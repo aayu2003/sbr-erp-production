@@ -65,11 +65,11 @@
         {
           "key": "purchase-procurement",
           "label": "Purchase And Procurement",
-          "enabled": true,
+          "enabled": false,
           "items": [
             { "key": "finance-admin-ops",  "label": "Finance Admin Ops",          "path": "/finance-admin-ops-indents","icon": "FileText",      "enabled": false  },
             { "key": "purchase-req",       "label": "Purchase Requisition",       "path": "/purchase-requisition",     "icon": "FileText",      "enabled": false  },
-            { "key": "vendor-directory",   "label": "Vendor Directory",           "path": "/vendor-directory",         "icon": "FileText",      "enabled": true  },
+            { "key": "vendor-directory",   "label": "Vendor Directory",           "path": "/vendor-directory",         "icon": "FileText",      "enabled": false  },
             { "key": "ho-module",          "label": "HO Module",                  "path": "/ho",                       "icon": "FileText",      "enabled": false  },
             { "key": "purchase-flow",      "label": "Purchase Flow",              "path": "/purchase-flow",            "icon": "FileText",      "enabled": false  },
             { "key": "work-order",         "label": "Work Order",                 "path": "/work-order",               "icon": "ClipboardCheck","enabled": false  },
@@ -92,7 +92,7 @@
           "enabled": true,
           "items": [
             { "key": "hrms",             "label": "Payroll & Attendance",  "path": "/hrms",                 "icon": "Landmark", "enabled": false },
-            { "key": "staff-onboarding", "label": "Staff Onboarding",      "path": "/staff-onboarding",     "icon": "UserPlus", "enabled": true  },
+            { "key": "staff-onboarding", "label": "Staff Onboarding",      "path": "/staff-onboarding",     "icon": "UserPlus", "enabled": true },
             { "key": "man-power-req",    "label": "Man Power Requisition", "path": "/man-power-requisition","icon": "FileText", "enabled": false },
             { "key": "hrms-inbox",       "label": "Inbox",                 "path": "/hrms/inbox",           "icon": "Mail",     "enabled": false }
           ]
@@ -170,7 +170,8 @@
             { "key": "accounts-dashboard",  "label": "Dashboard",                 "path": "/accounts/dashboard",    "icon": "LayoutDashboard","enabled": false },
             { "key": "accounts-ledger",     "label": "Ledger",                    "path": "/accounts/ledger",       "icon": "BookOpen",       "enabled": false },
             { "key": "accounts-purchase",   "label": "Purchase Flow Connection",  "path": "/accounts/purchase-flow","icon": "Link2",          "enabled": false },
-            { "key": "accounts-payments",   "label": "Payments",                  "path": "/accounts/payments",     "icon": "CreditCard",     "enabled": false }
+            { "key": "accounts-payments",   "label": "Payments",                  "path": "/accounts/payments",     "icon": "CreditCard",     "enabled": false },
+            { "key": "budget",              "label": "Budget",                    "path": "/budget",                "icon": "PieChart",       "enabled": false }
           ]
         }
       ]

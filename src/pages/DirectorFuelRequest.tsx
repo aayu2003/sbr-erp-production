@@ -102,7 +102,7 @@ const fmtCurrency = (n: number) =>
 // MAIN PAGE
 // ─────────────────────────────────────────────────────────────
 const DirectorFuelRequest = () => {
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const [requests, setRequests]             = useState<FuelRequest[]>([]);
   const [loading, setLoading]               = useState(false);
   const [search, setSearch]                 = useState('');
@@ -120,8 +120,8 @@ const DirectorFuelRequest = () => {
     if (filterDate) params.set('date', filterDate);
     if (filterSource !== 'all') params.set('source', filterSource);
     const qs = params.toString();
-    const url = `${BASE_URL}/fuels_consumables/get_director_pending_requests${qs ? `?${qs}` : ''}`;
-    fetch(url)
+    const url = `${BASE_URL}/fuels_consumables/get_director_pending_requests/${user?.id ?? ''}${qs ? `?${qs}` : ''}`;
+    fetch(url, { headers: { Authorization: `Bearer ${token ?? ''}` } })
       .then(r => r.json())
       .then((data: any) => {
         console.log('[DirectorFuelRequest] API response:', data);
@@ -173,17 +173,29 @@ const DirectorFuelRequest = () => {
     setApproving(true);
     try {
       const now = new Date();
+      const dd   = String(now.getDate()).padStart(2, '0');
+      const mm   = String(now.getMonth() + 1).padStart(2, '0');
+      const yyyy = now.getFullYear();
+      const h    = now.getHours();
+      const min  = String(now.getMinutes()).padStart(2, '0');
+      const ampm = h >= 12 ? 'pm' : 'am';
+      const h12  = String(h % 12 || 12).padStart(2, '0');
+
       const res = await fetch(`${BASE_URL}/fuels_consumables/director_approval`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token ?? ''}`,
+        },
         body: JSON.stringify({
           request_id: selectedPendingIds,
           approval_details: {
             approver_name:        user?.name        ?? '',
             approver_designation: user?.designation ?? '',
-            approved_time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }),
-            approved_date: `${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')}/${now.getFullYear()}`,
+            approved_time: `${h12}:${min} ${ampm}`,
+            approved_date: `${dd}/${mm}/${yyyy}`,
           },
+          staff_id: user?.id ?? '',
         }),
       });
       const data: any = await res.json().catch(() => null);

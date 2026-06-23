@@ -262,7 +262,7 @@ export function PRPreview({
             </div>
             <div className="p-2">
               <div className="font-semibold">Budget Head</div>
-              <div className="text-gray-700">{indent.budgetHead || '—'}</div>
+              <div className="text-gray-700 text-[11px] whitespace-pre-line leading-snug">{indent.budgetHead || '—'}</div>
             </div>
           </div>
         </div>

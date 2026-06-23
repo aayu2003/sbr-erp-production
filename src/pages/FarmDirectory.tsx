@@ -1,11 +1,11 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  Search, MapPin, Map, Sprout, Wheat, Leaf,
-  Wallet, NotebookText, LayoutGrid, Layers,
+  Search, MapPin, Map as MapIcon, Sprout, Wheat, Leaf,
+  LayoutGrid, Layers,
   TreePine, RefreshCw, Shovel, Video, Crosshair,
-  TrendingUp, BookOpen, X,
+  TrendingUp, BookOpen, X, Maximize2,
 } from 'lucide-react';
-import { MapContainer, TileLayer, Polygon, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polygon, Polyline, CircleMarker, Tooltip, Marker, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { Input } from '@/components/ui/input';
@@ -13,6 +13,7 @@ import { toast } from 'sonner';
 import getBaseUrl from '@/lib/config';
 import PlotMarkingModal from '@/components/farm/PlotMarkingModal';
 import FarmActivityModal, { FarmActivityEntry } from '@/components/farm/FarmActivityModal';
+import PremiumPlotterModal from '@/components/farm/PremiumPlotterModal';
 
 const BASE_URL = getBaseUrl().replace(/\/$/, '');
 
@@ -42,10 +43,19 @@ type VendorScope = {
 };
 
 type LandPlot = {
+  plot_id:          string;
   plot_name:        string;
   plot_area:        number;
   plot_coordinates: [number, number][];
+  crop_type?:       string;
   created_at?:      string;
+};
+
+type AdditionalMapping = {
+  mapping_name:        string;
+  mapping_type:        string;
+  mapping_coordinates: string[];          // "lat,lng" strings
+  shape_details:       'polygon' | 'line' | 'point';
 };
 
 type Farm = {
@@ -66,6 +76,7 @@ type Farm = {
     land_media: { images: string[]; video: string };
   };
   land_plots?: LandPlot[];
+  additional_mappings?: AdditionalMapping[];
   scope_of_work?: Record<string, VendorScope>;
   harvest_log: Record<string, unknown>;
   payment_log: Record<string, unknown>;
@@ -76,6 +87,34 @@ type Farm = {
 // MINI MAP — Leaflet satellite with land boundary + plots
 // ─────────────────────────────────────────────────────────────
 const PLOT_COLORS = ['#f59e0b','#a855f7','#06b6d4','#ec4899','#f97316','#14b8a6','#6366f1','#84cc16'];
+
+const CROP_COLORS: Record<string, string> = {
+  rahar:  '#f97316',
+  paddy:  '#f59e0b',
+  napier: '#22c55e',
+};
+const cropPlotColor = (cropType: string | undefined, fallback: string) =>
+  cropType ? (CROP_COLORS[cropType] ?? fallback) : fallback;
+
+const MAPPING_COLORS: Record<string, string> = {
+  'narrow road':   '#f97316',
+  'narrow path':   '#f97316',
+  'small shelter': '#eab308',
+  'bore well':     '#3b82f6',
+  'borewell':      '#3b82f6',
+  'canal':         '#06b6d4',
+  'huge pipe':     '#8b5cf6',
+  'ditch':         '#b45309',
+  'unwanted tree': '#16a34a',
+  'boundary wall': '#6b7280',
+  'pond':          '#0ea5e9',
+  'electric pole': '#facc15',
+};
+const getMappingColor = (type: string) =>
+  MAPPING_COLORS[type.toLowerCase()] ?? '#ef4444';
+
+const parseCoords = (raw: string[]): [number, number][] =>
+  raw.map(s => { const [a, b] = s.split(',').map(Number); return [a, b]; });
 
 const FitBounds = ({ coords }: { coords: [number, number][] }) => {
   const map = useMap();
@@ -90,14 +129,21 @@ const FitBounds = ({ coords }: { coords: [number, number][] }) => {
 const FarmMiniMap = ({
   landCoords,
   plots,
+  mappings = [],
 }: {
   landCoords: [number, number][];
   plots?: LandPlot[];
+  mappings?: AdditionalMapping[];
 }) => {
   const hasPlots = (plots?.length ?? 0) > 0;
-  const allCoords: [number, number][] = hasPlots
-    ? [...landCoords, ...plots!.flatMap(p => p.plot_coordinates)]
-    : landCoords;
+  const parsedMappings = mappings.map(m => ({ ...m, coords: parseCoords(m.mapping_coordinates) }));
+
+  const allCoords: [number, number][] = [
+    ...landCoords,
+    ...(plots ?? []).flatMap(p => p.plot_coordinates),
+    ...parsedMappings.flatMap(m => m.coords),
+  ];
+
   const center: [number, number] = allCoords.length > 0
     ? [allCoords.reduce((s, c) => s + c[0], 0) / allCoords.length,
        allCoords.reduce((s, c) => s + c[1], 0) / allCoords.length]
@@ -106,7 +152,7 @@ const FarmMiniMap = ({
   if (landCoords.length === 0) {
     return (
       <div className="h-full w-full flex flex-col items-center justify-center bg-gray-900 gap-1">
-        <Map className="h-8 w-8 text-gray-600" />
+        <MapIcon className="h-8 w-8 text-gray-600" />
         <span className="text-[10px] text-gray-500">No coordinates</span>
       </div>
     );
@@ -131,31 +177,140 @@ const FarmMiniMap = ({
       />
       {/* Land boundary */}
       {landCoords.length >= 3 && (
-        <Polygon
-          positions={landCoords}
-          pathOptions={{
-            color: '#22c55e',
-            fillColor: '#22c55e',
-            fillOpacity: hasPlots ? 0.08 : 0.22,
-            weight: 2.5,
-          }}
+        <Polygon positions={landCoords}
+          pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: hasPlots ? 0.08 : 0.22, weight: 2.5 }}
         />
       )}
       {/* Plot polygons */}
-      {hasPlots && plots!.map((plot, i) =>
-        plot.plot_coordinates.length >= 3 ? (
-          <Polygon
-            key={i}
-            positions={plot.plot_coordinates}
-            pathOptions={{
-              color: PLOT_COLORS[i % PLOT_COLORS.length],
-              fillColor: PLOT_COLORS[i % PLOT_COLORS.length],
-              fillOpacity: 0.35,
-              weight: 2,
-            }}
+      {hasPlots && plots!.map((plot, i) => {
+        const c = cropPlotColor(plot.crop_type, PLOT_COLORS[i % PLOT_COLORS.length]);
+        return plot.plot_coordinates.length >= 3 ? (
+          <Polygon key={i} positions={plot.plot_coordinates}
+            pathOptions={{ color: c, fillColor: c, fillOpacity: 0.45, weight: 2 }}
           />
-        ) : null
+        ) : null;
+      })}
+      {/* Additional mappings */}
+      {parsedMappings.map((m, i) => {
+        const color = getMappingColor(m.mapping_type);
+        if (m.shape_details === 'polygon' && m.coords.length >= 3)
+          return <Polygon key={i} positions={m.coords} pathOptions={{ color, fillColor: color, fillOpacity: 0.3, weight: 1.5 }} />;
+        if (m.shape_details === 'line' && m.coords.length >= 2)
+          return <Polyline key={i} positions={m.coords} pathOptions={{ color, weight: 2 }} />;
+        return m.coords.map((pt, j) =>
+          <CircleMarker key={`${i}-${j}`} center={pt} radius={4} pathOptions={{ color, fillColor: color, fillOpacity: 0.9, weight: 1.5 }} />
+        );
+      })}
+      <FitBounds coords={allCoords} />
+    </MapContainer>
+  );
+};
+
+// Full interactive map used inside the expand modal
+const FarmExpandMap = ({
+  landCoords,
+  plots,
+  mappings = [],
+  visibleLayers,
+}: {
+  landCoords: [number, number][];
+  plots?: LandPlot[];
+  mappings?: AdditionalMapping[];
+  visibleLayers: Set<string>;
+}) => {
+  const hasPlots = (plots?.length ?? 0) > 0;
+  const parsedMappings = mappings
+    .filter(m => visibleLayers.has(m.mapping_type.toLowerCase()))
+    .map(m => ({ ...m, coords: parseCoords(m.mapping_coordinates) }));
+
+  const allCoords: [number, number][] = [
+    ...landCoords,
+    ...(plots ?? []).flatMap(p => p.plot_coordinates),
+    ...parsedMappings.flatMap(m => m.coords),
+  ];
+
+  const center: [number, number] = allCoords.length > 0
+    ? [allCoords.reduce((s, c) => s + c[0], 0) / allCoords.length,
+       allCoords.reduce((s, c) => s + c[1], 0) / allCoords.length]
+    : [20.5937, 78.9629];
+
+  if (landCoords.length === 0) {
+    return (
+      <div className="h-full w-full flex flex-col items-center justify-center bg-gray-900 gap-1">
+        <MapIcon className="h-10 w-10 text-gray-600" />
+        <span className="text-sm text-gray-500">No coordinates</span>
+      </div>
+    );
+  }
+
+  return (
+    <MapContainer
+      key={`expand-${landCoords[0]?.[0]}-${landCoords[0]?.[1]}`}
+      center={center}
+      zoom={15}
+      style={{ height: '100%', width: '100%' }}
+      zoomControl
+      dragging
+      scrollWheelZoom
+      doubleClickZoom
+      touchZoom
+      attributionControl={false}
+    >
+      <TileLayer
+        url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        maxZoom={21}
+      />
+      {/* Land boundary */}
+      {visibleLayers.has('land') && landCoords.length >= 3 && (
+        <Polygon positions={landCoords}
+          pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: hasPlots ? 0.06 : 0.20, weight: 2.5 }}
+        />
       )}
+      {/* Plot polygons with labels */}
+      {visibleLayers.has('plots') && hasPlots && plots!.map((plot, i) => {
+        const c = cropPlotColor(plot.crop_type, PLOT_COLORS[i % PLOT_COLORS.length]);
+        return plot.plot_coordinates.length >= 3 ? (
+          <Polygon key={i} positions={plot.plot_coordinates}
+            pathOptions={{ color: c, fillColor: c, fillOpacity: 0.45, weight: 2 }}
+          >
+            <Tooltip permanent direction="center" opacity={1} className="plot-label-tooltip">
+              <div className="text-center leading-tight">
+                <div className="font-bold text-[11px]">{plot.plot_name}</div>
+                <div className="text-[10px] opacity-80">{plot.plot_area} ac</div>
+                {plot.crop_type && (
+                  <div className="text-[10px] font-semibold mt-0.5 capitalize" style={{ color: c }}>{plot.crop_type}</div>
+                )}
+              </div>
+            </Tooltip>
+          </Polygon>
+        ) : null;
+      })}
+      {/* Additional mappings with labels */}
+      {parsedMappings.map((m, i) => {
+        const color = getMappingColor(m.mapping_type);
+        const tip = (
+          <Tooltip sticky opacity={1}>
+            <span className="text-[11px] font-semibold">{m.mapping_name}</span>
+          </Tooltip>
+        );
+        if (m.shape_details === 'polygon' && m.coords.length >= 3)
+          return (
+            <Polygon key={i} positions={m.coords} pathOptions={{ color, fillColor: color, fillOpacity: 0.3, weight: 2 }}>
+              {tip}
+            </Polygon>
+          );
+        if (m.shape_details === 'line' && m.coords.length >= 2)
+          return (
+            <Polyline key={i} positions={m.coords} pathOptions={{ color, weight: 3 }}>
+              {tip}
+            </Polyline>
+          );
+        return m.coords.map((pt, j) => (
+          <CircleMarker key={`${i}-${j}`} center={pt} radius={6} pathOptions={{ color, fillColor: color, fillOpacity: 0.9, weight: 2 }}>
+            {tip}
+          </CircleMarker>
+        ));
+      })}
       <FitBounds coords={allCoords} />
     </MapContainer>
   );
@@ -204,9 +359,13 @@ const FarmDirectory = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState<string | null>(null);
   const [search, setSearch]   = useState('');
+  const [farmerNames, setFarmerNames] = useState<Record<string, string>>({});
   const [plotMarkingFarm, setPlotMarkingFarm]     = useState<Farm | null>(null);
   const [activityModalFarm, setActivityModalFarm] = useState<Farm | null>(null);
   const [ledgerFarm, setLedgerFarm]               = useState<Farm | null>(null);
+  const [expandMapFarm, setExpandMapFarm]         = useState<Farm | null>(null);
+  const [plotterFarm, setPlotterFarm]             = useState<Farm | null>(null);
+  const [cropSelectorFarm, setCropSelectorFarm]   = useState<Farm | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -225,18 +384,35 @@ const FarmDirectory = () => {
       .finally(() => setLoading(false));
   }, []);
 
+  // After farms are loaded, batch-fetch owner names individually so they fill in progressively
+  useEffect(() => {
+    if (farms.length === 0) return;
+    farms.forEach(farm => {
+      fetch(`${BASE_URL}/farmer_managment/get_farmer_details_from_farm_id/${farm.farm_id}`)
+        .then(r => r.json())
+        .then((data: any) => {
+          const name = data?.farmer?.farmer_name;
+          setFarmerNames(prev => ({ ...prev, [farm.farm_id]: name || '' }));
+        })
+        .catch(() => {
+          setFarmerNames(prev => ({ ...prev, [farm.farm_id]: '' }));
+        });
+    });
+  }, [farms]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return farms;
     return farms.filter(f =>
       f.farm_id.toLowerCase().includes(q) ||
+      (farmerNames[f.farm_id] ?? '').toLowerCase().includes(q) ||
       (f.land_data?.village ?? '').toLowerCase().includes(q) ||
       (f.land_data?.district ?? '').toLowerCase().includes(q) ||
       (f.land_data?.state ?? '').toLowerCase().includes(q) ||
       (f.crop_type ?? '').toLowerCase().includes(q) ||
       (f.land_data?.farming_option ?? '').toLowerCase().includes(q)
     );
-  }, [farms, search]);
+  }, [farms, farmerNames, search]);
 
   // KPIs
   const totalArea      = farms.reduce((s, f) => s + (f.area ?? 0), 0);
@@ -249,7 +425,7 @@ const FarmDirectory = () => {
   const kpis = [
     { label: 'Total Farms',        value: farms.length,                                                                   icon: LayoutGrid,  color: 'text-gray-800'    },
     { label: 'Total Area (Acres)',  value: totalArea.toLocaleString('en-IN'),                                              icon: Layers,      color: 'text-blue-600'    },
-    { label: 'Unique Blocks',       value: uniqueBlocks,                                                                   icon: Map,         color: 'text-violet-600'  },
+    { label: 'Unique Blocks',       value: uniqueBlocks,                                                                   icon: MapIcon,     color: 'text-violet-600'  },
     { label: 'Lease Farming',       value: leaseFarms,                                                                     icon: TreePine,    color: 'text-emerald-600' },
     { label: 'Contract Farming',    value: contractFarms,                                                                  icon: Shovel,      color: 'text-orange-600'  },
     { label: 'Total Investment',    value: `₹${totalInvestment.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`,   icon: TrendingUp,  color: 'text-rose-600'    },
@@ -333,7 +509,7 @@ const FarmDirectory = () => {
               >
                 {/* ── Header: Leaflet satellite map ── */}
                 <div className="h-[220px] w-full relative overflow-hidden">
-                  <FarmMiniMap landCoords={coords} plots={farm.land_plots} />
+                  <FarmMiniMap landCoords={coords} plots={farm.land_plots} mappings={farm.additional_mappings} />
 
                   {/* Farming option badge */}
                   <span className={`absolute top-2 left-2 z-[1000] inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 backdrop-blur-sm bg-white/90 ${optionMeta.color}`}>
@@ -347,6 +523,16 @@ const FarmDirectory = () => {
                     </span>
                   )}
 
+                  {/* Expand map button */}
+                  <button
+                    type="button"
+                    onClick={() => setExpandMapFarm(farm)}
+                    className="absolute bottom-2 left-2 z-[1000] p-1.5 rounded-md bg-black/60 hover:bg-black/80 text-white transition-colors"
+                    title="Expand map"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5" />
+                  </button>
+
                   {/* Plot count badge */}
                   {(farm.land_plots?.length ?? 0) > 0 && (
                     <span className="absolute bottom-2 right-2 z-[1000] rounded bg-black/60 text-white text-[9px] px-1.5 py-0.5">
@@ -358,11 +544,24 @@ const FarmDirectory = () => {
                 {/* ── Card body ── */}
                 <div className="p-4 space-y-3 flex-1 flex flex-col">
 
-                  {/* Farm ID + Block + Date */}
+                  {/* Farm ID + Owner + Block + Date */}
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="font-semibold text-sm text-gray-950 font-mono leading-5">
-                        {shortId(farm.farm_id)}…
+                    <div className="min-w-0">
+                      <div className="font-semibold text-sm text-gray-950 font-mono leading-5 truncate">
+                        {farm.farm_id}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1 h-4">
+                        {farm.farm_id in farmerNames ? (
+                          farmerNames[farm.farm_id] ? (
+                            <span className="text-[11px] font-medium text-gray-700 truncate">
+                              {farmerNames[farm.farm_id]}
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-muted-foreground italic">Unknown owner</span>
+                          )
+                        ) : (
+                          <span className="inline-block h-3 w-28 rounded bg-gray-200 animate-pulse" />
+                        )}
                       </div>
                       <div className="mt-0.5 text-[10px] text-muted-foreground">
                         {fmtDate(farm.created_at)}
@@ -546,20 +745,14 @@ const FarmDirectory = () => {
                   </div>
 
                   {/* ── Footer actions ── */}
-                  <div className="flex items-center gap-2 pt-1 border-t border-gray-100 mt-auto">
+                  <div className="flex items-center gap-2 pt-1 border-t border-gray-100 mt-auto flex-wrap">
                     <button
                       type="button"
-                      className="inline-flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                      onClick={() => setCropSelectorFarm(farm)}
+                      className="inline-flex items-center gap-1 rounded-md border border-green-200 bg-green-50 px-2.5 py-1.5 text-[11px] font-medium text-green-700 hover:bg-green-100"
                     >
-                      <Wallet className="h-3.5 w-3.5" />
-                      Payments
-                    </button>
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                    >
-                      <NotebookText className="h-3.5 w-3.5" />
-                      Harvest
+                      <Sprout className="h-3.5 w-3.5" />
+                      Crop Selector
                     </button>
                     <button
                       type="button"
@@ -568,6 +761,14 @@ const FarmDirectory = () => {
                     >
                       <Crosshair className="h-3.5 w-3.5" />
                       Plot Marking
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPlotterFarm(farm)}
+                      className="inline-flex items-center gap-1 rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1.5 text-[11px] font-medium text-violet-700 hover:bg-violet-100"
+                    >
+                      <Layers className="h-3.5 w-3.5" />
+                      Plotter
                     </button>
                   </div>
 
@@ -653,6 +854,375 @@ const FarmDirectory = () => {
           onClose={() => setLedgerFarm(null)}
         />
       )}
+
+      {/* Map Expand Modal */}
+      {expandMapFarm && (
+        <FarmMapExpandModal
+          farm={expandMapFarm}
+          onClose={() => setExpandMapFarm(null)}
+        />
+      )}
+
+      {/* Premium Plotter Modal */}
+      {plotterFarm && (
+        <PremiumPlotterModal
+          farmId={plotterFarm.farm_id}
+          farmLabel={[
+            plotterFarm.land_data?.village,
+            plotterFarm.land_data?.district,
+            plotterFarm.land_data?.state,
+          ].filter(Boolean).join(', ')}
+          landCoordinates={plotterFarm.land_data?.land_coordinates ?? []}
+          landPlots={plotterFarm.land_plots ?? []}
+          onClose={() => setPlotterFarm(null)}
+        />
+      )}
+
+      {/* Crop Selector Modal */}
+      {cropSelectorFarm && (
+        <CropSelectorModal
+          farm={cropSelectorFarm}
+          onClose={() => setCropSelectorFarm(null)}
+        />
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// CROP SELECTOR MODAL
+// ─────────────────────────────────────────────────────────────
+const CROP_OPTIONS: { key: string; label: string; Icon: React.ComponentType<{ className?: string }>; color: string; emoji: string }[] = [
+  { key: 'rahar',  label: 'Rahar',  Icon: Sprout, color: '#f97316', emoji: '🫘' },
+  { key: 'paddy',  label: 'Paddy',  Icon: Wheat,  color: '#f59e0b', emoji: '🌾' },
+  { key: 'napier', label: 'Napier', Icon: Leaf,   color: '#22c55e', emoji: '🌿' },
+];
+
+const plotCentroid = (coords: [number, number][]): [number, number] => [
+  coords.reduce((s, c) => s + c[0], 0) / coords.length,
+  coords.reduce((s, c) => s + c[1], 0) / coords.length,
+];
+
+const CropSelectorModal = ({
+  farm,
+  onClose,
+}: {
+  farm: Farm;
+  onClose: () => void;
+}) => {
+  const [selectedCrop, setSelectedCrop] = useState<string | null>(null);
+  // plot_name → crop_key  (each plot tracks its own assigned crop)
+  const [plotCropMap, setPlotCropMap] = useState<Map<string, string>>(() => {
+    const initial = new Map<string, string>();
+    (farm.land_plots ?? []).forEach(p => {
+      if (p.crop_type) initial.set(p.plot_name, p.crop_type);
+    });
+    return initial;
+  });
+  const [saving, setSaving] = useState(false);
+
+  const plots    = farm.land_plots ?? [];
+  const coords   = farm.land_data?.land_coordinates ?? [];
+  const location = [farm.land_data?.village, farm.land_data?.district, farm.land_data?.state]
+    .filter(Boolean).join(', ');
+
+  const activeCrop = CROP_OPTIONS.find(c => c.key === selectedCrop);
+
+  const acresByCrop = (cropKey: string) =>
+    plots
+      .filter(p => plotCropMap.get(p.plot_name) === cropKey)
+      .reduce((s, p) => s + (p.plot_area ?? 0), 0);
+
+  const totalAssignedAcres = plots
+    .filter(p => plotCropMap.has(p.plot_name))
+    .reduce((s, p) => s + (p.plot_area ?? 0), 0);
+
+  const togglePlot = (plotName: string) => {
+    if (!selectedCrop) { toast.error('Select a crop first'); return; }
+    setPlotCropMap(prev => {
+      const next = new Map(prev);
+      // same crop tapped again → remove; otherwise assign / reassign
+      next.get(plotName) === selectedCrop ? next.delete(plotName) : next.set(plotName, selectedCrop);
+      return next;
+    });
+  };
+
+  const handleSave = async () => {
+    if (plotCropMap.size === 0) { toast.error('Tap at least one plot on the map'); return; }
+    setSaving(true);
+
+    const payloads = [...plotCropMap.entries()].map(([plotName, cropKey]) => {
+      const plot = plots.find(p => p.plot_name === plotName);
+      return {
+        farm_id:   farm.farm_id,
+        plot_id:   plot?.plot_id ?? plotName,
+        crop_type: cropKey,
+      };
+    });
+
+    try {
+      // process in batches of 10, each batch fully parallel
+      for (let i = 0; i < payloads.length; i += 10) {
+        const batch = payloads.slice(i, i + 10);
+        const results = await Promise.all(
+          batch.map(payload =>
+            fetch(`${BASE_URL}/farmer_managment/add_crop_type_to_plot`, {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify(payload),
+            }).then(r => r.json())
+          )
+        );
+
+        const failed = results.filter(r => !r.success);
+        if (failed.length > 0) {
+          toast.error(`${failed.length} assignment(s) failed — please retry`);
+          setSaving(false);
+          return;
+        }
+      }
+
+      toast.success(`Crop assignment saved for ${plotCropMap.size} plot(s)`);
+      onClose();
+    } catch {
+      toast.error('Network error — crop assignment not saved');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const allMapCoords: [number, number][] = [
+    ...coords,
+    ...plots.flatMap(p => p.plot_coordinates),
+  ];
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-[2px] p-4">
+      <div className="w-full max-w-2xl bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col" style={{ height: '88vh' }}>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
+          <div>
+            <div className="flex items-center gap-2">
+              <Sprout className="w-4 h-4 text-green-600" />
+              <h2 className="text-base font-bold text-gray-900">Crop Selector</h2>
+            </div>
+            <p className="text-xs text-gray-400 mt-0.5">{location || farm.farm_id}</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-md hover:bg-gray-100 transition-colors">
+            <X className="w-4 h-4 text-gray-400" />
+          </button>
+        </div>
+
+        {/* Step 1 — Crop chips */}
+        <div className="px-5 py-3 border-b border-gray-100 shrink-0">
+          <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-2">
+            Select active crop — then tap plots on the map
+          </p>
+          <div className="flex items-center gap-2">
+            {CROP_OPTIONS.map(({ key, label, Icon, color, emoji }) => {
+              const active = selectedCrop === key;
+              const acres  = acresByCrop(key);
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setSelectedCrop(key)}
+                  className={`relative flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-semibold transition-all ${
+                    active ? 'text-white shadow-md ring-2 ring-offset-1' : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                  }`}
+                  style={active ? { background: color, borderColor: color } : {}}
+                >
+                  <span className="text-base leading-none">{emoji}</span>
+                  <Icon className="w-3.5 h-3.5" />
+                  {label}
+                  {acres > 0 && (
+                    <span
+                      className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                      style={{ background: active ? 'rgba(255,255,255,0.3)' : color, color: '#fff' }}
+                    >
+                      {acres} ac
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Map + legend */}
+        <div className="flex flex-1 min-h-0">
+
+          {/* Map area */}
+          <div className="flex-1 relative">
+            {plots.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center bg-gray-900 gap-2">
+                <Crosshair className="w-8 h-8 text-gray-500" />
+                <p className="text-sm text-gray-400 font-medium">No plots marked yet</p>
+                <p className="text-xs text-gray-500">Use "Plot Marking" to add plots first</p>
+              </div>
+            ) : (
+              <>
+                {/* Hint pill */}
+                <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[400] bg-black/60 text-white text-[11px] font-medium px-3 py-1.5 rounded-full pointer-events-none whitespace-nowrap">
+                  {activeCrop
+                    ? `Assigning: ${activeCrop.emoji} ${activeCrop.label} — tap a plot`
+                    : 'Select a crop above first'}
+                </div>
+                <MapContainer
+                  key={farm.farm_id}
+                  center={
+                    allMapCoords.length > 0
+                      ? [
+                          allMapCoords.reduce((s, c) => s + c[0], 0) / allMapCoords.length,
+                          allMapCoords.reduce((s, c) => s + c[1], 0) / allMapCoords.length,
+                        ]
+                      : [20.5937, 78.9629]
+                  }
+                  zoom={15}
+                  style={{ height: '100%', width: '100%' }}
+                  zoomControl={true}
+                  scrollWheelZoom={true}
+                  attributionControl={false}
+                >
+                  <TileLayer
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                    maxZoom={19}
+                  />
+                  {/* Land boundary */}
+                  {coords.length >= 3 && (
+                    <Polygon
+                      positions={coords}
+                      pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: 0.07, weight: 2 }}
+                    />
+                  )}
+                  {/* Plot polygons + centroid icons */}
+                  {plots.map((plot) => {
+                    if (plot.plot_coordinates.length < 3) return null;
+                    const assignedKey = plotCropMap.get(plot.plot_name);
+                    const crop        = CROP_OPTIONS.find(c => c.key === assignedKey);
+                    return (
+                      <>
+                        <Polygon
+                          key={`poly-${plot.plot_name}`}
+                          positions={plot.plot_coordinates}
+                          pathOptions={
+                            crop
+                              ? { color: crop.color, fillColor: crop.color, fillOpacity: 0.55, weight: 3 }
+                              : { color: '#ffffff', fillColor: '#ffffff', fillOpacity: 0.12, weight: 1.5, dashArray: '5 5' }
+                          }
+                          eventHandlers={{ click: () => togglePlot(plot.plot_name) }}
+                        >
+                          <Tooltip sticky direction="center">
+                            <span className="text-[11px] font-semibold">{plot.plot_name}</span>
+                            {crop && <span className="ml-1">{crop.emoji}</span>}
+                            <span className="text-[10px] text-gray-500 ml-1">· {plot.plot_area} ac</span>
+                          </Tooltip>
+                        </Polygon>
+                        {/* Crop icon badge at polygon centroid */}
+                        {crop && (
+                          <Marker
+                            key={`icon-${plot.plot_name}`}
+                            position={plotCentroid(plot.plot_coordinates)}
+                            interactive={false}
+                            icon={L.divIcon({
+                              html: `<div style="
+                                width:32px;height:32px;border-radius:50%;
+                                background:${crop.color};
+                                border:2.5px solid white;
+                                box-shadow:0 2px 8px rgba(0,0,0,0.5);
+                                display:flex;align-items:center;justify-content:center;
+                                font-size:16px;line-height:1;
+                              ">${crop.emoji}</div>`,
+                              className: '',
+                              iconSize:   [32, 32],
+                              iconAnchor: [16, 16],
+                            })}
+                          />
+                        )}
+                      </>
+                    );
+                  })}
+                  <FitBounds coords={allMapCoords} />
+                </MapContainer>
+              </>
+            )}
+          </div>
+
+          {/* Side legend */}
+          <div className="w-44 border-l border-gray-100 bg-gray-50 flex flex-col shrink-0">
+            <div className="px-3 pt-3 pb-2 border-b border-gray-100">
+              <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Plots</p>
+            </div>
+            <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1.5">
+              {plots.length === 0
+                ? <p className="text-[11px] text-gray-400 px-1 pt-2">No plots</p>
+                : plots.map((plot) => {
+                    const assignedKey = plotCropMap.get(plot.plot_name);
+                    const crop        = CROP_OPTIONS.find(c => c.key === assignedKey);
+                    return (
+                      <button
+                        key={plot.plot_name}
+                        type="button"
+                        onClick={() => togglePlot(plot.plot_name)}
+                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg border text-left transition-all text-[11px] ${
+                          crop ? 'border-transparent text-white font-semibold' : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-100'
+                        }`}
+                        style={crop ? { background: crop.color } : {}}
+                      >
+                        <span className="shrink-0 text-sm leading-none">{crop ? crop.emoji : '○'}</span>
+                        <span className="flex-1 truncate leading-tight">{plot.plot_name}</span>
+                        <span className="text-[10px] opacity-70 shrink-0">{plot.plot_area}a</span>
+                      </button>
+                    );
+                  })
+              }
+            </div>
+            {plotCropMap.size > 0 && (
+              <div className="px-3 py-2 border-t border-gray-100 text-center">
+                <p className="text-xs font-bold text-gray-700">{plotCropMap.size} assigned</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between shrink-0">
+          <div className="flex flex-col gap-0.5">
+            {plotCropMap.size > 0 ? (
+              <>
+                <p className="text-xs font-semibold text-gray-700">
+                  Total: {totalAssignedAcres} ac across {plotCropMap.size} plot(s)
+                </p>
+                <p className="text-[11px] text-gray-400">
+                  {CROP_OPTIONS.filter(c => acresByCrop(c.key) > 0)
+                    .map(c => `${c.emoji} ${c.label} ${acresByCrop(c.key)} ac`)
+                    .join(' · ')}
+                </p>
+              </>
+            ) : (
+              <p className="text-xs text-gray-400">
+                {activeCrop ? `Tap plots to assign ${activeCrop.label}` : 'Select a crop first, then tap plots'}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={plotCropMap.size === 0 || saving}
+              className="px-4 py-2 rounded-lg text-sm font-semibold bg-green-600 hover:bg-green-700 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
@@ -761,6 +1331,149 @@ const FarmInvestmentLedgerModal = ({
             Close
           </button>
         </div>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// FARM MAP EXPAND MODAL
+// ─────────────────────────────────────────────────────────────
+const FarmMapExpandModal = ({
+  farm,
+  onClose,
+}: {
+  farm: Farm;
+  onClose: () => void;
+}) => {
+  const plots    = farm.land_plots ?? [];
+  const mappings = farm.additional_mappings ?? [];
+  const coords   = farm.land_data?.land_coordinates ?? [];
+  const location = [farm.land_data?.village, farm.land_data?.district, farm.land_data?.state]
+    .filter(Boolean).join(', ');
+
+  // Collect unique mapping types present in this farm
+  const uniqueMappingTypes = Array.from(new Set(mappings.map(m => m.mapping_type.toLowerCase())));
+
+  // All layer keys: 'land', 'plots', + each unique mapping type
+  const allLayers = ['land', ...(plots.length > 0 ? ['plots'] : []), ...uniqueMappingTypes];
+
+  const [visibleLayers, setVisibleLayers] = useState<Set<string>>(() => new Set(allLayers));
+
+  const toggleLayer = (key: string) =>
+    setVisibleLayers(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  const hasLegend = plots.length > 0 || mappings.length > 0;
+
+  // Filter pills config
+  const filterPills = [
+    { key: 'land',  label: 'Land Boundary', color: '#22c55e' },
+    ...(plots.length > 0 ? [{ key: 'plots', label: 'Plot Mapping', color: PLOT_COLORS[0] }] : []),
+    ...uniqueMappingTypes.map(t => ({
+      key: t,
+      label: t.split(' ').map(w => w[0].toUpperCase() + w.slice(1)).join(' '),
+      color: getMappingColor(t),
+    })),
+  ];
+
+  return (
+    <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-5xl bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col" style={{ height: '90vh' }}>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
+          <div className="flex items-center gap-2">
+            <MapIcon className="w-4 h-4 text-emerald-600" />
+            <div>
+              <h2 className="text-base font-bold text-gray-900">Land Map</h2>
+              <p className="text-xs text-gray-400">{location || farm.farm_id}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-md hover:bg-gray-100 transition-colors">
+            <X className="w-4 h-4 text-gray-400" />
+          </button>
+        </div>
+
+        {/* Filter strip */}
+        <div className="shrink-0 flex items-center gap-2 flex-wrap px-5 py-2.5 border-b border-gray-100 bg-gray-50/60">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mr-1">Layers</span>
+          {filterPills.map(pill => {
+            const active = visibleLayers.has(pill.key);
+            return (
+              <button
+                key={pill.key}
+                type="button"
+                onClick={() => toggleLayer(pill.key)}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-semibold transition-all"
+                style={{
+                  borderColor: active ? pill.color : '#d1d5db',
+                  backgroundColor: active ? pill.color + '22' : 'transparent',
+                  color: active ? pill.color : '#9ca3af',
+                }}
+              >
+                <span
+                  className="w-2 h-2 rounded-full shrink-0"
+                  style={{ background: active ? pill.color : '#d1d5db' }}
+                />
+                {pill.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Map */}
+        <div className="flex-1 relative min-h-0">
+          <FarmExpandMap landCoords={coords} plots={plots} mappings={mappings} visibleLayers={visibleLayers} />
+        </div>
+
+        {/* Legend strip */}
+        {hasLegend && (
+          <div className="shrink-0 border-t border-gray-100 px-5 py-3 bg-gray-50 rounded-b-2xl space-y-2">
+            {/* Plots */}
+            {plots.length > 0 && (
+              <div className="flex flex-wrap gap-x-5 gap-y-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 self-center">Plots</span>
+                {plots.map((plot, i) => {
+                  const c = cropPlotColor(plot.crop_type, PLOT_COLORS[i % PLOT_COLORS.length]);
+                  return (
+                    <div key={i} className="flex items-center gap-1.5">
+                      <span className="w-3 h-3 rounded-sm shrink-0" style={{ background: c }} />
+                      <span className="text-xs font-semibold text-gray-800">{plot.plot_name}</span>
+                      <span className="text-xs text-gray-400">{plot.plot_area} ac</span>
+                      {plot.crop_type && (
+                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full text-white" style={{ background: c }}>
+                          {plot.crop_type}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {/* Additional mappings */}
+            {mappings.length > 0 && (
+              <div className="flex flex-wrap gap-x-5 gap-y-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 self-center">Features</span>
+                {mappings.map((m, i) => {
+                  const color = getMappingColor(m.mapping_type);
+                  const shape = m.shape_details === 'point' ? 'rounded-full' : m.shape_details === 'polygon' ? 'rounded-sm' : 'rounded-full';
+                  const size  = m.shape_details === 'line' ? 'w-4 h-1' : 'w-3 h-3';
+                  return (
+                    <div key={i} className="flex items-center gap-1.5">
+                      <span className={`${size} ${shape} shrink-0`} style={{ background: color }} />
+                      <span className="text-xs font-semibold text-gray-800">{m.mapping_name}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

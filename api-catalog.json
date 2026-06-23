@@ -1,0 +1,1477 @@
+{
+  "meta": {
+    "title": "Farm Connect — API Catalog",
+    "description": "Derived from frontend source code. Each endpoint entry includes the business purpose as understood by the UI — something the backend alone cannot provide.",
+    "base_url": "http://127.0.0.1:8000",
+    "production_url": "https://farm-connect.amritagrotech.com/api",
+    "generated_from": "frontend source analysis (src/pages, src/modules, src/components)",
+    "version": "1.0.0",
+    "authentication": "not required (as of current scope)",
+    "notes": [
+      "Paths are relative to base_url. Do NOT append /api — base_url already includes it or the Django router handles it at root.",
+      "Several endpoints accept both GET and POST (405 fallback pattern is used in the code).",
+      "Multipart/form-data endpoints use FormData — do not send JSON body for these.",
+      "The typo 'farmer_managment' (missing 'e') is intentional — it matches the actual backend router."
+    ]
+  },
+  "domains": {
+
+    "purchase_and_procurement": {
+      "description": "Covers the full purchase lifecycle: indent creation → quotation comparison → purchase flow document tracking → inventory induction. This domain is the most complex and spans multiple user roles (field staff, HOInbox approver, finance).",
+      "router_prefix": "/purchase_flow",
+      "endpoints": [
+        {
+          "id": "pf_get_purchase_flows",
+          "path": "/purchase_flow/get_purchase_flows",
+          "method": "GET",
+          "fallback_method": "POST",
+          "purpose": "Fetch all active purchase flows. Each flow is a row on the Purchase Flow page showing document upload progress (step_1, step_2, …). Sorted by timestamp descending on the frontend.",
+          "used_in": ["src/pages/PurchaseFlow.tsx"],
+          "request_body": null,
+          "query_params": null,
+          "response_shape": {
+            "purchase_flows": [
+              {
+                "flow_id": "string",
+                "comparison_id": "string",
+                "order_number": "string",
+                "pr_number": "string",
+                "purchase_flow_stage": {
+                  "step_1": { "document": "string", "status": "string", "doc_link": "string" },
+                  "step_2": { "document": "string", "status": "string", "doc_link": "string" }
+                },
+                "timestamp": "ISO datetime string"
+              }
+            ]
+          }
+        },
+        {
+          "id": "pf_get_left_panel_info",
+          "path": "/purchase_flow/get_left_panel_info",
+          "method": "POST",
+          "purpose": "Fetch the left-panel metadata for a single purchase flow row: vendor name, contact, GST, indent type (PR/SPR), department, and order number. Called per-row after the list loads.",
+          "used_in": ["src/pages/PurchaseFlow.tsx"],
+          "request_body": {
+            "pr_number": "string — the PR number of the flow"
+          },
+          "response_shape": {
+            "pr_number": "string",
+            "indent_type": "PR | SPR",
+            "department": "string | null",
+            "Order_number": "string",
+            "vendor_details": {
+              "approved_vendor_id": "string",
+              "vendor_name": "string",
+              "vendor_contact": "string",
+              "vendor_address": "string",
+              "gst_number": "string"
+            }
+          }
+        },
+        {
+          "id": "pf_update_purchase_flow_stage",
+          "path": "/purchase_flow/update_purchase_flow_stage",
+          "method": "POST",
+          "purpose": "Save the current step order for a purchase flow. Called when the user clicks 'Save Current' after reordering or checking off steps. Also unblocks further document uploads.",
+          "used_in": ["src/pages/PurchaseFlow.tsx"],
+          "request_body": {
+            "flow_id": "string",
+            "step_json": {
+              "step_1": { "document": "string", "status": "string", "doc_link": "string" },
+              "step_2": { "document": "string", "status": "string", "doc_link": "string" }
+            }
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_upload_purchase_flow_document",
+          "path": "/purchase_flow/upload_purchase_flow_document",
+          "method": "POST",
+          "content_type": "multipart/form-data",
+          "purpose": "Upload a physical document (PDF, image, etc.) to a purchase flow step. Returns a file_url that is then linked to the step via update_doc_link_for_step. Step 1 of a 2-API document upload flow.",
+          "used_in": ["src/pages/PurchaseFlow.tsx"],
+          "query_params": {
+            "order_number": "string — the PO/Order number this document belongs to"
+          },
+          "request_body": {
+            "document": "File — the file being uploaded"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "file_url": "string — public URL of the uploaded file",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_update_doc_link_for_step",
+          "path": "/purchase_flow/update_doc_link_for_step",
+          "method": "POST",
+          "purpose": "Link an already-uploaded file URL to a specific step in a purchase flow. Called after upload_purchase_flow_document succeeds. Step 2 of the document upload flow. Not called for locally-inserted invoice steps.",
+          "used_in": ["src/pages/PurchaseFlow.tsx"],
+          "request_body": {
+            "flow_id": "string",
+            "document_url": "string — the URL returned by upload_purchase_flow_document",
+            "step": "string — step key e.g. 'step_1', 'step_2'"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_get_indent_for_purchase_requisition",
+          "path": "/purchase_flow/get_indent_for_purchase_requisition",
+          "method": "GET",
+          "fallback_method": "POST",
+          "purpose": "Fetch all indents (PR and SPR) that need to go through the purchase requisition workflow. Shown as cards on the Purchase Requisition page. Includes line items, signatures, and notes.",
+          "used_in": ["src/pages/PurchaseRequisition.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "indents_for_pr": [
+              {
+                "pr_number": "string",
+                "created_at": "ISO datetime",
+                "department": "string",
+                "notes": "string",
+                "indented_by": { "name_id": "string", "signature": "string" },
+                "forwarded_by": { "name_id": "string", "signature": "string" },
+                "approved_by": { "name_id": "string", "signature": "string" },
+                "indent_data": {
+                  "project": "string",
+                  "item_row": [
+                    {
+                      "sr_no": "number",
+                      "part_name": "string",
+                      "specification": "string",
+                      "uom": "string",
+                      "total_qty_required": "number",
+                      "less_qty_available_in_stock": "number",
+                      "net_pr_qty": "number",
+                      "rate_per_item": "number",
+                      "preferred_vendor_name": "string",
+                      "procurement_lead_time_weeks": "number",
+                      "material_required_by_date": "string"
+                    }
+                  ],
+                  "area_of_service": "string (SPR only)",
+                  "name_of_service": "string (SPR only)"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "pf_forward_comparative_statement",
+          "path": "/purchase_flow/forward_comparative_statement",
+          "method": "POST",
+          "purpose": "Mark a comparative statement as forwarded to the HO/Director for final approval. Locks the quotation from further edits on the Purchase Requisition page.",
+          "used_in": ["src/pages/PurchaseRequisition.tsx"],
+          "request_body": {
+            "pr_number": "string"
+          },
+          "response_shape": {
+            "success": "boolean | 'True' | 1",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_indent_quotation_status",
+          "path": "/purchase_flow/indent_quotation_status",
+          "method": "POST",
+          "purpose": "Check the current quotation stage of an indent. Drives the status badge shown on each PR card (Not started / Draft / Saved / Forwarded). Polled for every PR after the list loads.",
+          "used_in": ["src/pages/PurchaseRequisition.tsx"],
+          "request_body": {
+            "pr_number": "string"
+          },
+          "response_shape": {
+            "status": "saved | draft | no_comparative_statement | forwarded"
+          }
+        },
+        {
+          "id": "pf_get_comparative_statement_draft",
+          "path": "/purchase_flow/get_comparative_statement_draft",
+          "method": "POST",
+          "purpose": "Fetch a previously saved comparative quotation draft for a PR. Used to pre-populate the quotation editor when the user reopens an in-progress comparison. Server draft takes priority over local storage.",
+          "used_in": ["src/pages/QuotationComparative.tsx", "src/pages/SprQuotationComparative.tsx"],
+          "request_body": {
+            "pr_number": "string"
+          },
+          "response_shape": {
+            "items": [
+              {
+                "created_at": "ISO datetime",
+                "pr_number": "string",
+                "comparision_id": "string",
+                "status": "string",
+                "item_row": [
+                  { "item_name": "string", "UoM": "string", "gst_percentage": "number", "quantity": "number" }
+                ],
+                "quoters": [
+                  {
+                    "vendor_id": "string",
+                    "item_costing": {
+                      "<item_name>": { "per_unit_costing": "number", "quanity": "number", "final_costing": "number" }
+                    },
+                    "freight_charges": "number",
+                    "other_charges": "number",
+                    "subtotal": "number",
+                    "total_amount": "number",
+                    "payment_terms": "string",
+                    "delivery_time": "string",
+                    "warrenty_garantee": "string"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "pf_get_indents",
+          "path": "/purchase_flow/get_indents",
+          "method": "GET",
+          "purpose": "Fetch all indents in raw form. Used by the quotation editor to seed line items when opening a fresh comparative statement (before any draft exists). Also used in WorkOrder.tsx.",
+          "used_in": ["src/pages/QuotationComparative.tsx", "src/pages/WorkOrder.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "indents": [
+              {
+                "pr_number": "string",
+                "indent_data": {
+                  "item_row": [
+                    {
+                      "part_name": "string",
+                      "service_description": "string (SPR)",
+                      "uom": "string",
+                      "total_qty_required": "number",
+                      "less_qty_available_in_stock": "number",
+                      "net_pr_qty": "number",
+                      "quantity": "number (SPR)",
+                      "gst_percentage": "number (SPR)",
+                      "area_of_service": "string (SPR)",
+                      "name_of_service": "string (SPR)"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "pf_get_vendors",
+          "path": "/purchase_flow/get_vendors",
+          "method": "GET",
+          "fallback_method": "POST",
+          "purpose": "Fetch all approved vendors for the comparative quotation editor's vendor dropdown. Provides vendor ID, name, contact, and address.",
+          "used_in": ["src/pages/QuotationComparative.tsx", "src/pages/SprQuotationComparative.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "vendors": [
+              {
+                "vendor_id": "string",
+                "vendor_name": "string",
+                "vendor_contact": "string",
+                "vendor_address": "string"
+              }
+            ]
+          }
+        },
+        {
+          "id": "pf_save_comparative_statement_draft",
+          "path": "/purchase_flow/save_comparative_statement_draft",
+          "method": "POST",
+          "purpose": "Auto-save the comparative quotation in progress. Called when the user clicks 'Save as Draft'. Preserves per-vendor item costing, freight, payment terms without locking the PR.",
+          "used_in": ["src/pages/QuotationComparative.tsx", "src/pages/SprQuotationComparative.tsx"],
+          "request_body": {
+            "pr_number": "string",
+            "item_row": [
+              { "item_name": "string", "quantity": "number", "UoM": "string", "gst_percentage": "number" }
+            ],
+            "quoters": [
+              {
+                "vendor_id": "string",
+                "item_costing": {
+                  "<item_name>": { "per_unit_costing": "number", "quanity": "number", "final_costing": "number" }
+                },
+                "freight_charges": "number | null",
+                "other_charges": "number | null",
+                "subtotal": "number",
+                "total_amount": "number",
+                "payment_terms": "string | null",
+                "delivery_time": "string | null",
+                "warrenty_garantee": "string | null",
+                "price_basis": "string | null"
+              }
+            ]
+          },
+          "response_shape": {
+            "success": "boolean",
+            "created_at": "ISO datetime",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_save_comparative_statement",
+          "path": "/purchase_flow/save_comparative_statement",
+          "method": "POST",
+          "purpose": "Save the final comparative statement with a technical recommendation (chosen vendor). This locks the comparative statement and triggers the forwarding process. Called after the user picks the recommended vendor in the confirmation dialog.",
+          "used_in": ["src/pages/QuotationComparative.tsx", "src/pages/SprQuotationComparative.tsx"],
+          "request_body": {
+            "pr_number": "string",
+            "item_row": [
+              { "item_name": "string", "quantity": "number", "UoM": "string", "gst_percentage": "number" }
+            ],
+            "quoters": [
+              {
+                "vendor_id": "string",
+                "item_costing": {
+                  "<item_name>": { "per_unit_costing": "number", "quanity": "number", "final_costing": "number" }
+                },
+                "freight_charges": "number | null",
+                "other_charges": "number | null",
+                "subtotal": "number",
+                "total_amount": "number",
+                "payment_terms": "string | null",
+                "delivery_time": "string | null",
+                "warrenty_garantee": "string | null"
+              }
+            ],
+            "technical_recommendation": "string — vendor_id of the recommended vendor"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_add_item_stock",
+          "path": "/purchase_flow/add_item_stock",
+          "method": "POST",
+          "purpose": "Add purchased goods to inventory after a PO is completed. Triggered from the 'Add to Inventory' button on a PR-type purchase flow. Links the stock addition to a specific PO number for traceability.",
+          "used_in": ["src/pages/PurchaseFlow.tsx"],
+          "request_body": {
+            "product_id": "string — inventory item ID (Invent_id or new_item_code)",
+            "stock_added": "number — quantity being added",
+            "po_number": "string — the PO/Order number",
+            "per_unit_cost": "number — cost per unit for FIFO valuation"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_create_indent",
+          "path": "/purchase_flow/create_indent",
+          "method": "POST",
+          "purpose": "Create a new Purchase Requisition (PR) or Service Purchase Requisition (SPR) indent. Called from the Inventory Indent page and the Work Order page when a user initiates procurement.",
+          "used_in": ["src/pages/InventoryIndent.tsx", "src/pages/WorkOrder.tsx"],
+          "request_body": {
+            "pr_number": "string — auto-generated PR number",
+            "project": "string",
+            "department": "string",
+            "indented_by": "string",
+            "forwarded_by": "string",
+            "approved_by": "string",
+            "indent_data": {
+              "item_row": [
+                {
+                  "sr_no": "number",
+                  "part_name": "string",
+                  "specification": "string",
+                  "uom": "string",
+                  "total_qty_required": "number",
+                  "less_qty_available_in_stock": "number",
+                  "net_pr_qty": "number",
+                  "rate_per_item": "number",
+                  "preferred_vendor_name": "string"
+                }
+              ]
+            }
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_indent_by_attach_sign",
+          "path": "/purchase_flow/indent_by_attach_sign",
+          "method": "POST",
+          "purpose": "Attach a digital signature to an indent at the appropriate signatory role (indented by, forwarded by, or director approval). Triggers the next stage in the indent approval workflow.",
+          "used_in": ["src/pages/InventoryIndent.tsx", "src/pages/WorkOrder.tsx"],
+          "request_body": {
+            "pr_number": "string",
+            "signature_role": "string — e.g. 'indented_by', 'forwarded_by', 'approved_by'",
+            "signature_data": "string — base64 or URL of the signature image"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_get_admin_ops_indents",
+          "path": "/purchase_flow/get_admin_ops_indents",
+          "method": "GET",
+          "purpose": "Fetch Admin Operations specific indents (non-cultivation procurement). These are displayed on the Admin Ops Indent page separately from standard PR indents.",
+          "used_in": ["src/pages/AdminOpsIndent.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "indents": "array — same structure as get_indents but filtered for admin ops department"
+          }
+        },
+        {
+          "id": "pf_forward_indent",
+          "path": "/purchase_flow/forward_indent",
+          "method": "POST",
+          "purpose": "Forward an approved indent to the next stage in the procurement pipeline. Used by the Admin Ops Indent page after the manager reviews the indent.",
+          "used_in": ["src/pages/AdminOpsIndent.tsx"],
+          "request_body": {
+            "pr_number": "string"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "pf_find_the_order_type",
+          "path": "/purchase_flow/find_the_order_type",
+          "method": "POST",
+          "purpose": "Determine if a PR number corresponds to a PR or SPR order type. Used in the HO Inbox to decide which view/template to render for an incoming approval item.",
+          "used_in": ["src/pages/HOInbox.tsx"],
+          "request_body": {
+            "pr_number": "string"
+          },
+          "response_shape": {
+            "order_type": "PR | SPR",
+            "success": "boolean"
+          }
+        }
+      ]
+    },
+
+    "inventory": {
+      "description": "Manages the physical stock of all farm inputs, equipment, tools, and consumables. Tracks incoming stock (from POs), outgoing/issued stock (to field teams and farms), damage, returns, and provides a full FIFO-valued ledger per item.",
+      "router_prefix": "/inventory",
+      "endpoints": [
+        {
+          "id": "inv_get_all_item",
+          "path": "/inventory/get_all_item",
+          "method": "GET",
+          "purpose": "Fetch the complete inventory catalog with current stock levels, FIFO cost list, stock history, and pipeline stock. Primary data source for the Inventory Management page and the 'Add to Inventory' dropdown in Purchase Flow.",
+          "used_in": ["src/pages/Inventory.tsx", "src/pages/PurchaseFlow.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "success": "boolean",
+            "items": [
+              {
+                "Invent_id": "string",
+                "new_item_code": "string — SKU e.g. SBR/INV/FRT/001",
+                "item_name": "string",
+                "category": "string",
+                "unit": "string",
+                "stock": "number — current stock quantity",
+                "stock_in_pipeline": "number — ordered but not received",
+                "threshold": "number — minimum stock level",
+                "item_image_url": "string",
+                "location": "string",
+                "description": "string",
+                "fifo_list": [
+                  { "stock": "number", "per_unit_cost": "number", "po_number": "string" }
+                ],
+                "stock_history": [
+                  { "timestamp": "ISO datetime", "stock": "number", "per_unit_cost": "number", "po_number": "string" }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "inv_get_issue_requests",
+          "path": "/inventory/get_issue_requests",
+          "method": "GET",
+          "purpose": "Fetch all stock issue requests. Used to: (1) show the 'Open Ledgers' KPI count on the Inventory page dashboard, (2) populate the Issue Items management modal where staff can approve/reject requests.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "success": "boolean",
+            "issue_requests": [
+              {
+                "request_id": "string",
+                "item_id": "string",
+                "quantity": "number",
+                "issued_to": "string — staff ID",
+                "farm_id": "string",
+                "status": "pending | issued | returned | rejected",
+                "created_at": "ISO datetime"
+              }
+            ]
+          }
+        },
+        {
+          "id": "inv_upload_item_image",
+          "path": "/inventory/upload_item_image",
+          "method": "POST",
+          "content_type": "multipart/form-data",
+          "purpose": "Upload an image for a new inventory item before creating it. Returns a public CDN URL used as item_image_url in create_new_item.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "request_body": {
+            "doc": "File — image file (PNG, JPG)"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "public_url": "string — CDN URL of the uploaded image",
+            "message": "string"
+          }
+        },
+        {
+          "id": "inv_create_new_item",
+          "path": "/inventory/create_new_item",
+          "method": "POST",
+          "purpose": "Create a new inventory item in the catalog. Accepts optional opening stock entries with FIFO cost tracking. Triggered from the 'Create New Product' modal.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "request_body": {
+            "item_name": "string",
+            "new_item_code": "string — auto-generated SKU",
+            "category": "string",
+            "location": "string",
+            "unit": "string",
+            "threshold": "number — min stock level",
+            "item_image_url": "string",
+            "description": "string",
+            "total_opening_stock": "number (optional)",
+            "fifo_list": [
+              { "stock": "number", "per_unit_cost": "number", "po_number": "string" }
+            ]
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "inv_get_item_ledger",
+          "path": "/inventory/get_item_ledger/{item_id}",
+          "method": "GET",
+          "purpose": "Fetch the full stock ledger (accounting-style GRN/ISS/ADJ history) for a specific item. Shows received qty, issued qty, running balance, and value per transaction.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "path_params": {
+            "item_id": "string — the inventory item's Invent_id"
+          },
+          "request_body": null,
+          "response_shape": {
+            "success": "boolean",
+            "ledger": [
+              {
+                "input_id": "string",
+                "date": "ISO datetime",
+                "input": "number — quantity added (GRN)",
+                "output": "number — quantity removed (ISS)",
+                "returned": "number",
+                "quantity": "number",
+                "per_unit_cost": "number",
+                "amount": "number — value of this transaction",
+                "balance": "number — closing stock after this entry",
+                "equipment_id": "string",
+                "description": "string",
+                "lock_status": "string"
+              }
+            ]
+          }
+        },
+        {
+          "id": "inv_get_new_item_code",
+          "path": "/inventory/get_new_item_code/{category_code}",
+          "method": "GET",
+          "purpose": "Get the next auto-incremented SKU for a category when creating a new item. Category code is derived from the selected category (e.g., 'FRT' for Fertilizer → 'SBR/INV/FRT/002').",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "path_params": {
+            "category_code": "string — 3-letter code e.g. FRT, SED, AGC, IMP, MAC, SPR, TNC, IRM, PKG, AGE, ELC, CIV, STR, ITA, OFF, OTH"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "new_item_code": "string — full SKU e.g. SBR/INV/FRT/003"
+          }
+        },
+        {
+          "id": "inv_get_equipment_allocation",
+          "path": "/inventory/get_equipment_allocation/{otp}",
+          "method": "GET",
+          "purpose": "Verify an OTP and retrieve the pending equipment allocation request details. Part of the OTP-gated equipment issue flow — the field staff provides OTP, manager verifies and approves.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "path_params": {
+            "otp": "string — 6-digit OTP entered by the approver"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "allocation": {
+              "item_id": "string",
+              "item_name": "string",
+              "quantity": "number",
+              "requested_by": "string",
+              "farm_id": "string"
+            }
+          }
+        },
+        {
+          "id": "inv_update_item_stock_on_allocation",
+          "path": "/inventory/update_item_stock_on_allocation",
+          "method": "POST",
+          "purpose": "Confirm equipment allocation and deduct the approved quantity from inventory stock. Called after OTP verification succeeds.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "request_body": {
+            "item_id": "string",
+            "quantity": "number",
+            "otp": "string",
+            "farm_id": "string",
+            "issued_to": "string — staff ID"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "inv_update_issue_request_status",
+          "path": "/inventory/update_issue_request_status",
+          "method": "POST",
+          "purpose": "Approve or close an issue request from the Issue Items management modal. Changes status from 'pending' → 'issued' or 'returned'.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "request_body": {
+            "request_id": "string",
+            "status": "issued | returned | rejected"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "inv_return_issue_item",
+          "path": "/inventory/return_issue_item",
+          "method": "POST",
+          "purpose": "Return a previously issued item back to inventory stock. Increments the stock count and logs a return transaction in the ledger.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "request_body": {
+            "request_id": "string",
+            "quantity_returned": "number",
+            "return_note": "string"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "inv_item_damage",
+          "path": "/inventory/item_damage",
+          "method": "POST",
+          "purpose": "Record a damage entry for an inventory item. Deducts the damaged quantity from stock and logs the event with farm, cause, and description. Triggered from the 'Damage' button on an inventory card.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "request_body": {
+            "item_id": "string",
+            "quantity_damaged": "number",
+            "farm_id": "string",
+            "damage_description": "string",
+            "damage_date": "string — YYYY-MM-DD"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "inv_get_farm_investment_ledger",
+          "path": "/inventory/get_farm_investment_ledger/{farm_id}",
+          "method": "GET",
+          "purpose": "Fetch the investment ledger for a specific farm — shows all items issued/used on that farm with dates and amounts. Used in the return entry modal to contextualize what was previously issued.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "path_params": {
+            "farm_id": "string"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "ledger": [
+              {
+                "date": "string",
+                "item_description": { "item_code": "string", "item_name": "string", "item_unit": "string" },
+                "input": "number",
+                "output": "number",
+                "amount": "number",
+                "description": "string",
+                "voucher_number": "string"
+              }
+            ]
+          }
+        },
+        {
+          "id": "inv_inventory_item_return_ledger",
+          "path": "/inventory/inventory_item_return_ledger",
+          "method": "POST",
+          "purpose": "Record a formal return entry in the farm investment ledger. Called when items are physically returned from field to warehouse. Distinct from return_issue_item — this is ledger-level accounting.",
+          "used_in": ["src/pages/Inventory.tsx"],
+          "request_body": {
+            "item_id": "string",
+            "farm_id": "string",
+            "quantity_returned": "number",
+            "return_date": "string — YYYY-MM-DD",
+            "description": "string"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        }
+      ]
+    },
+
+    "farmer_management": {
+      "description": "Manages the complete farmer lifecycle: lead capture → KYC verification → onboarding → land/bank document management → crop type assignment → farm directory. Note the router prefix is intentionally misspelled 'farmer_managment' (no 'e') to match the backend.",
+      "router_prefix": "/farmer_managment",
+      "endpoints": [
+        {
+          "id": "fm_get_farmers",
+          "path": "/farmer_managment/get_farmers",
+          "method": "GET",
+          "purpose": "Fetch all registered farmers with their basic data, KYC status, agreements, and flagging state. Primary data for the Farmers listing page. After loading, farmer_details is fetched per-farmer to enrich with bank details, farms, and documents.",
+          "used_in": ["src/pages/Farmers.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "farmers": [
+              {
+                "farmer_id": "string",
+                "farmer_data": {
+                  "full_name": "string",
+                  "phone_number": "string",
+                  "alternate_phone_number": "string",
+                  "village": "string",
+                  "taluka": "string",
+                  "district": "string",
+                  "state": "string",
+                  "estimated_land_area": "number",
+                  "block_assigned": "string",
+                  "farming_option": "Lease Farming | Contract Farming",
+                  "crop_type": "napier | paddy | ragi"
+                },
+                "kyc_data": { "adhar_number": "string", "pan_numnber": "string", "IFSC_code": "string", "accound_number": "string", "permanent_address": "string" },
+                "agreement_data": [
+                  { "lease_rent": "number", "agreement_start_date": "string", "agreement_end_date": "string" }
+                ],
+                "credentials_data": { "user_id": "string", "password": "string" },
+                "documents": {
+                  "adhar_card": { "url": "string" },
+                  "pand_card": { "url": "string" },
+                  "kisan_book": { "url": "string" },
+                  "B1_record": { "url": "string" },
+                  "agreement": { "url": "string" },
+                  "bank_passbook": { "url": "string" },
+                  "profile_photo": { "url": "string" }
+                },
+                "flagged": { "flagged": "boolean" },
+                "created_at": "ISO datetime"
+              }
+            ]
+          }
+        },
+        {
+          "id": "fm_farmer_details",
+          "path": "/farmer_managment/farmer_details/{farmer_id}",
+          "method": "GET",
+          "purpose": "Fetch full enriched details for a single farmer: bank accounts, all farm parcels, updated KYC, agreement documents. Called per-farmer after the list loads to progressively enrich each card.",
+          "used_in": ["src/pages/Farmers.tsx", "src/pages/FarmerProfile.tsx"],
+          "path_params": {
+            "farmer_id": "string"
+          },
+          "response_shape": {
+            "farmer": {
+              "farmer_name": "string",
+              "farmer_contact": "string",
+              "farming_option": "string",
+              "kyc_data": "object",
+              "agreement_data": "array",
+              "documents": "object",
+              "bank_details": [
+                { "holder_name": "string", "bank_name": "string", "account_number": "string", "ifsc_code": "string" }
+              ]
+            },
+            "farm": [
+              {
+                "farm_id": "string",
+                "total_area": "number",
+                "village": "string",
+                "district": "string",
+                "state": "string",
+                "land_coordinates": "array",
+                "land_media": { "images": "array of URLs", "video": "string URL" }
+              }
+            ]
+          }
+        },
+        {
+          "id": "fm_make_farmer_flagged",
+          "path": "/farmer_managment/make_farmer_flagged",
+          "method": "POST",
+          "purpose": "Flag a farmer for review (suspicious activity, document mismatch, etc.). Highlights the farmer card with a red border in the UI. Unflagging is only done locally on the frontend without an API call.",
+          "used_in": ["src/pages/Farmers.tsx"],
+          "request_body": {
+            "farmer_id": "string"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "fm_add_new_bank_details",
+          "path": "/farmer_managment/add_new_bank_details",
+          "method": "POST",
+          "purpose": "Add a new bank account for a farmer. Followed immediately by update_bank_passbook_document to upload the passbook PDF. Both calls must succeed for the operation to be considered complete.",
+          "used_in": ["src/pages/Farmers.tsx"],
+          "request_body": {
+            "farmer_id": "string",
+            "account_number": "string",
+            "IFSC_code": "string",
+            "holder_name": "string",
+            "bank_name": "string"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "fm_update_bank_passbook_document",
+          "path": "/farmer_managment/update_bank_passbook_document",
+          "method": "POST",
+          "content_type": "multipart/form-data",
+          "purpose": "Upload the passbook PDF for a farmer's bank account. Called as the second step after add_new_bank_details. Must be a PDF file.",
+          "used_in": ["src/pages/Farmers.tsx"],
+          "query_params": {
+            "farmer_id": "string"
+          },
+          "request_body": {
+            "doc": "File — PDF passbook document"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "fm_upload_land_images",
+          "path": "/farmer_managment/upload_land_images",
+          "method": "POST",
+          "content_type": "multipart/form-data",
+          "purpose": "Upload up to 3 land photos when adding a new land parcel to a farmer. Returns an array of public image URLs used in add_new_land_to_existing_farmer.",
+          "used_in": ["src/pages/Farmers.tsx", "src/components/leads/AddLeadModal.tsx"],
+          "request_body": {
+            "land_images": "File[] — multiple image files (field name repeated)"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "images": [{ "url": "string" }],
+            "message": "string"
+          }
+        },
+        {
+          "id": "fm_upload_land_video",
+          "path": "/farmer_managment/upload_land_video",
+          "method": "POST",
+          "content_type": "multipart/form-data",
+          "purpose": "Upload a land walkthrough video when adding a new land parcel. Returns a URL used in add_new_land_to_existing_farmer.",
+          "used_in": ["src/pages/Farmers.tsx", "src/components/leads/AddLeadModal.tsx"],
+          "request_body": {
+            "land_video": "File — video file"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "video": { "url": "string" },
+            "message": "string"
+          }
+        },
+        {
+          "id": "fm_add_new_land_to_existing_farmer",
+          "path": "/farmer_managment/add_new_land_to_existing_farmer",
+          "method": "POST",
+          "purpose": "Add a new land parcel (farm) to an existing farmer. Includes land boundary coordinates (from KML or map drawing), crop type, acreage, and media URLs. This is the core step of the 4-step 'Add Land' modal.",
+          "used_in": ["src/pages/Farmers.tsx"],
+          "request_body": {
+            "farmer_id": "string",
+            "land_coordinates": "[[lat, lng], ...] — min 3 points for a valid polygon",
+            "total_area": "number — acres",
+            "state": "string",
+            "district": "string",
+            "village": "string",
+            "crop_type": "napier | paddy | ragi | ''",
+            "farming_option": "Lease Farming | Contract Farming",
+            "land_photos_urls": "string[] — from upload_land_images",
+            "land_video_url": "string — from upload_land_video"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "fm_upload_new_agreement_document",
+          "path": "/farmer_managment/upload_new_agreement_document",
+          "method": "POST",
+          "content_type": "multipart/form-data",
+          "purpose": "Upload the lease/contract agreement PDF for a newly added land parcel. Called as optional step 4 of the Add Land modal.",
+          "used_in": ["src/pages/Farmers.tsx"],
+          "query_params": { "farmer_id": "string" },
+          "request_body": { "doc": "File — PDF agreement document" },
+          "response_shape": { "success": "boolean", "message": "string" }
+        },
+        {
+          "id": "fm_add_new_B1_record",
+          "path": "/farmer_managment/add_new_B1_record",
+          "method": "POST",
+          "content_type": "multipart/form-data",
+          "purpose": "Upload the B1 land record (government-issued land ownership proof) PDF for a land parcel. Called as optional step 4 of the Add Land modal.",
+          "used_in": ["src/pages/Farmers.tsx"],
+          "query_params": { "farmer_id": "string" },
+          "request_body": { "doc": "File — PDF B1 record" },
+          "response_shape": { "success": "boolean", "message": "string" }
+        },
+        {
+          "id": "fm_add_new_kisan_book",
+          "path": "/farmer_managment/add_new_kisan_book",
+          "method": "POST",
+          "content_type": "multipart/form-data",
+          "purpose": "Upload the Kisan credit/passbook document PDF for a land parcel. Called as optional step 4 of the Add Land modal.",
+          "used_in": ["src/pages/Farmers.tsx"],
+          "query_params": { "farmer_id": "string" },
+          "request_body": { "doc": "File — PDF Kisan book" },
+          "response_shape": { "success": "boolean", "message": "string" }
+        },
+        {
+          "id": "fm_set_crop_type",
+          "path": "/farmer_managment/set_crop_type",
+          "method": "POST",
+          "purpose": "Set or update the crop type for a farmer. Requires confirmation dialog before submission (shown to prevent accidental crop changes which affect cultivation planning downstream).",
+          "used_in": ["src/pages/Farmers.tsx"],
+          "request_body": {
+            "farmer_id": "string",
+            "crop_type": "napier | paddy | ragi | ''"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "Crop type update initiated"
+          }
+        },
+        {
+          "id": "fm_get_farms",
+          "path": "/farmer_managment/get_farms",
+          "method": "GET",
+          "purpose": "Fetch all registered farm parcels with full land data, coordinates, crop type, scope of work, investment ledger, and media. Primary data for the Farm Directory page. Also used as the farm dropdown in the Inventory Issue modal.",
+          "used_in": ["src/pages/FarmDirectory.tsx", "src/pages/Inventory.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "farms": [
+              {
+                "farm_id": "string",
+                "farmer_id": "string",
+                "block_id": "string",
+                "crop_type": "string",
+                "area": "number — total acres",
+                "priority": "number",
+                "created_at": "ISO datetime",
+                "land_data": {
+                  "land_coordinates": "[[lat, lng], ...]",
+                  "farming_option": "string",
+                  "state": "string",
+                  "village": "string",
+                  "district": "string",
+                  "land_media": { "images": "string[]", "video": "string" }
+                },
+                "land_plots": [{ "plot_name": "string", "plot_area": "number", "plot_coordinates": "array" }],
+                "additional_mappings": [{ "mapping_name": "string", "mapping_type": "string", "mapping_coordinates": "string[]", "shape_details": "polygon | line | point" }],
+                "scope_of_work": { "<vendor_id>": { "start_date": "string", "end_date": "string", "activities": "string[]", "vendor_details": { "vendor_name": "string", "vendor_contact": "string" } } },
+                "farm_investment_ledger": [{ "date": "string", "amount": "number", "description": "string", "item_description": { "item_code": "string", "item_name": "string", "item_unit": "string" }, "voucher_number": "string" }],
+                "harvest_log": "object",
+                "payment_log": "object"
+              }
+            ]
+          }
+        },
+        {
+          "id": "fm_get_farmer_details_from_farm_id",
+          "path": "/farmer_managment/get_farmer_details_from_farm_id/{farm_id}",
+          "method": "GET",
+          "purpose": "Resolve the farmer name (owner) from a farm ID. Called per-farm in the Farm Directory to progressively fill in the owner name label without blocking the initial render.",
+          "used_in": ["src/pages/FarmDirectory.tsx", "src/pages/CultivationCalendar.tsx"],
+          "path_params": { "farm_id": "string" },
+          "response_shape": {
+            "farmer": { "farmer_name": "string" }
+          }
+        },
+        {
+          "id": "fm_get_leads",
+          "path": "/farmer_managment/get_leads",
+          "method": "GET",
+          "purpose": "Fetch all farmer leads (prospective farmers who have been approached but not yet onboarded). Displayed on the Leads page with their contact and land interest details.",
+          "used_in": ["src/pages/Leads.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "leads": [
+              {
+                "lead_id": "string",
+                "full_name": "string",
+                "phone_number": "string",
+                "village": "string",
+                "district": "string",
+                "state": "string",
+                "land_area": "number",
+                "status": "new | contacted | followed_up | verified | rejected",
+                "created_at": "ISO datetime"
+              }
+            ]
+          }
+        },
+        {
+          "id": "fm_verify_lead",
+          "path": "/farmer_managment/verify_lead",
+          "method": "POST",
+          "purpose": "Verify and approve a lead, converting them into an active farmer record. Called from the Verification modal after documents are reviewed.",
+          "used_in": ["src/pages/Leads.tsx"],
+          "request_body": { "lead_id": "string" },
+          "response_shape": { "success": "boolean", "message": "string" }
+        },
+        {
+          "id": "fm_reject_lead",
+          "path": "/farmer_managment/reject_lead",
+          "method": "POST",
+          "purpose": "Reject a lead with a reason. Removes them from the active pipeline and flags the record as rejected.",
+          "used_in": ["src/pages/Leads.tsx"],
+          "request_body": { "lead_id": "string", "reason": "string" },
+          "response_shape": { "success": "boolean", "message": "string" }
+        },
+        {
+          "id": "fm_followup_lead",
+          "path": "/farmer_managment/followup_lead",
+          "method": "POST",
+          "purpose": "Log a follow-up action for a lead (e.g., second call made, site visit scheduled). Updates the lead status and records the follow-up note.",
+          "used_in": ["src/pages/Leads.tsx"],
+          "request_body": { "lead_id": "string", "followup_note": "string" },
+          "response_shape": { "success": "boolean", "message": "string" }
+        },
+        {
+          "id": "fm_lead_contacted",
+          "path": "/farmer_managment/lead_contacted",
+          "method": "POST",
+          "purpose": "Mark a lead as contacted and submit the initial land area, crop preference, and media from the Add Lead modal. This is the first formal API contact made for a new lead submission.",
+          "used_in": ["src/components/leads/AddLeadModal.tsx"],
+          "request_body": {
+            "lead_id": "string",
+            "land_area": "number",
+            "crop_type": "string",
+            "land_image_urls": "string[]",
+            "land_video_url": "string"
+          },
+          "response_shape": { "success": "boolean", "message": "string" }
+        },
+        {
+          "id": "fm_get_blocks",
+          "path": "/farmer_managment/get_blocks",
+          "method": "GET",
+          "purpose": "Fetch all farm blocks (geographic/administrative groupings of farms). Used in the cultivation plan creation to select which block's farms to plan for.",
+          "used_in": ["src/pages/CreateCultivationPlan.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "blocks": [{ "block_id": "string", "block_name": "string" }]
+          }
+        },
+        {
+          "id": "fm_get_zones",
+          "path": "/farmer_managment/get_zones",
+          "method": "GET",
+          "purpose": "Fetch all zones (larger geographic units containing multiple blocks). Used in cultivation plan creation for zone-based plan scope selection.",
+          "used_in": ["src/pages/CreateCultivationPlan.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "zones": [{ "zone_id": "string", "zone_name": "string" }]
+          }
+        },
+        {
+          "id": "fm_get_zone_details",
+          "path": "/farmer_managment/get_zone_details",
+          "method": "GET",
+          "purpose": "Fetch details of a specific zone (its blocks, farms). Called when user selects a zone in the cultivation plan creation form to show what is included.",
+          "used_in": ["src/pages/CreateCultivationPlan.tsx"],
+          "query_params": { "zone_id": "string" },
+          "response_shape": {
+            "zone": { "zone_id": "string", "zone_name": "string", "blocks": "array", "farms": "array" }
+          }
+        },
+        {
+          "id": "fm_get_assigned_supervisor",
+          "path": "/farmer_managment/get_assigned_supervisor_and_field_manager/{farm_id}",
+          "method": "GET",
+          "purpose": "Fetch the assigned supervisor and field manager for a specific farm. Used in the Cultivation Calendar when assigning tasks to determine available supervisors.",
+          "used_in": ["src/pages/CultivationCalendar.tsx"],
+          "path_params": { "farm_id": "string" },
+          "response_shape": {
+            "supervisor": { "staff_id": "string", "name": "string" },
+            "field_manager": { "staff_id": "string", "name": "string" }
+          }
+        }
+      ]
+    },
+
+    "cultivation": {
+      "description": "Manages crop cultivation planning, task scheduling, and real-time task monitoring across all farms. Two sub-routers: admin_cultivation (plans, tasks, scope) and admin_all_task (cross-module task management). Also interfaces with admin_vehicles for machinery scheduling.",
+      "router_prefixes": ["/admin_cultivation", "/admin_all_task"],
+      "endpoints": [
+        {
+          "id": "cult_get_master_cultivation_plans",
+          "path": "/admin_cultivation/get_master_cultivation_plans",
+          "method": "GET",
+          "purpose": "Fetch all master cultivation plan templates. These are reusable week-by-week activity blueprints (e.g., 'Napier 52-week plan') that can be instantiated for specific farms. Primary data for the Cultivation Master page.",
+          "used_in": ["src/modules/CultivationMasterModule.tsx", "src/lib/config.ts", "src/pages/CreateCultivationPlan.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "master_plans": [
+              {
+                "plan_id": "string",
+                "plan_name": "string",
+                "crop_type": "string",
+                "weekly_activities": [
+                  { "week": "number", "activities": "string[]", "inputs": "object" }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "cult_save_master_cultivation_plan",
+          "path": "/admin_cultivation/save_master_cultivation_plan",
+          "method": "POST",
+          "purpose": "Create or update a master cultivation plan template. Used from the Cultivation Master module to define the standard activity schedule for a crop type.",
+          "used_in": ["src/modules/CultivationMasterModule.tsx"],
+          "request_body": {
+            "plan_name": "string",
+            "crop_type": "string",
+            "weekly_activities": [
+              { "week": "number", "activities": "string[]", "inputs": "object" }
+            ]
+          },
+          "response_shape": {
+            "success": "boolean",
+            "plan_id": "string",
+            "message": "string"
+          }
+        },
+        {
+          "id": "cult_delete_cultivation_plans",
+          "path": "/admin_cultivation/delete_cultivation_plans",
+          "method": "POST",
+          "purpose": "Delete one or more master cultivation plan templates. Called from the Cultivation Plan module when a plan is no longer needed.",
+          "used_in": ["src/modules/CultivationPlanModule.tsx"],
+          "request_body": {
+            "plan_ids": "string[] — list of plan IDs to delete"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "cult_cultivation_lands_for_block",
+          "path": "/admin_cultivation/cultivation_lands_for_block/{block_id}",
+          "method": "GET",
+          "purpose": "Fetch all land parcels (farms) in a specific block that are eligible for cultivation planning. Used in the Create Cultivation Plan page to populate the farm selection list after a block is chosen.",
+          "used_in": ["src/pages/CreateCultivationPlan.tsx"],
+          "path_params": { "block_id": "string" },
+          "response_shape": {
+            "lands": [
+              { "farm_id": "string", "village": "string", "area": "number", "crop_type": "string", "farmer_name": "string" }
+            ]
+          }
+        },
+        {
+          "id": "cult_blocked_dates",
+          "path": "/admin_cultivation/blocked_dates",
+          "method": "GET",
+          "purpose": "Fetch dates that are blocked for cultivation activities (e.g., public holidays, equipment maintenance windows). Greyed out in the Cultivation Calendar date picker.",
+          "used_in": ["src/pages/CreateCultivationPlan.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "blocked_dates": "string[] — list of YYYY-MM-DD date strings"
+          }
+        },
+        {
+          "id": "cult_save_plan",
+          "path": "/admin_cultivation/save_plan",
+          "method": "POST",
+          "purpose": "Save a cultivation plan for specific farms. Assigns a master plan template to a set of farms with a start date, generating the week-by-week task schedule.",
+          "used_in": ["src/pages/CreateCultivationPlan.tsx"],
+          "request_body": {
+            "master_plan_id": "string",
+            "farm_ids": "string[]",
+            "start_date": "string — YYYY-MM-DD",
+            "plan_name": "string",
+            "notes": "string"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "plan_id": "string",
+            "message": "string"
+          }
+        },
+        {
+          "id": "cult_plan_metadata_finder",
+          "path": "/admin_cultivation/plan_metadata_finder",
+          "method": "POST",
+          "purpose": "Find and return existing plan metadata for a farm+plan combination. Used in the Cultivation Calendar and Create Plan page to check if a plan already exists and retrieve its details (start date, current week, completed activities).",
+          "used_in": ["src/pages/CreateCultivationPlan.tsx", "src/pages/CultivationCalendar.tsx"],
+          "request_body": {
+            "farm_id": "string",
+            "plan_id": "string (optional)"
+          },
+          "response_shape": {
+            "plan_metadata": {
+              "plan_id": "string",
+              "start_date": "string",
+              "current_week": "number",
+              "completed_weeks": "number[]",
+              "activities_status": "object"
+            }
+          }
+        },
+        {
+          "id": "cult_date_mapping_get",
+          "path": "/admin_cultivation/date_mapping",
+          "method": "GET",
+          "purpose": "Fetch the date-to-activity mapping for the cultivation calendar. Shows which activities are scheduled on which dates across all farms. Drives the calendar view.",
+          "used_in": ["src/pages/CreateCultivationPlan.tsx"],
+          "request_body": null,
+          "response_shape": {
+            "date_mapping": {
+              "<YYYY-MM-DD>": [
+                { "farm_id": "string", "activity": "string", "week": "number" }
+              ]
+            }
+          }
+        },
+        {
+          "id": "cult_date_mapping_post",
+          "path": "/admin_cultivation/date_mapping",
+          "method": "POST",
+          "purpose": "Update or override the date-to-activity mapping. Called when the user manually adjusts activity dates in the calendar.",
+          "used_in": ["src/pages/CreateCultivationPlan.tsx"],
+          "request_body": {
+            "farm_id": "string",
+            "activity": "string",
+            "old_date": "string — YYYY-MM-DD",
+            "new_date": "string — YYYY-MM-DD"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "cult_get_scope_of_work_for_land",
+          "path": "/admin_cultivation/get_scope_of_work_for_land/{farm_id}",
+          "method": "GET",
+          "purpose": "Fetch the complete scope of work assigned to a farm. Includes which activities are self-performed by SBR vs. assigned to external vendors. Used in the Cultivation Calendar's task detail panel.",
+          "used_in": ["src/pages/CultivationCalendar.tsx"],
+          "path_params": { "farm_id": "string" },
+          "response_shape": {
+            "scope_of_work": {
+              "<vendor_id_or_self>": {
+                "start_date": "string",
+                "end_date": "string",
+                "activities": "string[]",
+                "vendor_details": { "vendor_name": "string", "vendor_contact": "string" }
+              }
+            }
+          }
+        },
+        {
+          "id": "cult_change_task_date",
+          "path": "/admin_cultivation/change_task_date",
+          "method": "POST",
+          "purpose": "Reschedule a cultivation task to a different date. Used in the Cultivation Calendar when a user drags/drops a task or picks a new date. Validates against blocked_dates before saving.",
+          "used_in": ["src/pages/CultivationCalendar.tsx"],
+          "request_body": {
+            "task_id": "string",
+            "farm_id": "string",
+            "new_date": "string — YYYY-MM-DD",
+            "activity": "string"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "cult_assign_task",
+          "path": "/admin_cultivation/assign-task",
+          "method": "POST",
+          "purpose": "Assign a cultivation task to a specific resource (staff member, vendor, or machine). Called from the task assignment panel in the Cultivation Calendar.",
+          "used_in": ["src/pages/CultivationCalendar.tsx"],
+          "request_body": {
+            "task_id": "string",
+            "farm_id": "string",
+            "assigned_to": "string — staff/vendor ID",
+            "activity": "string",
+            "date": "string — YYYY-MM-DD",
+            "vehicle_id": "string (optional)"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "cult_update_task_status",
+          "path": "/admin_cultivation/update_task_status",
+          "method": "POST",
+          "purpose": "Update the completion status of a cultivation task (pending → in_progress → completed). Called from the Cultivation Calendar task detail panel when field staff marks work done.",
+          "used_in": ["src/pages/CultivationCalendar.tsx"],
+          "request_body": {
+            "task_id": "string",
+            "status": "pending | in_progress | completed",
+            "completion_note": "string (optional)"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "task_get_all_tasks",
+          "path": "/admin_all_task/get_all_tasks",
+          "method": "POST",
+          "purpose": "Fetch all tasks across all modules (cultivation, field visits, admin ops). Used on the TasksBeta page which provides a unified cross-module task management view.",
+          "used_in": ["src/pages/TasksBeta.tsx"],
+          "request_body": {
+            "filters": {
+              "status": "string (optional)",
+              "farm_id": "string (optional)",
+              "assigned_to": "string (optional)"
+            }
+          },
+          "response_shape": {
+            "tasks": [
+              {
+                "task_id": "string",
+                "title": "string",
+                "module": "cultivation | field_visit | admin_ops",
+                "status": "pending | in_progress | completed",
+                "assigned_to": "string",
+                "farm_id": "string",
+                "due_date": "string",
+                "created_at": "ISO datetime"
+              }
+            ]
+          }
+        },
+        {
+          "id": "task_update_task_status",
+          "path": "/admin_all_task/update_task_status",
+          "method": "POST",
+          "purpose": "Update task status from the unified TasksBeta view. Applies across all task types regardless of module.",
+          "used_in": ["src/pages/TasksBeta.tsx"],
+          "request_body": {
+            "task_id": "string",
+            "status": "pending | in_progress | completed",
+            "note": "string (optional)"
+          },
+          "response_shape": {
+            "success": "boolean",
+            "message": "string"
+          }
+        },
+        {
+          "id": "task_get_task_details",
+          "path": "/admin_all_task/get_task_details/{task_id}",
+          "method": "GET",
+          "purpose": "Fetch full details for a specific task including history, attachments, and linked resources. Used in the TaskMonitorModal to show the complete task context.",
+          "used_in": ["src/components/cultivation/TaskMonitorModal.tsx"],
+          "path_params": { "task_id": "string" },
+          "response_shape": {
+            "task": {
+              "task_id": "string",
+              "title": "string",
+              "description": "string",
+              "status": "string",
+              "history": "array",
+              "attachments": "array",
+              "farm_id": "string",
+              "assigned_to": "string"
+            }
+          }
+        }
+      ]
+    }
+  },
+
+  "support_endpoints": {
+    "description": "Cross-cutting endpoints that appear in multiple domains above. Listed here to avoid duplication.",
+    "endpoints": [
+      {
+        "id": "staff_get_all_staff",
+        "path": "/admin_staff/get_all_staff",
+        "method": "GET",
+        "purpose": "Fetch all company staff. Used in the Inventory Issue modal to show a staff dropdown when issuing equipment to an employee.",
+        "used_in": ["src/pages/Inventory.tsx"],
+        "response_shape": {
+          "array": [
+            { "staff_id": "string", "staff_information": { "staff_name": "string", "staff_designation": "string" } }
+          ]
+        }
+      },
+      {
+        "id": "admin_ops_get_farm_and_farmer",
+        "path": "/admin_ops_requests/get_farm_and_farmer",
+        "method": "GET",
+        "purpose": "Fetch a combined farm+farmer list for dropdown selection. Used in inventory damage and return entry modals to link the entry to a specific farm.",
+        "used_in": ["src/pages/Inventory.tsx"],
+        "response_shape": {
+          "farms": [{ "farm_id": "string", "farmer_name": "string", "village": "string" }]
+        }
+      },
+      {
+        "id": "rental_get_all_rental_rate_cards",
+        "path": "/admin_rental/get_all_rental_rate_cards",
+        "method": "GET",
+        "purpose": "Fetch machinery/equipment rental rate cards. Used in the cultivation plan creation to estimate the cost of renting equipment for specific activities.",
+        "used_in": ["src/pages/CreateCultivationPlan.tsx"],
+        "response_shape": {
+          "rate_cards": [{ "equipment_name": "string", "rate_per_hour": "number", "rate_per_day": "number" }]
+        }
+      },
+      {
+        "id": "vehicles_get_all_vehicles",
+        "path": "/admin_vehicles/get_all_vehicles",
+        "method": "GET",
+        "purpose": "Fetch all company vehicles/machinery. Used in the Cultivation Calendar task assignment panel to attach a vehicle to a field task.",
+        "used_in": ["src/pages/CultivationCalendar.tsx"],
+        "response_shape": {
+          "vehicles": [{ "vehicle_id": "string", "vehicle_name": "string", "type": "string", "status": "available | busy" }]
+        }
+      },
+      {
+        "id": "vehicles_update_vehicle_calendar",
+        "path": "/admin_vehicles/update_vehicle_calander",
+        "method": "POST",
+        "purpose": "Book or release a vehicle on the calendar. Called after assigning a vehicle to a cultivation task to prevent double-booking.",
+        "used_in": ["src/pages/CultivationCalendar.tsx"],
+        "request_body": {
+          "vehicle_id": "string",
+          "date": "string — YYYY-MM-DD",
+          "task_id": "string",
+          "action": "book | release"
+        },
+        "response_shape": { "success": "boolean", "message": "string" }
+      }
+    ]
+  }
+}

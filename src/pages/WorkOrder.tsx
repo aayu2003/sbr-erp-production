@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Paperclip, Plus, Printer, Trash2, X } from 'lucide-react';
+import { Loader2, Paperclip, Plus, Printer, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -86,6 +86,54 @@ type WorkOrderRecord = {
   approvedBy?: string;
   approvedBySignature?: string;
   serviceRows?: ApiServiceRow[];
+};
+
+// ─────────────────────────────────────────────────────────────
+// BUDGET HEAD TYPES
+// ─────────────────────────────────────────────────────────────
+type ApiBudget = {
+  budget_id: string;
+  budget_name: string;
+  crop_season: string;
+  financial_year_start: string;
+  financial_year_end: string;
+  status: string;
+};
+
+type ApiBudgetLineItem = {
+  line_item_id: string;
+  budget_type: string;
+  category: string;
+  line_item: string;
+  UoM: string;
+  quantity_per_acre: number;
+  total_acres: number;
+  total_quantity: number;
+  rate_per_unit: number;
+  total_value: number;
+  utilized_amount: number;
+  savings: number;
+};
+
+type BudgetLineItemSelection = {
+  id: string;
+  lineNo: number;
+  name: string;
+  category: string;
+  budgetType: string;
+  uom: string;
+  qtyPerAcre: number;
+  totalAcres: number;
+  totalQty: number;
+  ratePerUnit: number;
+  totalValue: number;
+  amount: number;
+};
+
+type BudgetHeadSelection = {
+  budgetId: string;
+  budgetName: string;
+  lineItems: BudgetLineItemSelection[];
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -210,6 +258,230 @@ const DocSelect = ({
     {options.map((o) => <option key={o} value={o}>{o || '—'}</option>)}
   </select>
 );
+
+// ─────────────────────────────────────────────────────────────
+// BUDGET HEAD PICKER MODAL
+// ─────────────────────────────────────────────────────────────
+const BudgetHeadPickerModal = ({
+  open,
+  onClose,
+  onSave,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSave: (selection: BudgetHeadSelection) => void;
+  initial?: BudgetHeadSelection | null;
+}) => {
+  const [step, setStep] = React.useState<1 | 2>(1);
+  const [budgets, setBudgets] = React.useState<ApiBudget[]>([]);
+  const [budgetsLoading, setBudgetsLoading] = React.useState(false);
+  const [budgetsError, setBudgetsError] = React.useState<string | null>(null);
+  const [selectedBudget, setSelectedBudget] = React.useState<ApiBudget | null>(null);
+  const [lineItems, setLineItems] = React.useState<ApiBudgetLineItem[]>([]);
+  const [lineItemsLoading, setLineItemsLoading] = React.useState(false);
+  const [lineItemsError, setLineItemsError] = React.useState<string | null>(null);
+  const [lineItemSelections, setLineItemSelections] = React.useState<Record<string, { checked: boolean; amount: number }>>({});
+
+  useEffect(() => {
+    if (!open) return;
+    setStep(1);
+    setSelectedBudget(null);
+    setLineItems([]);
+    setLineItemSelections({});
+    setBudgetsError(null);
+
+    setBudgetsLoading(true);
+    const ac = new AbortController();
+    fetch(`${BASE_URL}/admin_accounts/get_budgets`, { headers: { Accept: 'application/json' }, signal: ac.signal })
+      .then((r) => r.json())
+      .then((d) => { if (d?.success) setBudgets(d.data ?? []); else setBudgetsError(d?.message || 'Failed to load budgets'); })
+      .catch((e) => { if (e?.name !== 'AbortError') setBudgetsError('Failed to load budgets'); })
+      .finally(() => setBudgetsLoading(false));
+
+    return () => ac.abort();
+  }, [open]);
+
+  useEffect(() => {
+    if (!selectedBudget) return;
+    setLineItemsLoading(true);
+    setLineItemsError(null);
+    setLineItems([]);
+    setLineItemSelections({});
+
+    const ac = new AbortController();
+    fetch(`${BASE_URL}/purchase_flow/get_budget_all_line_items/${selectedBudget.budget_id}`, {
+      headers: { Accept: 'application/json' }, signal: ac.signal,
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        const items: ApiBudgetLineItem[] = d?.line_items ?? [];
+        setLineItems(items);
+        const init: Record<string, { checked: boolean; amount: number }> = {};
+        items.forEach((li) => { init[li.line_item_id] = { checked: false, amount: 0 }; });
+        setLineItemSelections(init);
+      })
+      .catch((e) => { if (e?.name !== 'AbortError') setLineItemsError('Failed to load line items'); })
+      .finally(() => setLineItemsLoading(false));
+
+    return () => ac.abort();
+  }, [selectedBudget]);
+
+  const toggleLineItem = (id: string) =>
+    setLineItemSelections((prev) => ({ ...prev, [id]: { ...prev[id], checked: !prev[id].checked } }));
+
+  const updateAmount = (id: string, amount: number) =>
+    setLineItemSelections((prev) => ({ ...prev, [id]: { ...prev[id], amount } }));
+
+  const handleSave = () => {
+    const selected = lineItems
+      .map((li, idx) => ({ li, idx }))
+      .filter(({ li }) => lineItemSelections[li.line_item_id]?.checked)
+      .map(({ li, idx }) => ({
+        id: li.line_item_id,
+        lineNo: idx + 1,
+        name: li.line_item,
+        category: li.category,
+        budgetType: li.budget_type,
+        uom: li.UoM,
+        qtyPerAcre: li.quantity_per_acre,
+        totalAcres: li.total_acres,
+        totalQty: li.total_quantity,
+        ratePerUnit: li.rate_per_unit,
+        totalValue: li.total_value,
+        amount: lineItemSelections[li.line_item_id]?.amount ?? 0,
+      }));
+
+    if (selected.length === 0) { toast.error('Select at least one line item'); return; }
+    const unfilled = selected.filter((s) => !s.amount);
+    if (unfilled.length > 0) { toast.error(`Enter indent amount for: ${unfilled.map((s) => s.name).join(', ')}`); return; }
+
+    onSave({ budgetId: selectedBudget!.budget_id, budgetName: selectedBudget!.budget_name, lineItems: selected });
+    onClose();
+  };
+
+  const checkedCount = Object.values(lineItemSelections).filter((v) => v.checked).length;
+  const totalAllocated = lineItems
+    .filter((li) => lineItemSelections[li.line_item_id]?.checked)
+    .reduce((s, li) => s + (lineItemSelections[li.line_item_id]?.amount ?? 0), 0);
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="max-w-5xl w-full">
+        <DialogHeader>
+          <DialogTitle>{step === 1 ? 'Select Budget' : 'Select Line Items'}</DialogTitle>
+        </DialogHeader>
+
+        {step === 1 && (
+          <div className="space-y-2 py-2">
+            <p className="text-xs text-gray-500 mb-3">Choose the budget to link to this work order</p>
+            {budgetsLoading ? (
+              <div className="flex items-center justify-center py-10"><Loader2 className="w-5 h-5 animate-spin text-green-600" /><span className="text-xs text-gray-500 ml-2">Loading budgets…</span></div>
+            ) : budgetsError ? (
+              <div className="text-xs text-red-500 text-center py-8">{budgetsError}</div>
+            ) : budgets.length === 0 ? (
+              <div className="text-xs text-gray-400 text-center py-8">No budgets found</div>
+            ) : (
+              budgets.map((b) => (
+                <button key={b.budget_id} type="button" onClick={() => { setSelectedBudget(b); setStep(2); }}
+                  className="w-full text-left rounded-lg border border-gray-200 bg-white px-4 py-3 hover:border-green-400 hover:bg-green-50 transition-colors group">
+                  <p className="text-sm font-semibold text-gray-800 group-hover:text-green-700">{b.budget_name}</p>
+                  <p className="text-xs text-gray-400 mt-0.5">{b.crop_season} · FY {b.financial_year_start}–{b.financial_year_end} · {b.status}</p>
+                </button>
+              ))
+            )}
+          </div>
+        )}
+
+        {step === 2 && selectedBudget && (
+          <div className="space-y-3 py-2">
+            <div className="flex items-center gap-3">
+              <button type="button" onClick={() => setStep(1)} className="text-xs text-gray-400 hover:text-gray-700 underline">← Back</button>
+              <span className="text-sm font-bold text-gray-800">{selectedBudget.budget_name}</span>
+              <span className="text-xs text-gray-400">{selectedBudget.crop_season} · FY {selectedBudget.financial_year_start}–{selectedBudget.financial_year_end}</span>
+            </div>
+
+            {lineItemsLoading ? (
+              <div className="flex items-center justify-center py-12"><Loader2 className="w-5 h-5 animate-spin text-green-600" /><span className="text-xs text-gray-500 ml-2">Loading line items…</span></div>
+            ) : lineItemsError ? (
+              <div className="text-xs text-red-500 text-center py-10">{lineItemsError}</div>
+            ) : lineItems.length === 0 ? (
+              <div className="text-xs text-gray-400 text-center py-10">No line items found for this budget</div>
+            ) : (
+              <div className="overflow-auto rounded-lg border border-gray-200 max-h-[420px]">
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-gray-100 sticky top-0 z-10">
+                      <th className="w-9 px-2 py-2.5 border-b border-gray-200" />
+                      {['Line #', 'Category', 'Line Item', 'UoM', 'Qty / Acre', 'Acres', 'Total Qty', 'Rate / Unit', 'Total Value', 'Indent Amount (₹) *'].map((h) => (
+                        <th key={h} className="px-3 py-2.5 text-left font-semibold text-gray-500 border-b border-gray-200 whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lineItems.map((li, idx) => {
+                      const sel = lineItemSelections[li.line_item_id];
+                      const isChecked = sel?.checked ?? false;
+                      return (
+                        <tr key={li.line_item_id} onClick={() => toggleLineItem(li.line_item_id)}
+                          className={`cursor-pointer border-b border-gray-100 transition-colors ${isChecked ? 'bg-green-50 hover:bg-green-100' : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/60 hover:bg-gray-100'}`}>
+                          <td className="px-2 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
+                            <input type="checkbox" checked={isChecked} onChange={() => toggleLineItem(li.line_item_id)} className="w-3.5 h-3.5 accent-green-600" />
+                          </td>
+                          <td className="px-3 py-2.5 font-mono text-gray-500 font-semibold">{idx + 1}</td>
+                          <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{li.category}</td>
+                          <td className="px-3 py-2.5 font-medium text-gray-900 min-w-[160px]">{li.line_item}</td>
+                          <td className="px-3 py-2.5 text-center text-gray-600">{li.UoM}</td>
+                          <td className="px-3 py-2.5 text-right font-mono text-gray-700">{li.quantity_per_acre?.toLocaleString() ?? '—'}</td>
+                          <td className="px-3 py-2.5 text-right font-mono text-gray-700">{li.total_acres?.toLocaleString() ?? '—'}</td>
+                          <td className="px-3 py-2.5 text-right font-mono text-gray-700">{li.total_quantity?.toLocaleString() ?? '—'}</td>
+                          <td className="px-3 py-2.5 text-right font-mono text-gray-700">{INR(li.rate_per_unit)}</td>
+                          <td className="px-3 py-2.5 text-right font-mono font-semibold text-gray-800">{INR(li.total_value)}</td>
+                          <td className="px-3 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
+                            {isChecked ? (
+                              <input type="number" min={1}
+                                value={sel!.amount === 0 ? '' : sel!.amount}
+                                placeholder="Enter amount"
+                                onChange={(e) => updateAmount(li.line_item_id, Number(e.target.value))}
+                                className={`w-36 border rounded px-2 py-1 text-xs text-right bg-white focus:outline-none focus:ring-2 font-mono ${!sel!.amount ? 'border-red-300 focus:ring-red-400 placeholder-red-300' : 'border-green-300 focus:ring-green-500'}`}
+                              />
+                            ) : (
+                              <span className="text-gray-300 font-mono text-[10px]">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  {checkedCount > 0 && (
+                    <tfoot>
+                      <tr className="bg-green-50 border-t-2 border-green-300">
+                        <td colSpan={10} className="px-3 py-2.5 text-right text-xs font-bold text-gray-700">
+                          {checkedCount} item{checkedCount !== 1 ? 's' : ''} selected — Total Indent Amount
+                        </td>
+                        <td className="px-3 py-2.5 text-right text-xs font-bold text-green-700 font-mono">
+                          {totalAllocated > 0 ? INR(totalAllocated) : <span className="text-red-400">Enter amounts ↑</span>}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          {step === 2 && (
+            <Button className="bg-green-600 hover:bg-green-700 text-white" onClick={handleSave} disabled={checkedCount === 0 || lineItemsLoading}>
+              Save Selection{checkedCount > 0 ? ` (${checkedCount})` : ''}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
 
 // ─────────────────────────────────────────────────────────────
 // SPR PREVIEW — read-only document view
@@ -588,6 +860,8 @@ const WorkOrderModal = ({
 }) => {
   const [form, setForm] = useState<WorkOrderForm>(emptyForm());
   const [saving, setSaving] = useState(false);
+  const [budgetPickerOpen, setBudgetPickerOpen] = useState(false);
+  const [budgetHeadSelection, setBudgetHeadSelection] = useState<BudgetHeadSelection | null>(null);
 
   const set = (k: keyof Omit<WorkOrderForm, 'rows'>, v: string) =>
     setForm((p) => ({ ...p, [k]: v }));
@@ -635,6 +909,19 @@ const WorkOrderModal = ({
         function: form.func,
         name_of_service: form.natureOfService,
         item_row: form.rows.map(toWorkOrderRow),
+        ...(budgetHeadSelection && {
+          budget_head: {
+            budget_id: budgetHeadSelection.budgetId,
+            line_item: budgetHeadSelection.lineItems.map((li) => ({
+              line_item_id: li.id,
+              line_item: li.name,
+              category: li.category,
+              budget_type: li.budgetType,
+              uom: li.uom,
+              allocated_amount: li.amount,
+            })),
+          },
+        }),
       };
 
       const res = await fetch(`${BASE_URL}/purchase_flow/create_indent`, {
@@ -922,6 +1209,42 @@ const WorkOrderModal = ({
           </div>
         </div>
 
+        {/* Budget Head section — below document */}
+        <div className="mx-4 mb-4 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+            <span className="text-sm font-semibold text-gray-800">Budget Head</span>
+            <button
+              type="button"
+              onClick={() => setBudgetPickerOpen(true)}
+              className="text-xs text-green-600 hover:text-green-700 font-semibold flex items-center gap-1"
+            >
+              <Plus className="w-3 h-3" />
+              {budgetHeadSelection ? 'Change' : 'Select Budget'}
+            </button>
+          </div>
+
+          {budgetHeadSelection ? (
+            <div className="px-4 py-3 space-y-1">
+              {budgetHeadSelection.lineItems.map((li) => (
+                <div key={li.id} className="text-xs text-gray-700 font-mono leading-snug">
+                  {budgetHeadSelection.budgetName} | {li.category} | {li.name} | {INR(li.amount)}
+                </div>
+              ))}
+              <div className="pt-1 text-xs font-bold text-green-700 text-right font-mono border-t border-green-200 mt-1">
+                Total: {INR(budgetHeadSelection.lineItems.reduce((s, l) => s + l.amount, 0))}
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setBudgetPickerOpen(true)}
+              className="w-full px-4 py-5 text-center text-xs text-gray-400 hover:text-green-600 hover:bg-green-50 transition-colors"
+            >
+              Click to link a budget and select line items with allocation amounts
+            </button>
+          )}
+        </div>
+
         {/* Footer */}
         <div className="shrink-0 px-5 py-3 border-t border-gray-200 bg-gray-50 flex items-center justify-between gap-3">
           <p className="text-xs text-gray-400">Fill in SPR details and save</p>
@@ -933,6 +1256,12 @@ const WorkOrderModal = ({
           </div>
         </div>
       </div>
+
+      <BudgetHeadPickerModal
+        open={budgetPickerOpen}
+        onClose={() => setBudgetPickerOpen(false)}
+        onSave={(sel) => setBudgetHeadSelection(sel)}
+      />
     </div>
   );
 };

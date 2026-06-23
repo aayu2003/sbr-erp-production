@@ -77,7 +77,7 @@ type FuelRequest = {
   vendor_details?: VendorDetails;     // present for vendor-source requests
   requestor_approval_details?: { approver_name: string; approver_designation: string; approved_time: string; approved_date: string };
   admin_ops_approval_details?: { approver_name: string; approver_designation: string; approved_time: string; approved_date: string };
-  director_approval_details?:  { approver_name: string; approver_designation: string; approved_time: string; approved_date: string };
+  director_approval_details?:  Record<string, { approver_name: string; approver_designation: string; approved_time: string; approved_date: string }>;
   // Optional — filled at manual-entry / receipt stage
   receipt_no?: string;
   issue_type?: string;
@@ -232,8 +232,8 @@ const FuelsAndConsumables = () => {
     fetch(url)
       .then(r => r.json())
       .then((data: any) => {
-        const list = data?.fuel_requests ?? data?.pending_requests ?? data?.requests ?? data;
-        if (Array.isArray(list)) setRequests(list);
+        const raw = data?.fuel_requests ?? data?.pending_requests ?? data?.requests ?? data;
+        if (Array.isArray(raw)) setRequests(raw.map((r: any) => ({ ...r, fuel_requested: Number(r.fuel_requested) })));
         else toast.error(data?.message || 'Failed to load requests');
       })
       .catch(() => toast.error('Failed to load fuel requests'))
@@ -390,8 +390,8 @@ const FuelsAndConsumables = () => {
       fetch(`${BASE_URL}/fuels_consumables/get_all_requests${qs.toString() ? `?${qs}` : ''}`)
         .then(r => r.json())
         .then((d: any) => {
-          const list = d?.fuel_requests ?? d?.pending_requests ?? d?.requests ?? d;
-          if (Array.isArray(list)) setRequests(list);
+          const raw = d?.fuel_requests ?? d?.pending_requests ?? d?.requests ?? d;
+          if (Array.isArray(raw)) setRequests(raw.map((r: any) => ({ ...r, fuel_requested: Number(r.fuel_requested) })));
         })
         .catch(() => {})
         .finally(() => setLoading(false));
@@ -404,7 +404,7 @@ const FuelsAndConsumables = () => {
 
   const totalQty = requests
     .filter(r => deriveStatus(r) !== 'rejected')
-    .reduce((s, r) => s + r.fuel_requested, 0);
+    .reduce((s, r) => s + Number(r.fuel_requested), 0);
 
   const totalValue = requests
     .filter(r => (r.total_amount ?? 0) > 0)
@@ -1201,6 +1201,19 @@ const ReceiptModal = ({
     const absoluteLogoUrl = window.location.origin + logoUrl;
     const requestType     = req.staff_details ? 'For Staff' : 'For Vendor';
 
+    const directorEntries = Object.entries(req.director_approval_details ?? {});
+    const approvalCols = [
+      { role: 'Indented By',  d: req.requestor_approval_details ?? null },
+      { role: 'Forwarded By', d: req.admin_ops_approval_details ?? null },
+      ...(directorEntries.length === 0
+        ? [{ role: 'Approved By', d: null as null }]
+        : directorEntries.map(([, d], i) => ({
+            role: directorEntries.length > 1 ? `Approved (${i + 1})` : 'Approved By',
+            d,
+          }))
+      ),
+    ];
+
     const companyHeader = (badge: string) => `
       <div style="position:absolute;top:18px;right:22px">
         <span class="badge ${badge === 'ORIGINAL' ? 'badge-orig' : 'badge-copy'}">${badge}</span>
@@ -1251,7 +1264,7 @@ const ReceiptModal = ({
               ${fuelType}
             </div>
             <p class="label" style="margin-top:2px">Quantity</p>
-            <p class="val-big">${req.fuel_requested.toFixed(2)} Ltr</p>
+            <p class="val-big">${Number(req.fuel_requested).toFixed(2)} Ltr</p>
           </div>
         </div>
         <div class="box" style="margin-bottom:0">
@@ -1262,16 +1275,12 @@ const ReceiptModal = ({
           </div>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:18px">
-        ${[
-          { role: 'Indented By',   d: req.requestor_approval_details },
-          { role: 'Forwarded By',  d: req.admin_ops_approval_details },
-          { role: 'Approved By',   d: req.director_approval_details  },
-        ].map(({ role, d }) => `
+      <div style="display:grid;grid-template-columns:${approvalCols.map(() => '1fr').join(' ')};gap:10px;margin-top:18px">
+        ${approvalCols.map(({ role, d }) => `
           <div>
             <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:4px">${role}</div>
-            <div style="border:1px solid #d1d5db;border-radius:5px;padding:5px 9px;font-size:10px;color:#374151;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-              ${d ? `${d.approver_name || '—'} | ${d.approver_designation || '—'} | ${d.approved_time} | ${d.approved_date}` : '<span style="color:#9ca3af;font-style:italic">Pending</span>'}
+            <div style="border:1px solid #d1d5db;border-radius:5px;padding:6px 9px;font-size:10px;line-height:1.6">
+              ${d ? `<div style="font-weight:700;color:#1f2937">${d.approver_name || '—'}</div><div style="color:#6b7280">${d.approver_designation || '—'}</div><div style="color:#9ca3af">${d.approved_time} &middot; ${d.approved_date}</div>` : '<span style="color:#9ca3af;font-style:italic">Pending</span>'}
             </div>
           </div>
         `).join('')}
@@ -1465,7 +1474,7 @@ const ReceiptModal = ({
                       </span>
                       <p className="text-[11px] text-gray-500">Quantity</p>
                       <p className="text-2xl font-black text-emerald-600 leading-none">
-                        {req.fuel_requested.toFixed(2)} Ltr
+                        {Number(req.fuel_requested).toFixed(2)} Ltr
                       </p>
                     </div>
                   </ReceiptBox>
@@ -1477,23 +1486,43 @@ const ReceiptModal = ({
                   </ReceiptBox>
                 </div>
 
-                <div className="grid grid-cols-3 gap-2.5 pt-2">
-                  {([
-                    { role: 'Indented By',  details: req.requestor_approval_details },
-                    { role: 'Forwarded By', details: req.admin_ops_approval_details },
-                    { role: 'Approved By',  details: req.director_approval_details  },
-                  ] as const).map(({ role, details }) => (
-                    <div key={role}>
-                      <p className="text-[9px] font-bold uppercase tracking-wider text-gray-500 mb-1">{role}</p>
-                      <div className="border border-gray-300 rounded px-2.5 py-1.5 font-mono text-[10px] text-gray-700 truncate">
-                        {details
-                          ? `${details.approver_name || '—'} | ${details.approver_designation || '—'} | ${details.approved_time} | ${details.approved_date}`
-                          : <span className="italic text-gray-400">Pending</span>
-                        }
-                      </div>
+                {(() => {
+                  const dirEntries = Object.entries(req.director_approval_details ?? {});
+                  const previewCols = [
+                    { role: 'Indented By',  details: req.requestor_approval_details ?? null },
+                    { role: 'Forwarded By', details: req.admin_ops_approval_details ?? null },
+                    ...(dirEntries.length === 0
+                      ? [{ role: 'Approved By', details: null as null }]
+                      : dirEntries.map(([, d], i) => ({
+                          role: dirEntries.length > 1 ? `Approved (${i + 1})` : 'Approved By',
+                          details: d,
+                        }))
+                    ),
+                  ];
+                  return (
+                    <div
+                      className="grid gap-2.5 pt-2"
+                      style={{ gridTemplateColumns: `repeat(${previewCols.length}, minmax(0, 1fr))` }}
+                    >
+                      {previewCols.map(({ role, details }) => (
+                        <div key={role}>
+                          <p className="text-[9px] font-bold uppercase tracking-wider text-gray-500 mb-1">{role}</p>
+                          <div className="border border-gray-300 rounded px-2.5 py-2 text-[10px] leading-relaxed">
+                            {details ? (
+                              <div>
+                                <p className="font-bold text-gray-800">{details.approver_name || '—'}</p>
+                                <p className="text-gray-500">{details.approver_designation || '—'}</p>
+                                <p className="text-gray-400">{details.approved_time} · {details.approved_date}</p>
+                              </div>
+                            ) : (
+                              <span className="italic text-gray-400">Pending</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  );
+                })()}
               </div>
             </div>
           ))}

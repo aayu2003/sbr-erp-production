@@ -272,48 +272,45 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
       }
 
       const selectedImages = landImages.filter((f): f is File => !!f);
-      if (selectedImages.length !== 3) {
-        throw new Error('Please upload exactly 3 land images');
-      }
-      if (!landVideo) {
-        throw new Error('Please upload 1 land video');
-      }
 
       const base = getBaseUrl().replace(/\/$/, '');
 
-      // Step 1: Upload land images
-      const imagesFormData = new FormData();
-      selectedImages.forEach((file) => {
-        imagesFormData.append('land_images', file, file.name);
-      });
-
-      const imagesResp = await fetch(`${base}/farmer_managment/upload_land_images`, {
-        method: 'POST',
-        body: imagesFormData,
-      });
-      if (!imagesResp.ok) throw new Error(`Failed to upload land images (${imagesResp.status})`);
-      const imagesResult = await imagesResp.json();
-      if (!imagesResult?.success || !Array.isArray(imagesResult?.images)) {
-        throw new Error('Image upload API returned invalid response');
+      // Step 1: Upload land images — only if user selected any
+      let imageUrls: string[] = [];
+      if (selectedImages.length > 0) {
+        const imagesFormData = new FormData();
+        selectedImages.forEach((file) => {
+          imagesFormData.append('land_images', file, file.name);
+        });
+        const imagesResp = await fetch(`${base}/farmer_managment/upload_land_images`, {
+          method: 'POST',
+          body: imagesFormData,
+        });
+        if (!imagesResp.ok) throw new Error(`Failed to upload land images (${imagesResp.status})`);
+        const imagesResult = await imagesResp.json();
+        if (!imagesResult?.success || !Array.isArray(imagesResult?.images)) {
+          throw new Error('Image upload API returned invalid response');
+        }
+        imageUrls = imagesResult.images
+          .map((img: any) => img?.url)
+          .filter((url: any) => typeof url === 'string' && url.length > 0);
       }
-      const imageUrls: string[] = imagesResult.images
-        .map((img: any) => img?.url)
-        .filter((url: any) => typeof url === 'string' && url.length > 0);
-      if (imageUrls.length === 0) throw new Error('Image upload succeeded but URLs missing');
 
-      // Step 2: Upload land video
-      const videoFormData = new FormData();
-      videoFormData.append('land_video', landVideo, landVideo.name);
-
-      const videoResp = await fetch(`${base}/farmer_managment/upload_land_video`, {
-        method: 'POST',
-        body: videoFormData,
-      });
-      if (!videoResp.ok) throw new Error(`Failed to upload land video (${videoResp.status})`);
-      const videoResult = await videoResp.json();
-      const videoUrl: string | undefined = videoResult?.video?.url;
-      if (!videoResult?.success || !videoUrl) {
-        throw new Error('Video upload API returned invalid response');
+      // Step 2: Upload land video — only if user selected one
+      let videoUrl = '';
+      if (landVideo) {
+        const videoFormData = new FormData();
+        videoFormData.append('land_video', landVideo, landVideo.name);
+        const videoResp = await fetch(`${base}/farmer_managment/upload_land_video`, {
+          method: 'POST',
+          body: videoFormData,
+        });
+        if (!videoResp.ok) throw new Error(`Failed to upload land video (${videoResp.status})`);
+        const videoResult = await videoResp.json();
+        if (!videoResult?.success || !videoResult?.video?.url) {
+          throw new Error('Video upload API returned invalid response');
+        }
+        videoUrl = videoResult.video.url;
       }
 
       // Step 3: Create lead with uploaded media URLs

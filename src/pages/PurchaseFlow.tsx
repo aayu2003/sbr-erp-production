@@ -85,6 +85,11 @@ const isUploaded = (s: PurchaseFlowStep) => {
   return st !== 'empty';
 };
 
+const isInvoiceDocType = (doc: string) => {
+  const d = doc.trim().toLowerCase();
+  return d === 'invoice' || d === 'proforma invoice';
+};
+
 const formatDateTime = (raw?: string) => {
   const v = safeTrim(raw);
   if (!v) return '';
@@ -385,6 +390,7 @@ export default function PurchaseFlow() {
     step: PurchaseFlowStep;
   } | null>(null);
   const [addToInventoryFor, setAddToInventoryFor] = useState<{ poNumber: string } | null>(null);
+  const [forwardingSteps, setForwardingSteps] = useState<Set<string>>(new Set());
 
   // Per-flow merged step lists (API steps + locally inserted invoice steps)
   const [flowStepOverrides, setFlowStepOverrides] = useState<Record<string, PurchaseFlowStep[]>>({});
@@ -600,10 +606,52 @@ export default function PurchaseFlow() {
 
     // ── Update local state so the step shows as uploaded immediately ─────────
     const updatedSteps = getFlowSteps(flowId, flow).map((s) =>
-      s.key === step.key ? { ...s, docLink: fileUrl, status: 'uploaded' } : s
+      s.key === step.key
+        ? { ...s, docLink: fileUrl, status: isInvoiceDocType(step.document) ? 'uploaded+accounts_pending' : 'uploaded' }
+        : s
     );
     setFlowStepOverrides((prev) => ({ ...prev, [flowId]: updatedSteps }));
     toast.success('Document uploaded successfully');
+  };
+
+  const handleForwardToAccounts = async (flowId: string, flow: ApiPurchaseFlow, step: PurchaseFlowStep) => {
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return toast.error('Missing API base URL');
+
+    const forwardKey = `${flowId}:${step.key}`;
+    setForwardingSteps((prev) => new Set([...prev, forwardKey]));
+
+    try {
+      const orderNumber = safeTrim((flow as any)?.order_number);
+      const vendorInfo = leftPanelInfoMap[flowId]?.vendor_details;
+
+      const res = await fetch(`${baseUrl}/admin_accounts/create_invoice_payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          doc_url: step.docLink,
+          order_number: orderNumber,
+          vendor_name: vendorInfo?.vendor_name || '',
+          vendor_id: vendorInfo?.approved_vendor_id || '',
+          flow_id: flowId,
+          step: step.key,
+          invoice_type: step.document,
+        }),
+      });
+      const data: any = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) throw new Error(data?.message || 'Failed to forward to accounts');
+
+      const current = getFlowSteps(flowId, flow);
+      const updated = current.map((s) =>
+        s.key === step.key ? { ...s, status: 'uploaded+accounts_sent' } : s
+      );
+      setFlowStepOverrides((prev) => ({ ...prev, [flowId]: updated }));
+      toast.success(data?.message || 'Forwarded to accounts successfully');
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to forward to accounts');
+    } finally {
+      setForwardingSteps((prev) => { const s = new Set(prev); s.delete(forwardKey); return s; });
+    }
   };
 
   return (
@@ -805,6 +853,14 @@ export default function PurchaseFlow() {
                               return blocking ? `Upload "${blocking.document}" first` : '';
                             })();
 
+                        const invoiceAccountsStatus = (() => {
+                          const st = s.status.toLowerCase();
+                          if (st === 'uploaded+accounts_approved') return 'approved' as const;
+                          if (st === 'uploaded+accounts_sent') return 'sent' as const;
+                          if (st === 'uploaded+accounts_pending') return 'pending' as const;
+                          return null;
+                        })();
+
                         return (
                           <div key={s.key} className="flex items-center gap-3">
                             {/* Step node */}
@@ -829,7 +885,11 @@ export default function PurchaseFlow() {
                                 <div className={
                                   'w-20 h-20 rounded-full border-2 flex flex-col items-center justify-center transition-colors ' +
                                   (uploaded
-                                    ? 'border-green-500 bg-green-50'
+                                    ? invoiceAccountsStatus === 'pending'
+                                      ? 'border-yellow-400 bg-yellow-50'
+                                      : invoiceAccountsStatus === 'sent'
+                                        ? 'border-blue-400 bg-blue-50'
+                                        : 'border-green-500 bg-green-50'
                                     : blocked
                                       ? 'border-gray-200 bg-gray-50 opacity-50'
                                       : s.isLocal && s.status !== 'completed'
@@ -839,7 +899,13 @@ export default function PurchaseFlow() {
                                           : 'border-dashed border-border bg-background hover:bg-muted')
                                 }>
                                   {uploaded ? (
-                                    <FileText className="w-5 h-5 text-green-700" />
+                                    invoiceAccountsStatus === 'pending' ? (
+                                      <FileText className="w-5 h-5 text-yellow-600" />
+                                    ) : invoiceAccountsStatus === 'sent' ? (
+                                      <FileText className="w-5 h-5 text-blue-600" />
+                                    ) : (
+                                      <FileText className="w-5 h-5 text-green-700" />
+                                    )
                                   ) : blocked ? (
                                     <Lock className="w-5 h-5 text-gray-400" />
                                   ) : s.isLocal && s.status !== 'completed' ? (
@@ -851,7 +917,13 @@ export default function PurchaseFlow() {
                                   )}
                                   <div className="text-[10px] mt-1 font-semibold text-muted-foreground">
                                     {uploaded
-                                      ? 'Uploaded'
+                                      ? invoiceAccountsStatus === 'pending'
+                                        ? 'Pending'
+                                        : invoiceAccountsStatus === 'sent'
+                                          ? 'Sent'
+                                          : invoiceAccountsStatus === 'approved'
+                                            ? 'Approved'
+                                            : 'Uploaded'
                                       : blocked
                                         ? 'Locked'
                                         : s.isLocal && s.status !== 'completed'
@@ -918,6 +990,28 @@ export default function PurchaseFlow() {
                                     <ChevronRight className="w-3 h-3" />
                                   </button>
                                 </div>
+                              )}
+
+                              {/* Accounts status actions — only for invoice / proforma invoice steps */}
+                              {uploaded && isInvoiceDocType(s.document) && (
+                                invoiceAccountsStatus === 'pending' ? (
+                                  <button
+                                    type="button"
+                                    disabled={forwardingSteps.has(`${flowId}:${s.key}`)}
+                                    onClick={() => handleForwardToAccounts(flowId, flow, s)}
+                                    className="mt-1 px-2 py-1 text-[10px] font-semibold rounded-md bg-yellow-400 hover:bg-yellow-500 disabled:opacity-60 disabled:cursor-not-allowed text-yellow-900 transition-colors whitespace-nowrap"
+                                  >
+                                    {forwardingSteps.has(`${flowId}:${s.key}`) ? 'Forwarding…' : 'Forward to Accounts'}
+                                  </button>
+                                ) : invoiceAccountsStatus === 'sent' ? (
+                                  <span className="mt-1 px-2 py-1 text-[10px] font-semibold rounded-md bg-blue-100 text-blue-700 whitespace-nowrap">
+                                    Sent to Accounts
+                                  </span>
+                                ) : invoiceAccountsStatus === 'approved' ? (
+                                  <span className="mt-1 px-2 py-1 text-[10px] font-semibold rounded-md bg-green-100 text-green-700 whitespace-nowrap">
+                                    Accounts Approved
+                                  </span>
+                                ) : null
                               )}
                             </div>
 

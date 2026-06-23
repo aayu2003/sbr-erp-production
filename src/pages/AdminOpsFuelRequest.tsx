@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Search, Fuel, Printer, Send, Eye, Smartphone, Edit3,
   CheckSquare, Square, Building2, Truck, Phone, MapPin, User,
-  FileText, RefreshCw, Calendar, X,
+  FileText, RefreshCw, Calendar, X, Loader2, UserCheck, Check,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -70,6 +70,12 @@ type FuelRequest = {
   reference_wo?: string;
 };
 
+type Director = {
+  staff_id:      string;
+  staff_name:    string;
+  staff_contact: string | null;
+};
+
 // Derives status from admin_ops perspective
 // 'sent_to_admin' key is reused here to mean "Sent to Director"
 const deriveStatus = (r: FuelRequest): RequestStatus => {
@@ -134,7 +140,7 @@ const fmtCurrency = (n: number) =>
 // MAIN PAGE
 // ─────────────────────────────────────────────────────────────
 const AdminOpsFuelRequest = () => {
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const [requests, setRequests] = useState<FuelRequest[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
@@ -143,6 +149,7 @@ const AdminOpsFuelRequest = () => {
   const [viewRequest, setViewRequest] = useState<FuelRequest | null>(null);
   const [receiptRequest, setReceiptRequest] = useState<FuelRequest | null>(null);
   const [sendingToDirector, setSendingToDirector] = useState(false);
+  const [showDirectorPicker, setShowDirectorPicker] = useState(false);
   const [filterDate, setFilterDate] = useState('');
   const [filterSource, setFilterSource] = useState<'all' | 'driver_app' | 'manual'>('all');
 
@@ -218,32 +225,50 @@ const AdminOpsFuelRequest = () => {
     }
   };
 
-  const handleSendToDirector = async () => {
+  const handleForwardConfirm = async (directors: Director[]) => {
     if (selectedPendingIds.length === 0) return;
     setSendingToDirector(true);
     try {
-      const now = new Date();
+      const now  = new Date();
+      const dd   = String(now.getDate()).padStart(2, '0');
+      const mm   = String(now.getMonth() + 1).padStart(2, '0');
+      const yyyy = now.getFullYear();
+      const h    = now.getHours();
+      const min  = String(now.getMinutes()).padStart(2, '0');
+      const ampm = h >= 12 ? 'pm' : 'am';
+      const h12  = String(h % 12 || 12).padStart(2, '0');
+
       const res = await fetch(`${BASE_URL}/fuels_consumables/admin_ops_approval`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token ?? ''}`,
+        },
         body: JSON.stringify({
           request_id: selectedPendingIds,
           approval_details: {
             approver_name:        user?.name        ?? '',
             approver_designation: user?.designation ?? '',
-            approved_time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }),
-            approved_date: `${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')}/${now.getFullYear()}`,
+            approved_time: `${h12}:${min} ${ampm}`,
+            approved_date: `${dd}/${mm}/${yyyy}`,
           },
+          forwarded_director: directors.map(d => ({
+            staff_id:      d.staff_id,
+            staff_name:    d.staff_name,
+            staff_contact: d.staff_contact,
+          })),
         }),
       });
       const data: any = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(data?.message || 'Failed to send to Director');
+      if (!res.ok) throw new Error(data?.message || 'Failed to forward to Director');
       toast.success(
-        `${selectedPendingIds.length} request${selectedPendingIds.length > 1 ? 's' : ''} sent to Director`
+        `${selectedPendingIds.length} request${selectedPendingIds.length > 1 ? 's' : ''} forwarded to ${directors.map(d => d.staff_name).join(', ')}`
       );
+      setShowDirectorPicker(false);
+      setSelectedIds(new Set());
       window.location.reload();
     } catch (e: any) {
-      toast.error(e?.message || 'Failed to send to Director');
+      toast.error(e?.message || 'Failed to forward to Director');
     } finally {
       setSendingToDirector(false);
     }
@@ -274,14 +299,12 @@ const AdminOpsFuelRequest = () => {
         </div>
         {selectedPendingIds.length > 0 && (
           <Button
-            onClick={handleSendToDirector}
+            onClick={() => setShowDirectorPicker(true)}
             disabled={sendingToDirector}
             className="bg-blue-600 hover:bg-blue-700 text-white gap-2 shadow-sm"
           >
             <Send className="w-4 h-4" />
-            {sendingToDirector
-              ? 'Sending…'
-              : `Send to Director (${selectedPendingIds.length})`}
+            {`Send to Director (${selectedPendingIds.length})`}
           </Button>
         )}
       </div>
@@ -544,6 +567,16 @@ const AdminOpsFuelRequest = () => {
       )}
 
       {/* ── Modals ── */}
+      {showDirectorPicker && (
+        <DirectorPickerModal
+          token={token ?? ''}
+          confirming={sendingToDirector}
+          count={selectedPendingIds.length}
+          onConfirm={handleForwardConfirm}
+          onClose={() => !sendingToDirector && setShowDirectorPicker(false)}
+        />
+      )}
+
       {viewRequest && (
         <ViewRequestModal
           request={viewRequest}
@@ -972,5 +1005,125 @@ const DetailRow = ({
     </div>
   </div>
 );
+
+// ─────────────────────────────────────────────────────────────
+// DIRECTOR PICKER MODAL
+// ─────────────────────────────────────────────────────────────
+const DirectorPickerModal = ({
+  token, confirming, count, onConfirm, onClose,
+}: {
+  token:      string;
+  confirming: boolean;
+  count:      number;
+  onConfirm:  (directors: Director[]) => void;
+  onClose:    () => void;
+}) => {
+  const [directors, setDirectors] = useState<Director[]>([]);
+  const [selected,  setSelected]  = useState<Set<string>>(new Set());
+  const [loading,   setLoading]   = useState(true);
+  const [error,     setError]     = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch(`${BASE_URL}/admin_staff/get_directors`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.json())
+      .then((data: { directors: Director[] }) => setDirectors(data?.directors ?? []))
+      .catch(() => setError('Failed to load directors'))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  const toggle = (id: string) =>
+    setSelected(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+
+  return (
+    <Dialog open onOpenChange={() => !confirming && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <UserCheck className="w-5 h-5 text-emerald-600" />
+            Forward to Director
+          </DialogTitle>
+        </DialogHeader>
+
+        <p className="text-sm text-gray-500 -mt-1">
+          Select one or more directors to forward{' '}
+          <span className="font-semibold text-gray-700">{count} request{count !== 1 ? 's' : ''}</span> to.
+        </p>
+
+        <div className="space-y-2 max-h-72 overflow-y-auto py-1 pr-1">
+          {loading ? (
+            <div className="flex items-center justify-center py-10 gap-2 text-gray-400">
+              <Loader2 className="w-5 h-5 animate-spin" />
+              <span className="text-sm">Loading directors…</span>
+            </div>
+          ) : error ? (
+            <p className="text-center text-sm text-red-500 py-8">{error}</p>
+          ) : directors.length === 0 ? (
+            <p className="text-center text-sm text-gray-400 py-8">No directors found</p>
+          ) : (
+            directors.map(d => {
+              const isSel = selected.has(d.staff_id);
+              return (
+                <button
+                  key={d.staff_id}
+                  type="button"
+                  onClick={() => toggle(d.staff_id)}
+                  className={cn(
+                    'w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all',
+                    isSel
+                      ? 'border-emerald-400 bg-emerald-50'
+                      : 'border-gray-200 bg-white hover:bg-gray-50'
+                  )}
+                >
+                  <div className={cn(
+                    'w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-all',
+                    isSel ? 'border-emerald-500 bg-emerald-500' : 'border-gray-300'
+                  )}>
+                    {isSel && <Check className="w-3 h-3 text-white" />}
+                  </div>
+                  <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center shrink-0">
+                    <span className="text-xs font-bold text-emerald-700">
+                      {d.staff_name.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="min-w-0">
+                    <p className={cn('text-sm font-semibold truncate', isSel ? 'text-emerald-800' : 'text-gray-800')}>
+                      {d.staff_name}
+                    </p>
+                    {d.staff_contact && (
+                      <p className="text-xs text-gray-400 mt-0.5">{d.staff_contact}</p>
+                    )}
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={confirming}>
+            Cancel
+          </Button>
+          <Button
+            className="bg-emerald-600 hover:bg-emerald-700 text-white gap-2"
+            disabled={selected.size === 0 || confirming}
+            onClick={() => onConfirm(directors.filter(d => selected.has(d.staff_id)))}
+          >
+            {confirming ? (
+              <><Loader2 className="w-4 h-4 animate-spin" /> Forwarding…</>
+            ) : (
+              <><Send className="w-4 h-4" /> Forward{selected.size > 0 ? ` (${selected.size})` : ''}</>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
 
 export default AdminOpsFuelRequest;

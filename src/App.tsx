@@ -65,6 +65,12 @@ import WebApp from "./pages/webapp/WebApp";
 import Inbox from "./pages/Inbox";
 import LabourManagement from "./pages/LabourManagement";
 import UserManagement from "./pages/UserManagement";
+import AccountsDashboard from "./pages/AccountsDashboard";
+import AccountsLedger from "./pages/AccountsLedger";
+import AccountsPayments from "./pages/AccountsPayments";
+import AccountsPurchaseFlow from "./pages/AccountsPurchaseFlow";
+import Budget from "./pages/Budget";
+import BudgetDashboard from "./pages/BudgetDashboard";
 
 const queryClient = new QueryClient();
 
@@ -219,6 +225,14 @@ const App = () => (
           <Route path="/purchase/inbox"  element={<AppLayout><Inbox department="Purchase" /></AppLayout>} />
           <Route path="/hrms/inbox"      element={<AppLayout><Inbox department="HRMS" /></AppLayout>} />
           <Route path="/director/inbox"  element={<AppLayout><Inbox department="Director" /></AppLayout>} />
+
+          {/* Accounts */}
+          <Route path="/accounts/dashboard"    element={<AppLayout><AccountsDashboard /></AppLayout>} />
+          <Route path="/accounts/ledger"       element={<AppLayout><AccountsLedger /></AppLayout>} />
+          <Route path="/accounts/payments"     element={<AppLayout><AccountsPayments /></AppLayout>} />
+          <Route path="/accounts/purchase-flow" element={<AppLayout><AccountsPurchaseFlow /></AppLayout>} />
+          <Route path="/budget"                element={<AppLayout><BudgetDashboard /></AppLayout>} />
+          <Route path="/budget/:budgetId"      element={<AppLayout><Budget /></AppLayout>} />
 
           {/* Standalone Webapp — no ERP sidebar */}
           <Route path="/approval/webapp/*" element={<WebApp />} />

@@ -1,7 +1,7 @@
 import { useMemo, useState, useEffect, useRef } from 'react';
-import { Search, Filter, Users, MapPin, Phone, FileText, ShieldCheck, NotebookText, Wallet, Check, Flag, Leaf, Wheat, Sprout, Image as ImageIcon, Map, Pencil, Trash2, KeyRound, MoreVertical, IdCard, BookOpen, FileBadge2, Landmark, Info, Navigation, Loader2 } from 'lucide-react';
+import { Search, Filter, Users, MapPin, Phone, FileText, ShieldCheck, NotebookText, Wallet, Check, Flag, Leaf, Wheat, Sprout, Image as ImageIcon, Map, Pencil, Trash2, KeyRound, MoreVertical, IdCard, BookOpen, FileBadge2, Landmark, Info, Navigation, Loader2, UploadCloud, X } from 'lucide-react';
 import { Fragment } from 'react';
-import { MapContainer, TileLayer, Polygon, Marker, Popup, FeatureGroup } from 'react-leaflet';
+import { MapContainer, TileLayer, Polygon, Marker, Popup, FeatureGroup, useMap } from 'react-leaflet';
 import { EditControl } from 'react-leaflet-draw';
 import 'leaflet/dist/leaflet.css';
 import 'leaflet-draw/dist/leaflet.draw.css';
@@ -35,6 +35,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import getBaseUrl from '@/lib/config';
+import { parseKmlFile } from '@/lib/kmlParser';
 import { useToast } from '@/hooks/use-toast';
 
 type CropValue = 'napier' | 'paddy' | 'ragi' | '';
@@ -82,6 +83,16 @@ const cropOptions: Array<{ value: Exclude<CropValue, ''>; label: string; Icon: R
   { value: 'ragi', label: 'Ragi', Icon: Sprout },
 ];
 
+const FlyToBounds = ({ coords }: { coords: { lat: number; lng: number }[] | null }) => {
+  const map = useMap();
+  useEffect(() => {
+    if (!coords || coords.length === 0) return;
+    const latLngs = coords.map(c => L.latLng(c.lat, c.lng));
+    map.flyToBounds(L.latLngBounds(latLngs), { padding: [40, 40], duration: 1.4, animate: true });
+  }, [coords]);
+  return null;
+};
+
 const Farmers = () => {
   // --- Existing State & Logic ---
   const [farmers, setFarmers] = useState<FarmerRow[]>([]);
@@ -107,6 +118,8 @@ const Farmers = () => {
   const newLandImageInputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const newLandVideoInputRef = useRef<HTMLInputElement | null>(null);
   const newLandFeatureGroupRef = useRef<any>(null);
+  const [newLandKmlCoordinates, setNewLandKmlCoordinates] = useState<{ lat: number; lng: number }[] | null>(null);
+  const [newLandIsParsingKml, setNewLandIsParsingKml] = useState(false);
   const [newLandForm, setNewLandForm] = useState({
     state: '',
     district: '',
@@ -661,6 +674,7 @@ const Farmers = () => {
     setNewLandLocation(null);
     setNewLandImagePreviews([null, null, null]);
     setNewLandVideoPreview(null);
+    setNewLandKmlCoordinates(null);
     setNewLandStep(1);
     setNewLandModal({ open: true, farmerId });
   };
@@ -710,21 +724,34 @@ const Farmers = () => {
     setNewLandVideoPreview(file ? URL.createObjectURL(file) : null);
   };
 
+  const handleNewLandKmlUpload = async (file: File) => {
+    try {
+      setNewLandIsParsingKml(true);
+      const result = await parseKmlFile(file);
+      const coords = result.land_coordinates.map(([lat, lng]: [number, number]) => ({ lat, lng }));
+      setNewLandKmlCoordinates(coords);
+      toast({ title: 'KML loaded', description: `${coords.length} boundary points mapped from file` });
+    } catch (err: any) {
+      toast({ title: 'KML Error', description: err?.message || 'Failed to read KML file', variant: 'destructive' });
+    } finally {
+      setNewLandIsParsingKml(false);
+    }
+  };
+
   const handleAddLandDetails = async () => {
-    if (!newLandForm.state || !newLandForm.district || !newLandForm.village || !newLandForm.cropType || !newLandForm.acres || !newLandForm.landLocation) {
+    if (!newLandForm.state || !newLandForm.district || !newLandForm.village || !newLandForm.acres || !newLandForm.landLocation) {
       toast({ title: 'Missing fields', description: 'Please complete Step 1 fields.', variant: 'destructive' });
       return;
     }
-    if (!newLandForm.landMapping || newLandForm.landMapping.length < 3) {
-      toast({ title: 'Missing mapping', description: 'Please complete land mapping in Step 2.', variant: 'destructive' });
+    const effectiveLandMapping = (newLandKmlCoordinates && newLandKmlCoordinates.length >= 3)
+      ? newLandKmlCoordinates.map(c => [c.lat, c.lng] as [number, number])
+      : newLandForm.landMapping;
+    if (!effectiveLandMapping || effectiveLandMapping.length < 3) {
+      toast({ title: 'Missing mapping', description: 'Please complete land mapping in Step 2 (KML upload or draw on map).', variant: 'destructive' });
       return;
     }
-    if (newLandForm.landImages.length !== 3 || !newLandForm.landVideo) {
-      toast({ title: 'Missing media', description: 'Please upload 3 photos and 1 video in Step 3.', variant: 'destructive' });
-      return;
-    }
-    if (!newLandForm.leaseStart || !newLandForm.leaseEnd || !newLandForm.leaseAmount || !newLandForm.agreementPdf || !newLandForm.b1Pdf || !newLandForm.kisanBookPdf) {
-      toast({ title: 'Missing fields', description: 'Please complete Step 4 fields and documents.', variant: 'destructive' });
+    if (!newLandForm.leaseStart || !newLandForm.leaseEnd || !newLandForm.leaseAmount) {
+      toast({ title: 'Missing fields', description: 'Please fill lease dates and amount in Step 4.', variant: 'destructive' });
       return;
     }
     if (!newLandModal.farmerId) {
@@ -737,29 +764,34 @@ const Farmers = () => {
       const base = getBaseUrl().replace(/\/$/, '');
       const farmer = farmers.find((f) => f.id === newLandModal.farmerId);
 
-      const imagesFormData = new FormData();
-      newLandForm.landImages.forEach((file) => imagesFormData.append('land_images', file, file.name));
-      const imagesResp = await fetch(`${base}/farmer_managment/upload_land_images`, {
-        method: 'POST',
-        body: imagesFormData,
-      });
-      const imagesBody = await imagesResp.json().catch(() => null);
-      if (!imagesResp.ok || imagesBody?.success !== true || !Array.isArray(imagesBody?.images)) {
-        throw new Error(imagesBody?.message || 'Failed to upload land images');
+      let imageUrls: string[] = [];
+      if (newLandForm.landImages.length > 0) {
+        const imagesFormData = new FormData();
+        newLandForm.landImages.forEach((file) => imagesFormData.append('land_images', file, file.name));
+        const imagesResp = await fetch(`${base}/farmer_managment/upload_land_images`, {
+          method: 'POST',
+          body: imagesFormData,
+        });
+        const imagesBody = await imagesResp.json().catch(() => null);
+        if (!imagesResp.ok || imagesBody?.success !== true || !Array.isArray(imagesBody?.images)) {
+          throw new Error(imagesBody?.message || 'Failed to upload land images');
+        }
+        imageUrls = imagesBody.images.map((x: any) => x?.url).filter((u: any) => typeof u === 'string' && u.length > 0);
       }
-      const imageUrls: string[] = imagesBody.images.map((x: any) => x?.url).filter((u: any) => typeof u === 'string' && u.length > 0);
-      if (imageUrls.length !== 3) throw new Error('Image upload did not return 3 URLs');
 
-      const videoFormData = new FormData();
-      videoFormData.append('land_video', newLandForm.landVideo as File, (newLandForm.landVideo as File).name);
-      const videoResp = await fetch(`${base}/farmer_managment/upload_land_video`, {
-        method: 'POST',
-        body: videoFormData,
-      });
-      const videoBody = await videoResp.json().catch(() => null);
-      const videoUrl = videoBody?.video?.url;
-      if (!videoResp.ok || videoBody?.success !== true || !videoUrl) {
-        throw new Error(videoBody?.message || 'Failed to upload land video');
+      let videoUrl = '';
+      if (newLandForm.landVideo) {
+        const videoFormData = new FormData();
+        videoFormData.append('land_video', newLandForm.landVideo, newLandForm.landVideo.name);
+        const videoResp = await fetch(`${base}/farmer_managment/upload_land_video`, {
+          method: 'POST',
+          body: videoFormData,
+        });
+        const videoBody = await videoResp.json().catch(() => null);
+        if (!videoResp.ok || videoBody?.success !== true || !videoBody?.video?.url) {
+          throw new Error(videoBody?.message || 'Failed to upload land video');
+        }
+        videoUrl = videoBody.video.url;
       }
 
       const totalArea = parseFloat(String(newLandForm.acres).trim());
@@ -769,7 +801,7 @@ const Farmers = () => {
 
       const addLandPayload = {
         farmer_id: newLandModal.farmerId,
-        land_coordinates: newLandForm.landMapping,
+        land_coordinates: effectiveLandMapping,
         total_area: totalArea,
         state: newLandForm.state,
         district: newLandForm.district,
@@ -789,8 +821,7 @@ const Farmers = () => {
         throw new Error(addLandBody?.message || 'Failed to add land');
       }
 
-      const uploadDoc = async (path: string, doc: File | null) => {
-        if (!doc) throw new Error('Required document missing');
+      const uploadDoc = async (path: string, doc: File) => {
         const fd = new FormData();
         fd.append('doc', doc, doc.name);
         const resp = await fetch(`${base}${path}?farmer_id=${encodeURIComponent(newLandModal.farmerId as string)}`, {
@@ -801,9 +832,9 @@ const Farmers = () => {
         if (!resp.ok || body?.success !== true) throw new Error(body?.message || `Failed: ${path}`);
       };
 
-      await uploadDoc('/farmer_managment/upload_new_agreement_document', newLandForm.agreementPdf);
-      await uploadDoc('/farmer_managment/add_new_B1_record', newLandForm.b1Pdf);
-      await uploadDoc('/farmer_managment/add_new_kisan_book', newLandForm.kisanBookPdf);
+      if (newLandForm.agreementPdf) await uploadDoc('/farmer_managment/upload_new_agreement_document', newLandForm.agreementPdf);
+      if (newLandForm.b1Pdf) await uploadDoc('/farmer_managment/add_new_B1_record', newLandForm.b1Pdf);
+      if (newLandForm.kisanBookPdf) await uploadDoc('/farmer_managment/add_new_kisan_book', newLandForm.kisanBookPdf);
 
       await refreshFarmerDetails(newLandModal.farmerId);
       toast({ title: 'Success', description: 'Land and documents added successfully.', variant: 'success' });
@@ -1299,7 +1330,7 @@ const Farmers = () => {
                     <div className="text-lg font-bold leading-5 text-emerald-800">
                       Rs. {getAmountInvested(farmer).toLocaleString('en-IN')}
                     </div>
-                    <div className="mt-1 text-[11px] text-emerald-700">Amount Invested</div>
+                    <div className="mt-1 text-[11px] text-emerald-700">Agreement Amount</div>
                   </div>
                 </div>
 
@@ -1445,11 +1476,11 @@ const Farmers = () => {
                   <Input type="number" step="0.01" placeholder="Enter acres (e.g. 10.75)" value={newLandForm.acres} onChange={(e) => setNewLandForm((p) => ({ ...p, acres: e.target.value }))} />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-medium text-muted-foreground">Crop Type</label>
+                  <label className="text-xs font-medium text-muted-foreground">Crop Type <span className="text-muted-foreground/60">(Optional)</span></label>
                   <Select value={newLandForm.cropType || 'none'} onValueChange={(value) => setNewLandForm((p) => ({ ...p, cropType: value === 'none' ? '' : value }))}>
                     <SelectTrigger><span>{newLandForm.cropType || 'Select crop type'}</span></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="none">Select crop type</SelectItem>
+                      <SelectItem value="none">None</SelectItem>
                       <SelectItem value="Napier">Napier</SelectItem>
                       <SelectItem value="Paddy">Paddy</SelectItem>
                       <SelectItem value="Rahar">Rahar</SelectItem>
@@ -1495,8 +1526,71 @@ const Farmers = () => {
             <div className="space-y-4">
               <div className="flex items-start gap-3 p-3 bg-info/10 rounded-lg border border-info/20">
                 <Info className="w-5 h-5 text-info mt-0.5 shrink-0" />
-                <p className="text-sm text-muted-foreground">Draw land boundary on map. Polygon/rectangle/circle tools are enabled.</p>
+                <p className="text-sm text-muted-foreground">
+                  Upload a KML file to auto-map the boundary, or draw it manually on the map using the polygon/rectangle/circle tools.
+                </p>
               </div>
+
+              {/* KML Upload */}
+              <div className="space-y-2">
+                <label
+                  className={`flex items-center justify-center gap-3 w-full rounded-lg border-2 border-dashed py-4 px-4 cursor-pointer transition-colors ${
+                    newLandIsParsingKml
+                      ? 'border-primary/40 bg-primary/5 cursor-wait'
+                      : newLandKmlCoordinates
+                      ? 'border-green-400 bg-green-50'
+                      : 'border-border hover:border-primary/50 hover:bg-muted/30'
+                  }`}
+                >
+                  {newLandIsParsingKml ? (
+                    <>
+                      <Loader2 className="w-5 h-5 text-primary animate-spin shrink-0" />
+                      <span className="text-sm font-medium text-primary">Reading KML file…</span>
+                    </>
+                  ) : newLandKmlCoordinates ? (
+                    <>
+                      <Check className="w-5 h-5 text-green-600 shrink-0" />
+                      <span className="text-sm font-medium text-green-700">
+                        KML loaded — {newLandKmlCoordinates.length} boundary points
+                      </span>
+                      <button
+                        type="button"
+                        onClick={e => { e.preventDefault(); setNewLandKmlCoordinates(null); }}
+                        className="ml-auto text-muted-foreground hover:text-red-500 transition-colors"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <UploadCloud className="w-5 h-5 text-muted-foreground shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium text-foreground">Upload KML file</p>
+                        <p className="text-xs text-muted-foreground">Auto-maps the land boundary from the file</p>
+                      </div>
+                    </>
+                  )}
+                  {!newLandKmlCoordinates && (
+                    <input
+                      type="file"
+                      accept=".kml,.kmz"
+                      className="hidden"
+                      disabled={newLandIsParsingKml}
+                      onChange={e => {
+                        const file = e.target.files?.[0];
+                        if (file) handleNewLandKmlUpload(file);
+                        e.target.value = '';
+                      }}
+                    />
+                  )}
+                </label>
+                {newLandKmlCoordinates && (
+                  <p className="text-xs text-muted-foreground px-1">
+                    KML boundary will be used for land mapping. You can still draw manually on the map to override it.
+                  </p>
+                )}
+              </div>
+
               <Button type="button" variant="outline" onClick={getNewLandUserLocation} disabled={newLandLocationLoading} className="gap-2 w-full">
                 {newLandLocationLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-4 h-4" />}
                 {newLandLocationLoading ? 'Getting Location...' : 'Use My Location'}
@@ -1507,6 +1601,18 @@ const Farmers = () => {
                     url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                     attribution="&copy; Esri"
                   />
+                  <FlyToBounds coords={newLandKmlCoordinates} />
+                  {newLandKmlCoordinates && newLandKmlCoordinates.length >= 3 && (
+                    <Polygon
+                      positions={newLandKmlCoordinates.map(c => [c.lat, c.lng] as [number, number])}
+                      pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: 0.2, weight: 2.5 }}
+                    />
+                  )}
+                  {newLandKmlCoordinates && newLandKmlCoordinates.length > 0 && (() => {
+                    const lat = newLandKmlCoordinates.reduce((s, c) => s + c.lat, 0) / newLandKmlCoordinates.length;
+                    const lng = newLandKmlCoordinates.reduce((s, c) => s + c.lng, 0) / newLandKmlCoordinates.length;
+                    return <Marker position={[lat, lng]} />;
+                  })()}
                   <FeatureGroup ref={newLandFeatureGroupRef}>
                     <EditControl
                       position="topleft"
@@ -1545,7 +1651,11 @@ const Farmers = () => {
 
           {newLandStep === 3 && (
             <div className="space-y-4">
-              <label className="text-xs font-medium text-muted-foreground">Land Images (3 Required)</label>
+              <div className="flex items-start gap-3 p-3 bg-info/10 rounded-lg border border-info/20">
+                <Info className="w-5 h-5 text-info mt-0.5 shrink-0" />
+                <p className="text-sm text-muted-foreground">Photos and video are <span className="font-semibold text-foreground">optional</span>. You can skip this step and add media later.</p>
+              </div>
+              <label className="text-xs font-medium text-muted-foreground">Land Images <span className="text-muted-foreground/60">(Optional — up to 3)</span></label>
               <div className="grid grid-cols-3 gap-3">
                 {[0, 1, 2].map((index) => (
                   <div key={index}>
@@ -1567,11 +1677,16 @@ const Farmers = () => {
                         <span className="text-2xl text-muted-foreground">+</span>
                       )}
                     </button>
+                    {newLandImagePreviews[index] && (
+                      <button type="button" onClick={() => clearNewLandImagePick(index)} className="mt-1 flex items-center gap-1 text-xs text-red-500 hover:text-red-700">
+                        <X className="w-3 h-3" /> Remove
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
               <div>
-                <label className="text-xs font-medium text-muted-foreground">Land Video (1 Required)</label>
+                <label className="text-xs font-medium text-muted-foreground">Land Video <span className="text-muted-foreground/60">(Optional)</span></label>
                 <input
                   ref={newLandVideoInputRef}
                   type="file"
@@ -1590,6 +1705,11 @@ const Farmers = () => {
                     <span className="text-2xl text-muted-foreground">+</span>
                   )}
                 </button>
+                {newLandVideoPreview && (
+                  <button type="button" onClick={() => handleNewLandVideoPick(null)} className="mt-1 flex items-center gap-1 text-xs text-red-500 hover:text-red-700">
+                    <X className="w-3 h-3" /> Remove video
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -1617,7 +1737,7 @@ const Farmers = () => {
                   { key: 'kisanBookPdf', label: 'Kisan Book' },
                 ].map((doc) => (
                   <div key={doc.key} className="space-y-1">
-                    <label className="text-xs text-muted-foreground">{doc.label}</label>
+                    <label className="text-xs text-muted-foreground">{doc.label} <span className="text-muted-foreground/60">(Optional)</span></label>
                     <Input
                       type="file"
                       accept="application/pdf"
@@ -1654,7 +1774,21 @@ const Farmers = () => {
           <DialogDescription>All land cards for this farmer</DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap gap-4 max-h-[70vh] overflow-y-auto pr-1">
-          {activeFarmsPopupFarmer && getFarmCards(activeFarmsPopupFarmer).map((farm) => {
+          {activeFarmsPopupFarmer && getFarmCards(activeFarmsPopupFarmer).map((farm, farmIndex) => {
+            const rawFarm   = activeFarmsPopupFarmer.farms?.[farmIndex];
+            const landPlots: any[] = Array.isArray(rawFarm?.plots) ? rawFarm.plots : [];
+            const plotStats = [
+              { key: 'napier', label: 'Napier', color: '#22c55e' },
+              { key: 'rahar',  label: 'Rahar',  color: '#f97316' },
+              { key: 'paddy',  label: 'Paddy',  color: '#f59e0b' },
+            ].map(({ key, label, color }) => {
+              const matched = landPlots.filter((p: any) => p.crop_type === key);
+              return {
+                label, color,
+                count: matched.length,
+                acres: matched.reduce((s: number, p: any) => s + (Number(p.plot_area) || 0), 0),
+              };
+            });
             const acresValue = Number(farm.acres);
             const acresDisplay = Number.isFinite(acresValue) && acresValue > 0 ? `${acresValue.toLocaleString('en-IN')} acres` : 'N/A';
             const now = Date.now();
@@ -1710,30 +1844,31 @@ const Farmers = () => {
                     <MapPin className="h-4 w-4 text-black" />
                     <span className="truncate">{farm.location}</span>
                   </div>
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    <Select
-                      value={(farm.cropType || 'none') as CropSelectValue}
-                      onValueChange={(value) => activeFarmsPopupFarmer && handleCropSelectionRequest(activeFarmsPopupFarmer.id, value as CropSelectValue)}
-                      disabled={!!(activeFarmsPopupFarmer && cropUpdating[activeFarmsPopupFarmer.id])}
-                    >
-                      <SelectTrigger className="h-8 min-w-[120px] bg-white text-xs">
-                        {(() => {
-                          const selected = activeFarmsPopupFarmer ? getCropOption(cropSelections[activeFarmsPopupFarmer.id] ?? '') : null;
-                          if (!selected) return <span className="inline-flex items-center gap-2 whitespace-nowrap text-muted-foreground">None</span>;
-                          return <span className="inline-flex items-center gap-2 whitespace-nowrap text-black">{selected.label}</span>;
-                        })()}
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="none">None</SelectItem>
-                        {cropOptions.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Acres</span>
                     <span className="font-medium">{acresDisplay}</span>
+                  </div>
+                  {/* Plot crop stats */}
+                  <div className="pt-2 border-t space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-muted-foreground">Plots</span>
+                      <span className="text-xs font-bold text-foreground">{landPlots.length} total</span>
+                    </div>
+                    {plotStats.map(({ label, color, count, acres }) => (
+                      <div key={label} className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
+                          <span className="text-xs text-muted-foreground">{label}</span>
+                        </div>
+                        {count > 0 ? (
+                          <span className="text-xs font-semibold" style={{ color }}>
+                            {count} plot{count > 1 ? 's' : ''} · {acres.toFixed(2)} ac
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground/50">—</span>
+                        )}
+                      </div>
+                    ))}
                   </div>
                   <div className="pt-2 border-t">
                     <div className="text-xs font-semibold text-muted-foreground mb-1">Land Mapping</div>

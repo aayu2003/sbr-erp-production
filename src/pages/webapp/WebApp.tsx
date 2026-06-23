@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Routes, Route, NavLink } from 'react-router-dom';
-import { Sprout, LayoutDashboard, MapPin, ShoppingBag, Users, Wallet, LogOut, Bell, X } from 'lucide-react';
+import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
+import { Sprout, LayoutDashboard, MapPin, ShoppingBag, Users, Wallet, Fuel, LogOut, Bell, X, ShieldOff } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
 import { usePushNotification } from '@/hooks/usePushNotification';
@@ -11,6 +11,7 @@ import LandsPage    from './LandsPage';
 import PurchasePage from './PurchasePage';
 import HRPage       from './HRPage';
 import AccountsPage from './AccountsPage';
+import FuelPage     from './FuelPage';
 
 // ─────────────────────────────────────────────────────────────
 // Shared types
@@ -552,34 +553,58 @@ const BottomNav = ({ approvals }: { approvals: Approval[] }) => {
 	const pendingOf = (cat: ApprovalCategory) =>
 		approvals.filter(a => a.category === cat && a.status === 'pending').length;
 
+	const pendingFuel = approvals.filter(
+		a => a.category === 'accounts' && a.subType === 'Fuel Request' && a.status === 'pending',
+	).length;
+
+	// Order: Lands | HOME(center circle) | Fuel
 	const items = [
-		{ to: `${BASE}/`,         label: 'Home',     Icon: LayoutDashboard, end: true,  badge: 0               },
-		{ to: `${BASE}/lands`,    label: 'Lands',    Icon: MapPin,          end: false, badge: pendingOf('lands')    },
-		{ to: `${BASE}/purchase`, label: 'Purchase', Icon: ShoppingBag,     end: false, badge: pendingOf('purchase') },
-		{ to: `${BASE}/hr`,       label: 'HR',        Icon: Users,           end: false, badge: pendingOf('hr')       },
-		{ to: `${BASE}/accounts`, label: 'Accounts', Icon: Wallet,          end: false, badge: pendingOf('accounts') },
+		{ to: `${BASE}/lands`, label: 'Lands', Icon: MapPin,          end: false, badge: pendingOf('lands'), isHome: false },
+		{ to: `${BASE}/`,      label: 'Home',  Icon: LayoutDashboard, end: true,  badge: 0,                  isHome: true  },
+		{ to: `${BASE}/fuel`,  label: 'Fuel',  Icon: Fuel,            end: false, badge: pendingFuel,        isHome: false },
 	];
 
 	return (
-		<nav className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-gray-200 flex h-16 max-w-md mx-auto">
-			{items.map(({ to, label, Icon, end, badge }) => (
-				<NavLink key={to} to={to} end={end} className="flex-1 flex flex-col items-center justify-center gap-0.5 relative">
+		<nav className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-gray-200 flex items-end h-16 max-w-md mx-auto overflow-visible">
+			{items.map(({ to, label, Icon, end, badge, isHome }) => (
+				<NavLink
+					key={to}
+					to={to}
+					end={end}
+					className="flex-1 flex flex-col items-center justify-end pb-2 gap-0.5 relative"
+				>
 					{({ isActive }) => (
 						<>
-							{isActive && (
+							{/* Active indicator line — only for non-home items */}
+							{!isHome && isActive && (
 								<span className="absolute top-0 inset-x-0 mx-auto w-8 h-0.5 bg-emerald-500 rounded-full" />
 							)}
-							<div className="relative">
-								<Icon className={`w-5 h-5 transition-colors ${isActive ? 'text-emerald-600' : 'text-gray-400'}`} />
-								{badge > 0 && (
-									<span className="absolute -top-1.5 -right-2 min-w-[16px] h-4 px-0.5 bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
-										{badge > 9 ? '9+' : badge}
+
+							{isHome ? (
+								/* Raised circular FAB in the center */
+								<div className="flex flex-col items-center -translate-y-4">
+									<div className={`w-14 h-14 rounded-full flex items-center justify-center shadow-xl border-4 border-white transition-all ${isActive ? 'bg-emerald-700 scale-105' : 'bg-emerald-500'}`}>
+										<Icon className="w-6 h-6 text-white" />
+									</div>
+									<span className={`text-[10px] font-semibold mt-1 ${isActive ? 'text-emerald-700' : 'text-emerald-500'}`}>
+										{label}
 									</span>
-								)}
-							</div>
-							<span className={`text-[10px] font-medium ${isActive ? 'text-emerald-600' : 'text-gray-400'}`}>
-								{label}
-							</span>
+								</div>
+							) : (
+								<>
+									<div className="relative">
+										<Icon className={`w-5 h-5 transition-colors ${isActive ? 'text-emerald-600' : 'text-gray-400'}`} />
+										{badge > 0 && (
+											<span className="absolute -top-1.5 -right-2 min-w-[16px] h-4 px-0.5 bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+												{badge > 9 ? '9+' : badge}
+											</span>
+										)}
+									</div>
+									<span className={`text-[10px] font-medium ${isActive ? 'text-emerald-600' : 'text-gray-400'}`}>
+										{label}
+									</span>
+								</>
+							)}
 						</>
 					)}
 				</NavLink>
@@ -630,6 +655,38 @@ const NotificationPrompt = () => {
 		</div>
 	);
 };
+
+// ─────────────────────────────────────────────────────────────
+// Unauthorized screen
+// ─────────────────────────────────────────────────────────────
+const UnauthorizedScreen = ({ designation, onLogout }: { designation?: string; onLogout: () => void }) => (
+	<div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center px-6 text-center">
+		<div className="w-20 h-20 rounded-3xl bg-red-100 flex items-center justify-center mb-5 shadow-sm">
+			<ShieldOff className="w-10 h-10 text-red-500" />
+		</div>
+		<h2 className="text-xl font-bold text-gray-900">Access Denied</h2>
+		<p className="text-sm text-gray-500 mt-2 leading-relaxed max-w-[280px]">
+			This portal is restricted to <span className="font-semibold text-gray-700">EA To Director</span> and{' '}
+			<span className="font-semibold text-gray-700">Director</span> roles only.
+		</p>
+		{designation && (
+			<div className="mt-4 inline-flex items-center gap-2 rounded-full bg-red-50 border border-red-200 px-4 py-2">
+				<span className="w-2 h-2 rounded-full bg-red-400 shrink-0" />
+				<span className="text-xs font-semibold text-red-700">{designation}</span>
+			</div>
+		)}
+		<p className="text-xs text-gray-400 mt-6 max-w-[240px] leading-relaxed">
+			Your account does not have the required permissions. Please contact your administrator.
+		</p>
+		<button
+			onClick={onLogout}
+			className="mt-6 flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gray-900 text-white text-sm font-semibold active:bg-gray-700 transition-colors"
+		>
+			<LogOut className="w-4 h-4" />
+			Sign out
+		</button>
+	</div>
+);
 
 const WebApp = () => {
 	const { token, user, loading, logout } = useAuth();
@@ -709,6 +766,11 @@ const WebApp = () => {
 
 	if (!token) return <WebAppLogin />;
 
+	const ALLOWED = ['EA To Director', 'Director'];
+	if (!ALLOWED.includes(user?.designation ?? '')) {
+		return <UnauthorizedScreen designation={user?.designation} onLogout={logout} />;
+	}
+
 	const handleApprove = (id: string) => {
 		setApprovals(prev => prev.map(a => a.id === id ? { ...a, status: 'approved' } : a));
 		toast.success('Approved successfully');
@@ -764,11 +826,13 @@ const WebApp = () => {
 				{/* Page content */}
 				<main className="flex-1 overflow-auto pb-20">
 					<Routes>
-						<Route path="/"         element={<HomePage     {...props} />} />
-						<Route path="/lands"    element={<LandsPage    {...props} />} />
-						<Route path="/purchase" element={<PurchasePage {...props} />} />
-						<Route path="/hr"       element={<HRPage       {...props} />} />
-						<Route path="/accounts" element={<AccountsPage {...props} />} />
+						<Route index          element={<HomePage />} />
+						<Route path="lands"    element={<LandsPage />} />
+						<Route path="fuel"     element={<FuelPage     {...props} />} />
+						<Route path="purchase" element={<PurchasePage {...props} />} />
+						<Route path="hr"       element={<HRPage       {...props} />} />
+						<Route path="accounts" element={<AccountsPage {...props} />} />
+						<Route path="*"        element={<Navigate to={`${BASE}/`} replace />} />
 					</Routes>
 				</main>
 
