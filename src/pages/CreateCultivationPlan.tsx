@@ -37,7 +37,6 @@ import {
   CheckCircle2,
   CircleDot,
   Loader2,
-  ChevronDown,
   Plus,
   Lock,
   Eye,
@@ -48,6 +47,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -65,18 +65,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
-import { Checkbox } from '@/components/ui/checkbox';
 import { ScrollArea } from '@/components/ui/scroll-area'; // New component
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import getBaseUrl from '@/lib/config';
 import ResourceAllocationPanel from '@/components/cultivation/ResourceAllocationPanel';
 
@@ -89,10 +79,11 @@ type RentalServiceOption = {
   isLive: boolean;
 };
 
-type CropType = 'paddy' | 'ragi' | 'napier';
+type CropType = 'paddy' | 'rahar' | 'napier';
 
 type CropPlannerCard = {
   id: string;
+  blockId: string;
   cropType: CropType | '';
   plannerId: string;
   color: string;
@@ -106,13 +97,14 @@ type CropPlannerCard = {
   locked: boolean;
 };
 
-type BlockPlannerCards = Record<string, CropPlannerCard[]>;
+// Keyed by `${blockId}::${cropType}` since lands are now fetched per block+crop combo.
 type BlockLandsMap = Record<string, LandTag[]>;
 
 type LandTag = {
-  id: string;
-  owner: string;
-  area: number;
+  id: string; // farm_id
+  name?: string;
+  area: number; // total area across the farm's plots
+  plotNames: string[];
   landType: 'new' | 'old';
   cropType: CropType;
 };
@@ -535,7 +527,7 @@ const CreateCultivationPlan: React.FC = () => {
   }>({});
   const [mappedByCard, setMappedByCard] = useState<Record<string, any[]>>({});
   const [mappedByCardRaw, setMappedByCardRaw] = useState<Record<string, any[]>>({});
-  const [activeMappingCard, setActiveMappingCard] = useState<{ blockId: string; cardId: string } | null>(null);
+  const [activeMappingCard, setActiveMappingCard] = useState<string | null>(null);
   const [mappingCardLoading, setMappingCardLoading] = useState(false);
   const [savingPlan, setSavingPlan] = useState(false);
   const [blockedDates, setBlockedDates] = useState<{ [date: string]: boolean }>({});
@@ -583,10 +575,13 @@ const CreateCultivationPlan: React.FC = () => {
   const [apiZones, setApiZones] = useState<{ zone_id: string; zone_name: string; total_area: number }[]>([]);
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [blocksInZone, setBlocksInZone] = useState<{ block_id: string; block_name: string; total_area: number }[]>([]);
-  const [selectedFarmIds, setSelectedFarmIds] = useState<string[]>([]);
-  const [planMode, setPlanMode] = useState<'zone' | 'group'>('zone');
-  const [blockPlannerCards, setBlockPlannerCards] = useState<BlockPlannerCards>({});
+  const [planMode, setPlanMode] = useState<'zone' | 'group'>('group');
+  const [plannerCards, setPlannerCards] = useState<CropPlannerCard[]>([]);
   const [blockLandsById, setBlockLandsById] = useState<BlockLandsMap>({});
+  const usedBlockIds = useMemo(
+    () => Array.from(new Set(plannerCards.map((c) => c.blockId).filter(Boolean))),
+    [plannerCards]
+  );
 
   // Rental services (multi-select)
   const [rentalServices, setRentalServices] = useState<RentalServiceOption[]>([]);
@@ -613,14 +608,14 @@ const CreateCultivationPlan: React.FC = () => {
   const BASE_URL = getBaseUrl(); // <-- Use shared config
   const CARD_LIGHT_TINTS = ['#fef3c7', '#dbeafe', '#dcfce7', '#fee2e2', '#f3e8ff', '#e0f2fe', '#ecfccb', '#ffe4e6'];
 
-  const addPlannerCard = (blockId: string) => {
-    setBlockPlannerCards((prev) => {
-      const existing = prev[blockId] || [];
+  const addPlannerCard = () => {
+    setPlannerCards((prev) => {
       const newCard: CropPlannerCard = {
         id: `card-${Date.now()}-${Math.random()}`,
+        blockId: '',
         cropType: '',
         plannerId: '',
-        color: CARD_LIGHT_TINTS[(existing.length % CARD_LIGHT_TINTS.length)],
+        color: CARD_LIGHT_TINTS[prev.length % CARD_LIGHT_TINTS.length],
         selectedFarmTags: [],
         selectNew: false,
         selectOld: false,
@@ -629,50 +624,50 @@ const CreateCultivationPlan: React.FC = () => {
         mappingLocked: false,
         locked: false,
       };
-      return { ...prev, [blockId]: [...existing, newCard] };
+      return [...prev, newCard];
     });
   };
 
-  const updatePlannerCard = (blockId: string, cardId: string, patch: Partial<CropPlannerCard>) => {
-    setBlockPlannerCards((prev) => ({
-      ...prev,
-      [blockId]: (prev[blockId] || []).map((card) => (card.id === cardId ? { ...card, ...patch } : card)),
-    }));
+  const updatePlannerCard = (cardId: string, patch: Partial<CropPlannerCard>) => {
+    setPlannerCards((prev) => prev.map((card) => (card.id === cardId ? { ...card, ...patch } : card)));
   };
 
-  const removePlannerCard = (blockId: string, cardId: string) => {
-    setBlockPlannerCards((prev) => ({
-      ...prev,
-      [blockId]: (prev[blockId] || []).filter((card) => card.id !== cardId),
-    }));
+  const removePlannerCard = (cardId: string) => {
+    setPlannerCards((prev) => prev.filter((card) => card.id !== cardId));
   };
 
   const getCropTags = (blockId: string, crop: CropType | ''): LandTag[] => {
-    if (!crop) return [];
-    return (blockLandsById[blockId] || []).filter((land) => land.cropType === crop);
+    if (!blockId || !crop) return [];
+    return blockLandsById[`${blockId}::${crop}`] || [];
   };
 
-  const toggleCardFarmTag = (blockId: string, cardId: string, tag: string) => {
-    setBlockPlannerCards((prev) => ({
-      ...prev,
-      [blockId]: (prev[blockId] || []).map((card) => {
+  const isTagUsedInOtherCard = (cardId: string, tagId: string) => {
+    const current = plannerCards.find((c) => c.id === cardId);
+    if (!current) return false;
+    return plannerCards.some(
+      (card) => card.id !== cardId && card.blockId === current.blockId && card.selectedFarmTags.includes(tagId)
+    );
+  };
+
+  const toggleCardFarmTag = (cardId: string, tag: string) => {
+    setPlannerCards((prev) =>
+      prev.map((card) => {
         if (card.id !== cardId) return card;
         const exists = card.selectedFarmTags.includes(tag);
         return {
           ...card,
           selectedFarmTags: exists ? card.selectedFarmTags.filter((t) => t !== tag) : [...card.selectedFarmTags, tag],
         };
-      }),
-    }));
+      })
+    );
   };
 
-  const applyLandFilter = (blockId: string, cardId: string, filter: 'new' | 'old' | 'all', checked: boolean) => {
-    setBlockPlannerCards((prev) => {
-      const cards = prev[blockId] || [];
-      const current = cards.find((c) => c.id === cardId);
+  const applyLandFilter = (cardId: string, filter: 'new' | 'old' | 'all', checked: boolean) => {
+    setPlannerCards((prev) => {
+      const current = prev.find((c) => c.id === cardId);
       if (!current) return prev;
 
-      const cropTags = getCropTags(blockId, current.cropType);
+      const cropTags = getCropTags(current.blockId, current.cropType);
       let nextSelectNew = current.selectNew;
       let nextSelectOld = current.selectOld;
       let nextSelectAll = current.selectAll;
@@ -693,104 +688,96 @@ const CreateCultivationPlan: React.FC = () => {
         nextSelectAll ? true : (nextSelectNew && tag.landType === 'new') || (nextSelectOld && tag.landType === 'old')
       );
       const selectedForFilter = eligibleTags
-        .filter((tag) => !isTagUsedInOtherCard(blockId, cardId, tag.id))
+        .filter((tag) => !isTagUsedInOtherCard(cardId, tag.id))
         .map((tag) => tag.id);
 
-      return {
-        ...prev,
-        [blockId]: cards.map((card) =>
-          card.id === cardId
-            ? {
-                ...card,
-                selectNew: nextSelectNew,
-                selectOld: nextSelectOld,
-                selectAll: nextSelectAll,
-                selectedFarmTags: selectedForFilter,
-              }
-            : card
-        ),
-      };
+      return prev.map((card) =>
+        card.id === cardId
+          ? {
+              ...card,
+              selectNew: nextSelectNew,
+              selectOld: nextSelectOld,
+              selectAll: nextSelectAll,
+              selectedFarmTags: selectedForFilter,
+            }
+          : card
+      );
     });
-  };
-
-  const isTagUsedInOtherCard = (blockId: string, cardId: string, tagId: string) => {
-    return (blockPlannerCards[blockId] || []).some(
-      (card) => card.id !== cardId && card.selectedFarmTags.includes(tagId)
-    );
   };
 
   const getFirstCardPlannerId = () => {
-    for (const cards of Object.values(blockPlannerCards)) {
-      const matched = cards.find((card) => !!card.plannerId);
-      if (matched?.plannerId) return matched.plannerId;
-    }
-    return null;
+    const matched = plannerCards.find((card) => !!card.plannerId);
+    return matched?.plannerId || null;
   };
 
   useEffect(() => {
-    setBlockPlannerCards((prev) => {
-      const next: BlockPlannerCards = {};
-      selectedFarmIds.forEach((blockId) => {
-        next[blockId] = prev[blockId] || [];
-      });
-      return next;
+    // Only fetch once a card has both a block and a crop type chosen.
+    const activePairs = new Set<string>();
+    plannerCards.forEach((card) => {
+      if (card.blockId && card.cropType) activePairs.add(`${card.blockId}::${card.cropType}`);
     });
-  }, [selectedFarmIds]);
 
-  useEffect(() => {
-    const activeBlockSet = new Set(selectedFarmIds);
     setBlockLandsById((prev) => {
       const next: BlockLandsMap = {};
-      selectedFarmIds.forEach((blockId) => {
-        next[blockId] = prev[blockId] || [];
+      activePairs.forEach((key) => {
+        if (prev[key]) next[key] = prev[key];
       });
       return next;
     });
 
-    if (selectedFarmIds.length === 0) return;
+    const pairsToFetch = Array.from(activePairs).filter((key) => !blockLandsById[key]);
+    if (pairsToFetch.length === 0) return;
 
     Promise.all(
-      selectedFarmIds.map(async (blockId) => {
+      pairsToFetch.map(async (key) => {
+        const [blockId, cropType] = key.split('::');
         try {
-          const resp = await fetch(`${BASE_URL}/admin_cultivation/cultivation_lands_for_block/${blockId}`);
+          const resp = await fetch(`${BASE_URL}/admin_cultivation/farms_and_land_for_block`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ block_id: blockId, crop_type: cropType }),
+          });
           if (!resp.ok) throw new Error(`Server responded ${resp.status}`);
           const data = await resp.json();
-          const landsRaw = Array.isArray(data?.lands) ? data.lands : [];
+          const availableLands =
+            data?.available_lands && typeof data.available_lands === 'object' ? data.available_lands : {};
 
-          const lands: LandTag[] = landsRaw
-            .map((item: any, idx: number) => {
-              const cropRaw = String(item?.crop_type ?? '').trim().toLowerCase();
-              if (cropRaw !== 'paddy' && cropRaw !== 'ragi' && cropRaw !== 'napier') return null;
-              const landTypeRaw = String(item?.land_type ?? '').trim().toLowerCase();
-              const areaVal = Number(item?.area ?? 0);
+          const lands: LandTag[] = Object.entries(availableLands)
+            .map(([farmId, plots]) => {
+              const plotArr = Array.isArray(plots) ? plots : [];
+              if (plotArr.length === 0) return null; // no plots of this crop on this farm
+
+              const totalArea = plotArr.reduce((sum: number, p: any) => sum + (Number(p?.plot_area) || 0), 0);
+              const plotNames = plotArr.map((p: any) => String(p?.plot_name ?? '')).filter(Boolean);
+              const name = (plotArr[0] as any)?.name || (plotArr[0] as any)?.farmer_name || undefined;
 
               return {
-                id: String(item?.farm_id ?? `${blockId}-${idx}`),
-                owner: String(item?.farmer_name ?? 'Unknown'),
-                area: Number.isFinite(areaVal) ? areaVal : 0,
-                cropType: cropRaw as CropType,
-                landType: landTypeRaw === 'new' ? 'new' : 'old',
+                id: farmId,
+                name,
+                area: Number(totalArea.toFixed(3)),
+                plotNames,
+                landType: 'old', // not provided by this API; kept so the New/Old filter still functions
+                cropType: cropType as CropType,
               } as LandTag;
             })
             .filter(Boolean) as LandTag[];
 
-          return { blockId, lands };
+          return { key, lands };
         } catch (error) {
-          console.error('Failed to fetch lands for block:', blockId, error);
-          return { blockId, lands: [] as LandTag[] };
+          console.error('Failed to fetch farms/land for block+crop:', key, error);
+          return { key, lands: [] as LandTag[] };
         }
       })
     ).then((results) => {
       setBlockLandsById((prev) => {
         const next = { ...prev };
-        results.forEach(({ blockId, lands }) => {
-          if (!activeBlockSet.has(blockId)) return;
-          next[blockId] = lands;
+        results.forEach(({ key, lands }) => {
+          next[key] = lands;
         });
         return next;
       });
     });
-  }, [selectedFarmIds, BASE_URL]);
+  }, [plannerCards, BASE_URL]);
 
   useEffect(() => {
     fetch(`${BASE_URL}/admin_cultivation/get_master_cultivation_plans`)
@@ -979,28 +966,26 @@ const CreateCultivationPlan: React.FC = () => {
   };
 
   const handleSaveLivePlan = async () => {
-    const cards = selectedFarmIds
-      .flatMap((blockId) => {
-        const block = apiBlocks.find((b) => b.block_id === blockId);
-        return (blockPlannerCards[blockId] || []).map((card, idx) => {
-          const acres = (blockLandsById[blockId] || [])
-            .filter((land) => card.selectedFarmTags.includes(land.id))
-            .reduce((sum, land) => sum + Number(land.area || 0), 0);
-          return {
-            id: card.id,
-            label: `${block?.block_name || blockId} - Card ${idx + 1}`,
-            acres: Number(acres.toFixed(2)),
-            status: 'pending' as CardSaveStatus,
-            blockName: block?.block_name || blockId,
-            blockTotalArea: Number(block?.total_area || 0),
-            cropType: String(card.cropType || '-').toUpperCase(),
-            masterName: apiMasterPlans.find((p) => p.id === card.plannerId)?.name || '-',
-            color: card.color || '#f8fafc',
-            farmIds: [...card.selectedFarmTags],
-            planId: String(card.plannerId || ''),
-            dateMapping: Array.isArray(mappedByCardRaw[card.id]) ? mappedByCardRaw[card.id] : (Array.isArray(mappedByCard[card.id]) ? mappedByCard[card.id] : []),
-          };
-        });
+    const cards = plannerCards
+      .map((card, idx) => {
+        const block = apiBlocks.find((b) => b.block_id === card.blockId);
+        const acres = (blockLandsById[`${card.blockId}::${card.cropType}`] || [])
+          .filter((land) => card.selectedFarmTags.includes(land.id))
+          .reduce((sum, land) => sum + Number(land.area || 0), 0);
+        return {
+          id: card.id,
+          label: `${block?.block_name || card.blockId} - Card ${idx + 1}`,
+          acres: Number(acres.toFixed(2)),
+          status: 'pending' as CardSaveStatus,
+          blockName: block?.block_name || card.blockId,
+          blockTotalArea: Number(block?.total_area || 0),
+          cropType: String(card.cropType || '-').toUpperCase(),
+          masterName: apiMasterPlans.find((p) => p.id === card.plannerId)?.name || '-',
+          color: card.color || '#f8fafc',
+          farmIds: [...card.selectedFarmTags],
+          planId: String(card.plannerId || ''),
+          dateMapping: Array.isArray(mappedByCardRaw[card.id]) ? mappedByCardRaw[card.id] : (Array.isArray(mappedByCard[card.id]) ? mappedByCard[card.id] : []),
+        };
       })
       .filter((c) => c.acres > 0 && c.planId && c.farmIds.length > 0 && c.dateMapping.length > 0);
 
@@ -1071,10 +1056,8 @@ const CreateCultivationPlan: React.FC = () => {
   const getTotalAreaForDateMapping = () => {
     if (planMode === 'group') {
       const selectedTagIds = new Set<string>();
-      Object.values(blockPlannerCards).forEach((cards) => {
-        cards.forEach((card) => {
-          card.selectedFarmTags.forEach((tagId) => selectedTagIds.add(tagId));
-        });
+      plannerCards.forEach((card) => {
+        card.selectedFarmTags.forEach((tagId) => selectedTagIds.add(tagId));
       });
 
       let totalFromTags = 0;
@@ -1086,7 +1069,7 @@ const CreateCultivationPlan: React.FC = () => {
 
       if (totalFromTags > 0) return Number(totalFromTags.toFixed(2));
 
-      const selectedBlocksArea = selectedFarmIds.reduce((sum, id) => {
+      const selectedBlocksArea = usedBlockIds.reduce((sum, id) => {
         const block = apiBlocks.find((b) => b.block_id === id);
         return sum + Number(block?.total_area || 0);
       }, 0);
@@ -1162,32 +1145,28 @@ const CreateCultivationPlan: React.FC = () => {
     );
   };
 
-  const refreshCalendarFromCardViews = (source: Record<string, any[]>, cardsSource: BlockPlannerCards) => {
-    const selectedIds: string[] = [];
-    Object.values(cardsSource).forEach((cards) => {
-      cards.forEach((card) => {
-        if (card.showOnCalendar) selectedIds.push(card.id);
-      });
-    });
+  const refreshCalendarFromCardViews = (source: Record<string, any[]>, cardsSource: CropPlannerCard[]) => {
+    const selectedIds = cardsSource.filter((card) => card.showOnCalendar).map((card) => card.id);
     setCalendarFromMappings(source, selectedIds);
   };
 
-  const handleMapSingleCard = async (blockId: string, cardId: string, day0Date: string) => {
-    const card = (blockPlannerCards[blockId] || []).find((c) => c.id === cardId);
+  const handleMapSingleCard = async (cardId: string, day0Date: string) => {
+    const card = plannerCards.find((c) => c.id === cardId);
     if (!card) throw new Error('Card not found');
+    if (!card.blockId) throw new Error('Select a block first');
     if (!card.plannerId) throw new Error('Select master cultivation first');
     if (!card.selectedFarmTags.length) throw new Error('Select at least one land tag');
     if (!day0Date) throw new Error('Select a start date');
 
     setMappingCardLoading(true);
     try {
-      const cardLands = (blockLandsById[blockId] || []).filter((land) => card.selectedFarmTags.includes(land.id));
+      const cardLands = (blockLandsById[`${card.blockId}::${card.cropType}`] || []).filter((land) => card.selectedFarmTags.includes(land.id));
       const totalArea = cardLands.reduce((sum, land) => sum + Number(land.area || 0), 0);
 
       const metaResp = await fetch(`${BASE_URL}/admin_cultivation/plan_metadata_finder`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ block_id: blockId, master_plan_id: card.plannerId }),
+        body: JSON.stringify({ block_id: card.blockId, master_plan_id: card.plannerId }),
       });
       if (!metaResp.ok) throw new Error('Failed to fetch plan metadata');
       const metaData = await metaResp.json();
@@ -1210,10 +1189,10 @@ const CreateCultivationPlan: React.FC = () => {
       const enriched = rawList.map((item: any) => ({
         ...item,
         card_id: card.id,
-        card_label: `${apiBlocks.find((b) => b.block_id === blockId)?.block_name || blockId} - ${String(card.cropType || '').toUpperCase() || 'CARD'}`,
+        card_label: `${apiBlocks.find((b) => b.block_id === card.blockId)?.block_name || card.blockId} - ${String(card.cropType || '').toUpperCase() || 'CARD'}`,
         card_color: card.color,
         selected_area: Number(totalArea.toFixed(2)),
-        block_id: blockId,
+        block_id: card.blockId,
         crop_type: card.cropType,
         work_quantity: workQtyByActivity.get(String(item?.activity || '').trim().toLowerCase()) ?? 0,
       }));
@@ -1221,13 +1200,10 @@ const CreateCultivationPlan: React.FC = () => {
       const nextMapped = { ...mappedByCard, [card.id]: enriched };
       setMappedByCard(nextMapped);
       setMappedByCardRaw((prev) => ({ ...prev, [card.id]: rawList }));
-      const nextCards: BlockPlannerCards = {
-        ...blockPlannerCards,
-        [blockId]: (blockPlannerCards[blockId] || []).map((c) =>
-          c.id === cardId ? { ...c, mappedStartDate: day0Date, showOnCalendar: true } : c
-        ),
-      };
-      setBlockPlannerCards(nextCards);
+      const nextCards = plannerCards.map((c) =>
+        c.id === cardId ? { ...c, mappedStartDate: day0Date, showOnCalendar: true } : c
+      );
+      setPlannerCards(nextCards);
       refreshCalendarFromCardViews(nextMapped, nextCards);
       setSelectionMode(true);
       setDialogOpen(false);
@@ -1242,7 +1218,7 @@ const CreateCultivationPlan: React.FC = () => {
     if (selectionMode && masterPlanId) {
       if (planMode === 'group' && activeMappingCard) {
         try {
-          await handleMapSingleCard(activeMappingCard.blockId, activeMappingCard.cardId, format(date, 'yyyy-MM-dd'));
+          await handleMapSingleCard(activeMappingCard, format(date, 'yyyy-MM-dd'));
         } catch (error) {
           toast.error(error instanceof Error ? error.message : 'Failed to map selected card');
         }
@@ -1363,482 +1339,287 @@ const CreateCultivationPlan: React.FC = () => {
 
       {/* --- DIALOG: Select Farm/Plan with Tabs --- */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="text-2xl font-bold bg-gradient-to-r from-green-700 to-emerald-600 bg-clip-text text-transparent">Create Cultivation Plan</DialogTitle>
-            <DialogDescription>Choose between zone-based or group-based planning.</DialogDescription>
-          </DialogHeader>
+        <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto border-0 shadow-2xl">
+          <div className="-m-6 mb-4 rounded-t-lg bg-emerald-700 px-6 py-5">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-2xl font-bold text-white">
+                <Sprout className="h-6 w-6" />
+                Create Cultivation Plan
+              </DialogTitle>
+              <DialogDescription className="text-white/80">
+                Pick your blocks, configure crop cards, and tag the farms/plots to plant.
+              </DialogDescription>
+            </DialogHeader>
+          </div>
 
-          <Tabs defaultValue="zone" className="w-full" onValueChange={(val) => setPlanMode(val as 'zone' | 'group')}>
-            <TabsList className="grid w-full grid-cols-2 mb-6 bg-gradient-to-r from-gray-100 to-gray-50 p-1 rounded-xl">
-              <TabsTrigger value="zone" className="rounded-lg font-semibold data-[state=active]:bg-white data-[state=active]:shadow-md transition-all">
-                Zone Plan
-              </TabsTrigger>
-              <TabsTrigger value="group" className="rounded-lg font-semibold data-[state=active]:bg-white data-[state=active]:shadow-md transition-all">
-                Group Plan
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="zone" className="space-y-5 mt-4">
-              <div className="space-y-2">
-                <label className="text-sm font-semibold text-gray-700">Select Zone</label>
-                <Select
-                  value={selectedZoneId ?? ''}
-                  onValueChange={(val) => {
-                    setSelectedZoneId(val);
-                    // Fetch blocks in this zone
-                    fetch(`${BASE_URL}/farmer_managment/get_zone_details?zone_id=${val}`)
-                      .then(res => res.json())
-                      .then(data => {
-                        if (data && Array.isArray(data.blocks)) {
-                          setBlocksInZone(data.blocks);
-                        } else {
-                          // Fallback: filter blocks by zone (if API doesn't support)
-                          setBlocksInZone([]);
-                        }
-                      })
-                      .catch(() => setBlocksInZone([]));
-                  }}
+          <div className="space-y-5 mt-2">
+            <div className="space-y-3 rounded-2xl border border-gray-200 bg-white p-4">
+              <div className="flex items-center justify-between">
+                <p className="flex items-center gap-1.5 text-sm font-bold text-emerald-700">
+                  <Layers className="h-4 w-4" /> Crop Planner Cards
+                </p>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-8 gap-1 bg-emerald-700 hover:bg-emerald-800 text-white"
+                  onClick={() => addPlannerCard()}
                 >
-                  <SelectTrigger className="border-2 hover:border-green-400 transition-colors">
-                    <SelectValue placeholder="Choose a zone..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {apiZones.map(zone => (
-                      <SelectItem key={zone.zone_id} value={zone.zone_id}>
-                        <span className="font-medium">{zone.zone_name}</span>
-                        <Badge variant="outline" className="ml-2 text-xs">{zone.total_area} acres</Badge>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  <Plus className="h-4 w-4" /> Add Card
+                </Button>
               </div>
+              <p className="text-xs text-gray-500">
+                For each card: pick a block, crop type, cultivation master, then tag the farms/plots to plant.
+              </p>
 
-              {selectedZoneId && blocksInZone.length > 0 && (
-                <div className="bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-200 rounded-xl p-4">
-                  <p className="text-sm font-semibold text-green-800 mb-3">Blocks in this Zone:</p>
-                  <div className="flex flex-wrap gap-2">
-                    {blocksInZone.map(block => (
-                      <Badge key={block.block_id} variant="secondary" className="bg-white border border-green-300 text-green-800 font-medium px-3 py-1">
-                        {block.block_name} ({block.total_area} acres)
-                      </Badge>
-                    ))}
-                  </div>
+              {plannerCards.length === 0 ? (
+                <div className="rounded-lg border-2 border-dashed border-gray-300 bg-gray-50 p-6 text-center text-xs text-gray-500">
+                  No cards yet. Click "Add Card" to start planning.
                 </div>
-              )}
+              ) : (
+                <ScrollArea className="h-[460px] pr-3">
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    {plannerCards.map((card) => {
+                      const block = apiBlocks.find((b) => b.block_id === card.blockId);
+                      const cropTags = getCropTags(card.blockId, card.cropType);
+                      const selectedArea = cropTags
+                        .filter((tag) => card.selectedFarmTags.includes(tag.id))
+                        .reduce((sum, tag) => sum + tag.area, 0);
 
-              <div className="space-y-2">
-                <label className="text-sm font-semibold text-gray-700">Select Master Plan</label>
-                <Select value={masterPlanId ?? ''} onValueChange={setMasterPlanId}>
-                  <SelectTrigger className="border-2 hover:border-green-400 transition-colors">
-                    <SelectValue placeholder="Choose a master plan..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {apiMasterPlans.map(plan => (
-                      <SelectItem key={plan.id} value={plan.id}>
-                        <span className="font-medium">{plan.name}</span>
-                        <Badge variant="outline" className="ml-2 text-xs">{plan.plan_list.length} activities</Badge>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-semibold text-gray-700">Select Rental Services</label>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="w-full justify-between border-2 hover:border-green-400 transition-colors"
-                      disabled={!rentalServices.length}
-                    >
-                      <span className="truncate">
-                        {selectedRentalServices.length
-                          ? `${selectedRentalServices.length} selected`
-                          : rentalServices.length
-                            ? 'Choose rental services...'
-                            : 'No rental services found'}
-                      </span>
-                      <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent className="w-[--radix-dropdown-menu-trigger-width]" align="start">
-                    <DropdownMenuLabel>Rental Services</DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    {rentalServices.map((s) => (
-                      <DropdownMenuCheckboxItem
-                        key={s.id}
-                        checked={selectedRentalServiceIds.includes(s.id)}
-                        onCheckedChange={() => toggleRentalService(s.id)}
-                      >
-                        {s.name}
-                      </DropdownMenuCheckboxItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-
-                {selectedRentalServices.length > 0 && (
-                  <div className="flex flex-wrap gap-2 pt-2">
-                    {selectedRentalServices.map((s) => (
-                      <Badge key={s.id} variant="secondary" className="bg-green-100 text-green-800 border border-green-300">
-                        {s.name}
-                      </Badge>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </TabsContent>
-
-            <TabsContent value="group" className="space-y-5 mt-4">
-              <div className="space-y-2">
-                <label className="text-sm font-semibold text-gray-700">Select Farms (Blocks)</label>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="w-full justify-between border-2 hover:border-blue-400 transition-colors"
-                    >
-                      <span className="truncate">
-                        {selectedFarmIds.length
-                          ? `${selectedFarmIds.length} farm(s) selected`
-                          : 'Choose farms...'}
-                      </span>
-                      <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent className="w-[--radix-dropdown-menu-trigger-width]" align="start">
-                    <DropdownMenuLabel>Select Farms</DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    {apiBlocks.map((block) => (
-                      <DropdownMenuCheckboxItem
-                        key={block.block_id}
-                        checked={selectedFarmIds.includes(block.block_id)}
-                        onCheckedChange={() => {
-                          setSelectedFarmIds(prev =>
-                            prev.includes(block.block_id)
-                              ? prev.filter(id => id !== block.block_id)
-                              : [...prev, block.block_id]
-                          );
-                        }}
-                      >
-                        {block.block_name} ({block.total_area} acres)
-                      </DropdownMenuCheckboxItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-
-                {selectedFarmIds.length > 0 && (
-                  <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-xl p-4">
-                    <p className="text-sm font-semibold text-blue-800 mb-3">Selected Farms:</p>
-                    <div className="flex flex-wrap gap-2">
-                      {selectedFarmIds.map(id => {
-                        const block = apiBlocks.find(b => b.block_id === id);
-                        return block ? (
-                          <Badge key={id} variant="secondary" className="bg-white border border-blue-300 text-blue-800 font-medium px-3 py-1">
-                            {block.block_name} ({block.total_area} acres)
-                          </Badge>
-                        ) : null;
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {selectedFarmIds.length > 0 && (
-                <div className="space-y-3 rounded-xl border border-blue-200 bg-blue-50/60 p-4">
-                  <div>
-                    <p className="text-sm font-semibold text-blue-900">Block-wise Crop Planner Cards</p>
-                    <p className="text-xs text-blue-700">Pick crop, pick cultivation master, then select farms as tags. Max 2 cards per row.</p>
-                  </div>
-
-                  <ScrollArea className="h-[420px] pr-3">
-                    <div className="space-y-4">
-                      {selectedFarmIds.map((blockId) => {
-                        const block = apiBlocks.find((b) => b.block_id === blockId);
-                        const cards = blockPlannerCards[blockId] || [];
-                        if (!block) return null;
-
-                        return (
-                          <div key={blockId} className="rounded-lg border border-blue-200 bg-white p-3">
-                            <div className="mb-3 flex items-center justify-between">
-                              <p className="font-semibold text-slate-900">{block.block_name}</p>
-                              <Badge variant="outline" className="border-blue-300 text-blue-800">{block.total_area} acres</Badge>
+                      return (
+                        <div key={card.id} className="rounded-xl border border-gray-200 p-3 bg-white">
+                          <div className="grid grid-cols-1 gap-2">
+                            {/* Step 1: Block */}
+                            <div className="relative">
+                              <LandPlot className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-emerald-700" />
+                              <Select
+                                value={card.blockId || ''}
+                                onValueChange={(value) =>
+                                  updatePlannerCard(card.id, {
+                                    blockId: value,
+                                    cropType: '',
+                                    plannerId: '',
+                                    selectedFarmTags: [],
+                                    selectNew: false,
+                                    selectOld: false,
+                                    selectAll: false,
+                                  })
+                                }
+                                disabled={card.locked}
+                              >
+                                <SelectTrigger className="h-9 border border-gray-300 pl-8">
+                                  <SelectValue placeholder="Select block" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {apiBlocks.map((b) => (
+                                    <SelectItem key={b.block_id} value={b.block_id}>{b.block_name} ({b.total_area} acres)</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
                             </div>
 
-                            <div className="mb-3">
-                              <Button type="button" variant="outline" size="sm" className="h-8 gap-1" onClick={() => addPlannerCard(blockId)}>
-                                <Plus className="h-4 w-4" /> Add Card
-                              </Button>
+                            {block && (
+                              <div className="grid grid-cols-2 gap-2 rounded-lg bg-emerald-700 p-2 text-white">
+                                <div className="flex items-center gap-1 text-xs font-semibold"><LandPlot className="h-3 w-3" /> Block</div>
+                                <div className="text-right text-xs font-semibold">{block.block_name}</div>
+                                <div className="text-xs font-semibold">Total Land Area</div>
+                                <div className="text-right text-xs font-semibold">{block.total_area} acres</div>
+                              </div>
+                            )}
+
+                            {/* Step 2: Crop Type */}
+                            <div className="relative">
+                              {card.cropType && <Sprout className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-emerald-700" />}
+                              <Select
+                                value={card.cropType || ''}
+                                onValueChange={(value) =>
+                                  updatePlannerCard(card.id, {
+                                    cropType: value as CropType,
+                                    selectedFarmTags: [],
+                                    selectNew: false,
+                                    selectOld: false,
+                                    selectAll: false,
+                                  })
+                                }
+                                disabled={card.locked || !card.blockId}
+                              >
+                                <SelectTrigger className={cn('h-9 border border-gray-300', card.cropType && 'pl-8')}>
+                                  <SelectValue placeholder="Select crop type" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="paddy">Paddy</SelectItem>
+                                  <SelectItem value="rahar">Rahar</SelectItem>
+                                  <SelectItem value="napier">Napier</SelectItem>
+                                </SelectContent>
+                              </Select>
                             </div>
 
-                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                              {cards.map((card) => {
-                                const cropTags = getCropTags(blockId, card.cropType);
-                                const selectedArea = cropTags
-                                  .filter((tag) => card.selectedFarmTags.includes(tag.id))
-                                  .reduce((sum, tag) => sum + tag.area, 0);
-                                return (
-                                  <div key={card.id} className="rounded-md border border-slate-200 p-3">
-                                    <div className="grid grid-cols-1 gap-2">
-                                      <div className="grid grid-cols-2 gap-2 rounded-md bg-slate-50 p-2">
-                                        <div className="text-xs font-semibold text-slate-700">Block</div>
-                                        <div className="text-right text-xs font-semibold text-slate-900">{block.block_name}</div>
-                                        <div className="text-xs font-semibold text-slate-700">Total Land Area</div>
-                                        <div className="text-right text-xs font-semibold text-slate-900">{block.total_area} acres</div>
-                                      </div>
+                            {/* Step 3: Master Plan */}
+                            <div className="relative">
+                              <Calendar className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-emerald-700" />
+                              <Select
+                                value={card.plannerId}
+                                onValueChange={(value) => updatePlannerCard(card.id, { plannerId: value })}
+                                disabled={card.locked || !card.cropType}
+                              >
+                                <SelectTrigger className="h-9 border border-gray-300 pl-8">
+                                  <SelectValue placeholder="Select cultivation master" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {apiMasterPlans.map((plan) => (
+                                    <SelectItem key={plan.id} value={plan.id}>{plan.name}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
 
-                                      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                                        <Select
-                                          value={card.cropType || ''}
-                                          onValueChange={(value) =>
-                                            updatePlannerCard(blockId, card.id, {
-                                              cropType: value as CropType,
-                                              selectedFarmTags: [],
-                                              selectNew: false,
-                                              selectOld: false,
-                                              selectAll: false,
-                                            })
-                                          }
-                                          disabled={card.locked}
-                                        >
-                                          <SelectTrigger className="h-9">
-                                            <SelectValue placeholder="Select crop type" />
-                                          </SelectTrigger>
-                                          <SelectContent>
-                                            <SelectItem value="paddy">Paddy</SelectItem>
-                                            <SelectItem value="ragi">Ragi</SelectItem>
-                                            <SelectItem value="napier">Napier</SelectItem>
-                                          </SelectContent>
-                                        </Select>
+                            {/* Step 4: Farms & Plots */}
+                            <div className="rounded-lg bg-white border border-gray-200 p-2">
+                              <div className="mb-2 flex items-center justify-between gap-2">
+                                <p className="flex items-center gap-1 text-xs font-bold text-emerald-700">
+                                  <Rows3 className="h-3.5 w-3.5" /> Farms &amp; Plots
+                                </p>
+                                <div className="flex items-center gap-1">
+                                  {(['new', 'old', 'all'] as const).map((filter) => {
+                                    const checked = filter === 'new' ? card.selectNew : filter === 'old' ? card.selectOld : card.selectAll;
+                                    return (
+                                      <button
+                                        key={filter}
+                                        type="button"
+                                        disabled={card.locked || !card.plannerId}
+                                        onClick={() => applyLandFilter(card.id, filter, !checked)}
+                                        className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold capitalize transition-colors ${
+                                          checked
+                                            ? 'border-emerald-700 bg-emerald-700 text-white'
+                                            : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
+                                        }`}
+                                      >
+                                        {filter}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
 
-                                        <Select
-                                          value={card.plannerId}
-                                          onValueChange={(value) => updatePlannerCard(blockId, card.id, { plannerId: value })}
-                                          disabled={card.locked}
-                                        >
-                                          <SelectTrigger className="h-9">
-                                            <SelectValue placeholder="Select cultivation master" />
-                                          </SelectTrigger>
-                                          <SelectContent>
-                                            {apiMasterPlans.map((plan) => (
-                                              <SelectItem key={plan.id} value={plan.id}>{plan.name}</SelectItem>
-                                            ))}
-                                          </SelectContent>
-                                        </Select>
-                                      </div>
-
-                                      <div className="rounded-md bg-slate-50 p-2">
-                                        <div className="mb-2 flex items-center justify-between gap-2">
-                                          <p className="text-xs font-semibold text-slate-700">Farms/Lands Tags</p>
-                                          <div className="flex items-center gap-3">
-                                            <label className="flex items-center gap-1 text-xs text-slate-700">
-                                              <Checkbox checked={card.selectNew} onCheckedChange={(v) => applyLandFilter(blockId, card.id, 'new', !!v)} disabled={card.locked} />
-                                              New
-                                            </label>
-                                            <label className="flex items-center gap-1 text-xs text-slate-700">
-                                              <Checkbox checked={card.selectOld} onCheckedChange={(v) => applyLandFilter(blockId, card.id, 'old', !!v)} disabled={card.locked} />
-                                              Old
-                                            </label>
-                                            <label className="flex items-center gap-1 text-xs text-slate-700">
-                                              <Checkbox checked={card.selectAll} onCheckedChange={(v) => applyLandFilter(blockId, card.id, 'all', !!v)} disabled={card.locked} />
-                                              All
-                                            </label>
-                                          </div>
-                                        </div>
-                                        <div className="flex flex-wrap gap-2">
-                                          {cropTags.length === 0 ? (
-                                            <span className="text-xs text-muted-foreground">
-                                              {card.cropType ? 'No lands found for selected crop' : 'Select crop type to see tags'}
-                                            </span>
-                                          ) : (
-                                            cropTags.map((tag) => (
-                                              <button
-                                                key={tag.id}
-                                                type="button"
-                                                disabled={card.locked || isTagUsedInOtherCard(blockId, card.id, tag.id)}
-                                                onClick={() => toggleCardFarmTag(blockId, card.id, tag.id)}
-                                                className={`rounded-full border px-2 py-1 text-xs ${
-                                                  card.selectedFarmTags.includes(tag.id)
-                                                    ? 'border-green-500 bg-green-100 text-green-800'
-                                                    : isTagUsedInOtherCard(blockId, card.id, tag.id)
-                                                      ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed'
-                                                      : tag.landType === 'new'
-                                                        ? 'border-green-300 bg-green-50 text-green-800'
-                                                        : 'border-yellow-300 bg-yellow-50 text-yellow-800'
-                                                }`}
-                                              >
-                                                {tag.owner} - {tag.area} acres
-                                              </button>
-                                            ))
-                                          )}
-                                        </div>
-                                      </div>
-
-                                      <div className="flex items-center justify-end gap-2">
-                                        <span className="text-xs font-semibold text-slate-700">Selected Area: {selectedArea.toFixed(2)} acres</span>
-                                        <Button type="button" variant="outline" size="sm" onClick={() => removePlannerCard(blockId, card.id)}>
-                                          Cancel
-                                        </Button>
-                                      </div>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-
-                              {cards.length === 0 && (
-                                <div className="rounded-md border border-dashed border-slate-300 p-4 text-xs text-muted-foreground">
-                                  No cards yet. Click + Add Card.
+                              {!card.blockId ? (
+                                <p className="px-1 py-2 text-xs text-muted-foreground">Select a block to begin</p>
+                              ) : !card.plannerId ? (
+                                <p className="px-1 py-2 text-xs text-muted-foreground">
+                                  {!card.cropType ? 'Select crop type to continue' : 'Select cultivation master to see farms'}
+                                </p>
+                              ) : cropTags.length === 0 ? (
+                                <p className="px-1 py-2 text-xs text-muted-foreground">No lands found for selected crop</p>
+                              ) : (
+                                <div className="overflow-hidden rounded-lg border border-gray-200">
+                                  <table className="w-full text-xs">
+                                    <thead>
+                                      <tr className="bg-emerald-700 text-white">
+                                        <th className="px-2 py-1.5 text-left font-semibold">Farm ID</th>
+                                        <th className="px-2 py-1.5 text-left font-semibold">
+                                          {card.cropType ? `${card.cropType.charAt(0).toUpperCase()}${card.cropType.slice(1)} Area` : 'Area'}
+                                        </th>
+                                        <th className="px-2 py-1.5 text-left font-semibold">Plots</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100 bg-white">
+                                      {cropTags.map((tag) => {
+                                        const selected = card.selectedFarmTags.includes(tag.id);
+                                        const usedElsewhere = isTagUsedInOtherCard(card.id, tag.id);
+                                        const disabled = card.locked || usedElsewhere;
+                                        return (
+                                          <tr
+                                            key={tag.id}
+                                            onClick={() => !disabled && toggleCardFarmTag(card.id, tag.id)}
+                                            className={`transition-colors ${
+                                              disabled
+                                                ? 'opacity-40 cursor-not-allowed'
+                                                : selected
+                                                  ? 'bg-emerald-50 cursor-pointer'
+                                                  : 'cursor-pointer hover:bg-emerald-50/60'
+                                            }`}
+                                          >
+                                            <td className="px-2 py-1.5 font-medium text-slate-800">
+                                              <span className="flex items-center gap-1">
+                                                {selected && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-700" />}
+                                                {tag.name || tag.id}
+                                              </span>
+                                              {tag.name && <div className="text-[10px] text-slate-400">{tag.id}</div>}
+                                            </td>
+                                            <td className="px-2 py-1.5 font-semibold text-slate-700">{tag.area} ac</td>
+                                            <td className="px-2 py-1.5 text-slate-600">
+                                              {tag.plotNames.length > 0 ? tag.plotNames.join(', ') : '—'}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
                                 </div>
                               )}
                             </div>
+
+                            <div className="flex items-center justify-end gap-2">
+                              <Badge className="bg-emerald-700 text-white border-0">
+                                Selected Area: {selectedArea.toFixed(2)} acres
+                              </Badge>
+                              <Button type="button" variant="outline" size="sm" className="gap-1" onClick={() => removePlannerCard(card.id)}>
+                                <X className="h-3.5 w-3.5" /> Cancel
+                              </Button>
+                            </div>
                           </div>
-                        );
-                      })}
-                    </div>
-                  </ScrollArea>
-                </div>
-              )}
-
-              <div className="space-y-2">
-                <label className="text-sm font-semibold text-gray-700">Select Rental Services</label>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="w-full justify-between border-2 hover:border-blue-400 transition-colors"
-                      disabled={!rentalServices.length}
-                    >
-                      <span className="truncate">
-                        {selectedRentalServices.length
-                          ? `${selectedRentalServices.length} selected`
-                          : rentalServices.length
-                            ? 'Choose rental services...'
-                            : 'No rental services found'}
-                      </span>
-                      <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent className="w-[--radix-dropdown-menu-trigger-width]" align="start">
-                    <DropdownMenuLabel>Rental Services</DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    {rentalServices.map((s) => (
-                      <DropdownMenuCheckboxItem
-                        key={s.id}
-                        checked={selectedRentalServiceIds.includes(s.id)}
-                        onCheckedChange={() => toggleRentalService(s.id)}
-                      >
-                        {s.name}
-                      </DropdownMenuCheckboxItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-
-                {selectedRentalServices.length > 0 && (
-                  <div className="flex flex-wrap gap-2 pt-2">
-                    {selectedRentalServices.map((s) => (
-                      <Badge key={s.id} variant="secondary" className="bg-blue-100 text-blue-800 border border-blue-300">
-                        {s.name}
-                      </Badge>
-                    ))}
+                        </div>
+                      );
+                    })}
                   </div>
-                )}
-              </div>
-            </TabsContent>
-          </Tabs>
+                </ScrollArea>
+              )}
+            </div>
+          </div>
 
           <DialogFooter className="gap-3 pt-4 border-t">
-            <Button variant="outline" onClick={() => setDialogOpen(false)} className="font-semibold">
-              Cancel
+            <Button variant="outline" onClick={() => setDialogOpen(false)} className="font-semibold gap-1">
+              <X className="h-4 w-4" /> Cancel
             </Button>
             <Button
               onClick={async () => {
-                let selectedPlanForMeta: string | null = masterPlanId;
-                // Validate based on plan mode
-                if (planMode === 'zone') {
-                  if (!selectedZoneId || !masterPlanId) {
-                    toast.error('Please select a zone and master plan');
-                    return;
-                  }
-                  // Use first block in zone as farmId for metadata
-                  if (blocksInZone.length === 0) {
-                    toast.error('No blocks found in selected zone');
-                    return;
-                  }
-                  setFarmId(blocksInZone[0].block_id);
-                } else {
-                  if (selectedFarmIds.length === 0) {
-                    toast.error('Please select at least one farm');
-                    return;
-                  }
-                  const matrixPlanId = getFirstCardPlannerId();
-                  if (!matrixPlanId) {
-                    toast.error('Please configure at least one card with cultivation master');
-                    return;
-                  }
-                  selectedPlanForMeta = matrixPlanId;
-                  setMasterPlanId(matrixPlanId);
-                  // Use first selected farm as farmId for metadata
-                  setFarmId(selectedFarmIds[0]);
+                if (usedBlockIds.length === 0) {
+                  toast.error('Please add at least one card and select a block');
+                  return;
                 }
+                const matrixPlanId = getFirstCardPlannerId();
+                if (!matrixPlanId) {
+                  toast.error('Please configure at least one card with cultivation master');
+                  return;
+                }
+                setMasterPlanId(matrixPlanId);
+                // Use first selected block as farmId for metadata
+                setFarmId(usedBlockIds[0]);
 
                 setPlanMetaLoading(true);
                 setPlanMeta(null);
                 try {
-                  if (planMode === 'group') {
-                    const cardsConfigured = selectedFarmIds.flatMap((blockId) =>
-                      (blockPlannerCards[blockId] || []).map((card) => ({ ...card, blockId }))
-                    ).filter((card) => card.plannerId && card.selectedFarmTags.length > 0);
-                    if (cardsConfigured.length === 0) {
-                      throw new Error('Please configure at least one card with planner and lands');
-                    }
-                    setBlockPlannerCards((prev) => {
-                      const next: BlockPlannerCards = { ...prev };
-                      selectedFarmIds.forEach((blockId) => {
-                        next[blockId] = (prev[blockId] || []).map((c) => ({ ...c, locked: true }));
-                      });
-                      return next;
-                    });
-                    setDialogOpen(false);
-                    setSelectionMode(true);
-                    setDay0(null);
-                    refreshCalendarFromCardViews(mappedByCard, blockPlannerCards);
-                    toast.success('Group card setup complete! Use "Make Land Mapping" on each card.');
-                  } else {
-                    const blockIdForMeta = blocksInZone[0].block_id;
-                    const resp = await fetch(`${BASE_URL}/admin_cultivation/plan_metadata_finder`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ block_id: blockIdForMeta, master_plan_id: selectedPlanForMeta })
-                    });
-                    if (!resp.ok) throw new Error('Failed to fetch plan metadata');
-                    const data = await resp.json();
-                    setPlanMeta(data);
-                    setDialogOpen(false);
-                    setSelectionMode(true);
-                    setDay0(null);
-                    setHighlighted({});
-                    setHighlightCounts({});
-                    setRawMappedData([]);
-                    toast.success('Zone plan setup complete!');
+                  const cardsConfigured = plannerCards.filter(
+                    (card) => card.blockId && card.plannerId && card.selectedFarmTags.length > 0
+                  );
+                  if (cardsConfigured.length === 0) {
+                    throw new Error('Please configure at least one card with planner and lands');
                   }
+                  const lockedCards = plannerCards.map((c) => ({ ...c, locked: true }));
+                  setPlannerCards(lockedCards);
+                  setDialogOpen(false);
+                  setSelectionMode(true);
+                  setDay0(null);
+                  refreshCalendarFromCardViews(mappedByCard, lockedCards);
+                  toast.success('Group card setup complete! Use "Make Land Mapping" on each card.');
                 } catch (err) {
                   toast.error(err instanceof Error ? err.message : 'Failed to load plan metadata');
                 } finally {
                   setPlanMetaLoading(false);
                 }
               }}
-              disabled={
-                planMetaLoading ||
-                (planMode === 'zone'
-                  ? (!selectedZoneId || !masterPlanId)
-                  : selectedFarmIds.length === 0)
-              }
-              className="bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white font-semibold px-6 shadow-lg hover:shadow-xl transition-all duration-300"
+              disabled={planMetaLoading || usedBlockIds.length === 0}
+              className="gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold px-6"
             >
+              <CheckCircle2 className="h-4 w-4" />
               {planMetaLoading ? 'Loading...' : 'Continue to Calendar'}
             </Button>
           </DialogFooter>
@@ -2132,100 +1913,91 @@ const CreateCultivationPlan: React.FC = () => {
         )}
       </div>
 
-      {planMode === 'group' && selectedFarmIds.length > 0 && (
+      {planMode === 'group' && plannerCards.length > 0 && (
         <div className="mb-4 rounded-xl border border-slate-200 bg-white p-4">
           <p className="mb-3 text-sm font-semibold text-slate-800">Configured Cards Mapping</p>
           <div className="overflow-x-auto pb-2">
             <div className="flex gap-3 min-w-max">
-              {selectedFarmIds.flatMap((blockId) => {
-                const block = apiBlocks.find((b) => b.block_id === blockId);
-                const cards = blockPlannerCards[blockId] || [];
-                if (!block || cards.length === 0) return [];
-                return cards.map((card) => {
-                  const selectedArea = (blockLandsById[blockId] || [])
-                    .filter((land) => card.selectedFarmTags.includes(land.id))
-                    .reduce((sum, land) => sum + Number(land.area || 0), 0);
-                  const canMap = !!card.cropType && !!card.plannerId && card.selectedFarmTags.length > 0;
-                  const isActive = activeMappingCard?.blockId === blockId && activeMappingCard?.cardId === card.id;
-                  return (
-                    <div
-                      key={`map-card-${card.id}`}
-                      className="w-[31%] min-w-[300px] max-w-[360px] shrink-0 rounded-lg border p-3"
-                      style={{ backgroundColor: card.color, borderColor: '#c4b5fd' }}
-                    >
-                      <div className="space-y-1 text-xs">
-                        <div className="flex items-center justify-between">
-                          <span className="inline-flex items-center gap-1 text-slate-500"><LandPlot className="h-3.5 w-3.5" /> Block</span>
-                          <span className="font-semibold text-slate-900 truncate max-w-[170px]">{block.block_name}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="inline-flex items-center gap-1 text-slate-500"><Wheat className="h-3.5 w-3.5" /> Total Area</span>
-                          <span className="font-semibold text-slate-900">{block.total_area} ac</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="inline-flex items-center gap-1 text-slate-500"><Sprout className="h-3.5 w-3.5" /> Crop</span>
-                          <span className="font-semibold text-slate-900 uppercase">{card.cropType || '-'}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="inline-flex items-center gap-1 text-slate-500"><UserSquare2 className="h-3.5 w-3.5" /> Master</span>
-                          <span className="font-semibold text-slate-900 truncate max-w-[170px]">{apiMasterPlans.find((p) => p.id === card.plannerId)?.name || '-'}</span>
-                        </div>
+              {plannerCards.map((card) => {
+                const block = apiBlocks.find((b) => b.block_id === card.blockId);
+                if (!block) return null;
+                const selectedArea = (blockLandsById[`${card.blockId}::${card.cropType}`] || [])
+                  .filter((land) => card.selectedFarmTags.includes(land.id))
+                  .reduce((sum, land) => sum + Number(land.area || 0), 0);
+                const canMap = !!card.cropType && !!card.plannerId && card.selectedFarmTags.length > 0;
+                const isActive = activeMappingCard === card.id;
+                return (
+                  <div
+                    key={`map-card-${card.id}`}
+                    className="w-[31%] min-w-[300px] max-w-[360px] shrink-0 rounded-lg border p-3"
+                    style={{ backgroundColor: card.color, borderColor: '#c4b5fd' }}
+                  >
+                    <div className="space-y-1 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1 text-slate-500"><LandPlot className="h-3.5 w-3.5" /> Block</span>
+                        <span className="font-semibold text-slate-900 truncate max-w-[170px]">{block.block_name}</span>
                       </div>
-                      <div className="mt-2 text-xs text-slate-600">Selected: {selectedArea.toFixed(2)} ac</div>
-                      {card.mappedStartDate && <div className="mt-1 text-xs text-slate-600">Mapped: {card.mappedStartDate}</div>}
-
-                      <div className="mt-3 flex items-center gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={isActive ? 'default' : 'outline'}
-                          onClick={() => setActiveMappingCard(isActive ? null : { blockId, cardId: card.id })}
-                          disabled={!canMap || card.mappingLocked || mappingCardLoading}
-                        >
-                          <Calendar className="mr-1 h-4 w-4" /> Map
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={card.showOnCalendar ? 'default' : 'outline'}
-                          onClick={() => {
-                            const nextCards: BlockPlannerCards = {
-                              ...blockPlannerCards,
-                              [blockId]: (blockPlannerCards[blockId] || []).map((c) =>
-                                c.id === card.id ? { ...c, showOnCalendar: !c.showOnCalendar } : c
-                              ),
-                            };
-                            setBlockPlannerCards(nextCards);
-                            refreshCalendarFromCardViews(mappedByCard, nextCards);
-                          }}
-                          disabled={!mappedByCard[card.id]?.length}
-                        >
-                          {card.showOnCalendar ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={card.mappingLocked ? 'default' : 'outline'}
-                          onClick={() => {
-                            const nextLocked = !card.mappingLocked;
-                            setBlockPlannerCards((prev) => ({
-                              ...prev,
-                              [blockId]: (prev[blockId] || []).map((c) =>
-                                c.id === card.id ? { ...c, mappingLocked: nextLocked } : c
-                              ),
-                            }));
-                            if (nextLocked && activeMappingCard?.blockId === blockId && activeMappingCard?.cardId === card.id) {
-                              setActiveMappingCard(null);
-                            }
-                          }}
-                          disabled={!mappedByCard[card.id]?.length}
-                        >
-                          <Lock className="mr-1 h-4 w-4" />
-                        </Button>
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1 text-slate-500"><Wheat className="h-3.5 w-3.5" /> Total Area</span>
+                        <span className="font-semibold text-slate-900">{block.total_area} ac</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1 text-slate-500"><Sprout className="h-3.5 w-3.5" /> Crop</span>
+                        <span className="font-semibold text-slate-900 uppercase">{card.cropType || '-'}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1 text-slate-500"><UserSquare2 className="h-3.5 w-3.5" /> Master</span>
+                        <span className="font-semibold text-slate-900 truncate max-w-[170px]">{apiMasterPlans.find((p) => p.id === card.plannerId)?.name || '-'}</span>
                       </div>
                     </div>
-                  );
-                });
+                    <div className="mt-2 text-xs text-slate-600">Selected: {selectedArea.toFixed(2)} ac</div>
+                    {card.mappedStartDate && <div className="mt-1 text-xs text-slate-600">Mapped: {card.mappedStartDate}</div>}
+
+                    <div className="mt-3 flex items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={isActive ? 'default' : 'outline'}
+                        onClick={() => setActiveMappingCard(isActive ? null : card.id)}
+                        disabled={!canMap || card.mappingLocked || mappingCardLoading}
+                      >
+                        <Calendar className="mr-1 h-4 w-4" /> Map
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={card.showOnCalendar ? 'default' : 'outline'}
+                        onClick={() => {
+                          const nextCards = plannerCards.map((c) =>
+                            c.id === card.id ? { ...c, showOnCalendar: !c.showOnCalendar } : c
+                          );
+                          setPlannerCards(nextCards);
+                          refreshCalendarFromCardViews(mappedByCard, nextCards);
+                        }}
+                        disabled={!mappedByCard[card.id]?.length}
+                      >
+                        {card.showOnCalendar ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={card.mappingLocked ? 'default' : 'outline'}
+                        onClick={() => {
+                          const nextLocked = !card.mappingLocked;
+                          setPlannerCards((prev) =>
+                            prev.map((c) => (c.id === card.id ? { ...c, mappingLocked: nextLocked } : c))
+                          );
+                          if (nextLocked && activeMappingCard === card.id) {
+                            setActiveMappingCard(null);
+                          }
+                        }}
+                        disabled={!mappedByCard[card.id]?.length}
+                      >
+                        <Lock className="mr-1 h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                );
               })}
             </div>
           </div>

@@ -1,0 +1,979 @@
+================================================================================
+       FARM CONNECT — FRONTEND THESIS
+       SBR Agrotech / Sigmoyd | Prepared: July 2026
+================================================================================
+
+TABLE OF CONTENTS
+─────────────────
+  1.  Tech Stack
+  2.  API Wiring Logic
+  3.  Bulk API Call Handling
+  4.  Module Importance & Implementation Depth
+  5.  Business Overview — Why This System Matters at 12,000 Acres
+  6.  The Finance–Purchase–Operations Chain: Investment Per Acre
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+1. TECH STACK
+════════════════════════════════════════════════════════════════════════════════
+
+CORE RUNTIME
+────────────
+  • React 18.3.1           — UI rendering, hooks, concurrent features
+  • TypeScript 5.8.3       — strict typing across all pages/components
+  • Vite 7.3.0             — bundler & dev server (SWC-based, ultra-fast HMR)
+  • React Router DOM 6.30  — client-side routing (BrowserRouter, nested routes)
+
+STATE MANAGEMENT & DATA FETCHING
+──────────────────────────────────
+  • TanStack React Query 5.83  — server-state caching, background refetch,
+                                 stale-while-revalidate; used in ~18 pages
+  • React useState / useEffect — local component state for most pages
+  • Native fetch() API         — primary HTTP client (381 occurrences across 52 files)
+  • Axios 1.13.2               — secondary HTTP client in lib/config.ts for
+                                 cultivation plan master API
+
+  NOTE: The dominant pattern is raw fetch() + useEffect, not a centralised
+  service layer. React Query is adopted in newer pages but the majority of
+  the codebase does direct imperative fetching.
+
+FORM MANAGEMENT & VALIDATION
+──────────────────────────────
+  • react-hook-form 7.61  — form state, field registration, submission
+  • zod 3.25.76            — runtime schema validation for form inputs
+  • @hookform/resolvers    — bridges zod schemas into react-hook-form
+
+UI COMPONENT SYSTEM
+────────────────────
+  • Tailwind CSS 3.4.17    — utility-first styling throughout
+  • Radix UI primitives    — 20+ headless components (Dialog, Select,
+                             Accordion, Tabs, Dropdown, Toast, Popover, etc.)
+  • shadcn/ui pattern      — Radix + Tailwind wrapped in /components/ui/
+  • lucide-react 0.462     — icon system (100+ icons used across pages)
+  • class-variance-authority + tailwind-merge — variant-based class composition
+  • Framer Motion 12.30    — animations (page transitions, modal entrances)
+  • next-themes 0.3        — dark/light theme switching
+
+MAPS & GEO
+───────────
+  • Leaflet 1.9.4 + react-leaflet 4.2.1   — interactive maps
+  • leaflet-draw + react-leaflet-draw      — polygon/shape drawing on canvas
+  • ArcGIS World Imagery tile layer        — satellite imagery base layer
+  • @types/leaflet + @types/geojson        — GeoJSON type support
+  Patterns: Polygon, Polyline, CircleMarker, Tooltip, MapContainer, TileLayer
+  Used in: FarmDirectory, LandAcquisition, Blocks, webapp/LandApprovalCard,
+           webapp/SatelliteMap, PlotMarkingModal
+
+CHARTS & DATA VISUALIZATION
+─────────────────────────────
+  • Recharts 2.15         — line, bar, area, pie, composed charts
+  • @xyflow/react 12.10   — node-based flow diagrams (OnDemandTask workflow)
+  • FullCalendar 6.1.20   — cultivation calendar (day grid, time grid,
+                             drag-and-drop interaction)
+
+DOCUMENT & FILE HANDLING
+─────────────────────────
+  • xlsx 0.18.5           — Excel file import/export (Budget, Inventory)
+  • jsPDF 4.2.0           — PDF generation
+  • jspdf-autotable 5.0   — table rendering inside PDFs
+  • html2canvas 1.4.1     — screenshot capture for PDF export
+  • @zxing/browser 0.1.5  — barcode/QR scanning (WeighmentQC, Inventory)
+  • @zxing/library 0.21   — barcode decoding library
+
+UX & MISC
+──────────
+  • sonner 1.7.4           — toast notifications (primary toast system)
+  • react-day-picker 8.10  — date pickers
+  • date-fns 3.6.0         — date formatting/manipulation
+  • embla-carousel-react   — image carousel (FarmerProfile, LandAcquisition)
+  • react-resizable-panels — split pane layouts (FarmDirectory expand view)
+  • vaul 0.9.9             — bottom drawer component
+  • input-otp 1.4.2        — OTP input (auth flow)
+  • cmdk 1.1.1             — command palette
+
+DEV TOOLCHAIN
+──────────────
+  • ESLint 9.32 + typescript-eslint 8.38  — linting
+  • @vitejs/plugin-react-swc              — SWC-based React transform
+  • lovable-tagger                        — component tagging for Lovable AI
+  • postcss + autoprefixer                — CSS processing
+  • @tailwindcss/typography               — prose styling
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+2. API WIRING LOGIC
+════════════════════════════════════════════════════════════════════════════════
+
+ARCHITECTURE OVERVIEW
+──────────────────────
+There is NO centralised API service layer or repository pattern. Every page
+manages its own data fetching inline via useEffect hooks. The pattern is:
+
+  1. Component mounts
+  2. useEffect fires
+  3. fetch() hits `${getBaseUrl()}/some/endpoint`
+  4. Response parsed with .json()
+  5. State updated via useState setter
+  6. Loading/error state toggled manually
+
+BASE URL RESOLUTION
+────────────────────
+Defined in src/lib/config.ts:
+
+  let baseUrl = env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
+
+  getBaseUrl()   — called by every page to resolve the base URL at runtime
+  setBaseUrl()   — allows dynamic switching (used in ProjectConfig page)
+
+Multiple commented-out alternatives exist in config.ts, suggesting the backend
+has been deployed at different endpoints during development:
+  - http://127.0.0.1:8000          (local dev)
+  - http://192.168.1.7:8000        (LAN dev)
+  - https://farm-connect.amritagrotech.com/api  (staging)
+  - https://api.saibioresources.com/api          (production)
+
+AUTHENTICATION
+───────────────
+Auth is handled via a context (AuthContext). Pages guard data fetching with
+the user session but there is no centralised auth token injection (no Axios
+interceptor). Tokens/session data are expected to flow through context.
+
+TYPICAL FETCH PATTERN (representative example — FarmDirectory.tsx)
+────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const BASE_URL = getBaseUrl().replace(/\/$/, '');
+    fetch(`${BASE_URL}/farmer_managment/get_all_farms_with_details`)
+      .then(r => r.json())
+      .then(data => {
+        setFarms(data.farms ?? []);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+ENDPOINTS PATTERN (backend URL structure observed)
+────────────────────────────────────────────────────
+  /farmer_managment/    — farmer, lead, farm, land, plot operations
+  /admin_cultivation/   — cultivation master and plans
+  /purchase/            — indents, PRs, vendors, quotations, POs
+  /fuel_requests/       — fuel request CRUD and approvals
+  /accounts/            — ledger, payments, vouchers
+  /inventory/           — stock, fuels, consumables
+  /labour/              — labour management, attendance
+  /harvest/             — harvest planning, orders, cards, weighment
+  /logistics/           — vehicles, fleet, logistics requests
+  /hrms/                — staff onboarding, payroll, man power
+
+REQUEST TYPES BY MODULE
+────────────────────────
+  • GET  — fetch lists (farms, farmers, indents, purchase orders, fuel requests)
+  • POST — create records (leads, indents, harvest cards, plot saves, payments)
+  • PUT/PATCH — update status (indent signing, fuel approval, PR status change)
+  • DELETE — remove items (line items from indents, plot deletions)
+
+CONTENT TYPE
+─────────────
+  Headers: { 'Content-Type': 'application/json' }
+  Body: JSON.stringify(payload)
+  No multipart/form-data wiring observed in pages (media uploads likely use
+  separate S3 pre-signed URLs or backend proxy)
+
+ERROR HANDLING
+───────────────
+  Pattern: .catch(err => { toast.error("..."); setLoading(false); })
+  No global error boundary for API failures.
+  Each page catches locally and shows a sonner toast.
+
+REACT QUERY USAGE (newer pages)
+────────────────────────────────
+  In pages like Farmers, LabourManagement, OnDemandTask, CultivationCalendar:
+    useQuery({ queryKey: [...], queryFn: async () => { ... } })
+  This gives automatic caching, background refresh, and loading states.
+  The QueryClient is configured with defaults at App.tsx root level.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+3. BULK API CALL HANDLING
+════════════════════════════════════════════════════════════════════════════════
+
+The system has three distinct patterns for handling bulk/multi-resource API
+operations, each serving different use cases.
+
+────────────────────────────────────────────────────────────────────────────────
+PATTERN 1: BATCHED PARALLEL UPLOADS WITH PROGRESS TRACKING
+  Location: src/components/farm/PlotMarkingModal.tsx
+  Context: Saving multiple land plots parsed from a KML file
+
+  When a user uploads a KML file containing dozens/hundreds of farm plots, the
+  system cannot fire all save requests at once (would overwhelm the server).
+  Solution: a batched parallel upload engine.
+
+  const BATCH_SIZE = 5; // 5 concurrent requests per batch
+
+  for (let i = 0; i < kmlPlots.length; i += BATCH_SIZE) {
+    const batch = kmlPlots.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(plot =>
+        fetch(`${BASE_URL}/farmer_managment/save_land_plot`, { ... })
+      )
+    );
+    // update UI progress bar after each batch
+    setProgressDone(totalDone += results.length);
+    setProgressSaved([...saved]);
+    setProgressFailed([...failed]);
+  }
+
+  Key properties:
+  - Promise.allSettled() used instead of Promise.all() — partial failures do NOT
+    abort the whole operation. Each plot result is inspected individually.
+  - Real-time progress bar (progressDone / progressTotal) shown during upload
+  - Failed plots are tracked separately and shown to user after completion
+  - Batch size of 5 prevents server overload while maintaining parallelism
+  - This is the most sophisticated data integrity pattern in the codebase
+
+────────────────────────────────────────────────────────────────────────────────
+PATTERN 2: PARALLEL MULTI-RESOURCE LOAD ON PAGE MOUNT
+  Locations: CultivationCalendar, Farmers, FarmDirectory, OnDemandTask, etc.
+
+  Pages that need data from multiple endpoints fire all fetches simultaneously
+  on mount, then combine results.
+
+  Example (CultivationCalendar):
+    const results = await Promise.all(
+      ids.map(async (id) => fetch(`${BASE}/cultivation_plan/${id}`).then(r => r.json()))
+    );
+    const allActivities = results.flatMap(r => r.activities ?? []);
+
+  Example (Farmers page — one of the most fetch-heavy pages at 31 occurrences):
+    // Fires multiple parallel fetches for farmer list, block data, crop data,
+    // land data, and farm statistics simultaneously
+    const [farmersRes, blocksRes, cropsRes] = await Promise.all([
+      fetch(`${BASE}/farmer_managment/get_all_farmers`),
+      fetch(`${BASE}/farmer_managment/get_all_blocks`),
+      fetch(`${BASE}/farmer_managment/get_crop_types`),
+    ]);
+
+  This reduces page load time significantly versus sequential fetching.
+
+────────────────────────────────────────────────────────────────────────────────
+PATTERN 3: SEQUENTIAL DEPENDENT FETCHES
+  Location: PurchaseFlow, FarmDirectory (investment ledger), QuotationComparative
+
+  When one resource ID is needed to fetch a dependent resource:
+
+  // Step 1: Get list of purchase flows
+  const flowsData = await fetch(`${BASE}/purchase/get_purchase_flows`).then(r => r.json());
+  const flowId = flowsData.purchase_flows[0]?.flow_id;
+
+  // Step 2: Fetch detail using the ID from step 1
+  const detail = await fetch(`${BASE}/purchase/get_flow_detail/${flowId}`).then(r => r.json());
+
+  FarmDirectory does this for investment ledger per farm:
+  - First: GET /farmer_managment/get_all_farms_with_details  (returns farm list)
+  - On farm card click: GET /accounts/get_farm_investment_ledger?farm_id={id}
+  - Then renders investment ledger table inside the expanded farm drawer
+
+────────────────────────────────────────────────────────────────────────────────
+PATTERN 4: REACT QUERY CACHING (newer modules)
+  Used in: Farmers, LabourManagement, OnDemandTask, CultivationCalendar
+
+  useQuery({
+    queryKey: ['cultivation-activities', planId],
+    queryFn: () => fetch(`${BASE}/cultivation/${planId}/activities`).then(r => r.json()),
+    staleTime: 5 * 60 * 1000,  // 5 min cache
+  })
+
+  Benefits: automatic deduplication, background re-fetching, no double-mount
+  fetch (which is the pain point with raw useEffect in React StrictMode).
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+4. MODULE IMPORTANCE & IMPLEMENTATION DEPTH
+════════════════════════════════════════════════════════════════════════════════
+
+The system has 6 supersets, 14 groups, and 45+ individual modules.
+Below is a depth rating (1–5) and business importance analysis per module.
+
+Legend: [Depth 1–5] = implementation completeness
+        [Importance H/M/L] = business criticality
+
+────────────────────────────────────────────────────────────────────────────────
+ADMIN SUPERSET
+────────────────────────────────────────────────────────────────────────────────
+
+[LEADS]  Depth: 4  |  Importance: H
+  The entry point of the entire system. Manages prospect pipeline.
+  Implementation: Full CRUD, status machine (contacted → verified → registered
+  → rejected / follow_up), AddLeadModal with zod validation, verification modal,
+  KYC modal with aadhaar/PAN/bank details collection, document upload support
+  (6 document types), tabbed view (All / Contacted / Verified / Registered),
+  search and filter. Feeds directly into Farmers module.
+  API surface: get_all_leads, add_lead, update_lead_status, upload_document
+
+[FARMERS / FARMER DIRECTORY]  Depth: 5  |  Importance: H
+  The most API-heavy page in the codebase (31 fetch occurrences).
+  Full farmer registry with embedded map, block assignment, crop type tagging,
+  document viewer, history timeline, farm listing per farmer, KYC status.
+  Individual FarmerProfile page with dedicated route (/farmers/:farmer_id).
+  This is the anchor entity — everything else (land, cultivation, harvest,
+  budget) links back to a farmer ID.
+
+[LAND ACQUISITION]  Depth: 4  |  Importance: H
+  Geo-data capture for land onboarding. Uses Leaflet + leaflet-draw for
+  polygon drawing. Supports KML upload. Captures photos (3 required), survey
+  video, lease details, rent amount, legal documents (B1 record, Kisan book,
+  agreement PDF). Auto-calculates area from coordinates. Feeds FarmDirectory.
+
+[FARM DIRECTORY (Land Directory)]  Depth: 5  |  Importance: H
+  The most visually sophisticated page. Each farm card contains:
+  - Leaflet satellite mini-map rendering land boundary + plots + mappings
+  - Color-coded plot polygons by crop type (napier=green, paddy=amber, rahar=orange)
+  - Additional mapping layers: roads, paths, shelters, bore wells, canals,
+    electric poles, ponds, ditches — each color-coded distinctly
+  - Expand modal: full-screen interactive satellite map, layer toggle panel
+  - Investment ledger tab: per-farm spend history with voucher numbers
+  - Scope of Work tab: vendor activities, start/end dates, vendor contacts
+  - Farm Activity log: timestamped field events
+  - PremiumPlotterModal: advanced plot drawing inside expanded view
+  - Farm-level investment calculated from the backend ledger entries
+  This page IS the granular investment per acre view for the operations team.
+
+[LAND HIERARCHY / BLOCKS]  Depth: 3  |  Importance: M
+  Block-level grouping of farms. Farms are assigned to blocks. Blocks
+  aggregate area and farm count. Useful for management reporting.
+
+[ADMIN OPS INDENTS]  Depth: 5  |  Importance: H
+  The backbone of the procurement trigger chain. Full indent creation UI for
+  both PR (Purchase Requisition) and SPR (Service Purchase Requisition) types.
+
+  PR line item fields: item code, part name, specification, UOM, total qty,
+  available stock, lead time (weeks), material required date,
+  indigenous/imported flag, rate per item, preferred vendor, warranty validity,
+  full life hrs, actual life hrs, reason for replacement, repair possibility.
+
+  SPR line item fields: service description, UOM, qty, start date, duration,
+  completion date, validity, scope attached, BOQ attached, approx value,
+  GST%, proposed vendors, previous work order, remarks.
+
+  Signature diary system: captures forwarder + director digital signatures.
+  PDF generation via jsPDF. Status machine: draft → signed → raised → po.
+
+  LocalStorage-backed config persistence (readAdminOpsIndentConfig /
+  writeAdminOpsIndentConfig). Signature diary stored in LocalStorage
+  (readSignatureDiary / writeSignatureDiary).
+
+[ADMIN OPS FUEL REQUESTS]  Depth: 4  |  Importance: H
+  Fuel request management dashboard (Admin Operations perspective).
+  Multi-level approval workflow: pending → sent_to_admin → approved/rejected.
+  Shows vehicle details, odometer, purpose, location, fuel amount, rate.
+  Can forward requests to Director. Real-time status badges.
+
+[ON DEMAND TASK & ALLOCATION]  Depth: 4  |  Importance: M
+  Workflow builder for ad-hoc operational tasks. Uses @xyflow/react for
+  visual node-based workflow diagrams. Supports multi-step task definitions
+  with staff assignment, inventory allocation, and farm linking per step.
+  React Query used for task list management.
+
+[USER MANAGEMENT]  Depth: 3  |  Importance: H
+  User creation, role assignment, module access control. Maps users to the
+  module_access array that drives sidebar visibility. Core admin function.
+
+────────────────────────────────────────────────────────────────────────────────
+PURCHASE SUPERSET
+────────────────────────────────────────────────────────────────────────────────
+
+[INVENTORY]  Depth: 4  |  Importance: H
+  Stock management with FIFO costing. 19 fetch occurrences — high API density.
+  Tracks item transactions (in/out), stock balances, vendor source per item.
+  Supports barcode scanning (@zxing) for item identification.
+  Links into Inventory Indents for replenishment requests.
+
+[INVENTORY INDENTS]  Depth: 4  |  Importance: H
+  Indent creation for inventory replenishment. Links to available stock,
+  triggers procurement workflow. 10 fetch occurrences.
+
+[FUELS & CONSUMABLES]  Depth: 4  |  Importance: H
+  Dedicated fuel and consumable tracking separate from general inventory.
+  7 fetch occurrences. Tracks diesel, petrol, oils, chemicals per vehicle/farm.
+  Feeds fuel request pipeline.
+
+[FINANCE ADMIN OPS INDENTS]  Depth: 4  |  Importance: H
+  Finance team's view of all indents. 16 fetch occurrences — second highest
+  in the purchase area. Manages indent forwarding to HO, status tracking,
+  cost centre assignment.
+
+[PURCHASE REQUISITION]  Depth: 4  |  Importance: H
+  After indent approval, formal PR creation. Separate PR and SPR types.
+  Feeds into Quotation Comparative for vendor selection.
+  Route: /purchase-requisition, /purchase-requisition/PR/:id/quotation,
+         /purchase-requisition/SPR/:id/quotation
+
+[QUOTATION COMPARATIVE / SPR QUOTATION COMPARATIVE]  Depth: 4  |  Importance: H
+  Side-by-side vendor quote comparison. For PR: columns are item, qty, UOM,
+  rate per vendor. For SPR: adds service-specific columns (start date,
+  duration, OEM, scope). 6 fetch occurrences each. Calculates lowest quote
+  and flags preferred vendor. Outputs vendor selection decision.
+
+[VENDOR DIRECTORY]  Depth: 3  |  Importance: M
+  Master vendor registry. Vendor name, contact, address, GST number, category.
+  Feeds into indent and PR vendor selection dropdowns.
+
+[HO MODULE (Head Office)]  Depth: 3  |  Importance: H
+  HOInbox: lists all indents pending at Head Office level.
+  HO/:indentId: detail view with MakePurchaseOrderPopup — creates formal PO
+  from approved indent + selected vendor. Promise.all used for multi-resource
+  load. This is the conversion point from requisition to order.
+
+[PURCHASE FLOW]  Depth: 5  |  Importance: H
+  The most architecturally complex page. 19 fetch occurrences.
+  Tracks the complete document lifecycle of a purchase:
+    Step 1: PR document
+    Step 2: Quotation comparison
+    Step 3: Vendor approval
+    Step 4: Purchase Order
+    Step 5: Invoice received
+    Step 6: GRN (Goods Receipt Note)
+    Step 7: Payment request
+    Step 8: Payment completion
+
+  parseSteps() function deserializes the step_N keyed API response into a
+  sorted array. Each step has: key, index, document name, status, doc link.
+  User can insert invoice steps locally (isLocal flag). Status is visualised
+  as a vertical stepper with color-coded states (done/active/pending/rejected).
+
+  Left panel shows PR meta: PR number, indent type, department, vendor details,
+  order number. This is the single source of truth for where any purchase
+  stands at any given moment.
+
+[WORK ORDER]  Depth: 4  |  Importance: H
+  Formalises vendor engagement. Work order number, vendor, scope, amount,
+  start/end dates, milestones. 6 fetch occurrences. Links to Scope of Work.
+
+[SCOPE OF WORK]  Depth: 3  |  Importance: M
+  Vendor activity scope definition per farm. Start date, end date, activity
+  list, vendor details. This data surfaces in FarmDirectory's Scope of Work
+  tab per farm, creating the ops↔purchase link at the farm level.
+
+────────────────────────────────────────────────────────────────────────────────
+OPERATIONS SUPERSET
+────────────────────────────────────────────────────────────────────────────────
+
+[CULTIVATION MASTER]  Depth: 4  |  Importance: H
+  Defines standard week-wise activity templates per crop type.
+  These become the blueprint for all cultivation plans.
+  Axios-based (one of the few places where Axios is used directly).
+
+[CULTIVATION PLAN]  Depth: 4  |  Importance: H
+  Maps master activities to specific farms with actual dates.
+  CreateCultivationPlan: 13 fetch occurrences — complex wizard that links
+  farm, crop, master template, and schedules week-by-week activities.
+  Outputs the operational schedule for the field team.
+
+[CULTIVATION CALENDAR]  Depth: 5  |  Importance: H
+  Highest React Query usage (5 useQuery calls). Uses FullCalendar with
+  day grid and time grid views. Drag-and-drop activity rescheduling.
+  12 fetch occurrences. Shows all farm activities across the operation
+  in a unified calendar view. Promise.all used to fetch activities for
+  multiple plans simultaneously.
+
+[FIELD MONITORING]  Depth: 4  |  Importance: H
+  Real-time field condition reporting. 6 fetch occurrences. Photos, GPS,
+  crop health scores, pest/disease observations per farm per visit.
+  Feeds into Field Visit Analytics.
+
+[FIELD VISIT ANALYTICS]  Depth: 3  |  Importance: M
+  Aggregated analytics on field visits: visit frequency, health trends,
+  issue classification. Recharts visualisations.
+
+[LABOUR MANAGEMENT]  Depth: 4  |  Importance: H
+  Worker attendance, daily wages, task allocation. 6 fetch occurrences +
+  2 React Query hooks. Tracks labour cost per farm per day — this is the
+  ground-level input for per-acre cost calculations.
+
+[HARVEST PLANNING]  Depth: 4  |  Importance: H
+  Farm-level harvest deadline setting. Field manager assignment. Expected
+  yield estimation. 6 fetch occurrences. Cascade: plan → order → execution.
+
+[HARVEST ORDERS]  Depth: 3  |  Importance: H
+  Converts harvest plan to execution order. Date confirmation, worker
+  allocation, equipment readiness. 2 fetch occurrences.
+
+[HARVEST CARDS]  Depth: 4  |  Importance: H
+  Field data capture during harvest. Quantity per plot, quality grade, media
+  documentation. 7 fetch occurrences. Barcode scanning support (@zxing).
+
+[WEIGHMENT & QC]  Depth: 4  |  Importance: H
+  Post-harvest quality control. Weight capture, moisture percentage, impurity
+  classification, grade assignment. 6 fetch occurrences. Generates weighment
+  slip (jsPDF). Barcode scanning for lot identification.
+
+[LOGISTICS / VEHICLE MANAGEMENT / FLEET CHART]  Depth: 3  |  Importance: M
+  Fleet tracking, vehicle list maintenance, logistics request management.
+  Fleet Chart uses a visual chart (@xyflow or Recharts) for fleet utilisation.
+
+[RENTAL RATE CARD]  Depth: 3  |  Importance: M
+  Equipment and labour rental rates. Master rate card for cost calculations.
+
+[SERVICE REQUEST]  Depth: 3  |  Importance: M
+  On-demand service requests for equipment or vendor services from the field.
+
+────────────────────────────────────────────────────────────────────────────────
+HR MANAGEMENT SUPERSET
+────────────────────────────────────────────────────────────────────────────────
+
+[HRMS — Payroll & Attendance]  Depth: 3  |  Importance: H
+  Payroll calculation and attendance management. Nested routes (/hrms/*).
+
+[STAFF ONBOARDING]  Depth: 4  |  Importance: H
+  Employee records, document collection, designation assignment. 8 fetch
+  occurrences. Feeds into labour management and payroll.
+
+[MAN POWER REQUISITION]  Depth: 3  |  Importance: M
+  Request for additional workforce. Feeds into Admin MRF Approvals.
+
+[ADMIN MRF APPROVALS]  Depth: 3  |  Importance: M
+  HR requisition approvals at admin level. 4 fetch occurrences.
+
+────────────────────────────────────────────────────────────────────────────────
+DIRECTOR SUPERSET
+────────────────────────────────────────────────────────────────────────────────
+
+[DIRECTOR FUEL REQUESTS]  Depth: 4  |  Importance: H
+  Final approval authority for all fuel requests. 3 fetch occurrences.
+  Shows pending requests forwarded by Admin Ops. Approve/reject with notes.
+
+[DIRECTOR CAPEX / OPEX / AMORTIZATION / CASH FLOW / COST MONITORING /
+ EMIs & INVESTMENTS / ASSETS & LIABILITIES]  Depth: 2-3  |  Importance: H
+  Director-level financial dashboards. Currently showing structured layouts
+  with data grids and Recharts visualisations. These are foundational views
+  that the Director uses to monitor financial health across all farms.
+  Some are partially built (placeholder content) but structurally complete.
+
+[WEBAPP — APPROVAL PORTAL]  Depth: 4  |  Importance: H
+  Standalone approval interface at /approval/webapp/*. Completely separate
+  from the main ERP (no AppLayout sidebar). Director-facing mobile-friendly
+  approval portal. Sub-pages:
+    - HomePage: pending approval counts by category
+    - LandsPage: land acquisition approvals with satellite map preview
+    - PurchasePage: purchase indent/PO approvals
+    - HRPage: staff requisition approvals
+    - AccountsPage: payment approvals
+    - FuelPage: fuel request approvals (5 fetch occurrences)
+    - LandApprovalCard: detailed land view with satellite imagery, GPS coords,
+      area, farmer details — approve/reject with one tap
+  Separate WebAppLogin route. All decisions flow back to main system via API.
+
+────────────────────────────────────────────────────────────────────────────────
+ACCOUNTS SUPERSET
+────────────────────────────────────────────────────────────────────────────────
+
+[ACCOUNTS DASHBOARD]  Depth: 4  |  Importance: H
+  Full accounting overview. 7 fetch occurrences. Tabs:
+    Overview → KPI cards (Assets, Liabilities, Net Worth, Revenue, Expenses,
+               Net Profit) with trend indicators
+    Journal Vouchers → voucher types (Sales, Purchase, Payment, Receipt,
+                        Journal, Contra, Debit Note, Credit Note) with GST
+    Trial Balance → account-wise debit/credit columns
+    Profit & Loss → period P&L statement
+    Cash & Bank → bank statement view
+    GST Summary → GST filing view
+    Masters → Ledger Master, Group Master, Voucher Types management
+    Cost Centre → allocation, creation, mapping to farms/departments
+
+[ACCOUNTS LEDGER]  Depth: 3  |  Importance: H
+  Lease payment tracking. Tabs: Lease Schedule, Payment Schedule, Lease Ledger.
+  Shows active leases, advance balance, upcoming payments, overdue amounts.
+  Ledger rows: date, description, debit, credit, balance, running total.
+
+[ACCOUNTS PAYMENTS]  Depth: 4  |  Importance: H
+  Vendor payment lifecycle. 2 fetch occurrences. Tabs:
+    Invoice Register, Payment Requests, Approvals, Payments,
+    Vendor Ledger, Accounting Ledger, TDS, Documents, Reports
+  Multi-level approval status: admin_ops_approval_status +
+  director_approval_status + payment_completed.
+  Milestone visualisation for payment pipeline stages.
+
+[BUDGET / BUDGET DASHBOARD]  Depth: 5  |  Importance: H
+  The most technically complex module in the finance domain.
+
+  BudgetDashboard (/budget): Lists all budgets with type, farm linkage, status.
+  Budget (/budget/:budgetId): The deep editor.
+
+  Features:
+  - Dual budget types: Capex (capital expenditure) and Opex (operating expense)
+  - Full XLSX rendering engine: reads Excel files from backend via xlsx library,
+    parses cell styles (indexed colors, theme colors, tint values), merges,
+    col/row spans, formulas, font weight/style/decoration, border styling
+  - applyTint() function correctly blends Excel theme colors with tint factors
+  - Cell reference system: Qty and Rate fields can be Excel cell references like
+    "<A5>" or "<D8>" instead of hardcoded values — computed from the spreadsheet
+  - BudgetItem structure: id, type, category, lineItem, UOM, qtyPerAcre,
+    qtyRaw, acres, ratePerUnit, rateRaw, utilizedQty, savings, workingXlsxUrl
+  - Per-acre formula: total_cost = qtyPerAcre × acres × ratePerUnit
+  - Categories: Seeds, Fertilizers, Equipment, Labour, Infrastructure, etc.
+  - XLSX export: allows downloading the budget as Excel file
+  - FarmRecord linking: budget tied to specific farm (farm_id, area, crop_type)
+  - Lock/unlock system for budget lines (Lock icon toggle)
+  - useAuth() integration for role-based edit permissions
+  6 fetch occurrences. This module is where the investment-per-acre calculation
+  originates at the planning stage.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+5. BUSINESS OVERVIEW
+   WHY THIS SYSTEM MATTERS FOR A COMPANY MANAGING 12,000 ACRES
+════════════════════════════════════════════════════════════════════════════════
+
+THE SCALE PROBLEM
+──────────────────
+Managing 12,000 acres of farmland is fundamentally a logistics, finance, and
+information problem. The numbers make this concrete:
+
+  12,000 acres
+  ÷ average Indian farm size of ~5 acres per farmer
+  = ~2,400 farmers in the system
+
+  At ₹25,000/acre/year lease rent alone:
+  12,000 × ₹25,000 = ₹30 crore/year in lease payments to track
+
+  Add cultivation costs:
+  12,000 acres × ₹15,000–40,000/acre (capex + opex)
+  = ₹18–48 crore/year in agricultural operations
+
+  This is money that must be tracked down to the rupee, per farm, per activity,
+  per vendor, per harvest cycle — without a system like this, it is impossible.
+
+WITHOUT THIS SYSTEM (THE ALTERNATIVE)
+───────────────────────────────────────
+  Without a unified platform, a company managing 12,000 acres would rely on:
+  • Excel sheets maintained by different departments (Finance, Ops, Purchase)
+  • WhatsApp/phone for approval chains
+  • Manual invoice reconciliation
+  • No visibility into per-acre ROI until the year-end audit
+  • Field data (harvest weights, soil conditions, labour hours) captured
+    on paper, often lost or inconsistently recorded
+  • Vendor payments delayed due to broken approval chains
+  • Duplicate procurement (two departments ordering same item)
+  • No GPS record of which plot belongs to which farmer
+
+  The result: financial leakages of 15–25% are typical in unorganised agri
+  operations of this scale.
+
+WHAT THIS SYSTEM SOLVES
+───────────────────────
+  1. LAND REGISTRY: Every acre is GPS-mapped, photographed, and legally
+     documented with B1 records, Kisan books, and signed agreements. The
+     company knows EXACTLY what land it controls and where it is.
+
+  2. FARMER ACCOUNTABILITY: KYC with Aadhaar, PAN, bank details means lease
+     payments can be made directly to verified accounts. Zero diversion risk.
+
+  3. REAL-TIME PROCUREMENT CONTROL: Every rupee spent must go through
+     Indent → Quote → PO → Invoice → Payment. The Director approves at every
+     significant step. Nothing is purchased off-the-books.
+
+  4. MULTI-LEVEL APPROVAL CHAINS: Even a fuel request for a tractor requires
+     Admin Ops review + Director approval. At 12,000 acres with hundreds of
+     vehicles and field workers, fuel misuse is a major leakage point. This
+     chain prevents it.
+
+  5. OPERATIONAL VISIBILITY: The cultivation calendar gives management a
+     single view of what activity is happening on which farm on which date.
+     At 2,400+ farms, this is impossible without a system.
+
+  6. HARVEST TRACEABILITY: Every harvest — quantity, quality grade, moisture
+     level — is recorded with a weighment slip. Revenue can be matched
+     exactly to which plot, which crop, which harvest cycle.
+
+  7. LABOUR COST CONTROL: Daily labour attendance and wages are recorded per
+     farm. This is the single largest variable cost in agri operations and
+     also the most prone to inflation and ghost workers.
+
+  8. INVESTMENT PER ACRE: The budget module ties every expense category to
+     a per-acre cost formula. Management can see at any moment: "We have spent
+     ₹X on this farm so far. The budget was ₹Y per acre. We are Z% over/under."
+
+  9. VENDOR MANAGEMENT: A vendor directory with GST numbers, rate cards, and
+     historical purchase orders prevents cartel pricing and enables true
+     competitive procurement.
+
+  10. DIRECTOR OVERSIGHT FROM ANYWHERE: The WebApp approval portal means the
+      Director can approve land acquisitions, fuel requests, and payment
+      authorisations from a mobile phone without needing to be on-site.
+
+THE AGRI OPERATION LIFECYCLE VALUE
+────────────────────────────────────
+  A farm investment cycle looks like:
+    Acquisition cost → Preparation cost → Cultivation cost → Labour cost
+    → Input (seeds, fertilizers) cost → Equipment/rental cost
+    → Harvest cost → Lease rent
+    = Total investment per acre per season
+
+  At 12,000 acres, a ₹500/acre error in cost tracking = ₹60 lakh in
+  unaccounted variance annually. This system makes that variance visible
+  and manageable.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+6. THE FINANCE–PURCHASE–OPERATIONS CHAIN
+   HOW THE SYSTEM LEADS TO GRANULAR INVESTMENT PER ACRE
+════════════════════════════════════════════════════════════════════════════════
+
+This is the most important functional story in the system. Here is how every
+layer connects into a single per-acre investment figure.
+
+────────────────────────────────────────────────────────────────────────────────
+LAYER 1: BUDGET CREATION (Accounts → Budget module)
+────────────────────────────────────────────────────────────────────────────────
+
+  The Director/Finance team creates a budget for each crop type:
+
+  BudgetItem {
+    category:    "Seeds"
+    lineItem:    "Napier Grass Slips"
+    UOM:         "Packets"
+    qtyPerAcre:  2.85           ← how many packets per acre
+    acres:       12000           ← total farm area under this budget
+    ratePerUnit: ₹400            ← cost per packet
+    totalCost:   qtyPerAcre × acres × ratePerUnit = ₹1.37 crore
+  }
+
+  Repeat for every input:
+  - Fertilizers (DAP, Urea, Micronutrients)
+  - Labour (land preparation, planting, weeding, harvesting)
+  - Equipment (tractor hire, rotavator, harvester)
+  - Infrastructure (irrigation setup, fencing, shed)
+  - Lease rent
+  - Fuel and consumables
+
+  Total Capex + Opex budget = the planned investment per acre.
+  The XLSX cell reference system (<A5>, <D8>) allows the budget to pull
+  live quantities from an Excel working file, keeping it dynamic.
+
+  OUTCOME: A per-acre cost blueprint exists for every farm.
+
+────────────────────────────────────────────────────────────────────────────────
+LAYER 2: PROCUREMENT TRIGGER (Operations → Purchase)
+────────────────────────────────────────────────────────────────────────────────
+
+  When the cultivation plan requires inputs (seeds at week 1, fertilizer at
+  week 4, harvester at week 18), Operations raises an indent.
+
+  Admin Ops Indent → PR (Purchase Requisition):
+  PRLineItem {
+    partName:                "Napier Grass Slips"
+    totalQtyRequired:        34,200 packets  (2.85 × 12,000 acres)
+    materialRequiredByDate:  "2026-02-01"
+    ratePerItem:             ₹400
+    preferredVendorName:     "AgroSeeds Pvt Ltd"
+  }
+
+  The indent is signed (forwarder → director) and raised.
+  Status: draft → signed → raised
+
+  OUTCOME: A formal, auditable procurement request exists with quantity,
+  date, and cost that maps back to the budget line item.
+
+────────────────────────────────────────────────────────────────────────────────
+LAYER 3: VENDOR SELECTION (Purchase → Quotation Comparative)
+────────────────────────────────────────────────────────────────────────────────
+
+  The Purchase team collects quotes from vendors:
+
+  Vendor A: ₹395/packet × 34,200 = ₹1.35 crore
+  Vendor B: ₹410/packet × 34,200 = ₹1.40 crore  ← 3.8% more expensive
+  Vendor C: ₹380/packet × 34,200 = ₹1.30 crore  ← lowest, selected
+
+  QuotationComparative renders these side by side. The system flags the
+  cheapest quote. Director approves the selected vendor via WebApp portal.
+
+  OUTCOME: ₹7 crore saved vs. highest quote on seeds alone. Savings are
+  tracked back to the budget item (Budget.savings field).
+
+────────────────────────────────────────────────────────────────────────────────
+LAYER 4: ORDER & DELIVERY (Purchase → Work Order → HO → GRN)
+────────────────────────────────────────────────────────────────────────────────
+
+  Purchase Flow stages for this transaction:
+    Step 1: PR Document (raised indent PDF)
+    Step 2: Quotation comparison (approved by Director)
+    Step 3: Vendor selection confirmation
+    Step 4: Purchase Order issued to Vendor C
+    Step 5: Invoice received from Vendor C
+    Step 6: GRN — field team verifies 34,200 packets delivered and counted
+    Step 7: Payment request raised to Accounts
+    Step 8: Payment released after Director approval
+
+  Every document at every step has a doc_link (S3 URL) stored in the database.
+  The complete audit trail exists: from budget line to vendor payment.
+
+  OUTCOME: Vendor is paid. The ₹1.30 crore transaction is ready for ledger.
+
+────────────────────────────────────────────────────────────────────────────────
+LAYER 5: ACCOUNTS RECORDING (Accounts → Ledger → Cost Centre)
+────────────────────────────────────────────────────────────────────────────────
+
+  Accounts creates a journal voucher:
+
+  JV-2026-0142 (Purchase Voucher):
+    Date:       01 Feb 2026
+    Narration:  "Napier Grass Slips — AgroSeeds Pvt Ltd"
+    Dr:         Seeds Expense A/c         ₹1,30,00,000
+    Dr:         GST Input Credit A/c      ₹  23,40,000  (18% GST)
+    Cr:         Vendor Payable A/c        ₹1,53,40,000
+    Cost Centre: Farm Operations
+    GST Status: Input credit claimable
+
+  This ledger entry links to:
+  - The specific purchase order number
+  - The vendor ID
+  - The GST breakdown
+
+  OUTCOME: The ₹1.30 crore seeds expense is now in the accounting system
+  with GST treatment, cost centre allocation, and vendor linkage.
+
+────────────────────────────────────────────────────────────────────────────────
+LAYER 6: FIELD EXECUTION (Operations → Labour, Field Monitoring, Cultivation)
+────────────────────────────────────────────────────────────────────────────────
+
+  With seeds delivered, the cultivation plan activates:
+
+  Week 1–2: Land preparation
+    Labour Management: 50 workers × 2 weeks × ₹400/day = ₹2,80,000
+    (recorded per farm, per day, per worker)
+
+  Week 3: Planting
+    Labour: 120 workers × 3 days × ₹400/day = ₹1,44,000
+    Equipment: 8 tractors × ₹1,500/day × 3 days = ₹36,000
+
+  Field Monitoring: agronomist records crop health score, photos per visit.
+  Field Visit Analytics: trend analysis over 18-week growing season.
+
+  Every labour cost entry is:
+    farm_id + date + worker_count + daily_wage + activity_type
+
+  This feeds into the farm_investment_ledger (visible in FarmDirectory):
+  FarmInvestmentEntry {
+    date:         "2026-02-10"
+    description:  "Planting — Labour"
+    amount:       1,44,000
+    unit:         "INR"
+    investment:   1,44,000
+    voucher_number: "JV-2026-0155"
+    item_description: { item_code: "LAB-001", item_name: "Unskilled Labour" }
+  }
+
+  OUTCOME: Every rupee spent on-ground is tagged to a farm, a date, an
+  activity, and a voucher number.
+
+────────────────────────────────────────────────────────────────────────────────
+LAYER 7: HARVEST & REVENUE (Operations → Harvest → Weighment → Accounts)
+────────────────────────────────────────────────────────────────────────────────
+
+  Harvest Planning: expected yield 8 tonnes/acre × 12,000 acres = 96,000 tonnes
+
+  Harvest Cards (per plot):
+    Plot: "Plot-A" | Area: 3.2 acres | Yield: 25.6 tonnes | Grade: A
+
+  Weighment & QC:
+    Moisture: 12% | Impurities: 0.8% | Grade: A | Lot: WS-2026-4421
+    Weighment slip generated (PDF via jsPDF)
+
+  Revenue entry in Accounts:
+    JV-2026-0899 (Sales Voucher):
+      Dr: Debtor/Cash A/c       ₹X
+      Cr: Crop Sales Revenue A/c ₹X
+      Linked to: harvest_log[farm_id] + payment_log[farm_id]
+
+  OUTCOME: Revenue is recorded and linked back to the specific farm.
+
+────────────────────────────────────────────────────────────────────────────────
+LAYER 8: PER-ACRE INVESTMENT ANALYSIS (FarmDirectory → Investment Ledger)
+────────────────────────────────────────────────────────────────────────────────
+
+  FarmDirectory is where all layers converge for each farm.
+
+  For Farm "SBR-F-68294" (32 acres, Napier crop):
+
+  Investment Ledger (fetched from /accounts/get_farm_investment_ledger):
+  ┌─────────────┬────────────────────────┬──────────────┐
+  │ Date        │ Description            │ Amount       │
+  ├─────────────┼────────────────────────┼──────────────┤
+  │ 01 Jan 2026 │ Lease Rent Q1          │ ₹2,00,000    │
+  │ 01 Feb 2026 │ Seeds — Napier Slips   │ ₹3,46,560    │
+  │ 10 Feb 2026 │ Planting Labour        │ ₹1,44,000    │
+  │ 15 Feb 2026 │ Tractor Hire           │ ₹36,000      │
+  │ 01 Mar 2026 │ Fertilizer — DAP       │ ₹1,12,000    │
+  │ ...         │ ...                    │ ...          │
+  │ TOTAL       │                        │ ₹12,48,000   │
+  ├─────────────┼────────────────────────┼──────────────┤
+  │ Per Acre    │ ₹12,48,000 ÷ 32 acres  │ ₹39,000/acre │
+  └─────────────┴────────────────────────┴──────────────┘
+
+  Budget said: ₹37,500/acre
+  Actual:      ₹39,000/acre
+  Variance:    +₹1,500/acre = +4% over budget
+
+  Director Cost Monitoring dashboard shows this variance in aggregate
+  across ALL 12,000 acres, broken down by category (seeds, labour,
+  fertilizer, equipment, lease) and by block/region.
+
+────────────────────────────────────────────────────────────────────────────────
+THE COMPLETE CHAIN — VISUAL SUMMARY
+────────────────────────────────────────────────────────────────────────────────
+
+  BUDGET          →   Per-acre planned cost by category (Seeds, Labour, etc.)
+      ↓
+  INDENT          →   Formal procurement request linked to budget line
+      ↓
+  QUOTATION       →   Competitive vendor selection, savings tracked
+      ↓
+  PURCHASE ORDER  →   Vendor committed, delivery date set
+      ↓
+  INVOICE / GRN   →   Physical delivery verified at farm
+      ↓
+  LEDGER ENTRY    →   Accounts records against cost centre, GST tracked
+      ↓
+  LABOUR LOGS     →   Daily on-ground cost captured per farm per activity
+      ↓
+  HARVEST DATA    →   Yield quantity, quality, revenue potential recorded
+      ↓
+  FARM INVESTMENT →   All entries aggregated per farm (farm_investment_ledger)
+  LEDGER
+      ↓
+  PER-ACRE ROI    →   (Revenue − Total Investment) ÷ Acres = ₹ ROI per acre
+      ↓
+  DIRECTOR        →   Reviews across all 12,000 acres: which farms are
+  DASHBOARD           profitable, which are over-budget, which vendors are
+                      performing, which crops are delivering best ROI.
+
+════════════════════════════════════════════════════════════════════════════════
+
+CONCLUSION
+──────────
+Farm Connect is not a simple CRUD application. It is a vertically integrated
+agricultural ERP that chains five organisational domains — Land, Operations,
+Procurement, Human Resources, and Finance — into a single unified data model
+anchored to the individual farm.
+
+The technical architecture reflects this complexity: 52 pages, 381 API calls
+across the system, 5 distinct role layers, geo-data with satellite imagery,
+real-time approval chains, Excel-native budget editing, batched parallel plot
+uploads, and a Director-facing mobile approval portal — all built in a modern
+React/TypeScript/Tailwind stack that is maintainable and extensible.
+
+The central insight of the system design is that the FARM is the unit of
+analysis. Every transaction — whether it is a fuel request, a labour wage,
+a vendor payment, or a harvest yield — is tagged back to a farm. This makes
+granular per-acre investment analysis possible not just at year-end, but in
+real time, for every one of the 12,000 acres under management.
+
+================================================================================
+END OF THESIS
+================================================================================

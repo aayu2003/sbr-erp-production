@@ -1352,25 +1352,19 @@ const FarmMapExpandModal = ({
   const location = [farm.land_data?.village, farm.land_data?.district, farm.land_data?.state]
     .filter(Boolean).join(', ');
 
-  // Collect unique mapping types present in this farm
   const uniqueMappingTypes = Array.from(new Set(mappings.map(m => m.mapping_type.toLowerCase())));
-
-  // All layer keys: 'land', 'plots', + each unique mapping type
   const allLayers = ['land', ...(plots.length > 0 ? ['plots'] : []), ...uniqueMappingTypes];
-
   const [visibleLayers, setVisibleLayers] = useState<Set<string>>(() => new Set(allLayers));
+  const [sheetSearch, setSheetSearch]     = useState('');
+  const [sheetCropFilter, setSheetCropFilter] = useState<string | null>(null);
 
   const toggleLayer = (key: string) =>
     setVisibleLayers(prev => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
+      if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
 
-  const hasLegend = plots.length > 0 || mappings.length > 0;
-
-  // Filter pills config
   const filterPills = [
     { key: 'land',  label: 'Land Boundary', color: '#22c55e' },
     ...(plots.length > 0 ? [{ key: 'plots', label: 'Plot Mapping', color: PLOT_COLORS[0] }] : []),
@@ -1381,12 +1375,30 @@ const FarmMapExpandModal = ({
     })),
   ];
 
+  // Summary stats
+  const totalArea     = plots.reduce((s, p) => s + (p.plot_area ?? 0), 0);
+  const cropBreakdown = plots.reduce<Record<string, { count: number; area: number }>>((acc, p) => {
+    const k = p.crop_type ?? 'unassigned';
+    if (!acc[k]) acc[k] = { count: 0, area: 0 };
+    acc[k].count++;
+    acc[k].area = +(acc[k].area + (p.plot_area ?? 0)).toFixed(3);
+    return acc;
+  }, {});
+
+  const filteredPlots = plots.filter(p => {
+    const matchSearch = !sheetSearch || p.plot_name.toLowerCase().includes(sheetSearch.toLowerCase());
+    const matchCrop   = !sheetCropFilter || (p.crop_type ?? 'unassigned') === sheetCropFilter;
+    return matchSearch && matchCrop;
+  });
+
+  const cropKeys = Object.keys(cropBreakdown);
+
   return (
     <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/70 p-4">
-      <div className="w-full max-w-5xl bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col" style={{ height: '90vh' }}>
+      <div className="w-full max-w-6xl bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col" style={{ height: '90vh' }}>
 
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100 shrink-0">
           <div className="flex items-center gap-2">
             <MapIcon className="w-4 h-4 text-emerald-600" />
             <div>
@@ -1400,7 +1412,7 @@ const FarmMapExpandModal = ({
         </div>
 
         {/* Filter strip */}
-        <div className="shrink-0 flex items-center gap-2 flex-wrap px-5 py-2.5 border-b border-gray-100 bg-gray-50/60">
+        <div className="shrink-0 flex items-center gap-2 flex-wrap px-5 py-2 border-b border-gray-100 bg-gray-50/60">
           <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mr-1">Layers</span>
           {filterPills.map(pill => {
             const active = visibleLayers.has(pill.key);
@@ -1411,67 +1423,148 @@ const FarmMapExpandModal = ({
                 onClick={() => toggleLayer(pill.key)}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-semibold transition-all"
                 style={{
-                  borderColor: active ? pill.color : '#d1d5db',
+                  borderColor:     active ? pill.color : '#d1d5db',
                   backgroundColor: active ? pill.color + '22' : 'transparent',
-                  color: active ? pill.color : '#9ca3af',
+                  color:           active ? pill.color : '#9ca3af',
                 }}
               >
-                <span
-                  className="w-2 h-2 rounded-full shrink-0"
-                  style={{ background: active ? pill.color : '#d1d5db' }}
-                />
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: active ? pill.color : '#d1d5db' }} />
                 {pill.label}
               </button>
             );
           })}
         </div>
 
-        {/* Map */}
-        <div className="flex-1 relative min-h-0">
-          <FarmExpandMap landCoords={coords} plots={plots} mappings={mappings} visibleLayers={visibleLayers} />
+        {/* Body: map + summary sheet */}
+        <div className="flex flex-1 min-h-0">
+
+          {/* ── Map (left, ~60%) ── */}
+          <div className="flex-1 relative min-h-0 min-w-0">
+            <FarmExpandMap landCoords={coords} plots={plots} mappings={mappings} visibleLayers={visibleLayers} />
+          </div>
+
+          {/* ── Summary Sheet (right, fixed 340px) ── */}
+          <div className="w-[340px] shrink-0 border-l border-gray-100 flex flex-col bg-gray-50/40 min-h-0">
+
+            {/* Stats row */}
+            <div className="shrink-0 px-4 py-3 border-b border-gray-100 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Plot Summary</span>
+                <span className="text-[11px] font-semibold text-gray-600">{plots.length} plots · {totalArea.toFixed(2)} ac</span>
+              </div>
+
+              {/* Crop breakdown chips */}
+              {cropKeys.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {cropKeys.map(k => {
+                    const color = CROP_COLORS[k] ?? '#6b7280';
+                    const active = sheetCropFilter === k;
+                    return (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => setSheetCropFilter(active ? null : k)}
+                        className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-all"
+                        style={{
+                          borderColor:     active ? color : color + '55',
+                          backgroundColor: active ? color : color + '18',
+                          color:           active ? '#fff' : color,
+                        }}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: active ? '#fff' : color }} />
+                        <span className="capitalize">{k}</span>
+                        <span className="opacity-80">· {cropBreakdown[k].count} · {cropBreakdown[k].area} ac</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Search */}
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Search plot…"
+                  value={sheetSearch}
+                  onChange={e => setSheetSearch(e.target.value)}
+                  className="w-full pl-7 pr-3 py-1.5 text-[11px] rounded-md border border-gray-200 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                />
+              </div>
+            </div>
+
+            {/* Plot list */}
+            <div className="flex-1 overflow-y-auto">
+              {filteredPlots.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-1">
+                  <MapPin className="w-6 h-6 opacity-30" />
+                  <p className="text-xs">No plots match</p>
+                </div>
+              ) : (
+                <table className="w-full text-[11px] border-collapse">
+                  <thead className="sticky top-0 z-10 bg-gray-100/80 backdrop-blur-sm">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-semibold text-gray-500 w-[44%]">Plot</th>
+                      <th className="text-right px-3 py-2 font-semibold text-gray-500 w-[22%]">Area</th>
+                      <th className="text-left px-3 py-2 font-semibold text-gray-500 w-[34%]">Crop</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredPlots.map((plot, i) => {
+                      const c = cropPlotColor(plot.crop_type, PLOT_COLORS[i % PLOT_COLORS.length]);
+                      return (
+                        <tr key={plot.plot_id ?? i} className="border-b border-gray-100 hover:bg-white transition-colors">
+                          <td className="px-3 py-2">
+                            <div className="flex items-center gap-1.5">
+                              <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: c }} />
+                              <span className="font-semibold text-gray-800 truncate">{plot.plot_name}</span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono text-gray-600">{plot.plot_area} ac</td>
+                          <td className="px-3 py-2">
+                            {plot.crop_type ? (
+                              <span
+                                className="inline-block px-1.5 py-0.5 rounded-full text-[10px] font-semibold capitalize text-white"
+                                style={{ background: CROP_COLORS[plot.crop_type] ?? '#6b7280' }}
+                              >
+                                {plot.crop_type}
+                              </span>
+                            ) : (
+                              <span className="text-gray-300 italic">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Footer count */}
+            <div className="shrink-0 px-4 py-2 border-t border-gray-100 text-center">
+              <p className="text-[10px] text-gray-400">
+                Showing {filteredPlots.length} of {plots.length} plots
+              </p>
+            </div>
+          </div>
         </div>
 
-        {/* Legend strip */}
-        {hasLegend && (
-          <div className="shrink-0 border-t border-gray-100 px-5 py-3 bg-gray-50 rounded-b-2xl space-y-2">
-            {/* Plots */}
-            {plots.length > 0 && (
-              <div className="flex flex-wrap gap-x-5 gap-y-1.5">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 self-center">Plots</span>
-                {plots.map((plot, i) => {
-                  const c = cropPlotColor(plot.crop_type, PLOT_COLORS[i % PLOT_COLORS.length]);
-                  return (
-                    <div key={i} className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded-sm shrink-0" style={{ background: c }} />
-                      <span className="text-xs font-semibold text-gray-800">{plot.plot_name}</span>
-                      <span className="text-xs text-gray-400">{plot.plot_area} ac</span>
-                      {plot.crop_type && (
-                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full text-white" style={{ background: c }}>
-                          {plot.crop_type}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {/* Additional mappings */}
-            {mappings.length > 0 && (
-              <div className="flex flex-wrap gap-x-5 gap-y-1.5">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 self-center">Features</span>
-                {mappings.map((m, i) => {
-                  const color = getMappingColor(m.mapping_type);
-                  const shape = m.shape_details === 'point' ? 'rounded-full' : m.shape_details === 'polygon' ? 'rounded-sm' : 'rounded-full';
-                  const size  = m.shape_details === 'line' ? 'w-4 h-1' : 'w-3 h-3';
-                  return (
-                    <div key={i} className="flex items-center gap-1.5">
-                      <span className={`${size} ${shape} shrink-0`} style={{ background: color }} />
-                      <span className="text-xs font-semibold text-gray-800">{m.mapping_name}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+        {/* Mapping features legend (only shown when mappings exist) */}
+        {mappings.length > 0 && (
+          <div className="shrink-0 border-t border-gray-100 px-5 py-2.5 bg-gray-50 rounded-b-2xl flex flex-wrap gap-x-5 gap-y-1.5 items-center">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Features</span>
+            {mappings.map((m, i) => {
+              const color = getMappingColor(m.mapping_type);
+              const shape = m.shape_details === 'point' ? 'rounded-full' : m.shape_details === 'polygon' ? 'rounded-sm' : 'rounded-full';
+              const size  = m.shape_details === 'line' ? 'w-4 h-1' : 'w-3 h-3';
+              return (
+                <div key={i} className="flex items-center gap-1.5">
+                  <span className={`${size} ${shape} shrink-0`} style={{ background: color }} />
+                  <span className="text-xs font-semibold text-gray-800">{m.mapping_name}</span>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

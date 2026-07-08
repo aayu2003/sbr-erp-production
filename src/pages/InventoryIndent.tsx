@@ -187,6 +187,17 @@ const formatInr = (value: number) => {
   }
 };
 
+const formatBudgetHead = (budgetHead: any): string => {
+  if (!budgetHead) return '';
+  const lineItems = Array.isArray(budgetHead.line_item) ? budgetHead.line_item : [];
+  if (lineItems.length === 0) return '';
+  return lineItems
+    .map((li: any) =>
+      `${li.category || ''} | ${li.line_item || ''} | ${li.budget_type || ''} | ${formatInr(Number(li.allocated_amount) || 0)}`
+    )
+    .join('\n');
+};
+
 const toPurchaseFlowRow = (it: PRLineItem) => {
   return {
     sr_no: it.srNo,
@@ -413,7 +424,7 @@ const InventoryIndent = () => {
             forwardedBy: formatPersonDisplay(r.forwarded_by),
             directorsApproval: formatPersonDisplay(r.approved_by),
             remarksNotes: r.notes ?? '',
-            budgetHead: '',
+            budgetHead: formatBudgetHead(r.budget_head),
             items,
             indentedByDetails,
             status: derivedStatus,

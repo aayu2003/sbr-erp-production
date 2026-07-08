@@ -333,7 +333,7 @@ const Blocks = () => {
 
   const confirmAssignFieldManager = async () => {
     if (!assigningZone || selectedManagerIds.length === 0) return;
-    const selected = fieldManagers.filter((m) => selectedManagerIds.includes(m.staff_id));
+    const selected = fieldManagers.filter((m) => selectedManagerIds.includes(m.manager_id));
     if (selected.length === 0) {
       toast({ title: 'Error', description: 'Please select at least one field manager', variant: 'destructive' });
       return;
@@ -420,20 +420,21 @@ const Blocks = () => {
 
       if (resp.ok) {
         const result = await resp.json();
-        const transformed: AvailableFarm[] = (result.farmers || []).map((item: any) => {
-          const fd = item.farmer_data || {};
+        const transformed: AvailableFarm[] = (result.not_assigned_farms || []).map((item: any) => {
+          const kyc = item.kyc_data || null;
           return {
-            id: item.farmer_id,
-            fullName: fd.full_name || 'Unknown',
-            phoneNumber: fd.phone_number || 'N/A',
-            village: fd.village || 'N/A',
-            district: fd.district || 'N/A',
-            state: fd.state || 'N/A',
-            landMapping: fd.estimated_land_area != null
-              ? { totalArea: fd.estimated_land_area, coordinates: fd.land_coordinates || [] }
+            id: item.farm_id,
+            fullName: item.farmer_name || 'Unknown',
+            phoneNumber: item.farmer_contact || 'N/A',
+            village: item.village || 'N/A',
+            district: item.district || 'N/A',
+            state: item.state || 'N/A',
+            kyc: kyc ? { verified: true } : undefined,
+            landMapping: item.area != null
+              ? { totalArea: item.area, coordinates: [] }
               : undefined,
-            agreements: item.agreement_data || [],
-            createdAt: item.created_at ? new Date(item.created_at) : new Date(),
+            agreements: [],
+            createdAt: new Date(),
           } as any;
         });
         setAvailableFarms(transformed);
@@ -502,7 +503,7 @@ const Blocks = () => {
       };
     });
 
-    const totalArea = farmerList.reduce((sum, row) => sum + (row.area || 0), 0);
+    const totalArea = Number(farmerList.reduce((sum, row) => sum + (row.area || 0), 0).toFixed(2));
 
     return {
       block_id: assigningBlock?.block_id || viewBlock?.block_id || '',
@@ -612,7 +613,7 @@ const Blocks = () => {
               return sum + (Number.isFinite(areaValue) ? areaValue : 0);
             }, 0);
 
-            return [String(block.block_id), totalArea] as const;
+            return [String(block.block_id), Number(totalArea.toFixed(2))] as const;
           } catch {
             return [String(block.block_id), Number(block.total_area ?? 0)] as const;
           }
@@ -687,7 +688,7 @@ const Blocks = () => {
             const totalCount = allLands.length;
 
             setZoneLandCountById((prev) => ({ ...prev, [String(zone.zone_id)]: totalCount }));
-            return [String(zone.zone_id), totalArea] as const;
+            return [String(zone.zone_id), Number(totalArea.toFixed(2))] as const;
           } catch {
             setZoneLandCountById((prev) => ({ ...prev, [String(zone.zone_id)]: 0 }));
             return [String(zone.zone_id), Number(zone.total_area ?? 0)] as const;
@@ -963,12 +964,13 @@ const Blocks = () => {
   });
 
   const getZoneViewTotalArea = () => {
-    return Object.values(blocksInZoneView).reduce((sum, lands) => {
+    const total = Object.values(blocksInZoneView).reduce((sum, lands) => {
       return sum + lands.reduce((landSum, land) => {
         const areaValue = Number(land?.area ?? 0);
         return landSum + (Number.isFinite(areaValue) ? areaValue : 0);
       }, 0);
     }, 0);
+    return Number(total.toFixed(2));
   };
 
   const dashboardTotals = {
@@ -976,7 +978,9 @@ const Blocks = () => {
     zones: zones.length,
     blocks: blocks.length,
     lands: Object.values(zoneLandCountById).reduce((sum, count) => sum + (Number.isFinite(Number(count)) ? Number(count) : 0), 0),
-    area: Object.values(zoneAreaById).reduce((sum, area) => sum + (Number.isFinite(Number(area)) ? Number(area) : 0), 0),
+    area: Number(
+      Object.values(zoneAreaById).reduce((sum, area) => sum + (Number.isFinite(Number(area)) ? Number(area) : 0), 0).toFixed(2)
+    ),
   };
 
   const getEntityCardArea = (entityType: EntityType, entity: any) => {
@@ -991,25 +995,17 @@ const Blocks = () => {
 
   return (
     <div className="p-8">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-3xl font-display font-bold">Farm Hierarchy Management</h1>
-          <p className="text-muted-foreground mt-1">Organize farms into clusters, zones, and blocks</p>
-        </div>
-      </div>
-
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 mb-6">
         {[
-          { label: 'Total Clusters', value: dashboardTotals.clusters, tone: 'from-sky-500 to-blue-600' },
-          { label: 'Total Zones', value: dashboardTotals.zones, tone: 'from-emerald-500 to-green-600' },
-          { label: 'Total Blocks', value: dashboardTotals.blocks, tone: 'from-amber-500 to-orange-600' },
-          { label: 'Total Lands', value: dashboardTotals.lands, tone: 'from-violet-500 to-fuchsia-600' },
-          { label: 'Total Area', value: `${dashboardTotals.area} acres`, tone: 'from-lime-500 to-emerald-600' },
+          { label: 'Total Clusters', value: dashboardTotals.clusters },
+          { label: 'Total Zones', value: dashboardTotals.zones },
+          { label: 'Total Blocks', value: dashboardTotals.blocks },
+          { label: 'Total Lands', value: dashboardTotals.lands },
+          { label: 'Total Area', value: `${dashboardTotals.area} acres` },
         ].map((kpi) => (
-          <div key={kpi.label} className="rounded-2xl border border-white/60 bg-white/80 p-4 shadow-[0_10px_30px_rgba(16,185,129,0.08)] backdrop-blur-sm">
-            <div className={`h-1.5 w-16 rounded-full bg-gradient-to-r ${kpi.tone} mb-3`} />
-            <div className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{kpi.label}</div>
-            <div className="mt-2 text-2xl font-bold text-slate-900">{kpi.value}</div>
+          <div key={kpi.label} className="rounded-xl border border-[#0D3A35]/15 bg-[#0D3A35]/5 px-4 py-3 shadow-sm">
+            <div className="text-xs font-semibold uppercase tracking-[0.2em] text-[#0D3A35]/55">{kpi.label}</div>
+            <div className="mt-2 text-2xl font-bold text-[#0D3A35]">{kpi.value}</div>
           </div>
         ))}
       </div>
@@ -1025,13 +1021,13 @@ const Blocks = () => {
         <TabsList className="mb-8 grid h-auto w-full grid-cols-1 gap-4 bg-transparent p-0 sm:grid-cols-2 lg:grid-cols-3">
           <TabsTrigger
             value="cluster"
-            className="group relative flex h-auto min-h-20 w-full min-w-0 flex-col items-start justify-between whitespace-normal rounded-3xl border border-border bg-white px-4 py-3 text-left text-slate-600 shadow-[0_8px_24px_rgba(15,23,42,0.06)] transition-all duration-200 hover:-translate-y-0.5 hover:border-green-200 hover:shadow-[0_14px_28px_rgba(16,185,129,0.12)] data-[state=active]:border-green-500 data-[state=active]:bg-gradient-to-br data-[state=active]:from-green-600 data-[state=active]:to-emerald-600 data-[state=active]:text-white data-[state=active]:shadow-[0_18px_36px_rgba(16,185,129,0.24)]"
+            className="group relative flex h-auto min-h-20 w-full min-w-0 flex-col items-start justify-between whitespace-normal rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-slate-600 shadow-sm transition-all duration-200 hover:border-[#0D3A35]/30 data-[state=active]:border-[#0D3A35] data-[state=active]:bg-[#0D3A35] data-[state=active]:text-white data-[state=active]:shadow-md"
           >
             <div className="flex w-full items-center justify-between">
-              <span className="inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-green-50 text-green-700 transition-colors group-data-[state=active]:bg-white/15 group-data-[state=active]:text-white">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-[#0D3A35]/10 text-[#0D3A35] transition-colors group-data-[state=active]:bg-white/15 group-data-[state=active]:text-white">
                 <Grid3x3 className="w-4 h-4" />
               </span>
-              <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-green-700/70 group-data-[state=active]:text-white/80">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-[#0D3A35]/70 group-data-[state=active]:text-white/80">
                 01
               </span>
             </div>
@@ -1042,13 +1038,13 @@ const Blocks = () => {
           </TabsTrigger>
           <TabsTrigger
             value="zone"
-            className="group relative flex h-auto min-h-20 w-full min-w-0 flex-col items-start justify-between whitespace-normal rounded-3xl border border-border bg-white px-4 py-3 text-left text-slate-600 shadow-[0_8px_24px_rgba(15,23,42,0.06)] transition-all duration-200 hover:-translate-y-0.5 hover:border-green-200 hover:shadow-[0_14px_28px_rgba(16,185,129,0.12)] data-[state=active]:border-green-500 data-[state=active]:bg-gradient-to-br data-[state=active]:from-green-600 data-[state=active]:to-emerald-600 data-[state=active]:text-white data-[state=active]:shadow-[0_18px_36px_rgba(16,185,129,0.24)]"
+            className="group relative flex h-auto min-h-20 w-full min-w-0 flex-col items-start justify-between whitespace-normal rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-slate-600 shadow-sm transition-all duration-200 hover:border-[#0D3A35]/30 data-[state=active]:border-[#0D3A35] data-[state=active]:bg-[#0D3A35] data-[state=active]:text-white data-[state=active]:shadow-md"
           >
             <div className="flex w-full items-center justify-between">
-              <span className="inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-green-50 text-green-700 transition-colors group-data-[state=active]:bg-white/15 group-data-[state=active]:text-white">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-[#0D3A35]/10 text-[#0D3A35] transition-colors group-data-[state=active]:bg-white/15 group-data-[state=active]:text-white">
                 <Building className="w-4 h-4" />
               </span>
-              <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-green-700/70 group-data-[state=active]:text-white/80">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-[#0D3A35]/70 group-data-[state=active]:text-white/80">
                 02
               </span>
             </div>
@@ -1059,13 +1055,13 @@ const Blocks = () => {
           </TabsTrigger>
           <TabsTrigger
             value="block"
-            className="group relative flex h-auto min-h-20 w-full min-w-0 flex-col items-start justify-between whitespace-normal rounded-3xl border border-border bg-white px-4 py-3 text-left text-slate-600 shadow-[0_8px_24px_rgba(15,23,42,0.06)] transition-all duration-200 hover:-translate-y-0.5 hover:border-green-200 hover:shadow-[0_14px_28px_rgba(16,185,129,0.12)] data-[state=active]:border-green-500 data-[state=active]:bg-gradient-to-br data-[state=active]:from-green-600 data-[state=active]:to-emerald-600 data-[state=active]:text-white data-[state=active]:shadow-[0_18px_36px_rgba(16,185,129,0.24)]"
+            className="group relative flex h-auto min-h-20 w-full min-w-0 flex-col items-start justify-between whitespace-normal rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-slate-600 shadow-sm transition-all duration-200 hover:border-[#0D3A35]/30 data-[state=active]:border-[#0D3A35] data-[state=active]:bg-[#0D3A35] data-[state=active]:text-white data-[state=active]:shadow-md"
           >
             <div className="flex w-full items-center justify-between">
-              <span className="inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-green-50 text-green-700 transition-colors group-data-[state=active]:bg-white/15 group-data-[state=active]:text-white">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-[#0D3A35]/10 text-[#0D3A35] transition-colors group-data-[state=active]:bg-white/15 group-data-[state=active]:text-white">
                 <Map className="w-4 h-4" />
               </span>
-              <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-green-700/70 group-data-[state=active]:text-white/80">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-[#0D3A35]/70 group-data-[state=active]:text-white/80">
                 03
               </span>
             </div>
@@ -1161,10 +1157,11 @@ const Blocks = () => {
         return config.viewEntity?.total_area ?? 0;
       }
 
-      return farmsInBlock.reduce((sum, farm: any) => {
+      const total = farmsInBlock.reduce((sum, farm: any) => {
         const areaValue = Number(farm?.area ?? 0);
         return sum + (Number.isFinite(areaValue) ? areaValue : 0);
       }, 0);
+      return Number(total.toFixed(2));
     };
 
     return (
@@ -1262,7 +1259,7 @@ const Blocks = () => {
             }}
           >
             <DialogTrigger asChild>
-              <Button className="gap-2 bg-green-700 hover:bg-green-800">
+              <Button className="gap-2 bg-[#0D3A35] hover:bg-[#092b27]">
                 <Plus className="w-4 h-4" /> Create {config.entityLabel}
               </Button>
             </DialogTrigger>
@@ -1311,7 +1308,7 @@ const Blocks = () => {
                       onClick={() => addLandRow(config.landRows, config.setLandRows)}
                       size="sm"
                       variant="outline"
-                      className="gap-2 text-green-700 border-green-700 hover:bg-green-50"
+                      className="gap-2 text-[#0D3A35] border-[#0D3A35] hover:bg-[#0D3A35]/5"
                     >
                       <Plus className="w-4 h-4" /> Add Row
                     </Button>
@@ -1454,7 +1451,7 @@ const Blocks = () => {
 
                           <div className="col-span-3">
                             {row.fetchedDetails ? (
-                              <div className="text-sm px-3 py-2 bg-blue-50 text-blue-700 rounded-md border border-blue-100 flex items-center gap-2">
+                              <div className="text-sm px-3 py-2 bg-[#0D3A35]/5 text-[#0D3A35] rounded-md border border-[#0D3A35]/15 flex items-center gap-2">
                                 <Map className="w-3 h-3" />
                                 <span className="truncate">{row.fetchedDetails}</span>
                               </div>
@@ -1496,7 +1493,7 @@ const Blocks = () => {
                 <div className="flex justify-end pt-2">
                   <Button
                     variant="outline"
-                    className="gap-2 text-blue-700 border-blue-700 hover:bg-blue-50 rounded-full shadow-md"
+                    className="gap-2 text-[#0D3A35] border-[#0D3A35] hover:bg-[#0D3A35]/5 rounded-full shadow-md"
                     title="Auto Priority"
                     disabled={config.landRows.length === 0 || config.landRows.every(row => !row.farmerId)}
                     onClick={() => {
@@ -1520,7 +1517,7 @@ const Blocks = () => {
                   <Button variant="outline" onClick={() => config.setIsModalOpen(false)}>Cancel</Button>
                   <Button
                     onClick={config.handleCreate}
-                    className="bg-green-700 hover:bg-green-800"
+                    className="bg-[#0D3A35] hover:bg-[#092b27]"
                     disabled={!config.entityName.trim() || config.landRows.length === 0 || config.landRows.every(row => !row.farmerId)}
                   >
                     Save {config.entityLabel}
@@ -1547,8 +1544,7 @@ const Blocks = () => {
             entities.map((entity) => (
               <div
                   key={entity[`${entityType}_id`]}
-                  className="group bg-white border border-green-200 rounded-2xl p-0 shadow-md hover:shadow-xl transition-shadow cursor-pointer relative overflow-hidden flex flex-col min-h-[180px]"
-                  style={{ boxShadow: '0 4px 24px 0 rgba(16, 185, 129, 0.08)' }}
+                  className="group bg-white border border-[#0D3A35]/15 rounded-2xl p-0 shadow-md hover:shadow-xl transition-shadow cursor-pointer relative overflow-hidden flex flex-col min-h-[180px]"
                   onClick={() => {
                     config.setViewEntity(entity);
                     if (entityType === 'block') {
@@ -1595,30 +1591,30 @@ const Blocks = () => {
                     config.setIsViewModalOpen(true);
                   }}
                 >
-                <div className="h-2 w-full bg-gradient-to-r from-green-400 via-green-200 to-green-100" />
+                <div className="h-1.5 w-full bg-[#0D3A35]" />
                 <div className="flex-1 flex flex-col justify-between p-6">
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <h3 className="font-bold text-xl text-green-900 truncate max-w-[70%] group-hover:text-green-700 transition-colors">
+                      <h3 className="font-bold text-xl text-slate-950 truncate max-w-[70%] group-hover:text-[#0D3A35] transition-colors">
                         {entity[`${entityType}_name`] || entity[`${entityType}_id`]}
                       </h3>
-                      <span className="text-xs text-green-700 bg-green-100 px-2 py-1 rounded-full font-semibold tracking-wide shadow-sm border border-green-200">
+                      <span className="text-xs text-[#0D3A35] bg-[#0D3A35]/10 px-2 py-1 rounded-full font-semibold tracking-wide shadow-sm border border-[#0D3A35]/20">
                         ID: {entity[`${entityType}_id`].slice(0, 8)}...
                       </span>
                     </div>
                     <div className="flex items-center gap-3 mt-2">
-                      <span className="text-base font-medium text-green-800">Total Area</span>
-                      <span className="text-2xl font-extrabold text-green-900 drop-shadow-sm">
+                      <span className="text-base font-medium text-[#0D3A35]">Total Area</span>
+                      <span className="text-2xl font-extrabold text-slate-950 drop-shadow-sm">
                             {getEntityCardArea(entityType, entity)} <span className="text-base font-semibold">acres</span>
                       </span>
                     </div>
                   </div>
                   <div className="flex items-center justify-between mt-6">
                     <span className="text-xs text-muted-foreground">Click to view details</span>
-                    <span className="inline-flex items-center gap-1 text-green-700 font-medium text-xs bg-green-50 px-2 py-1 rounded-full border border-green-100">
-                      {entityType === 'cluster' && <Grid3x3 className="w-4 h-4 mr-1 text-green-400" />}
-                      {entityType === 'zone' && <Building className="w-4 h-4 mr-1 text-green-400" />}
-                      {entityType === 'block' && <Map className="w-4 h-4 mr-1 text-green-400" />}
+                    <span className="inline-flex items-center gap-1 text-[#0D3A35] font-medium text-xs bg-[#0D3A35]/5 px-2 py-1 rounded-full border border-[#0D3A35]/15">
+                      {entityType === 'cluster' && <Grid3x3 className="w-4 h-4 mr-1 text-[#0D3A35]/50" />}
+                      {entityType === 'zone' && <Building className="w-4 h-4 mr-1 text-[#0D3A35]/50" />}
+                      {entityType === 'block' && <Map className="w-4 h-4 mr-1 text-[#0D3A35]/50" />}
                       {config.entityLabel}
                     </span>
                   </div>
@@ -1626,24 +1622,24 @@ const Blocks = () => {
 
                   {/* Zone Bottom Panel: Field Manager */}
                   {entityType === 'zone' && (
-                    <div className="border-t border-green-100 bg-green-50/40 px-6 py-3">
+                    <div className="border-t border-[#0D3A35]/15 bg-[#0D3A35]/5 px-6 py-3">
                       {(() => {
                         const managers = zoneFieldManagers[String(entity.zone_id)] || [];
                         if (managers.length === 0) {
                           return (
                             <button
                               type="button"
-                              className="w-full flex items-center justify-between gap-3 text-sm font-semibold text-green-800 hover:text-green-900"
+                              className="w-full flex items-center justify-between gap-3 text-sm font-semibold text-[#0D3A35] hover:text-[#092b27]"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 openAssignFieldManager(entity as Zone);
                               }}
                             >
                               <span className="inline-flex items-center gap-2">
-                                <User className="w-4 h-4 text-green-700" />
+                                <User className="w-4 h-4 text-[#0D3A35]" />
                                 Assign field manager
                               </span>
-                              <span className="text-xs text-green-700 bg-white/70 border border-green-200 px-2 py-0.5 rounded-full">Assign</span>
+                              <span className="text-xs text-[#0D3A35] bg-white/70 border border-[#0D3A35]/20 px-2 py-0.5 rounded-full">Assign</span>
                             </button>
                           );
                         }
@@ -1652,21 +1648,21 @@ const Blocks = () => {
                           <div className="flex items-start justify-between gap-4">
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-2">
-                                <BadgeCheck className="w-4 h-4 text-green-700" />
-                                <p className="text-xs uppercase font-bold tracking-wide text-green-800">Field Manager</p>
+                                <BadgeCheck className="w-4 h-4 text-[#0D3A35]" />
+                                <p className="text-xs uppercase font-bold tracking-wide text-[#0D3A35]">Field Manager</p>
                               </div>
                               <div className="mt-2 flex flex-wrap gap-2">
                                 {managers.map((manager) => (
-                                  <div key={manager.staff_id} className="inline-flex items-center gap-2 rounded-full border border-green-200 bg-white px-3 py-1 text-xs font-semibold text-green-900 shadow-sm">
+                                  <div key={manager.staff_id} className="inline-flex items-center gap-2 rounded-full border border-[#0D3A35]/20 bg-white px-3 py-1 text-xs font-semibold text-slate-950 shadow-sm">
                                     <span>{manager.name}</span>
-                                    <span className="text-[10px] font-medium text-green-700">{manager.manager_id}</span>
+                                    <span className="text-[10px] font-medium text-[#0D3A35]">{manager.manager_id}</span>
                                   </div>
                                 ))}
                               </div>
                             </div>
                             <button
                               type="button"
-                              className="shrink-0 text-xs font-semibold text-green-800 bg-white/80 border border-green-200 px-3 py-1 rounded-full hover:bg-white"
+                              className="shrink-0 text-xs font-semibold text-[#0D3A35] bg-white/80 border border-[#0D3A35]/20 px-3 py-1 rounded-full hover:bg-white"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 openAssignFieldManager(entity as Zone);
@@ -1682,24 +1678,24 @@ const Blocks = () => {
 
                   {/* Block Bottom Panel: Supervisor */}
                   {entityType === 'block' && (
-                    <div className="border-t border-green-100 bg-green-50/40 px-6 py-3">
+                    <div className="border-t border-[#0D3A35]/15 bg-[#0D3A35]/5 px-6 py-3">
                       {(() => {
                         const supervisor = blockSupervisors[String(entity.block_id)];
                         if (!supervisor) {
                           return (
                             <button
                               type="button"
-                              className="w-full flex items-center justify-between gap-3 text-sm font-semibold text-green-800 hover:text-green-900"
+                              className="w-full flex items-center justify-between gap-3 text-sm font-semibold text-[#0D3A35] hover:text-[#092b27]"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 openAssignSupervisor(entity as Block);
                               }}
                             >
                               <span className="inline-flex items-center gap-2">
-                                <User className="w-4 h-4 text-green-700" />
+                                <User className="w-4 h-4 text-[#0D3A35]" />
                                 Assign supervisor
                               </span>
-                              <span className="text-xs text-green-700 bg-white/70 border border-green-200 px-2 py-0.5 rounded-full">Assign</span>
+                              <span className="text-xs text-[#0D3A35] bg-white/70 border border-[#0D3A35]/20 px-2 py-0.5 rounded-full">Assign</span>
                             </button>
                           );
                         }
@@ -1708,8 +1704,8 @@ const Blocks = () => {
                           <div className="flex items-start justify-between gap-4">
                             <div className="min-w-0">
                               <div className="flex items-center gap-2">
-                                <BadgeCheck className="w-4 h-4 text-green-700" />
-                                <p className="text-xs uppercase font-bold tracking-wide text-green-800">Supervisor</p>
+                                <BadgeCheck className="w-4 h-4 text-[#0D3A35]" />
+                                <p className="text-xs uppercase font-bold tracking-wide text-[#0D3A35]">Supervisor</p>
                               </div>
                               <p className="mt-1 text-sm font-semibold text-slate-900 truncate">{supervisor.name}</p>
                               <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px] text-slate-600">
@@ -1719,7 +1715,7 @@ const Blocks = () => {
                             </div>
                             <button
                               type="button"
-                              className="shrink-0 text-xs font-semibold text-green-800 bg-white/80 border border-green-200 px-3 py-1 rounded-full hover:bg-white"
+                              className="shrink-0 text-xs font-semibold text-[#0D3A35] bg-white/80 border border-[#0D3A35]/20 px-3 py-1 rounded-full hover:bg-white"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 openAssignSupervisor(entity as Block);
@@ -1734,9 +1730,9 @@ const Blocks = () => {
                   )}
 
                 <div className="absolute right-0 bottom-0 opacity-10 pointer-events-none">
-                  {entityType === 'cluster' && <Grid3x3 className="w-32 h-32 text-green-400" />}
-                  {entityType === 'zone' && <Building className="w-32 h-32 text-green-400" />}
-                  {entityType === 'block' && <Map className="w-32 h-32 text-green-400" />}
+                  {entityType === 'cluster' && <Grid3x3 className="w-32 h-32 text-[#0D3A35]" />}
+                  {entityType === 'zone' && <Building className="w-32 h-32 text-[#0D3A35]" />}
+                  {entityType === 'block' && <Map className="w-32 h-32 text-[#0D3A35]" />}
                 </div>
               </div>
             ))
@@ -1767,22 +1763,22 @@ const Blocks = () => {
                     </div>
                   </div>
 
-                  <div className="bg-green-50/60 border border-green-200 rounded-lg px-4 py-3">
-                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-green-700 mb-2">Selected Managers</div>
+                  <div className="bg-[#0D3A35]/5 border border-[#0D3A35]/20 rounded-lg px-4 py-3">
+                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[#0D3A35] mb-2">Selected Managers</div>
                     {selectedManagerIds.length > 0 ? (
                       <div className="flex flex-wrap gap-2">
                         {selectedManagerIds.map((id) => {
                           const manager = fieldManagers.find((item) => item.manager_id === id);
                           return (
-                            <span key={id} className="inline-flex items-center gap-2 rounded-full bg-white border border-green-200 px-3 py-1 text-xs font-semibold text-green-900">
-                              <User className="w-3 h-3 text-green-700" />
+                            <span key={id} className="inline-flex items-center gap-2 rounded-full bg-white border border-[#0D3A35]/20 px-3 py-1 text-xs font-semibold text-slate-950">
+                              <User className="w-3 h-3 text-[#0D3A35]" />
                               {manager?.name || id}
                             </span>
                           );
                         })}
                       </div>
                     ) : (
-                      <div className="text-sm text-green-800/70">No field managers selected yet.</div>
+                      <div className="text-sm text-[#0D3A35]/70">No field managers selected yet.</div>
                     )}
                   </div>
 
@@ -1801,7 +1797,7 @@ const Blocks = () => {
                             key={m.manager_id}
                             className={
                               'flex items-start gap-3 p-3 rounded-lg border cursor-pointer hover:bg-muted/20 ' +
-                              (selectedManagerIds.includes(m.manager_id) ? 'border-green-400 bg-green-50/40' : 'border-border bg-white')
+                              (selectedManagerIds.includes(m.manager_id) ? 'border-[#0D3A35]/50 bg-[#0D3A35]/5' : 'border-border bg-white')
                             }
                           >
                             <input
@@ -1832,7 +1828,7 @@ const Blocks = () => {
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setIsAssignManagerOpen(false)}>Cancel</Button>
                   <Button
-                    className="bg-green-700 hover:bg-green-800"
+                    className="bg-[#0D3A35] hover:bg-[#092b27]"
                     onClick={confirmAssignFieldManager}
                     disabled={!assigningZone || selectedManagerIds.length === 0 || isLoadingFieldManagers || isAssigningFieldManager || fieldManagers.length === 0}
                   >
@@ -1884,7 +1880,7 @@ const Blocks = () => {
                             key={s.supervisor_id}
                             className={
                               'flex items-start gap-3 p-3 rounded-lg border cursor-pointer hover:bg-muted/20 ' +
-                              (selectedSupervisorId === s.supervisor_id ? 'border-green-400 bg-green-50/40' : 'border-border bg-white')
+                              (selectedSupervisorId === s.supervisor_id ? 'border-[#0D3A35]/50 bg-[#0D3A35]/5' : 'border-border bg-white')
                             }
                           >
                             <input
@@ -1912,7 +1908,7 @@ const Blocks = () => {
                     Cancel
                   </Button>
                   <Button
-                    className="bg-green-700 hover:bg-green-800"
+                    className="bg-[#0D3A35] hover:bg-[#092b27]"
                     onClick={confirmAssignSupervisor}
                     disabled={
                       !assigningBlock ||
@@ -1973,7 +1969,7 @@ const Blocks = () => {
                             <div className="text-sm text-muted-foreground">
                               {Object.values(blocksInZoneView).reduce((count, lands) => count + lands.length, 0)} lands across {Object.keys(blocksInZoneView).length} blocks.
                             </div>
-                            <div className="text-sm font-semibold text-green-800 bg-green-50 px-3 py-1 rounded-full border border-green-100">
+                            <div className="text-sm font-semibold text-[#0D3A35] bg-[#0D3A35]/5 px-3 py-1 rounded-full border border-[#0D3A35]/15">
                               Total Land Area: {getZoneViewTotalArea()} acres
                             </div>
                           </div>
@@ -1988,7 +1984,7 @@ const Blocks = () => {
                                     <div className="text-sm font-semibold text-foreground">Block: {blockName}</div>
                                     <div className="text-xs text-muted-foreground">{lands.length} land{lands.length === 1 ? '' : 's'}</div>
                                   </div>
-                                  <div className="text-sm font-semibold text-green-800">
+                                  <div className="text-sm font-semibold text-[#0D3A35]">
                                     {lands.reduce((sum, land) => sum + Number(land?.area ?? 0), 0)} acres
                                   </div>
                                 </div>
@@ -2112,7 +2108,7 @@ const Blocks = () => {
                             <Button variant="outline" onClick={() => setIsAddingBlockLands(false)}>
                               Back
                             </Button>
-                            <Button className="bg-green-700 hover:bg-green-800" onClick={async () => {
+                            <Button className="bg-[#0D3A35] hover:bg-[#092b27]" onClick={async () => {
                               try {
                                 const base = getBaseUrl();
                                 const payload = buildBlockUpdatePayload();
@@ -2156,7 +2152,7 @@ const Blocks = () => {
                             </div>
                             <Button
                               size="sm"
-                              className="gap-2 bg-green-700 hover:bg-green-800"
+                              className="gap-2 bg-[#0D3A35] hover:bg-[#092b27]"
                               onClick={openAddLandEditor}
                             >
                               <Plus className="w-4 h-4" /> Add Land

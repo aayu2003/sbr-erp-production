@@ -6,6 +6,9 @@
 
 @layer base {
   :root {
+    --brand-primary: #0D3A35;
+    --brand-primary-hover: #092B27;
+
     --background: 45 30% 97%;
     --foreground: 150 25% 15%;
 

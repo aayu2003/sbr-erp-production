@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   CalendarDays,
@@ -54,6 +54,8 @@ type InvoicePayment = {
   invoice_type?: string;
 };
 
+type MilestoneStatus = "done" | "active" | "pending" | "rejected";
+
 // ── Shared Data ───────────────────────────────────────────────────────────────
 
 const tabs: VendorTab[] = [
@@ -87,20 +89,6 @@ const vendor = {
 
 // ── Payment Requests data ─────────────────────────────────────────────────────
 
-const paymentRequestRows = [
-  { id: "PR-2026-019", vendor: "Agro Diesel Supplies", invoice: "INV-VEN-2026-088", amount: "₹4,70,400", tds: "₹9,600", net: "₹4,70,400", mode: "NEFT", date: "16 Jan 2026", status: "Pending Approval" },
-  { id: "PR-2026-018", vendor: "Farm Machinery Works", invoice: "INV-VEN-2026-077", amount: "₹2,25,000", tds: "-", net: "₹2,25,000", mode: "NEFT", date: "21 Jan 2026", status: "Approved" },
-  { id: "PR-2026-017", vendor: "Green Seeds Traders", invoice: "INV-VEN-2026-091", amount: "₹1,45,000", tds: "-", net: "₹1,45,000", mode: "RTGS", date: "16 Jan 2026", status: "Draft" },
-  { id: "PR-2026-015", vendor: "Shakti Fertilizers", invoice: "INV-VEN-2026-065", amount: "₹2,10,000", tds: "₹4,200", net: "₹2,05,800", mode: "NEFT", date: "08 Jan 2026", status: "Paid" },
-];
-
-const prStatusColors: Record<string, string> = {
-  "Pending Approval": "bg-orange-100 text-orange-700",
-  Approved: "bg-emerald-100 text-emerald-700",
-  Draft: "bg-slate-100 text-slate-700",
-  Paid: "bg-blue-100 text-blue-700",
-  Rejected: "bg-red-100 text-red-700",
-};
 
 // ── Approvals data ────────────────────────────────────────────────────────────
 
@@ -227,7 +215,14 @@ const renderPaymentData = (pd: unknown): string => {
 
 export default function AccountsPayments() {
   const [activeTab, setActiveTab] = useState<VendorTab>("Invoice Register");
-  const [isRequestOpen, setIsRequestOpen] = useState(false);
+  const [selectedInvoice, setSelectedInvoice] = useState<InvoicePayment | null>(null);
+
+  const handleOpen = (item: InvoicePayment, tab: VendorTab) => {
+    setSelectedInvoice(item);
+    setActiveTab(tab);
+  };
+
+  const goToRegister = () => setActiveTab("Invoice Register");
 
   return (
     <div className="min-h-full bg-[#f7f7f8] p-4 text-slate-900">
@@ -240,14 +235,6 @@ export default function AccountsPayments() {
               Manage vendor invoices, payment requests, approvals, and accounting ledger
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => { setActiveTab("Payment Requests"); setIsRequestOpen(true); }}
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#173f70] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#12345e]"
-          >
-            <IndianRupee className="h-4 w-4" />
-            New Payment Request
-          </button>
         </header>
 
         {/* Tab bar */}
@@ -268,25 +255,24 @@ export default function AccountsPayments() {
         </div>
 
         {/* Tab content */}
-        {activeTab === "Invoice Register" && <InvoiceRegisterView />}
-        {activeTab === "Payment Requests" && <PaymentRequestsView onNew={() => setIsRequestOpen(true)} />}
-        {activeTab === "Approvals" && <ApprovalsView />}
-        {activeTab === "Payments" && <PaymentsView />}
-        {activeTab === "Vendor Ledger" && <VendorLedgerView />}
-        {activeTab === "Accounting Ledger" && <AccountingLedgerView />}
+        {activeTab === "Invoice Register" && <InvoiceRegisterView onOpen={handleOpen} />}
+        {activeTab === "Payment Requests" && <PaymentRequestsView selectedInvoice={selectedInvoice} onClear={() => setSelectedInvoice(null)} onGoToRegister={goToRegister} />}
+        {activeTab === "Approvals" && <ApprovalsView selectedInvoice={selectedInvoice} onClear={() => setSelectedInvoice(null)} onGoToRegister={goToRegister} />}
+        {activeTab === "Payments" && <PaymentsView selectedInvoice={selectedInvoice} onClear={() => setSelectedInvoice(null)} onGoToRegister={goToRegister} />}
+        {activeTab === "Vendor Ledger" && <VendorLedgerView selectedInvoice={selectedInvoice} onClear={() => setSelectedInvoice(null)} onGoToRegister={goToRegister} />}
+        {activeTab === "Accounting Ledger" && <AccountingLedgerView selectedInvoice={selectedInvoice} onClear={() => setSelectedInvoice(null)} onGoToRegister={goToRegister} />}
         {activeTab === "TDS" && <TDSView />}
         {activeTab === "Documents" && <DocumentsView />}
         {activeTab === "Reports" && <ReportsView />}
       </div>
 
-      <VendorPaymentRequestModal open={isRequestOpen} onClose={() => setIsRequestOpen(false)} />
     </div>
   );
 }
 
 // ── Tab: Invoice Register (live API) ─────────────────────────────────────────
 
-const InvoiceRegisterView = () => {
+const InvoiceRegisterView = ({ onOpen }: { onOpen: (item: InvoicePayment, tab: VendorTab) => void }) => {
   const [items, setItems] = useState<InvoicePayment[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -368,6 +354,7 @@ const InvoiceRegisterView = () => {
                   <th className="px-4 py-3">Payment Status</th>
                   <th className="px-4 py-3">PRR Document</th>
                   <th className="px-4 py-3">Payment Data</th>
+                  <th className="px-4 py-3">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -377,7 +364,8 @@ const InvoiceRegisterView = () => {
                   const paymentDone = item.payment_completed === true;
 
                   return (
-                    <tr key={item.payment_id ?? idx} className="border-b border-slate-100 text-sm last:border-b-0 hover:bg-blue-50/30">
+                    <Fragment key={item.payment_id ?? idx}>
+                    <tr className="border-b-0 text-sm hover:bg-blue-50/30">
                       {/* Invoice Document */}
                       <td className="px-4 py-4">
                         {item.invoice_doc_url ? (
@@ -454,7 +442,18 @@ const InvoiceRegisterView = () => {
                           ? renderPaymentData(item.payment_completion_metadata)
                           : renderPaymentData(item.payment_request_dict)}
                       </td>
+
+                      {/* Action */}
+                      <td className="whitespace-nowrap px-4 py-4">
+                        <ActionCell item={item} onOpen={onOpen} />
+                      </td>
                     </tr>
+                    <tr className="border-b border-slate-100">
+                      <td colSpan={9} className="px-4 pb-2.5 pt-0 bg-slate-50/60">
+                        <PaymentProgressBar item={item} />
+                      </td>
+                    </tr>
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -466,79 +465,75 @@ const InvoiceRegisterView = () => {
   );
 };
 
-// ── Tab: Payment Requests ─────────────────────────────────────────────────────
+// ── Invoice context shared type + banners ────────────────────────────────────
 
-const PaymentRequestsView = ({ onNew }: { onNew: () => void }) => (
-  <div className="space-y-4">
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div>
-        <h2 className="text-2xl font-extrabold text-slate-900">Payment Requests</h2>
-        <p className="text-sm font-medium text-slate-500 mt-1">All vendor payment requests and their approval status</p>
-      </div>
-      <button
-        type="button"
-        onClick={onNew}
-        className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#173f70] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#12345e]"
-      >
-        <IndianRupee className="h-4 w-4" />
-        New Request
-      </button>
-    </div>
+type InvoiceCtxProps = {
+  selectedInvoice: InvoicePayment | null;
+  onClear: () => void;
+  onGoToRegister: () => void;
+};
 
-    <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[980px] border-collapse text-left">
-          <thead>
-            <tr className="border-b border-slate-200 bg-slate-50 text-xs font-extrabold text-slate-500">
-              <th className="px-4 py-3">Request ID</th>
-              <th className="px-4 py-3">Vendor</th>
-              <th className="px-4 py-3">Invoice</th>
-              <th className="px-4 py-3">Invoice Amt</th>
-              <th className="px-4 py-3">TDS</th>
-              <th className="px-4 py-3">Net Payable</th>
-              <th className="px-4 py-3">Mode</th>
-              <th className="px-4 py-3">Request Date</th>
-              <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {paymentRequestRows.map((row) => (
-              <tr key={row.id} className="border-b border-slate-100 text-sm last:border-b-0 hover:bg-blue-50/30">
-                <td className="whitespace-nowrap px-4 py-4 font-extrabold text-blue-600">{row.id}</td>
-                <td className="whitespace-nowrap px-4 py-4 font-extrabold text-slate-800">{row.vendor}</td>
-                <td className="whitespace-nowrap px-4 py-4 font-semibold text-blue-600">{row.invoice}</td>
-                <td className="whitespace-nowrap px-4 py-4 font-extrabold text-orange-600">{row.amount}</td>
-                <td className="whitespace-nowrap px-4 py-4 font-semibold text-slate-600">{row.tds}</td>
-                <td className="whitespace-nowrap px-4 py-4 font-extrabold text-emerald-600">{row.net}</td>
-                <td className="whitespace-nowrap px-4 py-4 font-semibold">{row.mode}</td>
-                <td className="whitespace-nowrap px-4 py-4 font-semibold text-slate-600">{row.date}</td>
-                <td className="whitespace-nowrap px-4 py-4">
-                  <span className={`rounded-full px-3 py-1 text-xs font-extrabold ${prStatusColors[row.status] ?? "bg-slate-100 text-slate-700"}`}>
-                    {row.status}
-                  </span>
-                </td>
-                <td className="whitespace-nowrap px-4 py-4">
-                  <button type="button" className="inline-flex h-8 items-center rounded-md border border-slate-200 px-3 text-xs font-extrabold hover:bg-slate-50">
-                    <Eye className="mr-1.5 h-3.5 w-3.5" />
-                    View
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <CreateVendorPaymentRequestView />
+const NoInvoiceSelectedBanner = ({ onGoToRegister }: { onGoToRegister: () => void }) => (
+  <div className="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-200 bg-white py-20 text-center">
+    <FileText className="mb-3 h-10 w-10 text-slate-300" />
+    <p className="text-base font-extrabold text-slate-600">Select an invoice to work in this tab</p>
+    <p className="mt-1 text-sm font-medium text-slate-400">Go to Invoice Register and click the action button on a row</p>
+    <button
+      type="button"
+      onClick={onGoToRegister}
+      className="mt-5 inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold hover:bg-slate-50"
+    >
+      <ArrowLeft className="h-4 w-4" />
+      Go to Invoice Register
+    </button>
   </div>
 );
 
+const SelectedInvoiceBanner = ({ invoice, onClear }: { invoice: InvoicePayment; onClear: () => void }) => (
+  <div className="flex items-center justify-between rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+    <div className="flex items-center gap-3">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-100">
+        <FileText className="h-5 w-5 text-blue-600" />
+      </div>
+      <div>
+        <p className="text-[10px] font-extrabold uppercase tracking-wider text-blue-400">Working on Invoice</p>
+        <p className="text-sm font-extrabold text-blue-800">
+          {safeStr(invoice.vendor_name) || "—"}
+          <span className="mx-1.5 font-semibold text-blue-400">·</span>
+          {safeStr(invoice.order_number) || "—"}
+          {invoice.invoice_type && (
+            <span className="ml-2 rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-extrabold text-blue-600">
+              {invoice.invoice_type}
+            </span>
+          )}
+        </p>
+      </div>
+    </div>
+    <button type="button" onClick={onClear} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-blue-400 hover:bg-blue-100">
+      <X className="h-4 w-4" />
+    </button>
+  </div>
+);
+
+// ── Tab: Payment Requests ─────────────────────────────────────────────────────
+
+const PaymentRequestsView = ({ selectedInvoice, onClear, onGoToRegister }: InvoiceCtxProps) => {
+  if (!selectedInvoice) return <NoInvoiceSelectedBanner onGoToRegister={onGoToRegister} />;
+  return (
+  <div className="space-y-4">
+    <SelectedInvoiceBanner invoice={selectedInvoice} onClear={onClear} />
+    <CreateVendorPaymentRequestView />
+  </div>
+  );
+};
+
 // ── Tab: Approvals ────────────────────────────────────────────────────────────
 
-const ApprovalsView = () => (
+const ApprovalsView = ({ selectedInvoice, onClear, onGoToRegister }: InvoiceCtxProps) => {
+  if (!selectedInvoice) return <NoInvoiceSelectedBanner onGoToRegister={onGoToRegister} />;
+  return (
   <div className="space-y-5">
+    <SelectedInvoiceBanner invoice={selectedInvoice} onClear={onClear} />
     <div>
       <h2 className="text-2xl font-extrabold text-slate-900">Approvals</h2>
       <p className="text-sm font-medium text-slate-500 mt-1">Payment requests pending your review and sign-off</p>
@@ -607,12 +602,17 @@ const ApprovalsView = () => (
       </div>
     )}
   </div>
-);
+  );
+};
 
 // ── Tab: Payments (Schedule) ──────────────────────────────────────────────────
 
-const PaymentsView = () => (
-  <section className="overflow-hidden rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+const PaymentsView = ({ selectedInvoice, onClear, onGoToRegister }: InvoiceCtxProps) => {
+  if (!selectedInvoice) return <NoInvoiceSelectedBanner onGoToRegister={onGoToRegister} />;
+  return (
+  <div className="space-y-4">
+    <SelectedInvoiceBanner invoice={selectedInvoice} onClear={onClear} />
+    <section className="overflow-hidden rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div>
         <h2 className="text-2xl font-extrabold tracking-normal text-slate-900">Payment Schedule</h2>
@@ -668,15 +668,19 @@ const PaymentsView = () => (
       </table>
     </div>
   </section>
-);
+  </div>
+  );
+};
 
 // ── Tab: Vendor Ledger ────────────────────────────────────────────────────────
 
-const VendorLedgerView = () => {
+const VendorLedgerView = ({ selectedInvoice, onClear, onGoToRegister }: InvoiceCtxProps) => {
   const [selectedEntry, setSelectedEntry] = useState<VendorLedgerRow | null>(null);
 
+  if (!selectedInvoice) return <NoInvoiceSelectedBanner onGoToRegister={onGoToRegister} />;
   return (
     <div className="space-y-5">
+      <SelectedInvoiceBanner invoice={selectedInvoice} onClear={onClear} />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-3xl font-extrabold tracking-normal text-slate-900">Vendor Ledger</h2>
@@ -762,8 +766,11 @@ const VendorLedgerView = () => {
 
 // ── Tab: Accounting Ledger ────────────────────────────────────────────────────
 
-const AccountingLedgerView = () => (
+const AccountingLedgerView = ({ selectedInvoice, onClear, onGoToRegister }: InvoiceCtxProps) => {
+  if (!selectedInvoice) return <NoInvoiceSelectedBanner onGoToRegister={onGoToRegister} />;
+  return (
   <div className="space-y-4">
+    <SelectedInvoiceBanner invoice={selectedInvoice} onClear={onClear} />
     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div>
         <h2 className="text-2xl font-extrabold text-slate-900">Accounting Ledger</h2>
@@ -824,7 +831,8 @@ const AccountingLedgerView = () => (
       </div>
     </section>
   </div>
-);
+  );
+};
 
 // ── Tab: TDS ──────────────────────────────────────────────────────────────────
 
@@ -1101,18 +1109,6 @@ const CreateVendorPaymentRequestView = () => (
       </div>
     </div>
 
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-      <h3 className="text-sm font-extrabold text-slate-900">Select Vendor</h3>
-      <div className="mt-4 max-w-xl">
-        <RequestSelect
-          label="Choose Vendor"
-          value={vendor.name}
-          options={[vendor.name, "Green Seeds Traders", "Farm Machinery Works", "Shakti Fertilizers"]}
-          required
-        />
-      </div>
-    </section>
-
     <VendorSummaryCard />
 
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_0.7fr]">
@@ -1253,22 +1249,6 @@ const VendorDocumentsPanel = () => {
   );
 };
 
-const VendorPaymentRequestModal = ({ open, onClose }: { open: boolean; onClose: () => void }) => {
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/45 p-4">
-      <div className="w-full max-w-3xl rounded-xl bg-white shadow-2xl max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
-          <h2 className="text-xl font-extrabold text-slate-900">New Vendor Payment Request</h2>
-          <button onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100"><X className="h-5 w-5" /></button>
-        </div>
-        <div className="p-6">
-          <CreateVendorPaymentRequestView />
-        </div>
-      </div>
-    </div>
-  );
-};
 
 const VendorLedgerEntryModal = ({ entry, onClose }: { entry: VendorLedgerRow | null; onClose: () => void }) => {
   if (!entry) return null;
@@ -1315,6 +1295,135 @@ const VendorLedgerEntryModal = ({ entry, onClose }: { entry: VendorLedgerRow | n
           <button onClick={onClose} className="h-10 rounded-lg border border-slate-200 px-5 text-sm font-semibold hover:bg-slate-50">Close</button>
         </div>
       </div>
+    </div>
+  );
+};
+
+// ── Payment Progress Bar ──────────────────────────────────────────────────────
+
+function isNonEmpty(v: unknown): boolean {
+  if (!v) return false;
+  if (typeof v === "string") return v.trim().length > 0;
+  if (typeof v === "object") return Object.keys(v as object).length > 0;
+  return true;
+}
+
+function getMilestoneStatuses(item: InvoicePayment): MilestoneStatus[] {
+  const admin    = safeStr(item.admin_ops_approval_status);
+  const director = safeStr(item.director_approval_status);
+
+  const s0: MilestoneStatus = item.invoice_doc_url                              ? "done" : "active";
+  const s1: MilestoneStatus = isNonEmpty(item.payment_request_dict)             ? "done" : s0 === "done" ? "active" : "pending";
+  const s2: MilestoneStatus = admin    === "approved_and_forwarded"             ? "done" : admin    === "rejected" ? "rejected" : s1 === "done" ? "active" : "pending";
+  const s3: MilestoneStatus = director === "approved_and_forwarded"             ? "done" : director === "rejected" ? "rejected" : s2 === "done" ? "active" : "pending";
+  const s4: MilestoneStatus = !!item.prr_url                                    ? "done" : s3 === "done" ? "active" : "pending";
+  const s5: MilestoneStatus = isNonEmpty(item.payment_completion_metadata)      ? "done" : s4 === "done" ? "active" : "pending";
+  const s6: MilestoneStatus = isNonEmpty(item.payment_completion_metadata)      ? "done" : "pending";
+
+  return [s0, s1, s2, s3, s4, s5, s6];
+}
+
+const PROGRESS_STEPS = [
+  "Invoice Received",
+  "Payment Request",
+  "Ops Approval",
+  "Director Approval",
+  "PRR",
+  "Payment Confirm.",
+  "Ledger Entry",
+] as const;
+
+const STEP_ACTIONS: { label: string; btnClass: string; tab: VendorTab | null }[] = [
+  { label: "Upload Invoice",   btnClass: "border-blue-200 text-blue-600 hover:bg-blue-50",       tab: null },
+  { label: "Create PR",        btnClass: "border-blue-200 text-blue-600 hover:bg-blue-50",       tab: "Payment Requests" },
+  { label: "Submit for Ops",   btnClass: "border-orange-200 text-orange-600 hover:bg-orange-50", tab: "Approvals" },
+  { label: "Submit for Dir.",  btnClass: "border-orange-200 text-orange-600 hover:bg-orange-50", tab: "Approvals" },
+  { label: "Upload PRR",       btnClass: "border-indigo-200 text-indigo-600 hover:bg-indigo-50", tab: null },
+  { label: "Confirm Payment",  btnClass: "border-emerald-200 text-emerald-700 hover:bg-emerald-50", tab: "Payments" },
+  { label: "Post Ledger",      btnClass: "border-emerald-200 text-emerald-700 hover:bg-emerald-50", tab: "Accounting Ledger" },
+];
+
+const ActionCell = ({
+  item,
+  onOpen,
+}: {
+  item: InvoicePayment;
+  onOpen: (item: InvoicePayment, tab: VendorTab) => void;
+}) => {
+  const statuses  = getMilestoneStatuses(item);
+  const allDone   = statuses.every((s) => s === "done");
+  const rejIdx    = statuses.findIndex((s) => s === "rejected");
+  const activeIdx = statuses.findIndex((s) => s === "active");
+
+  if (allDone) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-extrabold text-emerald-700">
+        <CheckCircle className="h-3 w-3" />
+        Completed
+      </span>
+    );
+  }
+  if (rejIdx !== -1) {
+    return (
+      <button type="button" className="inline-flex h-8 items-center gap-1.5 rounded-md border border-red-200 px-3 text-xs font-extrabold text-red-600 hover:bg-red-50">
+        <Send className="h-3 w-3" />
+        Resubmit
+      </button>
+    );
+  }
+  if (activeIdx !== -1) {
+    const action = STEP_ACTIONS[activeIdx];
+    return (
+      <button
+        type="button"
+        className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs font-extrabold ${action.btnClass}`}
+        onClick={() => action.tab && onOpen(item, action.tab)}
+      >
+        <Send className="h-3 w-3" />
+        {action.label}
+      </button>
+    );
+  }
+  return <span className="text-xs text-slate-400">—</span>;
+};
+
+const PaymentProgressBar = ({ item }: { item: InvoicePayment }) => {
+  const statuses = getMilestoneStatuses(item);
+
+  return (
+    <div className="flex w-full items-start px-1 py-0.5">
+      {PROGRESS_STEPS.map((label, i) => {
+        const status  = statuses[i];
+        const isLast  = i === PROGRESS_STEPS.length - 1;
+
+        const nodeClass =
+          status === "done"     ? "bg-emerald-500 text-white" :
+          status === "active"   ? "bg-blue-500 text-white ring-[2.5px] ring-blue-100" :
+          status === "rejected" ? "bg-red-500 text-white" :
+                                  "border border-slate-300 bg-white text-slate-400";
+
+        const labelClass =
+          status === "done"     ? "text-emerald-600" :
+          status === "active"   ? "font-extrabold text-blue-600" :
+          status === "rejected" ? "text-red-500" :
+                                  "text-slate-400";
+
+        const lineClass = status === "done" ? "bg-emerald-300" : "bg-slate-200";
+
+        return (
+          <div key={label} className="flex flex-1 items-start min-w-0">
+            <div className="flex flex-col items-center gap-[3px] shrink-0">
+              <div className={`flex h-4 w-4 items-center justify-center rounded-full text-[8px] font-extrabold leading-none ${nodeClass}`}>
+                {status === "done" ? "✓" : status === "rejected" ? "✕" : String(i + 1)}
+              </div>
+              <span className={`text-[9px] font-semibold leading-tight whitespace-nowrap ${labelClass}`}>
+                {label}
+              </span>
+            </div>
+            {!isLast && <div className={`mt-2 h-px flex-1 mx-1.5 ${lineClass}`} />}
+          </div>
+        );
+      })}
     </div>
   );
 };

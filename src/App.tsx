@@ -7,6 +7,7 @@ import AppLayout from "./components/layout/AppLayout";
 import AuthLanding from "./pages/AuthLanding";
 import Login from "./pages/Login";
 import Index from "./pages/Index";
+import CeosDesk from "./pages/CeosDesk";
 import Leads from "./pages/Leads";
 import Farmers from "./pages/Farmers";
 import FarmerProfile from "./pages/FarmerProfile";
@@ -26,7 +27,6 @@ import ManPowerRequisition from "./pages/ManPowerRequisition";
 import AdminMrfApproval from "./pages/adminmrfapproval";
 import LogisticsManagement from "./pages/LogisticsManagement";
 import AdminRequestPage from "./pages/AdminRequestPage";
-import Blocks from "./pages/Blocks";
 import TasksBeta from "./pages/TasksBeta";
 import VehicleManagement from "./pages/VehicleManagement";
 import WeighmentQC from "./pages/WeighmentQC";
@@ -53,7 +53,8 @@ import DirectorCashFlow from "./pages/DirectorCashFlow";
 import DirectorCostMonitoring from "./pages/DirectorCostMonitoring";
 import DirectorEmisInvestments from "./pages/DirectorEmisInvestments";
 import DirectorAssetsLiabilities from "./pages/DirectorAssetsLiabilities";
-import HRMS from "./pages/HRMS";
+import HRManagement from "./pages/HRManagement";
+import Settings from "./pages/Settings";
 import OnDemandTask from "./pages/OnDemandTask";
 import FarmDirectory from "./pages/FarmDirectory";
 import FuelsAndConsumables from "./pages/FuelsAndConsumables";
@@ -84,7 +85,9 @@ const App = () => (
           <Route path="/login" element={<Login />} />
           <Route path="/" element={<AuthLanding />} />
           <Route path="/index" element={<Index />} />
-          
+
+          <Route path="/ceos-desk" element={<AppLayout><CeosDesk /></AppLayout>} />
+
           <Route path="/leads" element={<AppLayout><Leads /></AppLayout>} />
           <Route path="/tasks-beta" element={<AppLayout><TasksBeta /></AppLayout>} />
           <Route path="/farmers" element={<AppLayout><Farmers /></AppLayout>} />
@@ -143,11 +146,9 @@ const App = () => (
           <Route path="/user-management" element={<AppLayout><UserManagement /></AppLayout>} />
           <Route path="/man-power-requisition" element={<AppLayout><ManPowerRequisition /></AppLayout>} />
           <Route path="/admin-mrf-approvals" element={<AppLayout><AdminMrfApproval /></AppLayout>} />
-                    {/* Human Resources */}
-                    <Route path="/hrms/*" element={<AppLayout><HRMS /></AppLayout>} />
-          
-          {/* Blocks */}
-          <Route path="/blocks" element={<AppLayout><Blocks /></AppLayout>} />
+          {/* Human Resources */}
+          <Route path="/hr-management" element={<AppLayout><HRManagement /></AppLayout>} />
+          <Route path="/settings" element={<AppLayout><Settings /></AppLayout>} />
 
           {/* Lease & Asset Management */}
           <Route path="/rental-rate-card" element={<AppLayout><RentalRateCard /></AppLayout>} />

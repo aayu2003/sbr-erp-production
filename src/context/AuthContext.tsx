@@ -48,7 +48,7 @@ const SBR_ADMIN_USER: AuthUser = {
     'inventory', 'inventory-indents', 'fuels-consumables', 'inventory-inbox',
     'finance-admin-ops', 'purchase-req', 'vendor-directory', 'ho-module',
     'purchase-flow', 'work-order', 'scope-of-work', 'purchase-inbox',
-    'hrms', 'staff-onboarding', 'man-power-req', 'hrms-inbox',
+    'hr-management', 'hrms', 'staff-onboarding', 'man-power-req', 'hrms-inbox',
     'vehicle-management', 'fleet-chart', 'logistics-request',
     'cultivation-calendar', 'cultivation-master', 'cultivation-plan',
     'field-monitoring', 'field-visit-analytics', 'labour-management',

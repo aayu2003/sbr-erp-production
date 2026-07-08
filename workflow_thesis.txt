@@ -1,0 +1,505 @@
+================================================================================
+        FARM CONNECT — END-TO-END WORKFLOW THESIS
+        SBR Agrotech / Sigmoyd | Prepared: July 2026
+================================================================================
+
+PURPOSE
+───────
+This document traces the single, continuous workflow of the system — from the
+moment a budget is first conceived to the moment a crop is growing on a
+mapped, labour-allocated, equipment-supported plot of land. It is the
+operational backbone that the rest of the platform (approvals, ledgers,
+dashboards) is built around.
+
+The workflow runs through 9 stages:
+
+  1. Budget Creation (Capex + Opex)
+  2. Amortization (for Capex)
+  3. Cash Flow Projection
+  4. Finalized Budget with Line-Item Working
+  5. Land Onboarding (Leads → KYC → Registration)
+  6. HR Onboarding (MRF under Budget Header)
+  7. Equipment / Inventory Onboarding (19-step Procurement Cycle)
+  8. Vehicle Onboarding
+  9. Scope of Work, Labour Distribution, Cultivation Master → Plan → Calendar
+     → On-Demand Tasks
+
+Each stage gates the next. Nothing downstream can happen without the upstream
+stage existing — this is what makes the platform a chain rather than a set of
+disconnected modules.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+STAGE 1 — BUDGET CREATION: CAPEX + OPEX
+════════════════════════════════════════════════════════════════════════════════
+
+The workflow begins at the Director/Finance level, not in the field.
+
+  • The user creates a budget and splits every planned cost into two buckets:
+      CAPEX (Capital Expenditure) — one-time, asset-creating spend
+        e.g. tractors, borewells, sheds, vehicles, heavy equipment
+      OPEX (Operating Expenditure) — recurring, season-to-season spend
+        e.g. seeds, labour, fertilizers, fuel, rentals
+
+  • Each line item carries: S.No, Item Name, UOM, Quantity, Per-Unit Cost,
+    and a computed Amount (Quantity × Per-Unit Cost).
+
+  • Capex and Opex are tracked as two parallel tables, each rolling up to a
+    Total Capex and Total Opex figure for the project.
+
+This is the seed of every cost figure that appears anywhere else in the
+system — the Indent, the Purchase Order, the Ledger entry, and the per-acre
+investment figure all trace their lineage back to a line item created here.
+
+────────────────────────────────────────────────────────────────────────────────
+
+WHY THIS MATTERS
+  Without separating Capex from Opex at the point of budgeting, a company
+  cannot correctly amortize its capital spend or distinguish a one-time asset
+  purchase from a recurring operating cost — both of which have completely
+  different accounting treatments and cash flow implications.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+STAGE 2 — AMORTIZATION (TRIGGERED BY CAPEX)
+════════════════════════════════════════════════════════════════════════════════
+
+The moment a Capex line item is added, it becomes eligible to be pulled into
+an Amortization schedule. The user selects one or more Capex items (a
+"bifurcation") and configures:
+
+  1. Loan Amount (CAPEX)        — the asset cost being financed
+  2. Interest (Rate %)          — annual interest rate
+  3. Loan Period                — total repayment duration
+  4. Moratorium                 — months before repayment begins
+  5. No. of Months in a Year    — repayment frequency basis (usually 12)
+  6. Repayment Period           — tenure over which EMI is calculated
+
+From these six inputs, the system computes a full month-by-month amortization
+table:
+
+  Month | Year | Opening Balance | Interest | Principal | EMI | Closing Balance
+
+Each row reduces the opening balance by the principal component until the
+loan is fully repaid. This schedule becomes the source of EMI obligations
+that the Director tracks under EMIs & Investments, and it directly feeds
+Stage 3 (Cash Flow) as a recurring monthly outflow.
+
+────────────────────────────────────────────────────────────────────────────────
+
+WHY THIS MATTERS
+  Capex is rarely paid in cash upfront at this scale — assets like tractors,
+  borewells, and processing equipment are financed. Amortization converts a
+  single lump-sum Capex figure into a monthly cash obligation that can be
+  planned against revenue. Without this step, cash flow projection would be
+  blind to debt servicing.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+STAGE 3 — CASH FLOW PROJECTION
+════════════════════════════════════════════════════════════════════════════════
+
+Once Capex, Opex, and the Amortization schedule all exist, the system
+generates a Cash Flow grid. Each row in the grid is a financial signal,
+projected month-by-month:
+
+  • Capex Outflow            — pulled from Stage 1
+  • Opex Outflow             — pulled from Stage 1
+  • EMI Obligation           — pulled from Stage 2 (amortization)
+  • Cycle Revenue            — expected income per crop cycle
+  • Inflow / Outflow / Net   — per month
+  • Cumulative Balance       — running cash position
+
+Opex can be modeled on different bases (per-acre, per-750-acres, fixed
+annual) and Capex similarly (per-acre, per-unit, fixed) — giving Finance the
+flexibility to scale projections as land under management grows.
+
+This is the first point in the workflow where the company can answer:
+"If we commit to this Capex and this Opex, will we run out of cash before
+the first harvest revenue arrives?"
+
+────────────────────────────────────────────────────────────────────────────────
+
+WHY THIS MATTERS
+  Agriculture has a structural cash flow problem: costs are front-loaded
+  (land prep, seeds, labour) and revenue arrives only after harvest, months
+  later. At 12,000 acres, a cash flow miscalculation can stall operations
+  mid-season. This stage is the company's early-warning system.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+STAGE 4 — FINALIZED BUDGET WITH LINE-ITEM WORKING
+════════════════════════════════════════════════════════════════════════════════
+
+With Capex, Opex, Amortization, and Cash Flow validated, the budget is
+finalized into its working form — the version that actual operational spend
+will be measured against.
+
+Each finalized line item carries a "working" triplet that tracks its
+lifecycle in real time:
+
+  • SAVINGS DONE          — difference between budgeted rate/qty and the
+                             actual rate achieved through vendor negotiation
+                             (realized the moment a PO is issued below the
+                             budgeted rate)
+  • AMOUNT IN PIPELINE     — value of POs/Indents raised against this line
+                             item that are approved but not yet fully paid
+                             or closed (in-flight commitments)
+  • TOTAL UTILIZED BUDGET  — cumulative amount actually spent and ledgered
+                             against this line item
+
+A finalized budget line also carries: Category, UOM, Qty per Acre, Total
+Acres, Rate per Unit — so that every downstream Indent can be checked against
+both a quantity ceiling and a per-acre cost ceiling.
+
+This is the budget object that every Indent in Stage 7 selects from.
+
+────────────────────────────────────────────────────────────────────────────────
+
+WHY THIS MATTERS
+  A budget that is only a plan is not a control. The Savings / Pipeline /
+  Utilized triplet turns the budget into a live financial control surface:
+  Finance can see, line by line, how much headroom remains before a category
+  is exhausted — before the money is committed, not after.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+STAGE 5 — LAND ONBOARDING (LEADS → VERIFICATION → KYC → REGISTRATION)
+════════════════════════════════════════════════════════════════════════════════
+
+With budget headroom confirmed, land acquisition begins. This runs through
+the Leads module:
+
+  Step 1 — LEAD CAPTURE
+    Field agent records a prospective land/farmer contact: name, phone,
+    village, estimated land area, water availability.
+
+  Step 2 — VERIFICATION
+    Field agent confirms the lead is genuine and the land is real.
+    Status moves: contacted → verified (or follow_up / rejected).
+
+  Step 3 — KYC & REGISTRATION
+    Full legal onboarding: Aadhaar, PAN, bank account + IFSC, lease
+    agreement dates, rent amount, B1 record, Kisan book, agreement PDF,
+    profile photo. Status moves: verified → registered.
+
+  COMPLICATION HANDLED — OWNERSHIP TOPOLOGY
+    Real land records in India rarely map 1:1 to a single farmer. The system
+    is built to handle both directions of this complexity:
+      (a) ONE LAND PARCEL, MULTIPLE OWNERS — a single plot is jointly owned;
+          the KYC and lease agreement must capture and bind multiple owner
+          KYC records to one land parcel, with rent/payment splits.
+      (b) ONE OWNER, MULTIPLE LAND PARCELS — a single farmer leases out
+          several disconnected plots; the system links multiple farm_ids
+          back to one farmer_id without duplicating KYC data.
+    This is why the data model separates Farmer (the legal/KYC identity)
+    from Farm (the physical land parcel) as distinct, many-to-many-capable
+    entities rather than collapsing them into one record.
+
+────────────────────────────────────────────────────────────────────────────────
+
+WHY THIS MATTERS
+  Land ownership disputes are the single largest legal risk in scaled
+  agri-leasing. Correctly modeling multi-owner and multi-parcel relationships
+  at the data layer — rather than forcing every farm into a single-owner
+  assumption — is what makes 12,000 acres of leased land legally defensible.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+STAGE 6 — HR ONBOARDING (MRF UNDER BUDGET HEADER)
+════════════════════════════════════════════════════════════════════════════════
+
+With land coming online, the workforce to operate it must be staffed. This is
+not an open-ended hiring process — it is tied directly back to Stage 4's
+budget.
+
+  Step 1 — MRF CREATION (Man Power Requisition Form)
+    HR raises an MRF against a SPECIFIC budget line item (the labour/staffing
+    head defined in Stage 1/4). The MRF captures: department, sub-department,
+    target date, impact level, contract type (Permanent/Temporary), reason
+    for vacancy, and a billing grid — designation, age limit, quantity,
+    job description, department, CTC per role — rolling up to a Total CTC
+    and Grand Total cost.
+
+  Step 2 — TWO-LEVEL APPROVAL
+    HR submits to Admin Ops first → Admin Ops reviews and signs →
+    forwarded to Director for final approval. Both approval stamps are
+    captured against the MRF number.
+
+  Step 3 — BUDGET ALLOCATION & ONBOARDING
+    Once both approvals clear, the budgeted amount for that line item is
+    allocated against the MRF's estimated CTC. HR then begins actual
+    onboarding (Staff Onboarding module) strictly within that allocated
+    envelope — designation by designation, against the MRF quantities.
+
+────────────────────────────────────────────────────────────────────────────────
+
+WHY THIS MATTERS
+  Tying every hire back to a specific budget line item (rather than a general
+  HR headcount plan) prevents staffing cost creep — the most common silent
+  leakage in large agricultural operations. The 2-level sign-off mirrors the
+  financial discipline already applied to procurement.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+STAGE 7 — EQUIPMENT / INVENTORY ONBOARDING
+            (THE 19-STEP PROCUREMENT-TO-CLOSURE CYCLE)
+════════════════════════════════════════════════════════════════════════════════
+
+This is the most elaborate and tightly governed workflow in the entire
+system. Every piece of equipment, consumable, or service the operation needs
+passes through this exact sequence:
+
+   1.  INDENT PREPARATION
+       Operations/Inventory raises a PR (Purchase Requisition) or SPR
+       (Service Purchase Requisition) with line-item detail: part name,
+       spec, UOM, qty required, stock on hand, lead time, required-by date.
+
+   2.  3-LEVEL APPROVAL
+       The indent is signed up the chain (Indenter → Forwarder → Director)
+       before it can proceed to sourcing.
+
+   3.  VENDOR ONBOARDING
+       If no suitable vendor exists in the Vendor Directory, a new vendor
+       is registered (name, GST, contact, address, category).
+
+   4.  COMPARATIVE QUOTATIONS
+       Multiple vendor quotes are collected and laid side by side in the
+       Quotation Comparative screen (separate PR vs SPR column sets) to
+       identify the best rate, lead time, and terms.
+
+   5.  TC TO THE HO (Technical Comparison to Head Office)
+       The comparative analysis is forwarded to Head Office for technical
+       review of the proposed vendor/spec choice.
+
+   6.  NFA TO THE DIRECTOR (Note For Approval)
+       A formal note is raised to the Director seeking final sanction to
+       proceed with the selected vendor and price.
+
+   7.  PO / WO PREPARATION & UPLOAD
+       Once sanctioned, a Purchase Order (goods) or Work Order (services)
+       is drafted and uploaded into the system.
+
+   8.  PO ISSUED & FORWARDED
+       The PO/WO is formally issued to the vendor and forwarded internally
+       for tracking.
+
+   9.  PO ACCEPTANCE & TIMELINE PROVISION FROM VENDOR
+       Vendor acknowledges the PO and commits a delivery/completion
+       timeline.
+
+  10.  PROFORMA (IF NECESSARY)
+       For advance-payment vendors, a proforma invoice is collected before
+       dispatch.
+
+  11.  INVOICE REGISTRY
+       On delivery/completion, the vendor's tax invoice is logged into the
+       Invoice Register.
+
+  12.  PAYMENT REQUEST GENERATED
+       Accounts (or the requesting department) raises a payment request
+       against the registered invoice.
+
+  13.  2-LEVEL APPROVAL ON PAYMENT REQUEST
+       Admin Ops approval, then Director approval. THIS is the step where
+       the correct BUDGET LINE ITEM (from Stage 4) is selected for the
+       payment.
+
+       ┌─────────────────────────────────────────────────────────────┐
+       │  THE CRITICAL LINK:                                         │
+       │  The moment a line item is selected and the payment request │
+       │  is forwarded, the amount moves into "Amount in Pipeline"   │
+       │  against that budget line. Once payment is finally settled, │
+       │  it either:                                                 │
+       │    (a) shows as SAVINGS — if the actual rate/amount paid    │
+       │        is lower than what was budgeted, or                 │
+       │    (b) is recorded as straight UTILIZATION — if it matches  │
+       │        or exceeds the budgeted figure.                      │
+       │  This single action is what keeps Stage 4's budget triplet  │
+       │  (Savings / Pipeline / Utilized) live and accurate.         │
+       └─────────────────────────────────────────────────────────────┘
+
+  14.  RAISING PRR (Payment Receipt Request / Release Request)
+       The formal request to release funds is raised post-approval.
+
+  15.  PAYMENT CONFIRMATION
+       Accounts confirms the payment has been executed.
+
+  16.  UTR UPLOADING
+       The bank's Unique Transaction Reference (UTR) number is uploaded
+       as proof of payment — closing the audit loop for that transaction.
+
+  17.  (Sequence continues to GRN)
+
+  18.  GRN ISSUING (Goods Receipt Note)
+       The field/store team confirms physical receipt and counts the
+       delivered goods, formally closing the goods-movement side of the
+       transaction.
+
+  19.  PO COMPLETION OR AMENDMENT (IF NECESSARY)
+       The PO is marked complete, or — if quantities/specs/timelines
+       changed mid-cycle — formally amended and re-confirmed.
+
+────────────────────────────────────────────────────────────────────────────────
+
+WHY THIS MATTERS
+  19 discrete, individually-approved steps sound heavy — but at the scale of
+  12,000 acres, this is precisely the friction needed to prevent the two
+  biggest procurement risks: (1) money committed against a budget line that
+  has no headroom left, and (2) goods/services paid for but never verified
+  as received. Step 13 is the linchpin — it is the single moment where
+  operational spend reconciles against financial planning in real time.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+STAGE 8 — VEHICLE ONBOARDING
+════════════════════════════════════════════════════════════════════════════════
+
+Once core equipment and consumables are flowing through the procurement
+cycle above, vehicles are onboarded the same way — through Vehicle
+Management / Fleet Chart — capturing registration, type, assigned
+driver, fuel card linkage, and odometer baseline. Vehicles then become
+allocatable resources for both the Cultivation Calendar (Stage 9) and
+On-Demand Tasks.
+
+────────────────────────────────────────────────────────────────────────────────
+
+WHY THIS MATTERS
+  Vehicles are the highest-leakage asset class in field agriculture (fuel
+  misuse, unauthorized trips, under-utilization). Onboarding them as tracked,
+  allocatable resources — rather than informally — is what makes the later
+  Fuel Request approval chain and Fleet Chart utilization tracking possible.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+STAGE 9 — SCOPE OF WORK, LABOUR, CULTIVATION MASTER → PLAN → CALENDAR
+            → ON-DEMAND TASKS
+════════════════════════════════════════════════════════════════════════════════
+
+With money, land, people, equipment, and vehicles all onboarded, the final
+layer is allocation — turning static resources into an actual working
+season.
+
+  STEP A — SCOPE OF WORK PER LAND PARCEL
+    The last manual allocation: deciding which vendor/activity scope
+    applies to which specific land parcel, and distributing available
+    labour across parcels.
+
+  STEP B — CULTIVATION MASTER
+    A standard, crop-specific, week-wise activity template is defined once
+    (e.g. "Napier: Week 1 land prep, Week 3 planting, Week 8 first
+    weeding..."). This is the reusable blueprint, not yet tied to any
+    specific farm.
+
+  STEP C — CULTIVATION PLAN
+    The master template is mapped onto an actual farm/crop combination,
+    converting "Week 3" into a real calendar date for that specific land.
+
+  STEP D — CULTIVATION CALENDAR  ★ The signature capability of the system
+    This is where the Cultivation Plan becomes an executable, resource-
+    allocated schedule across the entire land bank.
+
+    THE CORE CLAIM: building this schedule manually — assigning every
+    activity, on every plot, across thousands of acres, to the right dates,
+    with the right labour and equipment — is normally a STRATEGY exercise
+    that takes a planner roughly 30 MINUTES per plan, and even then only
+    produces the high-level strategy, not the granular day-by-day schedule.
+    The Cultivation Calendar engine compresses this into roughly 30 SECONDS,
+    generating the full granular schedule directly — not just the strategy.
+    This is a ~60x time compression on the single most labour-intensive
+    planning task in the operation.
+
+    Once generated, the Calendar:
+      • Allocates tasks to the appropriate VEHICLES and EQUIPMENT
+        (sourced from Stage 8) — every such allocation is recorded as a
+        LAND INVESTMENT entry against that farm.
+      • Distributes tasks across PLOTS, not raw land parcels — using the
+        plot boundaries drawn in Farm Directory's plotting tool combined
+        with the crop type assigned to each plot. (A 50-acre land parcel
+        with 3 different plots growing 3 different crops gets 3 different
+        activity schedules, not one blanket schedule.)
+      • Provides live task MONITORING per activity:
+          - Image/photo evidence of task completion
+          - Swap date tracking (when a scheduled date is moved)
+          - Overdue flagging (task past its scheduled date, not done)
+          - Underdue flagging (task completed ahead of schedule)
+
+  STEP E — ON-DEMAND TASKS
+    For work that falls outside the standard cultivation schedule
+    (emergency pest control, ad-hoc repairs, one-off services), the
+    On-Demand Task module allows allocation directly at the LAND PARCEL
+    level (rather than the plot level used by the Calendar). Each
+    allocation schema tracks owner_name, quantity, and farm-by-farm
+    assignment, with a status of pending / partial / completed — so partial
+    fulfilment across multiple parcels is visible, not just a binary
+    done/not-done flag.
+
+  STEP F — INVENTORY LEDGER DUALITY
+    Supporting all of the above, Inventory maintains two parallel ledgers
+    for every transaction:
+      • PER-ITEM LEDGER — full movement history of a single SKU across
+        every store/location it has touched.
+      • PER-STORE LEDGER — full movement history of everything that has
+        moved through a single physical store/location.
+    This dual view lets the same stock movement be audited either by
+    "what happened to this item" or "what happened in this warehouse,"
+    without maintaining two separate datasets.
+
+────────────────────────────────────────────────────────────────────────────────
+
+WHY THIS MATTERS
+  This final stage is where every preceding stage of the workflow physically
+  manifests on the ground. The Cultivation Calendar's 30-minute-to-30-second
+  compression is not a UX nicety — at 12,000 acres, manual scheduling at
+  scale is simply not done today by competitors; it is either skipped
+  (leading to ad-hoc, reactive farming) or done at a strategic level only,
+  never a per-plot level. Plot-level (not parcel-level) allocation means
+  mixed-cropping parcels are handled correctly. The Overdue/Underdue
+  monitoring closes the loop back to Stage 4's budget tracking — every
+  vehicle/equipment allocation here becomes a land investment entry that
+  rolls back up into the per-acre investment figure the Director monitors.
+
+
+
+════════════════════════════════════════════════════════════════════════════════
+THE COMPLETE CHAIN — ONE LINE PER STAGE
+════════════════════════════════════════════════════════════════════════════════
+
+  Budget (Capex/Opex)
+      → Amortization (loan terms on Capex)
+          → Cash Flow (monthly inflow/outflow incl. EMI)
+              → Finalized Budget (Savings / Pipeline / Utilized per line item)
+                  → Land Onboarding (Leads → KYC → Registration, multi-owner/
+                    multi-parcel aware)
+                  → HR Onboarding (MRF against budget line → 2-level approval
+                    → staffing within allocated envelope)
+                  → Equipment/Inventory (19-step Indent → Approval → Vendor →
+                    Quotation → TC/NFA → PO → Invoice → 2-level Payment
+                    Approval [budget line selected here] → PRR → UTR → GRN →
+                    PO Closure)
+                  → Vehicle Onboarding
+                      → Scope of Work + Labour Distribution per parcel
+                          → Cultivation Master (template)
+                              → Cultivation Plan (template → real farm/dates)
+                                  → Cultivation Calendar (full schedule,
+                                    plot-level, vehicle/equipment-allocated,
+                                    monitored — generated in ~30 seconds)
+                                  → On-Demand Tasks (ad-hoc, parcel-level
+                                    allocation, partial-fulfilment aware)
+
+Every box in this chain writes back into the budget's Savings / Pipeline /
+Utilized figures and ultimately into the per-farm investment ledger — closing
+the loop from financial plan to physical execution to financial actual.
+
+================================================================================
+END OF THESIS
+================================================================================

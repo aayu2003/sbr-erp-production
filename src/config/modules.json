@@ -1,6 +1,23 @@
 {
   "supersets": [
     {
+      "key": "ceos-desk",
+      "label": "CEO'S DESK",
+      "description": "Executive overview and decision dashboard",
+      "icon": "Landmark",
+      "enabled": true,
+      "groups": [
+        {
+          "key": "executive",
+          "label": "Executive",
+          "enabled": true,
+          "items": [
+            { "key": "ceos-desk", "label": "CEO's Desk", "path": "/ceos-desk", "icon": "Landmark", "enabled": true }
+          ]
+        }
+      ]
+    },
+    {
       "key": "admin",
       "label": "ADMIN",
       "description": "Admin controls and farmer operations",
@@ -29,8 +46,6 @@
             { "key": "farmers",          "label": "Farmer Directory",          "path": "/farmers",          "icon": "UserCheck",   "enabled": true  },
             { "key": "land-acquisition", "label": "Land Acquisition", "path": "/land-acquisition", "icon": "Map",         "enabled": true  },
             { "key": "farm-directory",   "label": "Land Directory",   "path": "/farm-directory",   "icon": "FolderKanban","enabled": true  },
-            { "key": "land-hierarchy",   "label": "Land Hierarchy",   "path": "/blocks",           "icon": "Layers",      "enabled": true  },
-
             { "key": "tasks-beta",       "label": "Tasks (Beta)",     "path": "/tasks-beta",       "icon": "CheckSquare", "enabled": true }
           ]
         },
@@ -91,8 +106,8 @@
           "label": "Human Resource",
           "enabled": true,
           "items": [
-            { "key": "hrms",             "label": "Payroll & Attendance",  "path": "/hrms",                 "icon": "Landmark", "enabled": true },
-            { "key": "staff-onboarding", "label": "Staff Onboarding",      "path": "/staff-onboarding",     "icon": "UserPlus", "enabled": true  },
+            { "key": "hr-management",    "label": "HR Management",         "path": "/hr-management",        "icon": "LayoutDashboard", "enabled": true },
+            { "key": "staff-onboarding", "label": "Employee Directory",    "path": "/staff-onboarding",     "icon": "UserPlus", "enabled": true  },
             { "key": "man-power-req",    "label": "Man Power Requisition", "path": "/man-power-requisition","icon": "FileText", "enabled": true },
             { "key": "hrms-inbox",       "label": "Inbox",                 "path": "/hrms/inbox",           "icon": "Mail",     "enabled": true }
           ]
@@ -122,8 +137,8 @@
           "enabled": true,
           "items": [
             { "key": "cultivation-calendar","label": "Cultivation Calendar",  "path": "/cultivation-calendar","icon": "Calendar","enabled": true  },
-            { "key": "cultivation-master",  "label": "Cultivation Master",    "path": "/cultivation-master",  "icon": "Sprout",  "enabled": true  },
-            { "key": "cultivation-plan",    "label": "Cultivation Plan",      "path": "/cultivation-plan",    "icon": "Layers",  "enabled": true  },
+            { "key": "cultivation-master",  "label": "Operations Master",     "path": "/cultivation-master",  "icon": "Sprout",  "enabled": true  },
+            { "key": "cultivation-plan",    "label": "Cultivation Planner",   "path": "/cultivation-plan",    "icon": "Layers",  "enabled": true  },
             { "key": "field-monitoring",    "label": "Field Monitoring",      "path": "/field-monitoring",    "icon": "Activity","enabled": true  },
             { "key": "field-visit-analytics","label": "Field Visit Analytics","path": "/field-visit-analytics","icon": "Map",    "enabled": true  },
             { "key": "labour-management",   "label": "Labour Management",     "path": "/labour-management",   "icon": "Users",   "enabled": true  },

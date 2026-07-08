@@ -18,6 +18,7 @@ import {
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
+import activitiesData from '@/config/activities.json';
 
 const BASE_URL = getBaseUrl().replace(/\/$/, '');
 
@@ -79,10 +80,11 @@ interface ActiveVendor {
 }
 
 // --- Constants ---
-const ACTIVITY_OPTIONS = [
-  'Ploughing', 'Bed Preparation', 'Irrigation', 'Fertilisation',
-  'Weeding', 'Spraying', 'Harvesting', 'Field Visit', 'Transport', 'Other',
-];
+// Sourced from the shared activity catalog (src/config/activities.json) so this list
+// stays in sync with the activity types managed in the Cultivation Master module.
+const ACTIVITY_OPTIONS = Array.from(
+  new Set((activitiesData as { name: string }[]).map((activity) => activity.name))
+);
 
 const EMPTY_ASSIGN_FORM = { farm_ids: [] as string[], activities: [] as string[], area_acres: '', start_date: '', end_date: '' };
 
@@ -317,6 +319,21 @@ const ScopeOfWork = () => {
     });
   }, [farms, farmSearch, alreadyAssignedFarmIds, farmerNames]);
 
+  // Total area is derived from the selected farms, not entered manually.
+  const selectedFarmsTotalArea = useMemo(() => {
+    return assignForm.farm_ids.reduce((sum, id) => {
+      const farm = farms.find(f => f.farm_id === id);
+      return sum + (Number(farm?.area) || 0);
+    }, 0);
+  }, [assignForm.farm_ids, farms]);
+
+  useEffect(() => {
+    setAssignForm(prev => ({
+      ...prev,
+      area_acres: selectedFarmsTotalArea ? selectedFarmsTotalArea.toFixed(2) : '',
+    }));
+  }, [selectedFarmsTotalArea]);
+
   const stats = useMemo(() => ({
     liveCount: vendors.filter(v => v.status === 'live').length,
     totalLands: scopeItems.length,
@@ -331,14 +348,14 @@ const ScopeOfWork = () => {
     const acres = Number(assignForm.area_acres);
     if (!acres || acres <= 0) { toast.error('Please enter a valid area'); return; }
 
-    // Build one optimistic assignment per selected farm
+    // Build one optimistic assignment per selected farm, each keeping its own actual area
     const newAssignments: LandAssignment[] = assignForm.farm_ids.map((farmId, i) => {
       const farm = farms.find(f => f.farm_id === farmId);
       return {
         assignment_id: `local_${Date.now()}_${i}`,
         farm_id: farmId,
         block_id: farm?.block_id ?? '',
-        area_acres: acres,
+        area_acres: Number(farm?.area) || 0,
         activities: assignForm.activities,
         start_date: assignForm.start_date || undefined,
         end_date: assignForm.end_date || undefined,
@@ -771,9 +788,9 @@ const ScopeOfWork = () => {
       {/* ── ASSIGN LAND MODAL ── */}
       {isAssignModalOpen && selectedVendor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="bg-white border border-gray-200 w-full max-w-lg rounded-2xl shadow-2xl animate-in zoom-in-95 duration-200 overflow-hidden">
+          <div className="bg-white border border-gray-200 w-full max-w-lg max-h-[90vh] rounded-2xl shadow-2xl animate-in zoom-in-95 duration-200 overflow-hidden flex flex-col">
             {/* Modal Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-indigo-50/60">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-indigo-50/60 shrink-0">
               <div>
                 <h3 className="text-base font-bold text-slate-800">Assign Land</h3>
                 <p className="text-xs text-slate-500 mt-0.5">
@@ -791,7 +808,7 @@ const ScopeOfWork = () => {
             </div>
 
             {/* Modal Body */}
-            <div className="px-6 py-5 space-y-5">
+            <div className="px-6 py-5 space-y-5 overflow-y-auto flex-1">
               {/* Farm / Land multi-select */}
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -933,16 +950,14 @@ const ScopeOfWork = () => {
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700 block mb-1.5">
-                    Area (acres) <span className="text-red-500">*</span>
+                    Total Area (acres) <span className="text-red-500">*</span>
                   </label>
                   <input
-                    type="number"
-                    min="0"
-                    step="0.01"
+                    type="text"
+                    readOnly
                     value={assignForm.area_acres}
-                    onChange={e => setAssignForm(prev => ({ ...prev, area_acres: e.target.value }))}
-                    placeholder="e.g. 5.25"
-                    className="h-9 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                    placeholder="Select lands to compute"
+                    className="h-9 w-full rounded-lg border border-gray-200 bg-gray-100 px-3 text-sm text-slate-600 cursor-not-allowed focus:outline-none"
                   />
                 </div>
                 <div>
@@ -987,7 +1002,7 @@ const ScopeOfWork = () => {
                       ))}
                     </div>
                     {assignForm.area_acres && (
-                      <div className="mt-1 text-indigo-600 font-semibold">{assignForm.area_acres} ac each</div>
+                      <div className="mt-1 text-indigo-600 font-semibold">{assignForm.area_acres} ac total</div>
                     )}
                   </div>
                 </div>
@@ -995,7 +1010,7 @@ const ScopeOfWork = () => {
             </div>
 
             {/* Modal Footer */}
-            <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-gray-100 bg-gray-50/50">
+            <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-gray-100 bg-gray-50/50 shrink-0">
               <button
                 type="button"
                 onClick={() => setIsAssignModalOpen(false)}

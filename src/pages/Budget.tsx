@@ -1,12 +1,14 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, Fragment } from "react";
 import { useParams } from "react-router-dom";
 import * as XLSX from "xlsx";
 import {
   Plus, TrendingUp, TrendingDown, DollarSign, Filter,
-  Lock, Unlock, X, Edit3, Trash2, FileSpreadsheet,
+  Lock, Unlock, X, Edit3, Trash2, FileSpreadsheet, Info, Sparkles, ArrowUpDown,
 } from "lucide-react";
 import getBaseUrl from "@/lib/config";
 import { useAuth } from "@/context/AuthContext";
+import Playground from "./Playground";
+import DisbursementSequence, { type DisbursementSequenceLineItem } from "./DisbursementSequence";
 
 type BudgetType = "Capex" | "Opex";
 
@@ -24,6 +26,21 @@ type BudgetItem = {
   utilizedQty: number;
   savings: number;
   workingXlsxUrl: string;
+  amountInPipeline: number;
+  remainingAmount: number;
+};
+
+type BudgetAllocationEntry = {
+  flow_id: string;
+  order_number: string;
+  allocation: {
+    row_number: number;
+    line_item: string;
+    category: string;
+    type: string;
+    budgeted: number;
+    allocated: number;
+  };
 };
 
 type FarmRecord = {
@@ -360,9 +377,11 @@ const mapXlsxRow = (d: any): BudgetItem => ({
   acres:       parseFloat(d.total_acres) || 0,
   rateRaw:     String(d.rate_per_unit ?? "0"),
   ratePerUnit: parseFloat(d.rate_per_unit) || 0,
-  utilizedQty: parseFloat(d.utilized_amount) || 0,
-  savings:     parseFloat(d.savings) || 0,
-  workingXlsxUrl: String(d.working_range ?? ""),
+  utilizedQty:       parseFloat(d.utilized_amount) || 0,
+  savings:           parseFloat(d.savings) || 0,
+  workingXlsxUrl:    String(d.working_range ?? ""),
+  amountInPipeline:  parseFloat(d.amount_in_pipeline) || 0,
+  remainingAmount:   parseFloat(d.remaining_amount) || 0,
 });
 
 
@@ -713,6 +732,7 @@ const MAPPING_COLORS: Record<MappingField, { chip: string; outline: string; bg: 
 function AddLineItemModal({
   onClose,
   onSaved,
+  onBulkSaved,
   sheetsMap,
   sheetNames,
   onLoadSheet,
@@ -720,6 +740,7 @@ function AddLineItemModal({
 }: {
   onClose: () => void;
   onSaved: (item: BudgetItem) => void;
+  onBulkSaved: (items: BudgetItem[]) => void;
   sheetsMap: Record<string, SheetData>;
   sheetNames: string[];
   onLoadSheet: (name: string) => void;
@@ -728,7 +749,7 @@ function AddLineItemModal({
   const hasSheets = sheetNames.length > 0;
 
   // ── mode ──────────────────────────────────────────────────────────────────
-  const [mode, setMode] = useState<"working" | "manual">(hasSheets ? "working" : "manual");
+  const [mode, setMode] = useState<"working" | "manual" | "bulk">(hasSheets ? "working" : "manual");
 
   // ── selected sheet ────────────────────────────────────────────────────────
   const [selectedSheet, setSelectedSheet] = useState<string>(sheetNames[0] ?? "");
@@ -751,6 +772,10 @@ function AddLineItemModal({
   const [acres,       setAcres]       = useState(defaultAcres > 0 ? String(defaultAcres) : "");
   const [ratePerUnit, setRatePerUnit] = useState("");
   const [error,       setError]       = useState("");
+
+  // ── bulk upload ────────────────────────────────────────────────────────────
+  const [bulkRows,     setBulkRows]     = useState<{ item: BudgetItem; errors: string[] }[]>([]);
+  const [bulkFileName, setBulkFileName] = useState("");
 
   // ── crop type / farms ──────────────────────────────────────────────────────
   const [cropType, setCropType] = useState("");
@@ -852,6 +877,44 @@ function AddLineItemModal({
     if (isDragging) setDragEnd([ri, ci]);
   };
 
+  // ── bulk upload handlers ───────────────────────────────────────────────────
+  const handleBulkFile = (file: File) => {
+    setBulkFileName(file.name);
+    setBulkRows([]);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const bytes = new Uint8Array(e.target!.result as ArrayBuffer);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wb = (XLSX as any).read(bytes, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      if (!ws) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawRows: any[] = XLSX.utils.sheet_to_json(ws);
+      const parsed = rawRows.map((row, i) => {
+        const item = mapXlsxRow(row);
+        if (!item.id) item.id = `temp_bulk_${Date.now()}_${i}`;
+        const errors: string[] = [];
+        if (!item.category)    errors.push("category");
+        if (!item.lineItem)    errors.push("line_item");
+        if (!item.uom)         errors.push("UoM");
+        if (!item.qtyPerAcre)  errors.push("quantity_per_acre");
+        if (!item.acres)       errors.push("total_acres");
+        if (!item.ratePerUnit) errors.push("rate_per_unit");
+        return { item, errors };
+      });
+      setBulkRows(parsed);
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const bulkValidCount = bulkRows.filter((r) => r.errors.length === 0).length;
+
+  const handleBulkImport = () => {
+    const valid = bulkRows.filter((r) => r.errors.length === 0).map((r) => r.item);
+    onBulkSaved(valid);
+    onClose();
+  };
+
   // ── computed ───────────────────────────────────────────────────────────────
   const qtyNum     = parseFloat(qtyPerAcre)  || 0;
   const acresNum   = parseFloat(acres)        || 0;
@@ -861,7 +924,7 @@ function AddLineItemModal({
 
   // ── submit ─────────────────────────────────────────────────────────────────
   const handleAdd = () => {
-    if (!category.trim() || !lineItem.trim() || !uom.trim() || !qtyPerAcre || !acres || !ratePerUnit) {
+    if (!lineItemId.trim() && (!category.trim() || !lineItem.trim() || !uom.trim() || !qtyPerAcre || !acres || !ratePerUnit)) {
       setError("All fields are required.");
       return;
     }
@@ -887,9 +950,11 @@ function AddLineItemModal({
       acres:          acresNum,
       rateRaw,
       ratePerUnit:    rateNum,
-      utilizedQty:    0,
-      savings:        0,
-      workingXlsxUrl: rangeStr && selectedSheet ? `${selectedSheet}!${rangeStr}` : rangeStr,
+      utilizedQty:      0,
+      savings:          0,
+      workingXlsxUrl:   rangeStr && selectedSheet ? `${selectedSheet}!${rangeStr}` : rangeStr,
+      amountInPipeline: 0,
+      remainingAmount:  0,
     };
 
     onSaved(newItem);
@@ -901,6 +966,8 @@ function AddLineItemModal({
       <div className={`w-full rounded-xl bg-white shadow-2xl ${
         mode === "working" && hasSheets
           ? "flex h-[calc(100vh-2rem)] max-w-[1500px] flex-col overflow-hidden"
+          : mode === "bulk"
+          ? "flex max-h-[calc(100vh-2rem)] max-w-4xl flex-col overflow-hidden"
           : "max-w-xl"
       }`}>
 
@@ -911,28 +978,47 @@ function AddLineItemModal({
             <p className="mt-0.5 text-xs font-semibold text-slate-500">
               {mode === "working"
                 ? "Activate a mapping button then click a cell · drag to mark the working range"
+                : mode === "bulk"
+                ? "Upload an .xlsx file — each row becomes a budget line item"
                 : "Enter values manually"}
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {/* Mode toggle — only shown when a working sheet exists */}
-            {hasSheets && (
-              <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
-                {(["working", "manual"] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setMode(m)}
-                    className={[
-                      "h-7 rounded-md px-3 text-xs font-extrabold transition-all capitalize",
-                      mode === m ? "bg-[#173f70] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
-                    ].join(" ")}
-                  >
-                    {m === "working" ? "Working Sheet" : "Manual"}
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* Mode toggle */}
+            <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
+              {hasSheets && (
+                <button
+                  type="button"
+                  onClick={() => setMode("working")}
+                  className={[
+                    "h-7 rounded-md px-3 text-xs font-extrabold transition-all",
+                    mode === "working" ? "bg-[#173f70] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
+                  ].join(" ")}
+                >
+                  Working Sheet
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setMode("manual")}
+                className={[
+                  "h-7 rounded-md px-3 text-xs font-extrabold transition-all",
+                  mode === "manual" ? "bg-[#173f70] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
+                ].join(" ")}
+              >
+                Manual
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("bulk")}
+                className={[
+                  "h-7 rounded-md px-3 text-xs font-extrabold transition-all",
+                  mode === "bulk" ? "bg-[#173f70] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
+                ].join(" ")}
+              >
+                Bulk Upload
+              </button>
+            </div>
             <button onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100">
               <X className="h-5 w-5" />
             </button>
@@ -942,11 +1028,14 @@ function AddLineItemModal({
         <div className={`p-6 ${
           mode === "working" && hasSheets
             ? "grid min-h-0 flex-1 grid-cols-[minmax(300px,340px)_minmax(0,1fr)] gap-6 overflow-hidden max-lg:grid-cols-1 max-lg:overflow-y-auto"
+            : mode === "bulk"
+            ? "min-h-0 flex-1 overflow-y-auto"
             : ""
         }`}>
 
           {/* ── Left / form column ── */}
           <div className={`space-y-4 ${mode === "working" && hasSheets ? "min-h-0 overflow-y-auto pr-2" : ""}`}>
+            {mode !== "bulk" ? (<>
             {error && <p className="rounded-md bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{error}</p>}
 
             {/* Line Item ID */}
@@ -1098,6 +1187,105 @@ function AddLineItemModal({
                 <p className="mt-0.5 text-base font-extrabold text-emerald-700">{fmt(totalValue)}</p>
               </div>
             </div>
+            </>) : (
+            /* ── Bulk Upload UI ── */
+            <div className="flex flex-col gap-4">
+              {error && <p className="rounded-md bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{error}</p>}
+              <Field label="Line Item ID">
+                <input
+                  value={lineItemId}
+                  onChange={(e) => setLineItemId(e.target.value)}
+                  placeholder="e.g. LI-001 (optional — enables import button)"
+                  className={inputCls}
+                />
+              </Field>
+              <label
+                className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 p-8 transition-all hover:border-[#173f70]/40 hover:bg-slate-100/60"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleBulkFile(f); }}
+              >
+                <FileSpreadsheet className="h-8 w-8 text-slate-400" />
+                <div className="text-center">
+                  <p className="text-sm font-extrabold text-slate-700">
+                    {bulkFileName || "Drop .xlsx here, or click to browse"}
+                  </p>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Required columns: budget_type · category · line_item · UoM · quantity_per_acre · total_acres · rate_per_unit
+                  </p>
+                </div>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls"
+                  className="hidden"
+                  onChange={(e) => { if (e.target.files?.[0]) handleBulkFile(e.target.files[0]); }}
+                />
+              </label>
+
+              {bulkRows.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-extrabold text-slate-600">
+                      {bulkRows.length} row{bulkRows.length !== 1 ? "s" : ""} found
+                      {bulkRows.some((r) => r.errors.length > 0) && (
+                        <span className="ml-2 text-red-500">· {bulkRows.filter((r) => r.errors.length > 0).length} with errors</span>
+                      )}
+                    </p>
+                    <p className="text-xs font-extrabold text-[#173f70]">{bulkValidCount} ready to import</p>
+                  </div>
+                  <div className="max-h-[340px] overflow-auto rounded-lg border border-slate-200">
+                    <table className="w-full border-collapse text-xs">
+                      <thead className="sticky top-0 z-10 bg-slate-50">
+                        <tr>
+                          <th className="border-b border-slate-200 px-2 py-2 text-left font-extrabold text-slate-500">#</th>
+                          <th className="border-b border-slate-200 px-2 py-2 text-left font-extrabold text-slate-500">Type</th>
+                          <th className="border-b border-slate-200 px-2 py-2 text-left font-extrabold text-slate-500">Category</th>
+                          <th className="border-b border-slate-200 px-2 py-2 text-left font-extrabold text-slate-500">Line Item</th>
+                          <th className="border-b border-slate-200 px-2 py-2 text-left font-extrabold text-slate-500">UoM</th>
+                          <th className="border-b border-slate-200 px-2 py-2 text-right font-extrabold text-slate-500">Qty/Ac</th>
+                          <th className="border-b border-slate-200 px-2 py-2 text-right font-extrabold text-slate-500">Acres</th>
+                          <th className="border-b border-slate-200 px-2 py-2 text-right font-extrabold text-slate-500">Rate</th>
+                          <th className="border-b border-slate-200 px-2 py-2 text-right font-extrabold text-slate-500 bg-emerald-50/60">Total Value</th>
+                          <th className="border-b border-slate-200 px-2 py-2 text-left font-extrabold text-red-400">Issues</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bulkRows.map(({ item, errors }, i) => (
+                          <tr key={i} className={errors.length > 0 ? "bg-red-50/60" : "hover:bg-slate-50"}>
+                            <td className="border-b border-slate-100 px-2 py-1.5 font-semibold text-slate-400">{i + 1}</td>
+                            <td className="border-b border-slate-100 px-2 py-1.5">
+                              <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-extrabold ${typeColors[item.type]}`}>{item.type}</span>
+                            </td>
+                            <td className="border-b border-slate-100 px-2 py-1.5 font-semibold text-slate-700">
+                              {item.category || <span className="text-red-400 italic">missing</span>}
+                            </td>
+                            <td className="border-b border-slate-100 px-2 py-1.5 font-extrabold text-slate-900">
+                              {item.lineItem || <span className="text-red-400 italic">missing</span>}
+                            </td>
+                            <td className="border-b border-slate-100 px-2 py-1.5 text-slate-500">
+                              {item.uom || <span className="text-red-400 italic">—</span>}
+                            </td>
+                            <td className="border-b border-slate-100 px-2 py-1.5 text-right text-slate-700">{fmtNum(item.qtyPerAcre)}</td>
+                            <td className="border-b border-slate-100 px-2 py-1.5 text-right text-slate-700">{fmtNum(item.acres)}</td>
+                            <td className="border-b border-slate-100 px-2 py-1.5 text-right text-slate-700">{fmt(item.ratePerUnit)}</td>
+                            <td className="border-b border-slate-100 bg-emerald-50/30 px-2 py-1.5 text-right font-extrabold text-emerald-700">
+                              {fmt(item.qtyPerAcre * item.acres * item.ratePerUnit)}
+                            </td>
+                            <td className="border-b border-slate-100 px-2 py-1.5">
+                              {errors.length > 0 ? (
+                                <span className="text-[10px] font-semibold text-red-500">Missing: {errors.join(", ")}</span>
+                              ) : (
+                                <span className="text-[10px] font-semibold text-emerald-500">✓ OK</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+            )}
           </div>
 
           {/* ── Right / working sheet grid ── */}
@@ -1247,10 +1435,24 @@ function AddLineItemModal({
           <button onClick={onClose} className="h-10 rounded-lg border border-slate-200 px-5 text-sm font-semibold hover:bg-slate-50">
             Cancel
           </button>
-          <button type="button" onClick={handleAdd}
-            className="h-10 rounded-lg bg-[#173f70] px-5 text-sm font-semibold text-white hover:bg-[#12345e]">
-            Add Line Item
-          </button>
+          {mode === "bulk" ? (
+            <button
+              type="button"
+              onClick={handleBulkImport}
+              className="h-10 rounded-lg bg-[#173f70] px-5 text-sm font-semibold text-white hover:bg-[#12345e]"
+            >
+              Import {bulkValidCount > 0 ? `${bulkValidCount} ` : ""}Item{bulkValidCount !== 1 ? "s" : ""}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleAdd}
+              disabled={!lineItemId.trim() && (!category.trim() || !lineItem.trim() || !uom.trim() || !qtyPerAcre || !acres || !ratePerUnit)}
+              className="h-10 rounded-lg bg-[#173f70] px-5 text-sm font-semibold text-white hover:bg-[#12345e] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Add Line Item
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1634,6 +1836,45 @@ export default function Budget() {
   const [showAdd,        setShowAdd]        = useState(false);
   const [editingItem,    setEditingItem]    = useState<BudgetItem | null>(null);
   const [xlsxDrawerItem, setXlsxDrawerItem] = useState<BudgetItem | null>(null);
+  const [showPlayground, setShowPlayground] = useState(false);
+  const [disbursementItem, setDisbursementItem] = useState<DisbursementSequenceLineItem | null>(null);
+  const [expandedAllocationId, setExpandedAllocationId] = useState<string | null>(null);
+  const [allocationBreakdowns, setAllocationBreakdowns] = useState<Record<string, BudgetAllocationEntry[]>>({});
+  const [loadingAllocationId, setLoadingAllocationId] = useState<string | null>(null);
+  const [allocationErrors, setAllocationErrors] = useState<Record<string, string>>({});
+
+  const toggleAllocationBreakdown = async (row: BudgetItem) => {
+    const nextId = expandedAllocationId === row.id ? null : row.id;
+    setExpandedAllocationId(nextId);
+    if (!nextId || allocationBreakdowns[row.id] || loadingAllocationId === row.id) return;
+
+    setLoadingAllocationId(row.id);
+    setAllocationErrors((prev) => {
+      if (!(row.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[row.id];
+      return next;
+    });
+    try {
+      const res = await fetch(`${getBaseUrl()}/admin_accounts/get_budget_allocation_schema`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          budget_id: budgetId,
+          line_item_category: row.category,
+          line_item_type: row.type,
+          line_item_name: row.lineItem,
+        }),
+      });
+      const json: any = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) throw new Error(json?.message || "Failed to load allocation breakdown");
+      setAllocationBreakdowns((prev) => ({ ...prev, [row.id]: json.data || [] }));
+    } catch (err: any) {
+      setAllocationErrors((prev) => ({ ...prev, [row.id]: err?.message || "Failed to load allocation breakdown" }));
+    } finally {
+      setLoadingAllocationId((prev) => (prev === row.id ? null : prev));
+    }
+  };
 
   // All non-budget sheets parsed from the xlsx
   const [sheetsMap,       setSheetsMap]       = useState<Record<string, SheetData>>({});
@@ -1785,6 +2026,7 @@ export default function Budget() {
   const overallPct           = filteredTotalValue > 0 ? Math.min(100, (filteredUtilizedVal / filteredTotalValue) * 100) : 0;
 
   const handleSaved = (item: BudgetItem) => setData((prev) => [...prev, item]);
+  const handleBulkSaved = (items: BudgetItem[]) => setData((prev) => [...prev, ...items]);
 
   const handleSaveEdit = (updated: BudgetItem) => {
     setData((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
@@ -1812,22 +2054,25 @@ export default function Budget() {
         "line_item_id", "budget_type", "category", "line_item", "UoM",
         "quantity_per_acre", "total_acres", "total_quantity",
         "rate_per_unit", "total_value", "utilized_amount", "working_range", "savings",
+        "amount_in_pipeline", "remaining_amount",
       ];
       const budgetWs = XLSX.utils.json_to_sheet(
         data.map((item) => ({
-          line_item_id:      item.id,
-          budget_type:       item.type,
-          category:          item.category,
-          line_item:         item.lineItem,
-          UoM:               item.uom,
-          quantity_per_acre: item.qtyPerAcre,
-          total_acres:       item.acres,
-          total_quantity:    item.qtyPerAcre * item.acres,
-          rate_per_unit:     item.ratePerUnit,
-          total_value:       item.qtyPerAcre * item.acres * item.ratePerUnit,
-          utilized_amount:   item.utilizedQty,
-          working_range:     item.workingXlsxUrl,
-          savings:           item.savings,
+          line_item_id:       item.id,
+          budget_type:        item.type,
+          category:           item.category,
+          line_item:          item.lineItem,
+          UoM:                item.uom,
+          quantity_per_acre:  item.qtyPerAcre,
+          total_acres:        item.acres,
+          total_quantity:     item.qtyPerAcre * item.acres,
+          rate_per_unit:      item.ratePerUnit,
+          total_value:        item.qtyPerAcre * item.acres * item.ratePerUnit,
+          utilized_amount:    item.utilizedQty,
+          working_range:      item.workingXlsxUrl,
+          savings:            item.savings,
+          amount_in_pipeline: item.amountInPipeline,
+          remaining_amount:   item.remainingAmount,
         })),
         { header: BUDGET_COLS }
       );
@@ -1926,6 +2171,14 @@ export default function Budget() {
           <p className="mt-1 text-sm font-medium text-slate-500">Plan and track capital and operational expenditure across all farm acres</p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowPlayground(true)}
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-4 text-sm font-semibold text-violet-700 transition-all hover:bg-violet-100"
+          >
+            <Sparkles className="h-4 w-4" />
+            Playground
+          </button>
           <button
             type="button"
             onClick={() => setLocked((l) => !l)}
@@ -2035,57 +2288,155 @@ export default function Budget() {
       {!loading && (
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1100px] border-collapse text-left">
+          <table className="w-full min-w-[1400px] border-collapse text-left">
             <thead>
-              <tr className="border-b border-slate-200 bg-slate-50 text-xs font-extrabold uppercase tracking-wide text-slate-500">
-                <th className="px-4 py-3">Budget Type</th>
-                <th className="px-4 py-3">Category</th>
-                <th className="px-4 py-3">Line Item</th>
-                <th className="px-4 py-3">UoM</th>
-                <th className="px-4 py-3 text-right">Qty / Acre</th>
-                <th className="px-4 py-3 text-right">Acres</th>
-                <th className="px-4 py-3 text-right bg-amber-50/60">Total Qty</th>
-                <th className="px-4 py-3 text-right">Rate / Unit</th>
-                <th className="px-4 py-3 text-right bg-emerald-50/60">Total Value</th>
-                <th className="px-4 py-3 bg-slate-100/80">Utilization</th>
-                <th className="px-4 py-3 text-right bg-teal-50/60">Savings</th>
-                <th className="px-4 py-3 text-center">Working</th>
-                {!locked && <th className="px-4 py-3">Actions</th>}
+              {/* Group header row */}
+              <tr className="bg-slate-100 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">
+                <th colSpan={9} className="px-4 pt-2.5 pb-1 border-b border-slate-200/60" />
+                <th colSpan={3} className="px-4 pt-2.5 pb-1 text-center border-b border-slate-200/60 text-emerald-600/70 border-l border-emerald-200">
+                  ₹ Cash Flow
+                </th>
+                <th colSpan={3} className="px-4 pt-2.5 pb-1 border-b border-slate-200/60 border-l border-slate-200" />
+                {!locked && <th className="border-b border-slate-200/60" />}
+              </tr>
+              {/* Column header row */}
+              <tr className="border-b-2 border-slate-200 bg-slate-50 text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                <th className="px-3 py-2.5 text-center text-slate-400">#</th>
+                <th className="px-4 py-2.5">Type</th>
+                <th className="px-4 py-2.5">Category</th>
+                <th className="px-4 py-2.5">Line Item</th>
+                <th className="px-4 py-2.5">UoM</th>
+                <th className="px-4 py-2.5 text-right">Qty / Acre</th>
+                <th className="px-4 py-2.5 text-right">Acres</th>
+                <th className="px-4 py-2.5 text-right bg-amber-50/60">Total Qty</th>
+                <th className="px-4 py-2.5 text-right">Rate / Unit</th>
+                {/* ── Cash flow columns ── */}
+                <th className="px-4 py-2.5 text-right bg-emerald-50 border-l-2 border-emerald-200">
+                  <div className="font-extrabold text-emerald-700">Total Value</div>
+                  <div className="text-[9px] font-medium normal-case tracking-normal text-emerald-500/80 mt-0.5">Budgeted (₹)</div>
+                </th>
+                <th className="px-4 py-2.5 text-right bg-sky-50">
+                  <div className="font-extrabold text-sky-700">Remaining</div>
+                  <div className="text-[9px] font-medium normal-case tracking-normal text-sky-400/80 mt-0.5">Available (₹)</div>
+                </th>
+                <th className="px-4 py-2.5 text-right bg-violet-50">
+                  <div className="font-extrabold text-violet-700">Allocated</div>
+                  <div className="text-[9px] font-medium normal-case tracking-normal text-violet-400/80 mt-0.5">In Pipeline (₹)</div>
+                </th>
+                <th className="px-4 py-2.5 bg-slate-100/80 border-l-2 border-slate-200">
+                  <div className="font-extrabold text-slate-500">Utilization</div>
+                  <div className="text-[9px] font-medium normal-case tracking-normal text-slate-400/80 mt-0.5">Actual Spend</div>
+                </th>
+                <th className="px-4 py-2.5 text-right bg-teal-50">
+                  <div className="font-extrabold text-teal-700">Savings</div>
+                  <div className="text-[9px] font-medium normal-case tracking-normal text-teal-400/80 mt-0.5">vs Budget (₹)</div>
+                </th>
+                <th className="px-4 py-2.5 text-center">Working</th>
+                {!locked && <th className="px-4 py-2.5">Actions</th>}
               </tr>
             </thead>
             <tbody>
-              {filtered.map((row) => {
+              {filtered.map((row, idx) => {
                 const totalQty      = row.qtyPerAcre * row.acres;
                 const totalValue    = totalQty * row.ratePerUnit;
                 const utilizedValue = row.utilizedQty * row.ratePerUnit;
                 const utilizedPct   = totalQty > 0 ? Math.min(100, (row.utilizedQty / totalQty) * 100) : 0;
+                const isAllocationExpanded = expandedAllocationId === row.id;
                 return (
-                  <tr key={row.id} className="border-b border-slate-100 text-sm last:border-b-0 hover:bg-blue-50/30">
-                    <td className="whitespace-nowrap px-4 py-3">
+                  <Fragment key={row.id}>
+                  <tr className="border-b border-slate-100 text-sm last:border-b-0 hover:bg-slate-50/60">
+                    <td className="px-3 py-3.5 text-center text-xs font-semibold text-slate-400 select-none">{idx + 1}</td>
+                    <td className="whitespace-nowrap px-4 py-3.5">
                       <span className={`rounded-full px-2.5 py-0.5 text-xs font-extrabold ${typeColors[row.type]}`}>{row.type}</span>
                     </td>
-                    <td className="whitespace-nowrap px-4 py-3 font-semibold text-slate-700">{row.category}</td>
-                    <td className="px-4 py-3 font-extrabold text-slate-900">{row.lineItem}</td>
-                    <td className="whitespace-nowrap px-4 py-3 text-slate-500">{row.uom}</td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right font-semibold text-slate-700">
-                      {fmtNum(row.qtyPerAcre)}
+                    <td className="whitespace-nowrap px-4 py-3.5 font-semibold text-slate-700">{row.category}</td>
+                    <td className="px-4 py-3.5 font-extrabold text-slate-900">{row.lineItem}</td>
+                    <td className="whitespace-nowrap px-4 py-3.5 text-slate-500">{row.uom}</td>
+                    <td className="whitespace-nowrap px-4 py-3.5 text-right font-semibold text-slate-700">{fmtNum(row.qtyPerAcre)}</td>
+                    <td className="whitespace-nowrap px-4 py-3.5 text-right font-semibold text-slate-700">{fmtNum(row.acres)}</td>
+                    <td className="whitespace-nowrap bg-amber-50/40 px-4 py-3.5 text-right font-extrabold text-amber-800">{fmtNum(totalQty)}</td>
+                    <td className="whitespace-nowrap px-4 py-3.5 text-right font-semibold text-slate-700">{fmt(row.ratePerUnit)}</td>
+
+                    {/* ── Cash flow columns ── */}
+                    {/* 1. Total Value — what was budgeted */}
+                    <td className="whitespace-nowrap bg-emerald-50/60 px-4 py-3.5 text-right border-l-2 border-emerald-200">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <div className="font-extrabold text-emerald-700 tabular-nums">{fmt(totalValue)}</div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDisbursementItem({
+                              id: row.id,
+                              category: row.category,
+                              lineItem: row.lineItem,
+                              type: row.type,
+                              totalValue,
+                            })
+                          }
+                          title="Disbursement sequence"
+                          className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-emerald-200 text-emerald-500 transition-colors hover:border-emerald-400 hover:text-emerald-700"
+                        >
+                          <ArrowUpDown className="h-2.5 w-2.5" />
+                        </button>
+                      </div>
                     </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right font-semibold text-slate-700">{fmtNum(row.acres)}</td>
-                    <td className="whitespace-nowrap bg-amber-50/40 px-4 py-3 text-right font-extrabold text-amber-800">{fmtNum(totalQty)}</td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right font-semibold text-slate-700">
-                      {fmt(row.ratePerUnit)}
+                    {/* 2. Remaining — available budget left; red when overrun */}
+                    <td className={`whitespace-nowrap px-4 py-3.5 text-right ${
+                      row.remainingAmount < 0
+                        ? 'bg-red-50/70'
+                        : row.remainingAmount === 0
+                        ? 'bg-slate-50'
+                        : 'bg-sky-50/60'
+                    }`}>
+                      {row.remainingAmount !== 0 ? (
+                        <div className={`font-extrabold tabular-nums flex items-center justify-end gap-1 ${row.remainingAmount < 0 ? 'text-red-600' : 'text-sky-700'}`}>
+                          {row.remainingAmount < 0 && <span className="text-[10px] font-black">▼</span>}
+                          {row.remainingAmount > 0 && <span className="text-[10px] font-black text-sky-500">▲</span>}
+                          {fmt(Math.abs(row.remainingAmount))}
+                        </div>
+                      ) : <span className="text-slate-300 font-semibold">—</span>}
                     </td>
-                    <td className="whitespace-nowrap bg-emerald-50/40 px-4 py-3 text-right font-extrabold text-emerald-700">{fmt(totalValue)}</td>
-                    <td className="px-4 py-3">
+                    {/* 3. Allocated / In Pipeline — committed but not yet paid */}
+                    <td className="whitespace-nowrap bg-violet-50/50 px-4 py-3.5 text-right">
+                      {row.amountInPipeline !== 0 ? (
+                        <div className="flex items-center justify-end gap-1.5">
+                          <div className="font-extrabold text-violet-700 tabular-nums">{fmt(row.amountInPipeline)}</div>
+                          <button
+                            type="button"
+                            onClick={() => toggleAllocationBreakdown(row)}
+                            title="Show allocation breakdown"
+                            className={[
+                              "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors",
+                              isAllocationExpanded
+                                ? "border-violet-400 bg-violet-100 text-violet-700"
+                                : "border-violet-200 text-violet-400 hover:border-violet-400 hover:text-violet-600",
+                            ].join(" ")}
+                          >
+                            <Info className="h-2.5 w-2.5" />
+                          </button>
+                        </div>
+                      ) : <span className="text-slate-300 font-semibold">—</span>}
+                    </td>
+                    {/* 4. Utilization — actual spend progress */}
+                    <td className="px-4 py-3.5 border-l-2 border-slate-200 min-w-[160px]">
                       <div className="space-y-1">
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span className="text-[10px] font-bold text-slate-500 tabular-nums">{fmt(utilizedValue)}</span>
+                          <span className={`text-[10px] font-extrabold tabular-nums ${utilizedPct > 100 ? 'text-red-500' : utilizedPct > 80 ? 'text-amber-600' : 'text-slate-400'}`}>
+                            {utilizedPct.toFixed(0)}%
+                          </span>
+                        </div>
                         <UtilizationBar pct={utilizedPct} />
-                        <p className="text-[10px] font-semibold text-slate-400 tabular-nums">
-                          {fmtNum(row.utilizedQty)} / {fmtNum(totalQty)} {row.uom} · {fmt(utilizedValue)}
+                        <p className="text-[9px] font-semibold text-slate-400 tabular-nums mt-0.5">
+                          {fmtNum(row.utilizedQty)} / {fmtNum(totalQty)} {row.uom}
                         </p>
                       </div>
                     </td>
-                    <td className="whitespace-nowrap bg-teal-50/40 px-4 py-3 text-right font-extrabold text-teal-700">
-                      {row.savings !== 0 ? fmt(row.savings) : <span className="text-slate-300 font-semibold">—</span>}
+                    {/* 5. Savings — efficiency vs budget */}
+                    <td className="whitespace-nowrap bg-teal-50/50 px-4 py-3.5 text-right">
+                      {row.savings !== 0
+                        ? <div className="font-extrabold text-teal-700 tabular-nums">{fmt(row.savings)}</div>
+                        : <span className="text-slate-300 font-semibold">—</span>}
                     </td>
                     <td className="px-4 py-3 text-center">
                       {row.workingXlsxUrl ? (
@@ -2121,6 +2472,41 @@ export default function Budget() {
                       </td>
                     )}
                   </tr>
+                  {isAllocationExpanded && (
+                    <tr className="border-b border-slate-100 bg-violet-50/30">
+                      <td colSpan={locked ? 15 : 16} className="px-6 py-3">
+                        <div className="rounded-lg border border-violet-100 bg-white px-4 py-3 text-xs">
+                          {loadingAllocationId === row.id ? (
+                            <span className="text-slate-400">Loading allocation breakdown…</span>
+                          ) : allocationErrors[row.id] ? (
+                            <span className="text-red-500">{allocationErrors[row.id]}</span>
+                          ) : (allocationBreakdowns[row.id]?.length ?? 0) === 0 ? (
+                            <span className="text-slate-400">No allocation breakdown found.</span>
+                          ) : (
+                            <table className="w-full text-left">
+                              <thead>
+                                <tr className="text-[10px] uppercase tracking-wide text-slate-400">
+                                  <th className="pb-1.5 pr-4 font-bold">Order Number</th>
+                                  <th className="pb-1.5 pr-4 text-right font-bold">Allocated (₹)</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {allocationBreakdowns[row.id]!.map((entry) => (
+                                  <tr key={entry.flow_id} className="border-t border-slate-100">
+                                    <td className="py-1.5 pr-4 font-semibold text-slate-700">{entry.order_number}</td>
+                                    <td className="py-1.5 pr-4 text-right font-extrabold text-violet-700 tabular-nums">
+                                      {fmt(entry.allocation.allocated)}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -2152,6 +2538,7 @@ export default function Budget() {
         <AddLineItemModal
           onClose={() => setShowAdd(false)}
           onSaved={handleSaved}
+          onBulkSaved={handleBulkSaved}
           sheetsMap={sheetsMap}
           sheetNames={sheetNames}
           onLoadSheet={loadSheet}
@@ -2171,6 +2558,12 @@ export default function Budget() {
           onCellEdit={handleWorkingCellEdit}
           onLoadSheet={loadSheet}
         />
+      )}
+      {showPlayground && (
+        <Playground budgetId={budgetId} onClose={() => setShowPlayground(false)} />
+      )}
+      {disbursementItem && (
+        <DisbursementSequence budgetId={budgetId} item={disbursementItem} onClose={() => setDisbursementItem(null)} />
       )}
     </div>
   );

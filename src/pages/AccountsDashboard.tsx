@@ -33,6 +33,8 @@ import {
   Trash2,
   Network,
   BookMarked,
+  Phone,
+  User,
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -234,11 +236,74 @@ const natureColors: Record<string, string> = {
   Expense: "bg-orange-100 text-orange-700",
 };
 
+// ── Bank onboarding helpers ───────────────────────────────────────────────────
+
+type BankAccountEntry = {
+  id: string;
+  bankName: string;
+  accountNumber: string;
+  ifscCode: string;
+  branch?: string;
+  holderName: string;
+  accountType?: "Current" | "Savings" | "";
+  authorisedPerson?: { name: string; phone: string };
+  rmName?: string;
+  rmPhone?: string;
+};
+
+type StaffOption = {
+  id: string;
+  name: string;
+  phone: string;
+};
+
+type StaffApiItem = {
+  staff_id?: string;
+  staff_information?: {
+    staff_name?: string;
+    staff_phone?: string;
+  };
+};
+
+const BANK_LOGO_MAP: Record<string, { bg: string; ring: string; abbr: string; textColor: string }> = {
+  sbi:              { bg: "bg-[#2255a4]",  ring: "ring-blue-300",   abbr: "SBI",   textColor: "text-white" },
+  "state bank":     { bg: "bg-[#2255a4]",  ring: "ring-blue-300",   abbr: "SBI",   textColor: "text-white" },
+  hdfc:             { bg: "bg-[#004C8F]",  ring: "ring-blue-400",   abbr: "HDFC",  textColor: "text-white" },
+  icici:            { bg: "bg-[#F37021]",  ring: "ring-orange-300", abbr: "ICICI", textColor: "text-white" },
+  axis:             { bg: "bg-[#800000]",  ring: "ring-red-300",    abbr: "AXIS",  textColor: "text-white" },
+  kotak:            { bg: "bg-[#EE1C25]",  ring: "ring-red-300",    abbr: "KMB",   textColor: "text-white" },
+  pnb:              { bg: "bg-[#1A237E]",  ring: "ring-indigo-300", abbr: "PNB",   textColor: "text-white" },
+  "punjab national":{ bg: "bg-[#1A237E]",  ring: "ring-indigo-300", abbr: "PNB",   textColor: "text-white" },
+  canara:           { bg: "bg-[#007BC3]",  ring: "ring-cyan-300",   abbr: "CBK",   textColor: "text-white" },
+  "union bank":     { bg: "bg-[#4A148C]",  ring: "ring-purple-300", abbr: "UBI",   textColor: "text-white" },
+  "bank of baroda": { bg: "bg-[#F57C00]",  ring: "ring-orange-300", abbr: "BOB",   textColor: "text-white" },
+  bob:              { bg: "bg-[#F57C00]",  ring: "ring-orange-300", abbr: "BOB",   textColor: "text-white" },
+  idfc:             { bg: "bg-[#D81B60]",  ring: "ring-pink-300",   abbr: "IDFC",  textColor: "text-white" },
+  "yes bank":       { bg: "bg-[#0d47a1]",  ring: "ring-blue-300",   abbr: "YES",   textColor: "text-white" },
+  federal:          { bg: "bg-[#1565C0]",  ring: "ring-blue-300",   abbr: "FED",   textColor: "text-white" },
+  "indian bank":    { bg: "bg-[#1B5E20]",  ring: "ring-green-300",  abbr: "IB",    textColor: "text-white" },
+  rbl:              { bg: "bg-[#C62828]",  ring: "ring-red-300",    abbr: "RBL",   textColor: "text-white" },
+  indusind:         { bg: "bg-[#7B1FA2]",  ring: "ring-purple-300", abbr: "IIB",   textColor: "text-white" },
+  bandhan:          { bg: "bg-[#E65100]",  ring: "ring-orange-300", abbr: "BDN",   textColor: "text-white" },
+};
+
+function getBankLogo(name: string): { bg: string; ring: string; abbr: string; textColor: string } {
+  const lower = name.toLowerCase();
+  if (lower.includes("cash")) return { bg: "bg-emerald-600", ring: "ring-emerald-300", abbr: "CASH", textColor: "text-white" };
+  for (const [key, val] of Object.entries(BANK_LOGO_MAP)) {
+    if (lower.includes(key)) return val;
+  }
+  const abbr = name.replace(/[^A-Za-z ]/g, "").trim().split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 4);
+  return { bg: "bg-slate-600", ring: "ring-slate-300", abbr: abbr || "BNK", textColor: "text-white" };
+}
+
 // ── Main Component ────────────────────────────────────────────────────────────
 
 const Accounting = () => {
   const [activeTab, setActiveTab] = useState<AccountingTab>("Overview");
   const [showNewJVModal, setShowNewJVModal] = useState(false);
+  const [showAddBankModal, setShowAddBankModal] = useState(false);
+  const [addedBanks, setAddedBanks] = useState<BankAccountEntry[]>([]);
 
   const accountingTabs: AccountingTab[] = [
     "Overview",
@@ -270,14 +335,25 @@ const Accounting = () => {
               <Download className="h-4 w-4" />
               Export
             </button>
-            <button
-              type="button"
-              onClick={() => setShowNewJVModal(true)}
-              className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#173f70] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#12345e]"
-            >
-              <Plus className="h-4 w-4" />
-              New Journal Entry
-            </button>
+            {activeTab === "Cash & Bank" ? (
+              <button
+                type="button"
+                onClick={() => setShowAddBankModal(true)}
+                className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#173f70] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#12345e]"
+              >
+                <Plus className="h-4 w-4" />
+                Add Bank
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowNewJVModal(true)}
+                className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#173f70] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#12345e]"
+              >
+                <Plus className="h-4 w-4" />
+                New Journal Entry
+              </button>
+            )}
           </div>
         </header>
 
@@ -322,13 +398,22 @@ const Accounting = () => {
         {activeTab === "Journal Vouchers" && <JournalVouchersTab />}
         {activeTab === "Trial Balance" && <TrialBalanceTab />}
         {activeTab === "Profit & Loss" && <ProfitLossTab />}
-        {activeTab === "Cash & Bank" && <CashBankTab />}
+        {activeTab === "Cash & Bank" && <CashBankTab addedBanks={addedBanks} />}
         {activeTab === "GST Summary" && <GSTSummaryTab />}
         {activeTab === "Masters" && <MastersTab />}
         {activeTab === "Cost Centre" && <CostCentreTab />}
       </div>
 
       {showNewJVModal && <NewJournalEntryModal onClose={() => setShowNewJVModal(false)} />}
+      {showAddBankModal && (
+        <AddBankModal
+          onClose={() => setShowAddBankModal(false)}
+          onSave={(bank) => {
+            setAddedBanks((prev) => [...prev, bank]);
+            setShowAddBankModal(false);
+          }}
+        />
+      )}
     </div>
   );
 };
@@ -792,7 +877,8 @@ const ProfitLossTab = () => (
 
 // ── Cash & Bank Tab ───────────────────────────────────────────────────────────
 
-const CashBankTab = () => (
+const CashBankTab = ({ addedBanks }: { addedBanks: BankAccountEntry[] }) => {
+  return (
   <div className="space-y-5">
     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div>
@@ -809,21 +895,50 @@ const CashBankTab = () => (
 
     {/* Bank account cards */}
     <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-      {bankAccounts.map((bank) => (
-        <article key={bank.name} className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-50">
-              <Wallet className="h-5 w-5 text-blue-600" />
+      {bankAccounts.map((bank) => {
+        const logo = getBankLogo(bank.name);
+        return (
+          <article key={bank.name} className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ring-2 ${logo.bg} ${logo.ring}`}>
+                <span className={`text-[10px] font-extrabold leading-none tracking-tight ${logo.textColor}`}>{logo.abbr}</span>
+              </div>
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-extrabold text-emerald-700">
+                {bank.status}
+              </span>
             </div>
-            <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-extrabold text-emerald-700">
-              {bank.status}
-            </span>
-          </div>
-          <p className="mt-3 text-xs font-semibold text-slate-500 leading-snug">{bank.name}</p>
-          <p className="mt-2 text-2xl font-extrabold text-blue-600">{bank.balance}</p>
-          <p className="mt-1 text-xs font-semibold text-slate-400">Last txn: {bank.lastTxn}</p>
-        </article>
-      ))}
+            <p className="mt-3 text-xs font-semibold text-slate-500 leading-snug">{bank.name}</p>
+            <p className="mt-2 text-2xl font-extrabold text-blue-600">{bank.balance}</p>
+            <p className="mt-1 text-xs font-semibold text-slate-400">Last txn: {bank.lastTxn}</p>
+          </article>
+        );
+      })}
+      {addedBanks.map((bank) => {
+        const logo = getBankLogo(bank.bankName);
+        return (
+          <article key={bank.id} className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ring-2 ${logo.bg} ${logo.ring}`}>
+                <span className={`text-[10px] font-extrabold leading-none tracking-tight ${logo.textColor}`}>{logo.abbr}</span>
+              </div>
+              <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-extrabold text-blue-700">Active</span>
+            </div>
+            <p className="mt-3 text-xs font-semibold text-slate-500 leading-snug">
+              {bank.bankName}{bank.accountType ? ` - ${bank.accountType} A/c` : ""}
+            </p>
+            <p className="mt-2 text-sm font-extrabold text-slate-800">{bank.holderName}</p>
+            <div className="mt-4 space-y-2 border-t border-slate-100 pt-3">
+              <BankDetailRow label="Account No." value={bank.accountNumber} />
+              <BankDetailRow label="IFSC Code" value={bank.ifscCode} />
+              <BankDetailRow label="Branch" value={bank.branch || "-"} />
+              <BankDetailRow label="Holder" value={bank.holderName} />
+              <BankDetailRow label="Account Type" value={bank.accountType || "-"} />
+              <BankDetailRow label="Authorised Person" value={bank.authorisedPerson ? `${bank.authorisedPerson.name} (${bank.authorisedPerson.phone})` : "-"} />
+              <BankDetailRow label="Relationship Manager" value={bank.rmName ? `${bank.rmName}${bank.rmPhone ? ` (${bank.rmPhone})` : ""}` : "-"} />
+            </div>
+          </article>
+        );
+      })}
     </div>
 
     {/* Total liquidity bar */}
@@ -874,9 +989,17 @@ const CashBankTab = () => (
       </div>
     </section>
   </div>
-);
+  );
+};
 
 // ── GST Summary Tab ───────────────────────────────────────────────────────────
+
+const BankDetailRow = ({ label, value }: { label: string; value: string }) => (
+  <div className="flex items-start justify-between gap-3 text-xs">
+    <span className="shrink-0 font-semibold text-slate-400">{label}</span>
+    <span className="break-all text-right font-extrabold text-slate-700">{value}</span>
+  </div>
+);
 
 const GSTSummaryTab = () => (
   <div className="space-y-5">
@@ -991,6 +1114,311 @@ const GSTSummaryTab = () => (
     </div>
   </div>
 );
+
+// ── Add Bank Modal ────────────────────────────────────────────────────────────
+
+const AddBankModal = ({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (bank: BankAccountEntry) => void;
+}) => {
+  const [form, setForm] = useState({
+    bankName: "",
+    accountNumber: "",
+    ifscCode: "",
+    branch: "",
+    holderName: "",
+    accountType: "" as "" | "Current" | "Savings",
+    authorisedPersonId: "",
+    rmName: "",
+    rmPhone: "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [staffList, setStaffList] = useState<StaffOption[]>([]);
+  const [staffLoading, setStaffLoading] = useState(false);
+  const [staffError, setStaffError] = useState("");
+
+  const set = (field: string, value: string) =>
+    setForm((prev) => ({ ...prev, [field]: value }));
+
+  const logo = form.bankName.trim() ? getBankLogo(form.bankName) : null;
+
+  const selectedStaff = staffList.find((s) => s.id === form.authorisedPersonId);
+
+  useEffect(() => {
+    const fetchStaff = async () => {
+      setStaffLoading(true);
+      setStaffError("");
+      try {
+        const res = await fetch(`${getBaseUrl()}/admin_staff/get_all_staff`, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+        });
+        const data = await res.json().catch(() => null);
+        const staffRows = Array.isArray(data) ? data : Array.isArray(data?.staff) ? data.staff : [];
+
+        if (!res.ok) {
+          setStaffError(data?.message || data?.error || "Failed to load staff.");
+          return;
+        }
+
+        setStaffList(
+          staffRows
+            .map((staff: StaffApiItem) => ({
+              id: String(staff?.staff_id || ""),
+              name: String(staff?.staff_information?.staff_name || ""),
+              phone: String(staff?.staff_information?.staff_phone || ""),
+            }))
+            .filter((staff: StaffOption) => staff.id && staff.name)
+        );
+      } catch {
+        setStaffError("Failed to load staff.");
+      } finally {
+        setStaffLoading(false);
+      }
+    };
+
+    fetchStaff();
+  }, []);
+
+  const handleSave = async () => {
+    if (!form.bankName || !form.accountNumber || !form.ifscCode || !form.holderName) return;
+    setSaving(true);
+    setError("");
+
+    const bank: BankAccountEntry = {
+      id: `bank-${Date.now()}`,
+      bankName: form.bankName.trim(),
+      accountNumber: form.accountNumber.trim(),
+      ifscCode: form.ifscCode.trim().toUpperCase(),
+      branch: form.branch.trim() || undefined,
+      holderName: form.holderName.trim(),
+      accountType: form.accountType || undefined,
+      authorisedPerson: selectedStaff
+        ? { name: selectedStaff.name, phone: selectedStaff.phone }
+        : undefined,
+      rmName: form.rmName.trim() || undefined,
+      rmPhone: form.rmPhone.trim() || undefined,
+    };
+
+    try {
+      const res = await fetch(`${getBaseUrl()}/admin_accounts/add_new_bank`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bank_name: bank.bankName,
+          account_number: bank.accountNumber,
+          IFSC_code: bank.ifscCode,
+          branch_name: bank.branch || "",
+          account_type: bank.accountType || "",
+          holder_name: bank.holderName,
+          authorised_person: {
+            name: bank.authorisedPerson?.name || "",
+            contact_number: bank.authorisedPerson?.phone || "",
+          },
+          relationship_manager: {
+            name: bank.rmName || "",
+            contact_number: bank.rmPhone || "",
+          },
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || data.success === false) {
+        setError(data.message || "Failed to add bank.");
+        return;
+      }
+
+      onSave(bank);
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-lg rounded-2xl bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
+          <div className="flex items-center gap-3">
+            {logo ? (
+              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ring-2 ${logo.bg} ${logo.ring}`}>
+                <span className={`text-[10px] font-extrabold leading-none tracking-tight ${logo.textColor}`}>{logo.abbr}</span>
+              </div>
+            ) : (
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 ring-2 ring-slate-200">
+                <Landmark className="h-5 w-5 text-slate-400" />
+              </div>
+            )}
+            <div>
+              <h2 className="text-base font-extrabold text-slate-900">Onboard Bank Account</h2>
+              <p className="text-xs font-medium text-slate-400">Add a new bank account to Cash & Bank</p>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Form */}
+        <div className="max-h-[70vh] overflow-y-auto px-6 py-5 space-y-4">
+          {/* Row 1: Bank name + logo preview */}
+          <div>
+            <label className="mb-1.5 block text-xs font-extrabold uppercase tracking-wider text-slate-500">Bank Name <span className="text-red-500">*</span></label>
+            <input
+              type="text"
+              placeholder="e.g. State Bank of India"
+              value={form.bankName}
+              onChange={(e) => set("bankName", e.target.value)}
+              className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-800 placeholder:font-normal placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            />
+          </div>
+
+          {/* Row 2: Account number + IFSC */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1.5 block text-xs font-extrabold uppercase tracking-wider text-slate-500">Account Number <span className="text-red-500">*</span></label>
+              <input
+                type="text"
+                placeholder="e.g. 12345678901"
+                value={form.accountNumber}
+                onChange={(e) => set("accountNumber", e.target.value)}
+                className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-800 placeholder:font-normal placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-extrabold uppercase tracking-wider text-slate-500">IFSC Code <span className="text-red-500">*</span></label>
+              <input
+                type="text"
+                placeholder="e.g. SBIN0001234"
+                value={form.ifscCode}
+                onChange={(e) => set("ifscCode", e.target.value.toUpperCase())}
+                className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-mono font-semibold text-slate-800 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              />
+            </div>
+          </div>
+
+          {/* Row 3: Branch + Account Type */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1.5 block text-xs font-extrabold uppercase tracking-wider text-slate-500">Branch <span className="text-slate-400 font-normal normal-case">(optional)</span></label>
+              <input
+                type="text"
+                placeholder="e.g. Hyderabad Main"
+                value={form.branch}
+                onChange={(e) => set("branch", e.target.value)}
+                className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-800 placeholder:font-normal placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-extrabold uppercase tracking-wider text-slate-500">Account Type <span className="text-slate-400 font-normal normal-case">(optional)</span></label>
+              <select
+                value={form.accountType}
+                onChange={(e) => set("accountType", e.target.value)}
+                className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-800 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              >
+                <option value="">Select type</option>
+                <option value="Current">Current</option>
+                <option value="Savings">Savings</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Row 4: Holder Name */}
+          <div>
+            <label className="mb-1.5 block text-xs font-extrabold uppercase tracking-wider text-slate-500">Account Holder's Name <span className="text-red-500">*</span></label>
+            <input
+              type="text"
+              placeholder="e.g. SBR Agrotech Pvt Ltd"
+              value={form.holderName}
+              onChange={(e) => set("holderName", e.target.value)}
+              className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-800 placeholder:font-normal placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            />
+          </div>
+
+          {/* Row 5: Authorised person */}
+          <div>
+            <label className="mb-1.5 block text-xs font-extrabold uppercase tracking-wider text-slate-500">Authorised Person</label>
+            <select
+              value={form.authorisedPersonId}
+              onChange={(e) => set("authorisedPersonId", e.target.value)}
+              disabled={staffLoading}
+              className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-800 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            >
+              <option value="">{staffLoading ? "Loading staff..." : "Select staff member"}</option>
+              {staffList.map((s) => (
+                <option key={s.id} value={s.id}>{s.phone ? `${s.name} - ${s.phone}` : s.name}</option>
+              ))}
+            </select>
+            {staffError && (
+              <p className="mt-1.5 text-xs font-semibold text-red-500">{staffError}</p>
+            )}
+            {selectedStaff && (
+              <div className="mt-2 flex items-center gap-2 rounded-lg bg-blue-50 px-3 py-2">
+                <User className="h-3.5 w-3.5 text-blue-500" />
+                <span className="text-xs font-extrabold text-blue-700">{selectedStaff.name}</span>
+                <Phone className="ml-auto h-3.5 w-3.5 text-blue-400" />
+                <span className="text-xs font-semibold text-blue-500">{selectedStaff.phone}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Row 6: Relationship Manager */}
+          <div>
+            <label className="mb-1.5 block text-xs font-extrabold uppercase tracking-wider text-slate-500">Relationship Manager</label>
+            <div className="grid grid-cols-2 gap-3">
+              <input
+                type="text"
+                placeholder="RM Name"
+                value={form.rmName}
+                onChange={(e) => set("rmName", e.target.value)}
+                className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-800 placeholder:font-normal placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              />
+              <div className="relative">
+                <Phone className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="tel"
+                  placeholder="RM Phone"
+                  value={form.rmPhone}
+                  onChange={(e) => set("rmPhone", e.target.value)}
+                  className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 pl-8 pr-3 text-sm font-semibold text-slate-800 placeholder:font-normal placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+            </div>
+          </div>
+
+          {error && (
+            <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{error}</p>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4">
+          <button type="button" onClick={onClose} className="h-10 rounded-lg border border-slate-200 px-5 text-sm font-semibold text-slate-600 hover:bg-slate-50">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving || !form.bankName || !form.accountNumber || !form.ifscCode || !form.holderName}
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#173f70] px-5 text-sm font-semibold text-white shadow-sm hover:bg-[#12345e] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Landmark className="h-4 w-4" />
+            {saving ? "Saving..." : "Save Bank"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 // ── New Journal Entry Modal ───────────────────────────────────────────────────
 

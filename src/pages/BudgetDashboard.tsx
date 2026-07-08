@@ -33,6 +33,17 @@ type FarmRecord = {
   crop_type: string | null;
 };
 
+type CropKey = 'paddy' | 'rahar' | 'napier';
+type CropWiseLandArea = Record<string, Record<CropKey, number>>;
+
+const CROP_TYPES: CropKey[] = ['paddy', 'rahar', 'napier'];
+const CROP_LABELS: Record<CropKey, string> = { paddy: 'Paddy', rahar: 'Rahar', napier: 'Napier' };
+const CROP_BTN: Record<CropKey, { on: string; off: string }> = {
+  paddy:  { on: 'border-amber-400 bg-amber-100 text-amber-700',  off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
+  rahar:  { on: 'border-green-400 bg-green-100 text-green-700',  off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
+  napier: { on: 'border-[#173f70] bg-[#173f70] text-white',      off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
+};
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 const fmtNum = (n: number) => n % 1 === 0 ? n.toLocaleString("en-IN") : n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
@@ -77,29 +88,57 @@ function CreateBudgetModal({
   const [seasonType,    setSeasonType]    = useState<SeasonType>("Kharif");
   const [projectStart,  setProjectStart]  = useState("");
   const [projectEnd,    setProjectEnd]    = useState("");
-  const [selectedCropTypes, setSelectedCropTypes] = useState<string[]>([]);
+  const [selectedCropTypes, setSelectedCropTypes] = useState<CropKey[]>([]);
   const [xlsxFile,      setXlsxFile]      = useState<File | null>(null);
   const [xlsxFileName,  setXlsxFileName]  = useState("");
   const [error,         setError]         = useState("");
   const [loading,       setLoading]       = useState(false);
-  const [allFarms,      setAllFarms]      = useState<FarmRecord[]>([]);
-  const [loadingFarms,  setLoadingFarms]  = useState(true);
+
+  const [cropWiseLandArea, setCropWiseLandArea] = useState<CropWiseLandArea>({});
+  const [farmFarmerMap,    setFarmFarmerMap]    = useState<Record<string, FarmRecord>>({});
+  const [loadingData,      setLoadingData]      = useState(true);
 
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    fetch(`${getBaseUrl()}/admin_ops_requests/get_farm_and_farmer`)
-      .then((r) => r.json())
-      .then((d) => { if (d.farm_farmer_mapping) setAllFarms(d.farm_farmer_mapping); })
+    Promise.all([
+      fetch(`${getBaseUrl()}/farmer_managment/get_crop_wise_land_area_for_budget`).then(r => r.json()),
+      fetch(`${getBaseUrl()}/admin_ops_requests/get_farm_and_farmer`).then(r => r.json()),
+    ])
+      .then(([cropData, farmData]) => {
+        if (cropData.crop_wise_land_area) setCropWiseLandArea(cropData.crop_wise_land_area);
+        if (farmData.farm_farmer_mapping) {
+          const map: Record<string, FarmRecord> = {};
+          (farmData.farm_farmer_mapping as FarmRecord[]).forEach(f => { map[f.farm_id] = f; });
+          setFarmFarmerMap(map);
+        }
+      })
       .catch(() => {})
-      .finally(() => setLoadingFarms(false));
+      .finally(() => setLoadingData(false));
   }, []);
 
-  const cropTypes    = [...new Set(allFarms.map((f) => f.crop_type).filter(Boolean))] as string[];
-  const matchedFarms = selectedCropTypes.length > 0
-    ? allFarms.filter((f) => f.crop_type && selectedCropTypes.includes(f.crop_type))
+  // Farms that have > 0 area for at least one selected crop
+  const matchedRows = selectedCropTypes.length > 0
+    ? Object.entries(cropWiseLandArea)
+        .map(([farmId, areas]) => {
+          const cropAreas: Partial<Record<CropKey, number>> = {};
+          let rowTotal = 0;
+          selectedCropTypes.forEach(ct => {
+            const a = areas[ct] ?? 0;
+            cropAreas[ct] = a;
+            rowTotal += a;
+          });
+          return { farmId, cropAreas, rowTotal, owner_name: farmFarmerMap[farmId]?.owner_name ?? farmId };
+        })
+        .filter(r => r.rowTotal > 0)
     : [];
-  const totalAcres   = matchedFarms.reduce((s, f) => s + (f.area ?? 0), 0);
+
+  const cropTotals: Partial<Record<CropKey, number>> = {};
+  CROP_TYPES.forEach(ct => {
+    if (selectedCropTypes.includes(ct))
+      cropTotals[ct] = matchedRows.reduce((s, r) => s + (r.cropAreas[ct] ?? 0), 0);
+  });
+  const totalAcres = Object.values(cropTotals).reduce((s, v) => s + (v ?? 0), 0);
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -144,8 +183,8 @@ function CreateBudgetModal({
           project_start_date:      projectStart,
           project_end_date:        projectEnd,
           crop_type:               selectedCropTypes.length > 0 ? selectedCropTypes : null,
-          farm_id:                 matchedFarms.length > 0
-                                     ? matchedFarms.map((f) => f.farm_id).join(", ")
+          farm_id:                 matchedRows.length > 0
+                                     ? matchedRows.map((r) => r.farmId).join(", ")
                                      : null,
           master_working_xlsx_url: masterXlsxUrl || null,
           total_acres:             totalAcres,
@@ -259,11 +298,11 @@ function CreateBudgetModal({
 
           {/* Crop Type */}
           <Field label="Crop Type">
-            {loadingFarms ? (
+            {loadingData ? (
               <p className="text-xs font-semibold italic text-slate-400">Loading…</p>
-            ) : cropTypes.length > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {cropTypes.map((ct) => (
+            ) : (
+              <div className="flex gap-2">
+                {CROP_TYPES.map((ct) => (
                   <button
                     key={ct}
                     type="button"
@@ -273,44 +312,75 @@ function CreateBudgetModal({
                       )
                     }
                     className={[
-                      "h-8 rounded-lg border px-3 text-xs font-extrabold transition-all",
-                      selectedCropTypes.includes(ct)
-                        ? "border-[#173f70] bg-[#173f70] text-white"
-                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
+                      "h-8 rounded-lg border px-4 text-xs font-extrabold transition-all",
+                      selectedCropTypes.includes(ct) ? CROP_BTN[ct].on : CROP_BTN[ct].off,
                     ].join(" ")}
                   >
-                    {ct.charAt(0).toUpperCase() + ct.slice(1)}
+                    {CROP_LABELS[ct]}
                   </button>
                 ))}
               </div>
-            ) : (
-              <p className="text-xs font-semibold italic text-slate-400">No crop types available</p>
             )}
           </Field>
 
-          {/* Land parcels under selected crop types */}
-          {selectedCropTypes.length > 0 && matchedFarms.length > 0 && (
+          {/* Land parcels table */}
+          {selectedCropTypes.length > 0 && (
             <div className="rounded-lg border border-slate-200 overflow-hidden">
               <div className="bg-slate-50 px-3 py-2 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <MapPin className="h-3.5 w-3.5 text-slate-400" />
                   <p className="text-xs font-extrabold text-slate-600">
-                    {matchedFarms.length} land parcel{matchedFarms.length !== 1 ? "s" : ""} · {selectedCropTypes.map((t) => t.charAt(0).toUpperCase() + t.slice(1)).join(", ")}
+                    {matchedRows.length} land parcel{matchedRows.length !== 1 ? "s" : ""} · {selectedCropTypes.map((t) => CROP_LABELS[t]).join(", ")}
                   </p>
                 </div>
                 <p className="text-xs font-extrabold text-[#173f70]">Total: {fmtNum(totalAcres)} acres</p>
               </div>
-              <div className="max-h-36 overflow-y-auto divide-y divide-slate-100">
-                {matchedFarms.map((f) => (
-                  <div key={f.farm_id} className="flex items-center justify-between px-3 py-1.5">
-                    <div>
-                      <p className="text-xs font-semibold text-slate-700">{f.owner_name}</p>
-                      <p className="text-[10px] font-semibold text-slate-400">ID: {f.farm_id}</p>
-                    </div>
-                    <span className="text-xs font-extrabold text-slate-500">{fmtNum(f.area)} ac</span>
-                  </div>
-                ))}
-              </div>
+              {loadingData ? (
+                <div className="py-6 text-center text-xs font-semibold text-slate-400">Loading land data…</div>
+              ) : matchedRows.length === 0 ? (
+                <div className="py-6 text-center text-xs font-semibold text-slate-400">No land parcels found for selected crops</div>
+              ) : (
+                <div className="max-h-48 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-slate-100">
+                      <tr>
+                        <th className="py-1.5 pl-3 pr-2 text-left font-extrabold text-slate-500">Owner</th>
+                        <th className="py-1.5 px-2 text-left font-extrabold text-slate-500">Farm ID</th>
+                        {selectedCropTypes.map((ct) => (
+                          <th key={ct} className="py-1.5 px-2 text-right font-extrabold text-slate-500">
+                            {CROP_LABELS[ct]} (ac)
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {matchedRows.map((row) => (
+                        <tr key={row.farmId} className="hover:bg-slate-50">
+                          <td className="py-1.5 pl-3 pr-2 font-semibold text-slate-700">{row.owner_name}</td>
+                          <td className="py-1.5 px-2 font-semibold text-slate-400">{row.farmId}</td>
+                          {selectedCropTypes.map((ct) => (
+                            <td key={ct} className="py-1.5 px-2 text-right font-extrabold text-slate-600">
+                              {(row.cropAreas[ct] ?? 0) > 0
+                                ? fmtNum(row.cropAreas[ct]!)
+                                : <span className="text-slate-300">—</span>}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="border-t-2 border-slate-200 bg-slate-50">
+                      <tr>
+                        <td colSpan={2} className="py-1.5 pl-3 pr-2 font-extrabold text-slate-700">Total</td>
+                        {selectedCropTypes.map((ct) => (
+                          <td key={ct} className="py-1.5 px-2 text-right font-extrabold text-[#173f70]">
+                            {fmtNum(cropTotals[ct] ?? 0)}
+                          </td>
+                        ))}
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
             </div>
           )}
 

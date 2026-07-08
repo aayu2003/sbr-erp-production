@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Boxes, Check, ChevronDown, ChevronLeft, ChevronRight, FileText, Lock, Plus, Receipt, Upload, X } from 'lucide-react';
+import { ArrowDown, ArrowRight, ArrowUp, Boxes, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FileText, Lock, Phone, Plus, Receipt, SendHorizonal, Upload, User, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import * as XLSX from 'xlsx';
 
 import { Button } from '@/components/ui/button';
 import getBaseUrl from '@/lib/config';
@@ -8,16 +9,38 @@ import { toast } from 'sonner';
 
 type LeftPanelInfo = {
   pr_number?: string;
-  indent_type?: string;
-  department?: string | null;
+  approved_vendor_id?: string;
   vendor_details?: {
-    approved_vendor_id?: string;
-    vendor_name?: string;
+    nature_of_vendor?: string;
+    aadhar_card_number?: string;
+    address?: {
+      name_of_premises?: string;
+      road?: string;
+      district?: string;
+      pin_code?: string;
+      state?: string;
+      plot_flat_unit_no_and_floor?: string;
+      taluka_locality?: string;
+    };
+    address_for_place_of_supply_of_goods_services?: {
+      name_of_premises?: string;
+      road?: string;
+      district?: string;
+      pin_code?: string;
+      state?: string;
+      gst_number?: string;
+      plot_flat_unit_no_and_floor?: string;
+      taluka_locality?: string;
+      contact_number?: string;
+      e_mail_id?: string;
+    };
+    income_tax_pan?: string;
     vendor_contact?: string;
-    vendor_address?: string;
+    vendor_name?: string;
     gst_number?: string;
+    vendor_address?: string;
+    e_mail_id?: string;
   } | null;
-  Order_number?: string;
 };
 
 type ApiPurchaseFlowStageEntry = {
@@ -30,6 +53,7 @@ type ApiPurchaseFlow = {
   comparison_id?: unknown;
   flow_id?: unknown;
   order_number?: unknown;
+  order_type?: unknown;
   pr_number?: unknown;
   purchase_flow_stage?: unknown;
   timestamp?: unknown;
@@ -88,6 +112,44 @@ const isUploaded = (s: PurchaseFlowStep) => {
 const isInvoiceDocType = (doc: string) => {
   const d = doc.trim().toLowerCase();
   return d === 'invoice' || d === 'proforma invoice';
+};
+
+const PO_NEXT_PROCESS_OPTIONS = [
+  { id: 'po_acceptance_wo_acceptance', label: 'PO acceptance / WO Acceptance (WO: Work order)' },
+  { id: 'delivery_timeline_work_completion', label: 'Delivery timeline (PO) / Work completion timeline (WO)' },
+  { id: 'proforma_invoice', label: 'Proforma invoice' },
+  { id: 'progress_inspection_report', label: 'Progress (WO) / Inspection report (PO)' },
+  { id: 'grn_completion_certificate', label: 'GRN (PO) / Completion certificate (WO)' },
+  { id: 'prr', label: 'PRR (payment requisition receipt)' },
+  { id: 'invoice', label: 'Invoice' },
+  { id: 'e_way_bill', label: 'E way bill' },
+  { id: 'warranty_guarantee_card', label: 'Warranty / Guarantee card' },
+] as const;
+
+type PoNextProcessId = (typeof PO_NEXT_PROCESS_OPTIONS)[number]['id'];
+
+const PO_DOC_BY_STEP: Record<PoNextProcessId, string> = {
+  po_acceptance_wo_acceptance: 'po acceptance',
+  delivery_timeline_work_completion: 'delivery timeline',
+  proforma_invoice: 'proforma invoice',
+  progress_inspection_report: 'inspection report',
+  grn_completion_certificate: 'grn',
+  prr: 'prr',
+  invoice: 'invoice',
+  e_way_bill: 'e way bill',
+  warranty_guarantee_card: 'warranty / guarantee card',
+};
+
+const buildPurchaseFlowStage = (series: PoNextProcessId[]) => {
+  const stage: Record<string, { document: string; status: 'empty'; doc_link: string }> = {};
+  series.forEach((id, idx) => {
+    stage[`step_${idx + 1}`] = {
+      document: PO_DOC_BY_STEP[id] || String(id).replace(/_/g, ' '),
+      status: 'empty',
+      doc_link: '',
+    };
+  });
+  return stage;
 };
 
 const formatDateTime = (raw?: string) => {
@@ -205,6 +267,688 @@ function UploadStepDocPopup({
           <Button onClick={handleUpload} className="gap-2" disabled={uploading}>
             <Upload className="w-4 h-4" /> {uploading ? 'Uploading…' : 'Upload'}
           </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CreateFlowPopup({
+  onClose,
+  onCreate,
+}: {
+  onClose: () => void;
+  onCreate: (payload: {
+    orderType: 'PR' | 'SPR';
+    orderNumber: string;
+    prNumber: string;
+    vendorId: string;
+    poFile: File | null;
+    nextProcessSeries: PoNextProcessId[];
+    budgetAllocations: {
+      budgetId: string;
+      budgetName: string;
+      items: { lineItemId: string; lineItem: string; category: string; budgetType: string; totalValue: number; amount: string }[];
+    }[];
+  }) => Promise<void>;
+}) {
+  // ── Wizard step ───────────────────────────────────────────────────────────────
+  const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
+  const [submitting, setSubmitting] = useState(false);
+
+  // ── Step 1: Order Details ─────────────────────────────────────────────────────
+  const [orderType, setOrderType] = useState<'PR' | 'SPR'>('PR');
+  const [orderNumber, setOrderNumber] = useState('');
+  const [prNumber, setPrNumber] = useState('');
+  const [poFile, setPoFile] = useState<File | null>(null);
+
+  type VendorOption = {
+    vendor_id: string; vendor_name: string; firm_name?: string;
+    vendor_contact?: string; vendor_address?: string; gst_number?: string;
+  };
+  const [vendors, setVendors] = useState<VendorOption[]>([]);
+  const [loadingVendors, setLoadingVendors] = useState(false);
+  const [selectedVendorId, setSelectedVendorId] = useState('');
+  const selectedVendor = vendors.find(v => v.vendor_id === selectedVendorId) ?? null;
+
+  useEffect(() => {
+    setLoadingVendors(true);
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    fetch(`${baseUrl}/purchase_flow/get_vendors`)
+      .then(r => r.json())
+      .then((data: any) => {
+        if (Array.isArray(data?.vendors)) {
+          setVendors(data.vendors.map((v: any) => ({
+            vendor_id:      String(v?.vendor_id   || ''),
+            vendor_name:    String(v?.vendor_name  || ''),
+            firm_name:      v?.firm_name      ? String(v.firm_name)      : undefined,
+            vendor_contact: v?.vendor_contact ? String(v.vendor_contact) : undefined,
+            vendor_address: v?.vendor_address ? String(v.vendor_address) : undefined,
+            gst_number:     v?.gst_number     ? String(v.gst_number)     : undefined,
+          })));
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoadingVendors(false));
+  }, []);
+
+  // ── Step 2: Document Flow ─────────────────────────────────────────────────────
+  const [nextProcessSeries, setNextProcessSeries] = useState<PoNextProcessId[]>(
+    PO_NEXT_PROCESS_OPTIONS.map((x) => x.id) as PoNextProcessId[]
+  );
+
+  // ── Step 3: Budget Allocation ─────────────────────────────────────────────────
+  type BudgetSummary = {
+    budget_id: string; budget_name: string; crop_season: string;
+    financial_year_start: string; financial_year_end: string;
+    budget_xlsx_url: string | null; locked: boolean;
+  };
+  type LineItemRow = { id: string; category: string; lineItem: string; budgetType: string; totalValue: number; };
+  type AllocItem = {
+    lineItemId: string; lineItem: string; category: string;
+    budgetType: string; totalValue: number; checked: boolean; amount: string;
+  };
+  type BudgetAlloc = { budgetId: string; budgetName: string; cropSeason: string; items: AllocItem[]; };
+
+  const [budgets, setBudgets] = useState<BudgetSummary[]>([]);
+  const [loadingBudgets, setLoadingBudgets] = useState(false);
+  const [pickedBudgetId, setPickedBudgetId] = useState('');
+  const [addingBudget, setAddingBudget] = useState(false);
+  const [lineItemsCache, setLineItemsCache] = useState<Record<string, LineItemRow[]>>({});
+  const [allocations, setAllocations] = useState<BudgetAlloc[]>([]);
+
+  useEffect(() => {
+    if (currentStep !== 3) return;
+    setLoadingBudgets(true);
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    fetch(`${baseUrl}/admin_accounts/get_budgets`)
+      .then(r => r.json())
+      .then(d => { if (d.success && Array.isArray(d.data)) setBudgets(d.data.filter((b: any) => !b.locked)); })
+      .catch(() => {})
+      .finally(() => setLoadingBudgets(false));
+  }, [currentStep]);
+
+  const fetchBudgetLineItems = async (budget: BudgetSummary): Promise<LineItemRow[]> => {
+    if (lineItemsCache[budget.budget_id]) return lineItemsCache[budget.budget_id];
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    const res = await fetch(`${baseUrl}/admin_accounts/get_budget/${budget.budget_id}`);
+    if (!res.ok) throw new Error(`Failed to fetch budget xlsx (${res.status})`);
+    const buf = await res.arrayBuffer();
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    const ws = wb.Sheets['budget'] || wb.Sheets[wb.SheetNames[0]];
+    if (!ws) return [];
+    const rows: any[] = XLSX.utils.sheet_to_json(ws);
+    const items: LineItemRow[] = rows
+      .map((r: any, i: number) => ({
+        id: String(r.line_item_id || `item_${i}`),
+        category: String(r.category || ''),
+        lineItem: String(r.line_item || ''),
+        budgetType: String(r.budget_type || ''),
+        totalValue:
+          parseFloat(r.total_value) ||
+          parseFloat(r.quantity_per_acre || 0) * parseFloat(r.total_acres || 0) * parseFloat(r.rate_per_unit || 0),
+      }))
+      .filter((it: LineItemRow) => it.lineItem);
+    setLineItemsCache(prev => ({ ...prev, [budget.budget_id]: items }));
+    return items;
+  };
+
+  const handleAddBudget = async () => {
+    const budget = budgets.find(b => b.budget_id === pickedBudgetId);
+    if (!budget) return toast.error('Select a budget first');
+    if (allocations.some(a => a.budgetId === budget.budget_id)) return toast.error('Budget already added');
+    setAddingBudget(true);
+    try {
+      const items = await fetchBudgetLineItems(budget);
+      if (items.length === 0) { toast.error('No line items found for this budget'); return; }
+      setAllocations(prev => [...prev, {
+        budgetId: budget.budget_id,
+        budgetName: budget.budget_name,
+        cropSeason: budget.crop_season,
+        items: items.map(li => ({
+          lineItemId: li.id, lineItem: li.lineItem, category: li.category,
+          budgetType: li.budgetType, totalValue: li.totalValue, checked: false, amount: '',
+        })),
+      }]);
+      setPickedBudgetId('');
+    } catch { toast.error('Failed to load budget line items'); }
+    finally { setAddingBudget(false); }
+  };
+
+  const toggleItem = (budgetId: string, lid: string) =>
+    setAllocations(prev => prev.map(a => a.budgetId !== budgetId ? a : {
+      ...a, items: a.items.map(it => it.lineItemId !== lid ? it : { ...it, checked: !it.checked }),
+    }));
+
+  const setItemAmount = (budgetId: string, lid: string, amount: string) =>
+    setAllocations(prev => prev.map(a => a.budgetId !== budgetId ? a : {
+      ...a, items: a.items.map(it => it.lineItemId !== lid ? it : { ...it, amount }),
+    }));
+
+  const removeBudget = (budgetId: string) =>
+    setAllocations(prev => prev.filter(a => a.budgetId !== budgetId));
+
+  const totalAllocated = allocations.reduce((sum, a) =>
+    sum + a.items.filter(it => it.checked).reduce((s, it) => s + (parseFloat(it.amount) || 0), 0), 0);
+
+  const fmtAmt = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+
+  // ── Navigation ───────────────────────────────────────────────────────────────
+  const goNext = () => {
+    if (currentStep === 1) {
+      if (!safeTrim(orderNumber)) return toast.error('Enter order number');
+      if (!safeTrim(prNumber)) return toast.error('Enter SPR / PR number');
+      setCurrentStep(2);
+    } else if (currentStep === 2) {
+      if (nextProcessSeries.length === 0) return toast.error('Select at least one process');
+      setCurrentStep(3);
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!safeTrim(orderNumber)) { toast.error('Order number is required'); setCurrentStep(1); return; }
+    if (!safeTrim(prNumber)) { toast.error('PR number is required'); setCurrentStep(1); return; }
+    if (nextProcessSeries.length === 0) { toast.error('Select at least one process'); setCurrentStep(2); return; }
+    setSubmitting(true);
+    try {
+      await onCreate({
+        orderType,
+        orderNumber: safeTrim(orderNumber),
+        prNumber: safeTrim(prNumber),
+        vendorId: selectedVendorId,
+        poFile,
+        nextProcessSeries,
+        budgetAllocations: allocations.map(a => ({
+          budgetId: a.budgetId,
+          budgetName: a.budgetName,
+          items: a.items.filter(it => it.checked).map(it => ({
+            lineItemId: it.lineItemId,
+            lineItem: it.lineItem,
+            category: it.category,
+            budgetType: it.budgetType,
+            totalValue: it.totalValue,
+            amount: it.amount,
+          })),
+        })),
+      });
+      onClose();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const STEPS = [
+    { n: 1 as const, label: 'Order Details' },
+    { n: 2 as const, label: 'Document Flow' },
+    { n: 3 as const, label: 'Budget Allocation' },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-4xl rounded-xl border border-border bg-card shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
+
+        {/* ── Modal header + step indicator ──────────────────────────────────── */}
+        <div className="px-6 pt-5 pb-4 border-b border-border bg-muted/30 shrink-0">
+          <div className="flex items-start justify-between gap-3 mb-5">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-foreground text-background">
+                <SendHorizonal className="h-5 w-5" />
+              </div>
+              <div>
+                <div className="text-base font-bold tracking-tight">Create Flow</div>
+                <div className="text-xs text-muted-foreground mt-0.5">
+                  {currentStep === 1 && 'Enter order details and vendor information.'}
+                  {currentStep === 2 && 'Define the purchase flow document sequence.'}
+                  {currentStep === 3 && 'Allocate budget line items to this purchase.'}
+                </div>
+              </div>
+            </div>
+            <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground mt-1">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Step indicator */}
+          <div className="flex items-center">
+            {STEPS.map((s, i) => (
+              <div key={s.n} className="flex items-center flex-1 last:flex-none">
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold transition-colors ${
+                    currentStep > s.n ? 'bg-green-500 text-white' :
+                    currentStep === s.n ? 'bg-foreground text-background' :
+                    'bg-muted text-muted-foreground'
+                  }`}>
+                    {currentStep > s.n ? <Check className="h-3 w-3" /> : s.n}
+                  </div>
+                  <span className={`text-xs font-semibold whitespace-nowrap ${currentStep === s.n ? 'text-foreground' : 'text-muted-foreground'}`}>
+                    {s.label}
+                  </span>
+                </div>
+                {i < STEPS.length - 1 && (
+                  <div className={`flex-1 mx-3 h-px transition-colors ${currentStep > s.n ? 'bg-green-400' : 'bg-border'}`} />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Step content ───────────────────────────────────────────────────── */}
+        <div className="flex-1 overflow-y-auto min-h-0">
+
+          {/* ── STEP 1: Order Details ── */}
+          {currentStep === 1 && (
+            <div className="p-6 space-y-5">
+
+              {/* Order Type Toggle */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium text-muted-foreground">Order Type *</label>
+                <div className="inline-flex rounded-lg border border-border overflow-hidden w-fit">
+                  {(['PR', 'SPR'] as const).map(type => (
+                    <button
+                      key={type}
+                      type="button"
+                      onClick={() => setOrderType(type)}
+                      className={`px-5 py-2 text-sm font-semibold transition-colors select-none ${
+                        orderType === type
+                          ? 'bg-foreground text-background'
+                          : 'bg-background text-muted-foreground hover:bg-muted/40'
+                      }`}
+                    >
+                      {type}
+                      <span className="ml-1.5 text-[10px] font-normal opacity-70">
+                        {type === 'PR' ? '(Purchase Requisition)' : '(Service Purchase Req.)'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-muted-foreground">Order Number *</label>
+                  <input
+                    value={orderNumber}
+                    onChange={e => setOrderNumber(e.target.value)}
+                    placeholder="Enter order number"
+                    className="border border-border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-foreground/20"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-muted-foreground">{orderType} Number *</label>
+                  <input
+                    value={prNumber}
+                    onChange={e => setPrNumber(e.target.value)}
+                    placeholder={`Enter ${orderType} number`}
+                    className="border border-border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-foreground/20"
+                  />
+                </div>
+              </div>
+
+              {/* PO / WO upload */}
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-medium text-muted-foreground">Upload PO / WO Document</label>
+                <label className={`flex items-center gap-3 rounded-lg border-2 border-dashed px-4 py-3 cursor-pointer transition-colors ${
+                  poFile ? 'border-green-300 bg-green-50/50' : 'border-border bg-background hover:bg-muted/30'
+                }`}>
+                  <Upload className={`w-4 h-4 shrink-0 ${poFile ? 'text-green-600' : 'text-muted-foreground'}`} />
+                  <span className={`flex-1 text-sm truncate ${poFile ? 'text-green-700 font-medium' : 'text-muted-foreground'}`}>
+                    {poFile ? poFile.name : 'Click to upload PO or WO document (optional)'}
+                  </span>
+                  {poFile && (
+                    <button
+                      type="button"
+                      onClick={e => { e.preventDefault(); setPoFile(null); }}
+                      className="text-[11px] font-medium text-red-500 hover:underline shrink-0"
+                    >Remove</button>
+                  )}
+                  <input type="file" className="hidden" onChange={e => setPoFile(e.target.files?.[0] || null)} />
+                </label>
+              </div>
+
+              {/* Vendor */}
+              <div className="pt-1 border-t border-border/60">
+                <div className="flex items-center gap-1.5 mb-3">
+                  <Building2 className="w-3.5 h-3.5 text-muted-foreground" />
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">Vendor</span>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-3 items-start">
+                  <div className="flex flex-col gap-1 sm:w-60 shrink-0">
+                    <label className="text-xs font-medium text-muted-foreground">Select Vendor</label>
+                    <div className="relative">
+                      <select
+                        value={selectedVendorId}
+                        onChange={e => setSelectedVendorId(e.target.value)}
+                        disabled={loadingVendors}
+                        className="w-full appearance-none border border-border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-foreground/20 pr-8 disabled:opacity-50"
+                      >
+                        <option value="">{loadingVendors ? 'Loading vendors…' : 'Select a vendor'}</option>
+                        {vendors.map(v => (
+                          <option key={v.vendor_id} value={v.vendor_id}>{v.firm_name || v.vendor_name}</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                    </div>
+                  </div>
+                  {selectedVendor ? (
+                    <div className="flex-1 rounded-lg border border-border bg-background px-4 py-3 grid grid-cols-2 gap-x-5 gap-y-2.5">
+                      <div>
+                        <div className="flex items-center gap-1 mb-0.5">
+                          <Building2 className="w-3 h-3 text-muted-foreground" />
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">Firm's Name</span>
+                        </div>
+                        <div className="text-xs font-semibold text-foreground">{selectedVendor.firm_name || selectedVendor.vendor_name || '—'}</div>
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1 mb-0.5">
+                          <User className="w-3 h-3 text-muted-foreground" />
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">Vendor's Name</span>
+                        </div>
+                        <div className="text-xs font-semibold text-foreground">{selectedVendor.vendor_name || '—'}</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground mb-0.5">GST Number</div>
+                        <div className="text-xs font-semibold font-mono text-foreground">{selectedVendor.gst_number || '—'}</div>
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1 mb-0.5">
+                          <Phone className="w-3 h-3 text-muted-foreground" />
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">Contact</span>
+                        </div>
+                        <div className="text-xs font-semibold text-foreground">{selectedVendor.vendor_contact || '—'}</div>
+                      </div>
+                      <div className="col-span-2">
+                        <div className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground mb-0.5">Address</div>
+                        <div className="text-xs text-foreground leading-snug">{selectedVendor.vendor_address || '—'}</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex-1 rounded-lg border border-dashed border-border bg-muted/10 flex items-center justify-center py-5 px-4">
+                      <p className="text-[11px] text-muted-foreground text-center">Select a vendor to see details</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── STEP 2: Document Flow ── */}
+          {currentStep === 2 && (
+            <div className="grid grid-cols-1 md:grid-cols-[2fr_3fr] divide-y md:divide-y-0 md:divide-x divide-border min-h-[420px]">
+              {/* Left: checklist */}
+              <div className="flex flex-col min-h-0">
+                <div className="px-5 py-3 border-b border-border bg-muted/20 shrink-0">
+                  <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Forward Purchase Order</div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">Check to add to the workflow.</div>
+                </div>
+                <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1.5">
+                  {PO_NEXT_PROCESS_OPTIONS.map((opt, optIdx) => {
+                    const checked = nextProcessSeries.includes(opt.id);
+                    const stepPos = nextProcessSeries.indexOf(opt.id);
+                    return (
+                      <label
+                        key={opt.id}
+                        className={`group flex items-center gap-3 rounded-md border px-3 py-2 cursor-pointer transition-colors ${
+                          checked ? 'bg-background border-foreground/20 shadow-sm' : 'bg-transparent border-transparent hover:bg-muted/40 hover:border-border'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={e => {
+                            const add = e.target.checked;
+                            setNextProcessSeries(prev => {
+                              if (add && !prev.includes(opt.id)) return [...prev, opt.id];
+                              if (!add) return prev.filter(x => x !== opt.id);
+                              return prev;
+                            });
+                          }}
+                          className="h-4 w-4 shrink-0 accent-foreground"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className={`text-[12px] leading-4 font-medium ${checked ? 'text-foreground' : 'text-muted-foreground'}`}>
+                            {opt.label}
+                          </div>
+                        </div>
+                        {checked ? (
+                          <div className="shrink-0 h-5 w-5 rounded-full bg-foreground text-background text-[10px] font-bold flex items-center justify-center tabular-nums">
+                            {stepPos + 1}
+                          </div>
+                        ) : (
+                          <div className="shrink-0 h-5 w-5 rounded-full border border-dashed border-muted-foreground/30 text-[10px] text-muted-foreground/40 flex items-center justify-center">
+                            {optIdx + 1}
+                          </div>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Right: workflow preview */}
+              <div className="flex flex-col min-h-0">
+                <div className="px-5 py-3 border-b border-border bg-muted/20 shrink-0">
+                  <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Document Workflow</div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">Steps in sequence as they must be completed.</div>
+                </div>
+                <div className="flex-1 overflow-y-auto px-4 py-4">
+                  {nextProcessSeries.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-10 text-center gap-2">
+                      <div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center">
+                        <ClipboardList className="h-5 w-5 text-muted-foreground" />
+                      </div>
+                      <div className="text-sm font-medium text-muted-foreground">No steps added yet</div>
+                      <div className="text-xs text-muted-foreground/70">Select processes from the left panel to build the workflow.</div>
+                    </div>
+                  ) : (
+                    <ol className="relative space-y-0">
+                      {nextProcessSeries.map((id, idx) => {
+                        const opt = PO_NEXT_PROCESS_OPTIONS.find(x => x.id === id);
+                        const isFirst = idx === 0;
+                        const isLast = idx === nextProcessSeries.length - 1;
+                        return (
+                          <li key={id} className="flex gap-3">
+                            <div className="flex flex-col items-center shrink-0 w-7">
+                              <div className="h-7 w-7 rounded-full border-2 bg-foreground border-foreground text-background flex items-center justify-center shrink-0 z-10 text-[11px] font-bold tabular-nums">
+                                {idx + 1}
+                              </div>
+                              {!isLast && <div className="w-px flex-1 bg-border mt-1 mb-1 min-h-[20px]" />}
+                            </div>
+                            <div className="flex-1 min-w-0 flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 mb-2 shadow-sm">
+                              <div className="flex-1 min-w-0">
+                                <div className="text-[12px] font-semibold text-foreground leading-4">{opt?.label || id}</div>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  type="button" disabled={isFirst}
+                                  onClick={() => setNextProcessSeries(prev => {
+                                    if (idx <= 0) return prev;
+                                    const next = [...prev]; const tmp = next[idx - 1]; next[idx - 1] = next[idx]; next[idx] = tmp; return next;
+                                  })}
+                                  className="h-6 w-6 rounded flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                                ><ArrowUp className="h-3.5 w-3.5" /></button>
+                                <button
+                                  type="button" disabled={isLast}
+                                  onClick={() => setNextProcessSeries(prev => {
+                                    if (idx >= prev.length - 1) return prev;
+                                    const next = [...prev]; const tmp = next[idx + 1]; next[idx + 1] = next[idx]; next[idx] = tmp; return next;
+                                  })}
+                                  className="h-6 w-6 rounded flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                                ><ArrowDown className="h-3.5 w-3.5" /></button>
+                                <button
+                                  type="button"
+                                  onClick={() => setNextProcessSeries(prev => prev.filter(x => x !== id))}
+                                  className="h-6 w-6 rounded flex items-center justify-center text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                                ><X className="h-3.5 w-3.5" /></button>
+                              </div>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── STEP 3: Budget Allocation ── */}
+          {currentStep === 3 && (
+            <div className="p-6 space-y-5">
+              {/* Budget picker row */}
+              <div>
+                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">Select Budget to Allocate</div>
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1 max-w-sm">
+                    <select
+                      value={pickedBudgetId}
+                      onChange={e => setPickedBudgetId(e.target.value)}
+                      disabled={loadingBudgets}
+                      className="w-full appearance-none border border-border rounded-lg px-3 py-2 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-foreground/20 pr-8 disabled:opacity-50"
+                    >
+                      <option value="">{loadingBudgets ? 'Loading budgets…' : 'Select a budget…'}</option>
+                      {budgets
+                        .filter(b => !allocations.some(a => a.budgetId === b.budget_id))
+                        .map(b => (
+                          <option key={b.budget_id} value={b.budget_id}>
+                            {b.budget_name} · {b.crop_season}
+                          </option>
+                        ))}
+                    </select>
+                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                  </div>
+                  <Button
+                    type="button" size="sm" variant="outline"
+                    onClick={handleAddBudget}
+                    disabled={!pickedBudgetId || addingBudget}
+                    className="gap-1.5 shrink-0"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    {addingBudget ? 'Loading…' : 'Add Budget'}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Allocated budgets */}
+              {allocations.length === 0 ? (
+                <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/10 py-14 gap-3">
+                  <ClipboardList className="h-8 w-8 text-muted-foreground/40" />
+                  <div className="text-sm font-medium text-muted-foreground">No budgets added yet</div>
+                  <div className="text-xs text-muted-foreground/60">Select a budget above and click Add Budget to start allocating.</div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {allocations.map(alloc => {
+                    const selectedCount = alloc.items.filter(it => it.checked).length;
+                    const allocTotal = alloc.items.filter(it => it.checked).reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
+                    return (
+                      <div key={alloc.budgetId} className="rounded-xl border border-border overflow-hidden">
+                        {/* Budget card header */}
+                        <div className="flex items-center justify-between px-4 py-3 bg-muted/20 border-b border-border">
+                          <div>
+                            <div className="text-sm font-bold text-foreground">{alloc.budgetName}</div>
+                            <div className="text-[11px] text-muted-foreground mt-0.5">{alloc.cropSeason}</div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            {selectedCount > 0 && (
+                              <div className="text-[11px] font-semibold text-foreground">
+                                {selectedCount} item{selectedCount !== 1 ? 's' : ''} · ₹{fmtAmt(allocTotal)}
+                              </div>
+                            )}
+                            <button
+                              type="button" onClick={() => removeBudget(alloc.budgetId)}
+                              className="h-6 w-6 rounded flex items-center justify-center text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                              title="Remove budget"
+                            ><X className="h-3.5 w-3.5" /></button>
+                          </div>
+                        </div>
+
+                        {/* Line items table */}
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs border-collapse">
+                            <thead>
+                              <tr className="bg-muted/10 border-b border-border">
+                                <th className="px-3 py-2 w-8"></th>
+                                <th className="px-3 py-2 text-left font-semibold text-muted-foreground">#</th>
+                                <th className="px-3 py-2 text-left font-semibold text-muted-foreground">Category</th>
+                                <th className="px-3 py-2 text-left font-semibold text-muted-foreground">Line Item</th>
+                                <th className="px-3 py-2 text-left font-semibold text-muted-foreground">Type</th>
+                                <th className="px-3 py-2 text-right font-semibold text-muted-foreground">Budgeted (₹)</th>
+                                <th className="px-3 py-2 text-right font-semibold text-muted-foreground w-36">Allocate (₹)</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {alloc.items.map((it, rowIdx) => (
+                                <tr key={it.lineItemId} className={`border-b border-border/50 last:border-b-0 transition-colors ${it.checked ? 'bg-blue-50/40' : 'hover:bg-muted/20'}`}>
+                                  <td className="px-3 py-2 text-center">
+                                    <input
+                                      type="checkbox" checked={it.checked}
+                                      onChange={() => toggleItem(alloc.budgetId, it.lineItemId)}
+                                      className="h-3.5 w-3.5 accent-foreground"
+                                    />
+                                  </td>
+                                  <td className="px-3 py-2 text-muted-foreground tabular-nums">{rowIdx + 1}</td>
+                                  <td className="px-3 py-2 text-muted-foreground font-medium">{it.category || '—'}</td>
+                                  <td className="px-3 py-2 font-semibold text-foreground">{it.lineItem}</td>
+                                  <td className="px-3 py-2">
+                                    <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                                      it.budgetType === 'Capex' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700'
+                                    }`}>{it.budgetType || '—'}</span>
+                                  </td>
+                                  <td className="px-3 py-2 text-right font-semibold text-foreground">
+                                    {it.totalValue > 0 ? `₹${fmtAmt(it.totalValue)}` : '—'}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <input
+                                      type="number" min="0" step="0.01" placeholder="0"
+                                      value={it.amount}
+                                      disabled={!it.checked}
+                                      onChange={e => setItemAmount(alloc.budgetId, it.lineItemId, e.target.value)}
+                                      className="w-full text-right border border-border rounded-md px-2 py-1 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-foreground/20 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    />
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Grand total */}
+                  {totalAllocated > 0 && (
+                    <div className="flex items-center justify-end gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5">
+                      <span className="text-xs font-bold uppercase tracking-wide text-emerald-700">Total Allocated</span>
+                      <span className="text-sm font-extrabold text-emerald-700">₹{fmtAmt(totalAllocated)}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ── Footer navigation ──────────────────────────────────────────────── */}
+        <div className="px-6 py-4 border-t border-border bg-muted/20 flex items-center justify-between gap-4 shrink-0">
+          <Button
+            type="button" variant="outline" size="sm" disabled={submitting}
+            onClick={() => { if (currentStep === 1) onClose(); else setCurrentStep((currentStep - 1) as 1 | 2 | 3); }}
+          >
+            {currentStep === 1 ? 'Cancel' : <><ChevronLeft className="h-3.5 w-3.5 mr-1" />Back</>}
+          </Button>
+
+          <span className="text-[11px] text-muted-foreground">Step {currentStep} of 3</span>
+
+          {currentStep < 3 ? (
+            <Button type="button" size="sm" onClick={goNext} className="gap-1.5">
+              Next <ChevronRight className="h-3.5 w-3.5" />
+            </Button>
+          ) : (
+            <Button type="button" size="sm" disabled={submitting} onClick={handleSubmit} className="gap-1.5">
+              <SendHorizonal className="h-3.5 w-3.5" />
+              {submitting ? 'Creating…' : 'Create Flow'}
+            </Button>
+          )}
         </div>
       </div>
     </div>
@@ -390,6 +1134,8 @@ export default function PurchaseFlow() {
     step: PurchaseFlowStep;
   } | null>(null);
   const [addToInventoryFor, setAddToInventoryFor] = useState<{ poNumber: string } | null>(null);
+  const [createFlowOpen, setCreateFlowOpen] = useState(false);
+  const [flowRefreshNonce, setFlowRefreshNonce] = useState(0);
   const [forwardingSteps, setForwardingSteps] = useState<Set<string>>(new Set());
 
   // Per-flow merged step lists (API steps + locally inserted invoice steps)
@@ -520,7 +1266,7 @@ export default function PurchaseFlow() {
 
     load();
     return () => ac.abort();
-  }, []);
+  }, [flowRefreshNonce]);
 
   const rows = useMemo(() => {
     const copy = [...flows];
@@ -536,16 +1282,15 @@ export default function PurchaseFlow() {
     if (!baseUrl) return;
 
     rows.forEach(async (flow) => {
-      const prNumber = safeTrim((flow as any)?.pr_number);
-      if (!prNumber) return;
-      const flowId = safeTrim((flow as any)?.flow_id) || safeTrim((flow as any)?.comparison_id) || prNumber;
+      const comparisonId = safeTrim((flow as any)?.comparison_id);
+      if (!comparisonId) return;
+      const flowId = safeTrim((flow as any)?.flow_id) || comparisonId;
 
       setLeftPanelLoadingSet((prev) => new Set([...prev, flowId]));
       try {
-        const res = await fetch(`${baseUrl}/purchase_flow/get_left_panel_info`, {
+        const res = await fetch(`${baseUrl}/purchase_flow/get_left_panel_info/${encodeURIComponent(comparisonId)}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ pr_number: prNumber }),
+          headers: { Accept: 'application/json' },
           signal: ac.signal,
         });
         if (!res.ok) return;
@@ -614,6 +1359,93 @@ export default function PurchaseFlow() {
     toast.success('Document uploaded successfully');
   };
 
+  const handleCreateFlow = async ({
+    orderType,
+    orderNumber,
+    prNumber,
+    vendorId,
+    poFile,
+    nextProcessSeries,
+    budgetAllocations,
+  }: {
+    orderType: 'PR' | 'SPR';
+    orderNumber: string;
+    prNumber: string;
+    vendorId: string;
+    poFile: File | null;
+    nextProcessSeries: PoNextProcessId[];
+    budgetAllocations: {
+      budgetId: string;
+      budgetName: string;
+      items: { lineItemId: string; lineItem: string; category: string; budgetType: string; totalValue: number; amount: string }[];
+    }[];
+  }) => {
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) { toast.error('Missing API base URL'); return; }
+
+    try {
+      // Step 1: upload PO document if provided
+      let orderUrl = '';
+      if (poFile) {
+        const fd = new FormData();
+        fd.append('document', poFile);
+        const uploadRes = await fetch(`${baseUrl}/purchase_flow/upload_PO_document`, {
+          method: 'POST',
+          body: fd,
+        });
+        const uploadData: any = await uploadRes.json().catch(() => null);
+        if (!uploadRes.ok || !uploadData?.success) {
+          throw new Error(uploadData?.message || uploadData?.error || `Upload failed (${uploadRes.status})`);
+        }
+        orderUrl = String(uploadData.file_url || '');
+      }
+
+      // Step 2: build budget_allocation dict keyed by budget_id
+      const budgetAllocationDict: Record<string, object[]> = {};
+      for (const alloc of budgetAllocations) {
+        if (alloc.items.length === 0) continue;
+        budgetAllocationDict[alloc.budgetId] = alloc.items.map((it, idx) => ({
+          row_number: idx + 1,
+          category: it.category,
+          line_item: it.lineItem,
+          type: it.budgetType,
+          budgeted: it.totalValue,
+          allocated: parseFloat(it.amount) || 0,
+        }));
+      }
+
+      // Step 3: create purchase flow
+      const res = await fetch(`${baseUrl}/purchase_flow/create_new_purchase_flow_manually`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          pr_number: prNumber,
+          order_number: orderNumber,
+          order_url: orderUrl,
+          vendor_id: vendorId,
+          order_type: orderType,
+          step_json: buildPurchaseFlowStage(nextProcessSeries),
+          budget_allocation: budgetAllocationDict,
+        }),
+      });
+
+      const text = await res.text().catch(() => '');
+      let data: any = null;
+      try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+
+      if (!res.ok) {
+        throw new Error(safeTrim(data?.message) || safeTrim(data?.error) || text || `HTTP ${res.status}`);
+      }
+      if (data?.success === false) throw new Error(data?.message || 'Create flow failed');
+
+      toast.success(data?.message || 'Purchase flow created');
+      setFlowRefreshNonce((n) => n + 1);
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to create purchase flow');
+      throw e;
+    }
+  };
+
   const handleForwardToAccounts = async (flowId: string, flow: ApiPurchaseFlow, step: PurchaseFlowStep) => {
     const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
     if (!baseUrl) return toast.error('Missing API base URL');
@@ -671,11 +1503,22 @@ export default function PurchaseFlow() {
         />
       ) : null}
 
+      {createFlowOpen ? (
+        <CreateFlowPopup
+          onClose={() => setCreateFlowOpen(false)}
+          onCreate={handleCreateFlow}
+        />
+      ) : null}
+
       <div className="mb-6">
         <div className="text-2xl font-bold">Purchase Flow</div>
         <div className="text-xs text-muted-foreground mt-0.5">
           Each purchase flow is a row. Steps come from the API as step_1, step_2, … — upload the required document in the empty step.
         </div>
+        <Button type="button" onClick={() => setCreateFlowOpen(true)} className="mt-3 gap-2">
+          <Plus className="w-4 h-4" />
+          Create Flow
+        </Button>
       </div>
 
       <div className="space-y-4">
@@ -696,6 +1539,7 @@ export default function PurchaseFlow() {
             const flowId = safeTrim((flow as any)?.flow_id) || safeTrim((flow as any)?.comparison_id) || `row-${idx}`;
             const prNumber = safeTrim((flow as any)?.pr_number);
             const orderNumber = safeTrim((flow as any)?.order_number);
+            const orderType = safeTrim((flow as any)?.order_type);
             const comparisonId = safeTrim((flow as any)?.comparison_id);
             const ts = safeTrim((flow as any)?.timestamp);
             const steps = getFlowSteps(flowId, flow);
@@ -707,10 +1551,12 @@ export default function PurchaseFlow() {
                   {(() => {
                     const info = leftPanelInfoMap[flowId];
                     const isLoading = leftPanelLoadingSet.has(flowId);
-                    const displayPr = info?.pr_number || prNumber || '—';
-                    const displayOrder = info?.Order_number || orderNumber || '—';
-                    const indentType = info?.indent_type;
+                    const effectivePrNumber = info?.pr_number || prNumber;
+                    const displayPr = effectivePrNumber || '—';
+                    const displayOrder = orderNumber || '—';
+                    const indentType = orderType || undefined;
                     const vendor = info?.vendor_details;
+                    const approvedVendorId = info?.approved_vendor_id;
 
                     return (
                   <div className="w-[280px] shrink-0 border-r border-border px-4 py-4 bg-muted/30 flex flex-col gap-3">
@@ -730,11 +1576,6 @@ export default function PurchaseFlow() {
                         )}
                       </div>
                       <div className="text-xs text-muted-foreground mt-1 break-all">{displayOrder}</div>
-                      {info?.department && (
-                        <div className="text-[11px] text-muted-foreground mt-0.5">
-                          <span className="font-medium">Dept:</span> {info.department}
-                        </div>
-                      )}
                     </div>
 
                     {/* Vendor details */}
@@ -744,11 +1585,14 @@ export default function PurchaseFlow() {
                         {vendor.vendor_name && (
                           <div className="text-xs font-semibold text-foreground">{vendor.vendor_name}</div>
                         )}
-                        {vendor.approved_vendor_id && (
-                          <div className="text-[11px] text-muted-foreground">{vendor.approved_vendor_id}</div>
+                        {approvedVendorId && (
+                          <div className="text-[11px] text-muted-foreground">{approvedVendorId}</div>
                         )}
                         {vendor.vendor_contact && (
                           <div className="text-[11px] text-muted-foreground">{vendor.vendor_contact}</div>
+                        )}
+                        {vendor.e_mail_id && (
+                          <div className="text-[11px] text-muted-foreground">{vendor.e_mail_id}</div>
                         )}
                         {vendor.vendor_address && (
                           <div className="text-[11px] text-muted-foreground">{vendor.vendor_address}</div>
@@ -780,16 +1624,16 @@ export default function PurchaseFlow() {
                         {savingFlows[flowId] ? 'Saving…' : 'Save Current'}
                       </button>
                       <button
-                        disabled={!prNumber}
-                        onClick={() => openHoInboxView(prNumber, 'po')}
+                        disabled={!effectivePrNumber}
+                        onClick={() => openHoInboxView(effectivePrNumber, 'po')}
                         className="flex flex-1 flex-col items-center justify-center gap-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-40 text-gray-700 px-2 py-2.5 text-[11px] font-medium transition-colors"
                       >
                         <Receipt className="w-4 h-4" />
                         View Order
                       </button>
                       <button
-                        disabled={!prNumber}
-                        onClick={() => openHoInboxView(prNumber, 'indent')}
+                        disabled={!effectivePrNumber}
+                        onClick={() => openHoInboxView(effectivePrNumber, 'indent')}
                         className="flex flex-1 flex-col items-center justify-center gap-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-40 text-gray-700 px-2 py-2.5 text-[11px] font-medium transition-colors"
                       >
                         <FileText className="w-4 h-4" />
@@ -799,7 +1643,7 @@ export default function PurchaseFlow() {
 
                     {indentType === 'PR' && (
                       <button
-                        disabled={!prNumber}
+                        disabled={!orderNumber}
                         onClick={() => setAddToInventoryFor({ poNumber: orderNumber })}
                         className="mt-2 w-full flex flex-col items-center justify-center gap-1 rounded-lg border border-green-200 bg-green-50 hover:bg-green-100 disabled:opacity-40 text-green-700 px-2 py-2.5 text-[11px] font-medium transition-colors"
                       >

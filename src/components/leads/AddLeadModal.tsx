@@ -189,10 +189,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
   };
 
   const handleMediaNext = () => {
-    const selectedImageCount = landImages.filter(Boolean).length;
-    if (selectedImageCount === 3 && landVideo) {
-      setStep('mapping');
-    }
+    setStep('mapping');
   };
 
   const handleImagePick = (index: number, file?: File | null) => {
@@ -730,14 +727,14 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
             <div className="flex items-start gap-3 p-3 bg-info/10 rounded-lg border border-info/20">
               <Info className="w-5 h-5 text-info mt-0.5 shrink-0" />
               <p className="text-sm text-muted-foreground">
-                Upload exactly 3 land images and 1 land video. Click any box to choose a file. This helps us verify the site quickly.
+                Land images and video are optional. If no media is uploaded, the lead will be saved without media.
               </p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {[0, 1, 2].map((index) => (
                 <div key={index} className="space-y-2">
-                  <Label className="text-xs text-muted-foreground">Image {index + 1} *</Label>
+                  <Label className="text-xs text-muted-foreground">Image {index + 1}</Label>
                   <input
                     ref={(el) => { imageInputRefs.current[index] = el; }}
                     type="file"
@@ -772,7 +769,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
             </div>
 
             <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">Land Video *</Label>
+              <Label className="text-xs text-muted-foreground">Land Video</Label>
               <input
                 ref={videoInputRef}
                 type="file"
@@ -791,7 +788,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
                     <Video className="w-7 h-7" />
                     <span className="text-sm font-medium">Click to upload land video</span>
-                    <span className="text-xs">One video required</span>
+                    <span className="text-xs">Optional</span>
                   </div>
                 )}
               </button>
@@ -817,7 +814,6 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                 <Button
                   type="button"
                   onClick={handleMediaNext}
-                  disabled={landImages.filter(Boolean).length !== 3 || !landVideo}
                   className="gap-2"
                 >
                   Next: Land Mapping (Optional)

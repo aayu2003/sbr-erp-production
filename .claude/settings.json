@@ -2,7 +2,25 @@
   "permissions": {
     "allow": [
       "Bash(npm install *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(find \"/c/Users/HP\" -iname \"budget.txt\" 2>/dev/null)",
+      "Read(//c/Users/HP/**)",
+      "Bash(git remote *)",
+      "Bash(echo \"EXIT:$?\")",
+      "Read(//c/HP/AppData/Local/Programs/Python/Python312/Sigmoyd testing/SBR Agrotech project/farm-connect/farm-connect/src/modules/**)",
+      "Read(//c/HP/AppData/Local/Programs/Python/Python312/Sigmoyd testing/SBR Agrotech project/farm-connect/farm-connect/src/pages/**)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" --max-time 3 http://127.0.0.1:8000/)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(curl -s -w \"\\\\nHTTP_STATUS:%{http_code}\\\\n\" -X POST http://127.0.0.1:8000/admin_cultivation/add_cultivation_activity -H \"Content-Type: application/json\" -d '{\"id\":\"__test-probe__\",\"name\":\"Test Probe\",\"category\":\"Other\",\"icon\":\"Sprout\",\"crop_type\":[\"Paddy\"]}')",
+      "Bash(node \"C:\\\\Users\\\\HP\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-HP-AppData-Local-Programs-Python-Python312-Sigmoyd-testing-SBR-Agrotech-project-farm-connect-farm-connect\\\\089dcb08-5b92-4231-acba-6a7f85faa810\\\\scratchpad\\\\seed_activities.mjs\")",
+      "Bash(curl -s http://127.0.0.1:8000/admin_cultivation/get_cultivation_activities)",
+      "Bash(node -e ' *)",
+      "Bash(curl -s http://127.0.0.1:8000/purchase_flow/get_purchase_flows)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/purchase_flow/get_left_panel_info -H \"Content-Type: application/json\" -d '{\"pr_number\":\"SBRPL/PO/BIO-CG/26-27/001\"}')",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/purchase_flow/get_left_panel_info -H \"Content-Type: application/json\" -d '{\"pr_number\":\"\"}')",
+      "Bash(curl -s http://127.0.0.1:8000/purchase_flow/get_left_panel_info/a04cad50-a1ac-438b-a6cd-fb044836b3bc)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/purchase_flow/get_left_panel_info/a04cad50-a1ac-438b-a6cd-fb044836b3bc)",
+      "Bash(curl -s -X OPTIONS -i http://127.0.0.1:8000/purchase_flow/get_left_panel_info/a04cad50-a1ac-438b-a6cd-fb044836b3bc)"
     ]
   }
 }

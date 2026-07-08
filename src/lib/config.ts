@@ -29,10 +29,10 @@ export const MODULE_GROUPS = [
     modules: [
       {
         key: 'cultivation-master',
-        label: 'Cultivation Master',
+        label: 'Operations Master',
         path: '/cultivation-master',
         component: 'CultivationMasterModule', // Should be imported dynamically in router
-        description: 'Create and manage week-wise activity planners for your farm.'
+        description: 'Manage cultivation setup, dosage controls, and land hierarchy references.'
       },
       {
         key: 'cultivation-plan',
