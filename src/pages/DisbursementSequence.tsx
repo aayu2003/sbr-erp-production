@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
-import { X, ArrowUpDown, Loader2 } from "lucide-react";
+import { X, ArrowUpDown, Loader2, Plus } from "lucide-react";
 import getBaseUrl from "@/lib/config";
 
 // Deliberately a narrow local shape (not Budget.tsx's BudgetItem) so this file
@@ -36,6 +36,34 @@ type WeekColumn = {
 const fmtInr = (value: number) =>
   new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 }).format(value);
 
+const MONTH_SHORT_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// monthKey round-trips through the xlsx column headers (e.g. "Nov2026"), so parsing must
+// invert exactly what toLocaleString("en-US", { month: "short" }) produces below.
+function parseMonthKey(monthKey: string): Date {
+  const match = monthKey.match(/^([A-Za-z]{3})(\d{4})$/);
+  if (!match) return new Date(NaN);
+  const idx = MONTH_SHORT_NAMES.indexOf(match[1]);
+  return new Date(Number(match[2]), idx, 1);
+}
+
+function buildMonthColumns(monthStart: Date): WeekColumn[] {
+  const monthLabel = monthStart.toLocaleString("en-US", { month: "long" });
+  const monthShort = monthStart.toLocaleString("en-US", { month: "short" });
+  const year = monthStart.getFullYear();
+  const monthKey = `${monthShort}${year}`;
+  const columns: WeekColumn[] = [];
+  for (let w = 1; w <= 4; w++) {
+    columns.push({
+      key: `${monthKey}-W${w}`,
+      monthKey,
+      monthLabel: `${monthLabel} ${year}`,
+      weekLabel: `W${w}`,
+    });
+  }
+  return columns;
+}
+
 function buildWeekColumns(startDate: string, endDate: string): WeekColumn[] {
   const start = new Date(startDate);
   const end = new Date(endDate);
@@ -46,18 +74,7 @@ function buildWeekColumns(startDate: string, endDate: string): WeekColumn[] {
   const endCursor = new Date(end.getFullYear(), end.getMonth(), 1);
 
   while (cursor <= endCursor) {
-    const monthLabel = cursor.toLocaleString("en-US", { month: "long" });
-    const monthShort = cursor.toLocaleString("en-US", { month: "short" });
-    const year = cursor.getFullYear();
-    const monthKey = `${monthShort}${year}`;
-    for (let w = 1; w <= 4; w++) {
-      columns.push({
-        key: `${monthKey}-W${w}`,
-        monthKey,
-        monthLabel: `${monthLabel} ${year}`,
-        weekLabel: `W${w}`,
-      });
-    }
+    columns.push(...buildMonthColumns(cursor));
     cursor.setMonth(cursor.getMonth() + 1);
   }
   return columns;
@@ -73,6 +90,13 @@ export default function DisbursementSequence({ budgetId, item, onClose }: Disbur
   const [saving, setSaving] = useState(false);
   const [existingLoading, setExistingLoading] = useState(true);
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  // Months the user has added beyond the project timeline (e.g. a disbursement that falls
+  // after the project end date), in chronological order. Each contributes 4 weeks (W1-W4).
+  const [extraMonthKeys, setExtraMonthKeys] = useState<string[]>([]);
+  // Raw saved row from the xlsx, kept around until the timeline is also loaded so we can
+  // detect which of its columns fall outside the timeline and restore them as extra months.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [existingRowRaw, setExistingRowRaw] = useState<Record<string, any> | null>(null);
 
   useEffect(() => {
     if (!budgetId) {
@@ -130,14 +154,7 @@ export default function DisbursementSequence({ budgetId, item, onClose }: Disbur
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const rows: Record<string, any>[] = XLSX.utils.sheet_to_json(sheet);
         const existingRow = rows.find((r) => String(r.line_item_id) === item.id);
-        if (!existingRow) return;
-        const restored: Record<string, string> = {};
-        Object.entries(existingRow).forEach(([key, value]) => {
-          if (key === "line_item_id" || key === "line_item") return;
-          const num = Number(value);
-          if (num) restored[key] = String(num);
-        });
-        setAmounts(restored);
+        setExistingRowRaw(existingRow ?? {});
       } catch (err: unknown) {
         if ((err as { name?: string })?.name !== "AbortError") {
           // Non-fatal — the grid just starts blank if this fails.
@@ -150,10 +167,42 @@ export default function DisbursementSequence({ budgetId, item, onClose }: Disbur
     return () => ac.abort();
   }, [budgetId, item.id]);
 
-  const weekColumns = useMemo(
-    () => (timeline ? buildWeekColumns(timeline.start, timeline.end) : []),
-    [timeline]
-  );
+  // Once both the timeline and the saved row are in, split the saved row into amounts that
+  // fall within the project timeline and columns that don't — the latter become extra months
+  // (e.g. a disbursement added after the project end date) so they reappear on reopen.
+  useEffect(() => {
+    if (!timeline || !existingRowRaw) return;
+    const baseKeys = new Set(buildWeekColumns(timeline.start, timeline.end).map((c) => c.key));
+    const restored: Record<string, string> = {};
+    const extraKeys = new Set<string>();
+    Object.entries(existingRowRaw).forEach(([key, value]) => {
+      if (key === "line_item_id" || key === "line_item") return;
+      const num = Number(value);
+      if (num) restored[key] = String(num);
+      if (!baseKeys.has(key)) extraKeys.add(key.replace(/-W\d+$/, ""));
+    });
+    setAmounts(restored);
+    if (extraKeys.size > 0) {
+      const sorted = Array.from(extraKeys).sort((a, b) => parseMonthKey(a).getTime() - parseMonthKey(b).getTime());
+      setExtraMonthKeys(sorted);
+    }
+  }, [timeline, existingRowRaw]);
+
+  const weekColumns = useMemo(() => {
+    if (!timeline) return [];
+    const base = buildWeekColumns(timeline.start, timeline.end);
+    const extra = extraMonthKeys.flatMap((mk) => buildMonthColumns(parseMonthKey(mk)));
+    return [...base, ...extra];
+  }, [timeline, extraMonthKeys]);
+
+  const handleAddMonth = () => {
+    const last = weekColumns[weekColumns.length - 1];
+    if (!last) return;
+    const nextMonth = parseMonthKey(last.monthKey);
+    nextMonth.setMonth(nextMonth.getMonth() + 1);
+    const monthKey = `${nextMonth.toLocaleString("en-US", { month: "short" })}${nextMonth.getFullYear()}`;
+    setExtraMonthKeys((prev) => (prev.includes(monthKey) ? prev : [...prev, monthKey]));
+  };
 
   const monthGroups = useMemo(() => {
     const groups: { monthKey: string; monthLabel: string; weekCount: number }[] = [];
@@ -289,6 +338,19 @@ export default function DisbursementSequence({ budgetId, item, onClose }: Disbur
               </span>
             </span>
           </div>
+
+          {!timelineLoading && !existingLoading && !timelineError && weekColumns.length > 0 && (
+            <div className="mb-3 flex justify-end">
+              <button
+                type="button"
+                onClick={handleAddMonth}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#173f70] px-3 py-1.5 text-xs font-semibold text-[#173f70] hover:bg-[#e8eef6]"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add Month
+              </button>
+            </div>
+          )}
 
           {timelineLoading || existingLoading ? (
             <div className="flex items-center justify-center gap-2 py-16 text-sm font-semibold text-slate-400">
