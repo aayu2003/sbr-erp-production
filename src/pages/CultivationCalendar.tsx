@@ -30,6 +30,7 @@ Map as MapIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
+import { getFarmerNames } from '@/lib/farmerNameCache';
 import { toast } from 'sonner';
 
 // ✅ Import the Sidebar
@@ -408,20 +409,6 @@ return {};
 }
 };
 
-const fetchFarmerName = async (farmId: string) => {
-	if (!farmId) return null;
-	try {
-		const res = await fetch(`${BASE_URL}/farmer_managment/get_farmer_details_from_farm_id/${farmId}`);
-		if (!res.ok) return null;
-		const data = await res.json().catch(() => null);
-		const name = data?.farmer?.farmer_name;
-		return typeof name === 'string' && name.trim().length > 0 ? name.trim() : null;
-	} catch (e) {
-		return null;
-	}
-};
-
-
 // --- Single Month Component ---
 const MonthCard = ({
 monthDate,
@@ -745,18 +732,14 @@ useEffect(() => {
 	const ids = farmOptions.filter((id) => id && !farmerNames[id]);
 	if (ids.length === 0) return;
 	let mounted = true;
-	(async () => {
-		const results = await Promise.all(ids.map(async (id) => {
-			const name = await fetchFarmerName(id);
-			return { id, name: name || id };
-		}));
+	getFarmerNames(ids).then((names) => {
 		if (!mounted) return;
 		setFarmerNames((prev) => {
 			const next = { ...prev };
-			for (const r of results) next[r.id] = r.name;
+			ids.forEach((id) => { next[id] = names[id] || id; });
 			return next;
 		});
-	})();
+	});
 	return () => { mounted = false; };
 }, [farmOptions]);
 

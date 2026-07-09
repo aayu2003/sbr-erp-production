@@ -33,7 +33,7 @@ const AuthLanding = () => {
     return <div className="min-h-screen bg-gray-50" />;
   }
 
-  return ok ? <Navigate to="/leads" replace /> : <Navigate to="/login" replace />;
+  return ok ? <Navigate to="/ceos-desk" replace /> : <Navigate to="/login" replace />;
 };
 
 export default AuthLanding;

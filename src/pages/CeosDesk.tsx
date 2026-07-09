@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import * as XLSX from "xlsx";
 import {
   Bar,
   BarChart,
@@ -37,6 +38,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import getBaseUrl from "@/lib/config";
+import { getFarmerNames } from "@/lib/farmerNameCache";
 import type { Lead } from "@/types/farm";
 
 type Tone = "green" | "blue" | "orange" | "purple" | "red";
@@ -584,29 +586,94 @@ const BudgetBifurcationCard = ({ budgets, loading }: { budgets: BudgetBifurcatio
   );
 };
 
-// TODO: replace with real week-wise disbursement data once the API is available.
 type DisbursementWeek = { week: string; planned: number; disbursed: number; cumulative: number };
 
-const buildDummyDisbursementSeries = (totalCr: number, weeks = 8): DisbursementWeek[] => {
-  const weights = [0.16, 0.14, 0.13, 0.12, 0.11, 0.12, 0.11, 0.11].slice(0, weeks);
-  const weightSum = weights.reduce((sum, w) => sum + w, 0);
-  let cumulative = 0;
+const DISBURSEMENT_SHEET_NAME = "ERP Disbursement";
+const MONTH_ORDER: Record<string, number> = {
+  Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
+};
 
-  return weights.map((weight, index) => {
-    const planned = (totalCr * weight) / weightSum;
-    const completionFactor = index < weeks - 3 ? 1 : index === weeks - 3 ? 0.6 : index === weeks - 2 ? 0.25 : 0;
-    const disbursed = planned * completionFactor;
-    cumulative += disbursed;
+// Week-column keys look like "Jun2026-W1" (see DisbursementSequence.tsx, which writes them).
+// Parse one into a chronologically sortable value plus a display label.
+const parseWeekKey = (key: string) => {
+  const match = key.match(/^([A-Za-z]{3})(\d{4})-W(\d)$/);
+  if (!match) return null;
+  const [, monthShort, yearStr, weekStr] = match;
+  const monthIdx = MONTH_ORDER[monthShort];
+  if (monthIdx === undefined) return null;
+  const year = Number(yearStr);
+  const week = Number(weekStr);
+  return { monthShort, year, week, sortValue: year * 48 + monthIdx * 4 + week };
+};
+
+// Same W1-W4 day-of-month bucketing convention used when the weeks were created, so "today"
+// can be placed on the same timeline to split planned-vs-already-due disbursement.
+const getCurrentWeekSortValue = () => {
+  const now = new Date();
+  const monthIdx = now.getMonth();
+  const day = now.getDate();
+  const week = day <= 7 ? 1 : day <= 14 ? 2 : day <= 21 ? 3 : 4;
+  return now.getFullYear() * 48 + monthIdx * 4 + week;
+};
+
+// Aggregates the "ERP Disbursement" sheet across every budget's own xlsx into one portfolio-wide,
+// chronologically-ordered week series. "Disbursed" is a best-effort proxy: weeks at-or-before
+// today are treated as already paid out on schedule, since there's no separate actuals feed.
+const fetchAggregateDisbursementSeries = async (
+  budgetIds: string[],
+  signal: AbortSignal
+): Promise<DisbursementWeek[]> => {
+  const baseUrl = getBaseUrl().replace(/\/$/, "");
+  const weekTotals = new Map<string, number>();
+
+  await Promise.all(
+    budgetIds.map(async (budgetId) => {
+      try {
+        const res = await fetch(`${baseUrl}/admin_accounts/get_budget/${budgetId}`, { signal });
+        if (!res.ok) return;
+        const buf = await res.arrayBuffer();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const wb = (XLSX as any).read(new Uint8Array(buf), { type: "array" });
+        const sheet = wb.Sheets[DISBURSEMENT_SHEET_NAME];
+        if (!sheet) return;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rows: Record<string, any>[] = XLSX.utils.sheet_to_json(sheet);
+        rows.forEach((row) => {
+          Object.entries(row).forEach(([key, value]) => {
+            if (key === "line_item_id" || key === "line_item") return;
+            const amount = Number(value) || 0;
+            if (!amount) return;
+            weekTotals.set(key, (weekTotals.get(key) || 0) + amount);
+          });
+        });
+      } catch (err: unknown) {
+        if ((err as { name?: string })?.name === "AbortError") throw err;
+        // Skip this one budget on failure rather than failing the whole aggregate.
+      }
+    })
+  );
+
+  const currentWeekSortValue = getCurrentWeekSortValue();
+  const parsedWeeks = Array.from(weekTotals.entries())
+    .map(([key, total]) => ({ total, parsed: parseWeekKey(key) }))
+    .filter((w): w is { total: number; parsed: NonNullable<ReturnType<typeof parseWeekKey>> } => w.parsed !== null)
+    .sort((a, b) => a.parsed.sortValue - b.parsed.sortValue);
+
+  let cumulative = 0;
+  return parsedWeeks.map(({ total, parsed }) => {
+    const plannedCr = total / 1e7;
+    const disbursedCr = parsed.sortValue <= currentWeekSortValue ? plannedCr : 0;
+    cumulative += disbursedCr;
     return {
-      week: `Wk ${index + 1}`,
-      planned: Number(planned.toFixed(2)),
-      disbursed: Number(disbursed.toFixed(2)),
+      week: `${parsed.monthShort} W${parsed.week}`,
+      planned: Number(plannedCr.toFixed(2)),
+      disbursed: Number(disbursedCr.toFixed(2)),
       cumulative: Number(cumulative.toFixed(2)),
     };
   });
 };
 
-const DisbursementSequenceCard = ({ series }: { series: DisbursementWeek[] }) => {
+const DisbursementSequenceCard = ({ series, loading }: { series: DisbursementWeek[]; loading: boolean }) => {
   const totalPlanned = series.reduce((sum, item) => sum + item.planned, 0);
   const totalDisbursed = series.reduce((sum, item) => sum + item.disbursed, 0);
   const pctComplete = totalPlanned > 0 ? Math.round((totalDisbursed / totalPlanned) * 100) : 0;
@@ -615,18 +682,45 @@ const DisbursementSequenceCard = ({ series }: { series: DisbursementWeek[] }) =>
     <Card className="p-5">
       <SectionHeader title="Disbursement Sequence" right={<Pill tone="blue">Week-wise · Rs Cr</Pill>} />
       <p className="-mt-2 mb-3 text-xs font-semibold text-slate-500">
-        Illustrative week-wise disbursement pace (dummy data — API not yet available).
+        Week-wise disbursement pace aggregated across all active budgets.
       </p>
       <div className="h-64">
-        <ResponsiveContainer>
-          <BarChart data={series} margin={{ left: -18, right: 8, top: 8, bottom: 0 }}>
-            <XAxis dataKey="week" axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
-            <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
-            <Tooltip formatter={(value: number, name: string) => [`Rs ${value.toFixed(2)} Cr`, name]} />
-            <Bar dataKey="planned" name="Planned" fill="#c7d2fe" radius={[6, 6, 0, 0]} />
-            <Bar dataKey="disbursed" name="Disbursed" fill="#2563eb" radius={[6, 6, 0, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
+        {loading ? (
+          <div className="flex h-full items-center justify-center text-sm font-semibold text-slate-400">Loading…</div>
+        ) : series.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm font-semibold text-slate-400">
+            No disbursement sequence data recorded yet.
+          </div>
+        ) : (
+          <ResponsiveContainer>
+            <LineChart data={series} margin={{ left: -18, right: 8, top: 28, bottom: 0 }}>
+              <XAxis dataKey="week" axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
+              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
+              <Tooltip formatter={(value: number) => [`Rs ${value.toFixed(2)} Cr`, "Planned"]} />
+              <Line
+                type="monotone"
+                dataKey="planned"
+                name="Planned"
+                stroke="#2563eb"
+                strokeWidth={2.5}
+                dot={{ r: 4 }}
+                label={(props: { x: number; y: number; index: number }) => (
+                  <text
+                    key={`cumulative-${props.index}`}
+                    x={props.x}
+                    y={props.y - 12}
+                    textAnchor="middle"
+                    fontSize={10}
+                    fontWeight={700}
+                    fill="#16a34a"
+                  >
+                    {`Rs ${series[props.index]?.cumulative.toFixed(2)}`}
+                  </text>
+                )}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
       </div>
       <div className="mt-3 grid grid-cols-3 gap-2 text-center">
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
@@ -2236,10 +2330,23 @@ const FinancialAnalysisView = ({
   farmerNames: Record<string, string>;
   farmsLoading: boolean;
 }) => {
-  const disbursementSeries = useMemo(() => {
-    const totals = sumBudgetTotals(budgets);
-    const totalCr = totals.totalBudget > 0 ? totals.totalBudget / 1e7 : 5;
-    return buildDummyDisbursementSeries(totalCr);
+  const [disbursementSeries, setDisbursementSeries] = useState<DisbursementWeek[]>([]);
+  const [disbursementLoading, setDisbursementLoading] = useState(false);
+
+  useEffect(() => {
+    if (budgets.length === 0) {
+      setDisbursementSeries([]);
+      return;
+    }
+    const ac = new AbortController();
+    setDisbursementLoading(true);
+    fetchAggregateDisbursementSeries(budgets.map((b) => b.budget_id), ac.signal)
+      .then((series) => setDisbursementSeries(series))
+      .catch((err: unknown) => {
+        if ((err as { name?: string })?.name !== "AbortError") setDisbursementSeries([]);
+      })
+      .finally(() => setDisbursementLoading(false));
+    return () => ac.abort();
   }, [budgets]);
 
   return (
@@ -2262,7 +2369,7 @@ const FinancialAnalysisView = ({
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.3fr_0.7fr]">
         <BudgetBifurcationCard budgets={budgets} loading={budgetsLoading} />
-        <DisbursementSequenceCard series={disbursementSeries} />
+        <DisbursementSequenceCard series={disbursementSeries} loading={disbursementLoading} />
       </section>
 
       <CategoryWiseBudgetSection budgets={categoryBudgets} loading={categoryBudgetsLoading} />
@@ -2599,7 +2706,6 @@ const CeosDesk = () => {
   const navigate = useNavigate();
   const [farms, setFarms] = useState<Farm[]>([]);
   const [farmsLoading, setFarmsLoading] = useState(false);
-  const [farmsFetched, setFarmsFetched] = useState(false);
   const [clusterList, setClusterList] = useState<ClusterEntry[]>([]);
   const [clusterLoading, setClusterLoading] = useState(false);
   const [calendarData, setCalendarData] = useState<CalendarDayMap>({});
@@ -2607,7 +2713,6 @@ const CeosDesk = () => {
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [financialKpis, setFinancialKpis] = useState<FinancialKpis | null>(null);
   const [financialLoading, setFinancialLoading] = useState(false);
-  const [financialFetched, setFinancialFetched] = useState(false);
   const [budgetBifurcation, setBudgetBifurcation] = useState<BudgetBifurcation[]>([]);
   const [budgetBifurcationLoading, setBudgetBifurcationLoading] = useState(false);
   const [categoryBudgets, setCategoryBudgets] = useState<BudgetCategoryBifurcation[]>([]);
@@ -2615,106 +2720,152 @@ const CeosDesk = () => {
   const [farmerNames, setFarmerNames] = useState<Record<string, string>>({});
   const [leads, setLeads] = useState<Lead[]>([]);
   const [leadsLoading, setLeadsLoading] = useState(false);
-  const [leadsFetched, setLeadsFetched] = useState(false);
 
+  // Load every tab's data as soon as the desk opens — not gated on which tab is active —
+  // so the data is already there the moment the user clicks a tab. Tiers run in priority
+  // order (Land Acquisition, then Cultivation Tracker, then Financial Analysis) rather than
+  // all at once, since the backend only runs 2 workers.
   useEffect(() => {
-    if (activeTabId !== "land-acquisition" || leadsFetched) return;
-    setLeadsFetched(true);
+    let cancelled = false;
     const base = getBaseUrl().replace(/\/$/, "");
 
-    setLeadsLoading(true);
-    fetch(`${base}/farmer_managment/get_leads`)
-      .then((res) => res.json())
-      .then((data: { leads?: any[] }) => setLeads(transformLeads(Array.isArray(data?.leads) ? data.leads : [])))
-      .catch(() => setLeads([]))
-      .finally(() => setLeadsLoading(false));
-  }, [activeTabId, leadsFetched]);
+    const loadLandAcquisition = async () => {
+      setLeadsLoading(true);
+      try {
+        const res = await fetch(`${base}/farmer_managment/get_leads`);
+        const data: { leads?: any[] } = await res.json();
+        if (!cancelled) setLeads(transformLeads(Array.isArray(data?.leads) ? data.leads : []));
+      } catch {
+        if (!cancelled) setLeads([]);
+      } finally {
+        if (!cancelled) setLeadsLoading(false);
+      }
+    };
 
-  useEffect(() => {
-    if (activeTabId !== "financial-analysis" || financialFetched) return;
-    setFinancialFetched(true);
-    const base = getBaseUrl().replace(/\/$/, "");
+    const loadCultivationTracker = async () => {
+      setFarmsLoading(true);
+      setClusterLoading(true);
+      setCalendarLoading(true);
 
-    setFinancialLoading(true);
-    fetch(`${base}/ceo_desk/get_financial_analytics_KPIs`)
-      .then((res) => res.json())
-      .then((data: { success?: boolean; data?: FinancialKpis }) => setFinancialKpis(data?.success && data?.data ? data.data : null))
-      .catch(() => setFinancialKpis(null))
-      .finally(() => setFinancialLoading(false));
+      const farmsPromise = fetch(`${base}/farmer_managment/get_farms`)
+        .then((res) => res.json())
+        .then((data: { farms?: Farm[] }) => {
+          if (!cancelled) setFarms(Array.isArray(data?.farms) ? data.farms : []);
+        })
+        .catch(() => {
+          if (!cancelled) setFarms([]);
+        })
+        .finally(() => {
+          if (!cancelled) setFarmsLoading(false);
+        });
 
-    setBudgetBifurcationLoading(true);
-    fetch(`${base}/ceo_desk/budget_wise_utilization_bifurcation`)
-      .then((res) => res.json())
-      .then((data: { success?: boolean; data?: BudgetBifurcation[] }) =>
-        setBudgetBifurcation(data?.success && Array.isArray(data?.data) ? data.data : []),
-      )
-      .catch(() => setBudgetBifurcation([]))
-      .finally(() => setBudgetBifurcationLoading(false));
+      const clusterPromise = fetch(`${base}/ceo_desk/get_cluster_wise_crop_distribution`)
+        .then((res) => res.json())
+        .then((data: { success?: boolean; clusters?: ClusterEntry[] }) => {
+          if (!cancelled) setClusterList(Array.isArray(data?.clusters) ? data.clusters : []);
+        })
+        .catch(() => {
+          if (!cancelled) setClusterList([]);
+        })
+        .finally(() => {
+          if (!cancelled) setClusterLoading(false);
+        });
 
-    setCategoryBudgetsLoading(true);
-    fetch(`${base}/ceo_desk/get_category_wise_budget_utilization`)
-      .then((res) => res.json())
-      .then((data: { success?: boolean; data?: BudgetCategoryBifurcation[] }) =>
-        setCategoryBudgets(data?.success && Array.isArray(data?.data) ? data.data : []),
-      )
-      .catch(() => setCategoryBudgets([]))
-      .finally(() => setCategoryBudgetsLoading(false));
-  }, [activeTabId, financialFetched]);
+      const calendarPromise = fetch(`${base}/admin_cultivation/fetch_cultivation_calander`)
+        .then((res) => res.json())
+        .then(async (data) => {
+          const parsed = parseCultivationCalendar(data);
+          const cropTypeByCalanderId = await fetchCropTypesForCalanders(base, collectCalanderIds(parsed));
+          return {
+            days: applyCalanderCropTypes(parsed, cropTypeByCalanderId),
+            tasks: applyTaskCropTypes(parseCultivationTasks(data), cropTypeByCalanderId),
+          };
+        })
+        .then(({ days, tasks }) => {
+          if (!cancelled) {
+            setCalendarData(days);
+            setCalendarTasks(tasks);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setCalendarData({});
+            setCalendarTasks({});
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setCalendarLoading(false);
+        });
 
-  useEffect(() => {
-    if ((activeTabId !== "cultivation-tracker" && activeTabId !== "financial-analysis") || farmsFetched) return;
-    setFarmsFetched(true);
-    const base = getBaseUrl().replace(/\/$/, "");
+      await Promise.all([farmsPromise, clusterPromise, calendarPromise]);
+    };
 
-    setFarmsLoading(true);
-    fetch(`${base}/farmer_managment/get_farms`)
-      .then((res) => res.json())
-      .then((data: { farms?: Farm[] }) => setFarms(Array.isArray(data?.farms) ? data.farms : []))
-      .catch(() => setFarms([]))
-      .finally(() => setFarmsLoading(false));
+    const loadFinancialAnalysis = async () => {
+      setFinancialLoading(true);
+      setBudgetBifurcationLoading(true);
+      setCategoryBudgetsLoading(true);
 
-    setClusterLoading(true);
-    fetch(`${base}/ceo_desk/get_cluster_wise_crop_distribution`)
-      .then((res) => res.json())
-      .then((data: { success?: boolean; clusters?: ClusterEntry[] }) =>
-        setClusterList(Array.isArray(data?.clusters) ? data.clusters : []),
-      )
-      .catch(() => setClusterList([]))
-      .finally(() => setClusterLoading(false));
+      const kpiPromise = fetch(`${base}/ceo_desk/get_financial_analytics_KPIs`)
+        .then((res) => res.json())
+        .then((data: { success?: boolean; data?: FinancialKpis }) => {
+          if (!cancelled) setFinancialKpis(data?.success && data?.data ? data.data : null);
+        })
+        .catch(() => {
+          if (!cancelled) setFinancialKpis(null);
+        })
+        .finally(() => {
+          if (!cancelled) setFinancialLoading(false);
+        });
 
-    setCalendarLoading(true);
-    fetch(`${base}/admin_cultivation/fetch_cultivation_calander`)
-      .then((res) => res.json())
-      .then(async (data) => {
-        const parsed = parseCultivationCalendar(data);
-        const cropTypeByCalanderId = await fetchCropTypesForCalanders(base, collectCalanderIds(parsed));
-        return {
-          days: applyCalanderCropTypes(parsed, cropTypeByCalanderId),
-          tasks: applyTaskCropTypes(parseCultivationTasks(data), cropTypeByCalanderId),
-        };
-      })
-      .then(({ days, tasks }) => {
-        setCalendarData(days);
-        setCalendarTasks(tasks);
-      })
-      .catch(() => {
-        setCalendarData({});
-        setCalendarTasks({});
-      })
-      .finally(() => setCalendarLoading(false));
-  }, [activeTabId, farmsFetched]);
+      const budgetBifPromise = fetch(`${base}/ceo_desk/budget_wise_utilization_bifurcation`)
+        .then((res) => res.json())
+        .then((data: { success?: boolean; data?: BudgetBifurcation[] }) => {
+          if (!cancelled) setBudgetBifurcation(data?.success && Array.isArray(data?.data) ? data.data : []);
+        })
+        .catch(() => {
+          if (!cancelled) setBudgetBifurcation([]);
+        })
+        .finally(() => {
+          if (!cancelled) setBudgetBifurcationLoading(false);
+        });
+
+      const categoryPromise = fetch(`${base}/ceo_desk/get_category_wise_budget_utilization`)
+        .then((res) => res.json())
+        .then((data: { success?: boolean; data?: BudgetCategoryBifurcation[] }) => {
+          if (!cancelled) setCategoryBudgets(data?.success && Array.isArray(data?.data) ? data.data : []);
+        })
+        .catch(() => {
+          if (!cancelled) setCategoryBudgets([]);
+        })
+        .finally(() => {
+          if (!cancelled) setCategoryBudgetsLoading(false);
+        });
+
+      await Promise.all([kpiPromise, budgetBifPromise, categoryPromise]);
+    };
+
+    (async () => {
+      await loadLandAcquisition();
+      if (cancelled) return;
+      await loadCultivationTracker();
+      if (cancelled) return;
+      await loadFinancialAnalysis();
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (farms.length === 0) return;
-    const base = getBaseUrl().replace(/\/$/, "");
-    farms.forEach((farm) => {
-      fetch(`${base}/farmer_managment/get_farmer_details_from_farm_id/${farm.farm_id}`)
-        .then((res) => res.json())
-        .then((data: { farmer?: { farmer_name?: string } }) =>
-          setFarmerNames((prev) => ({ ...prev, [farm.farm_id]: data?.farmer?.farmer_name || "" })),
-        )
-        .catch(() => setFarmerNames((prev) => ({ ...prev, [farm.farm_id]: "" })));
+    let mounted = true;
+    getFarmerNames(farms.map((farm) => farm.farm_id)).then((names) => {
+      if (mounted) setFarmerNames((prev) => ({ ...prev, ...names }));
     });
+    return () => {
+      mounted = false;
+    };
   }, [farms]);
 
   const clusterSummaries = useMemo(() => buildClusterCropSummaries(clusterList), [clusterList]);
