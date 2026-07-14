@@ -3,7 +3,7 @@ import { MapContainer, TileLayer, Polygon, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
-  X, Save, MapPin, Loader2, UploadCloud, Check, AlertCircle,
+  X, Save, MapPin, Loader2, UploadCloud, Check, AlertCircle, Pencil, Trash2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -23,7 +23,12 @@ export type PlotData = {
   coordinates: LatLng[];
 };
 
+// Internal-only — carries plot_id so saved plots can be edited/deleted. Kept separate from
+// the exported PlotData (used by the onSave callback) so that public contract stays unchanged.
+type SavedPlotItem = PlotData & { plot_id: string };
+
 type ApiPlot = {
+  plot_id: string;
   plot_name: string;
   plot_area: number;
   plot_coordinates: LatLng[];
@@ -118,13 +123,22 @@ const PlotMarkingModal = ({
   const [progressFailed, setProgressFailed] = useState<string[]>([]);
 
   // Plots already persisted on the server
-  const [savedPlots] = useState<PlotData[]>(() =>
+  const [savedPlots, setSavedPlots] = useState<SavedPlotItem[]>(() =>
     initialPlots.map(p => ({
+      plot_id:     p.plot_id,
       plot_number: p.plot_name,
       acres:       p.plot_area,
       coordinates: p.plot_coordinates,
     }))
   );
+
+  // Editing an existing saved plot (rename and/or replace its shape via a new KML)
+  const [editingPlotId, setEditingPlotId]     = useState<string | null>(null);
+  const [editName, setEditName]               = useState('');
+  const [editPendingShape, setEditPendingShape] = useState<{ coordinates: LatLng[]; area: number } | null>(null);
+  const [isParsingEditKml, setIsParsingEditKml] = useState(false);
+  const [savingEditId, setSavingEditId]       = useState<string | null>(null);
+  const [deletingPlotId, setDeletingPlotId]   = useState<string | null>(null);
 
   // ESC closes (except during save)
   useEffect(() => {
@@ -161,6 +175,96 @@ const PlotMarkingModal = ({
     }
   };
 
+  // ── Edit an existing saved plot (rename + optionally replace its shape) ──────
+  const startEdit = (plot: SavedPlotItem) => {
+    setEditingPlotId(plot.plot_id);
+    setEditName(plot.plot_number);
+    setEditPendingShape(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingPlotId(null);
+    setEditName('');
+    setEditPendingShape(null);
+  };
+
+  const handleEditKmlUpload = async (file: File) => {
+    try {
+      setIsParsingEditKml(true);
+      const result = await parseKmlFile(file);
+      if (result.allPolygons.length === 0) { toast.error('No polygons found in KML file'); return; }
+      if (result.allPolygons.length > 1) {
+        toast(`${result.allPolygons.length} polygons found in file — using the first one`);
+      }
+      const poly = result.allPolygons[0];
+      setEditPendingShape({
+        coordinates: poly.coordinates,
+        area: parseFloat(calculateAcres(poly.coordinates).toFixed(3)),
+      });
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to read KML file');
+    } finally {
+      setIsParsingEditKml(false);
+    }
+  };
+
+  const saveEdit = async (plot: SavedPlotItem) => {
+    const name = editName.trim();
+    if (!name) { toast.error('Plot name is required'); return; }
+
+    const coordinates = editPendingShape?.coordinates ?? plot.coordinates;
+    const area = editPendingShape?.area ?? plot.acres;
+
+    setSavingEditId(plot.plot_id);
+    try {
+      const res = await fetch(`${BASE_URL}/farmer_managment/edit_land_plot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          farm_id: farmId,
+          plot_id: plot.plot_id,
+          plot_coordinates: coordinates,
+          plot_area: area,
+          plot_name: name,
+        }),
+      });
+      const data = await res.json();
+      if (!data?.success) throw new Error(data?.message || 'Failed to save changes');
+
+      setSavedPlots(prev => prev.map(p => (p.plot_id === plot.plot_id ? { ...p, plot_number: name, acres: area, coordinates } : p)));
+      toast.success(`Plot "${name}" updated`);
+      cancelEdit();
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to update plot');
+    } finally {
+      setSavingEditId(null);
+    }
+  };
+
+  // ── Delete an existing saved plot ─────────────────────────────
+  const handleDeletePlot = async (plot: SavedPlotItem) => {
+    if (!window.confirm(`Delete plot "${plot.plot_number}"? This cannot be undone.`)) return;
+
+    setDeletingPlotId(plot.plot_id);
+    try {
+      const res = await fetch(`${BASE_URL}/farmer_managment/delete_land_plot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ farm_id: farmId, plot_id: plot.plot_id }),
+      });
+      const data = await res.json();
+      if (!data?.success) throw new Error(data?.message || 'Failed to delete plot');
+
+      setSavedPlots(prev => prev.filter(p => p.plot_id !== plot.plot_id));
+      if (editingPlotId === plot.plot_id) cancelEdit();
+      toast.success(`Plot "${plot.plot_number}" deleted`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to delete plot');
+    } finally {
+      setDeletingPlotId(null);
+    }
+  };
+
   // ── Save All (batched parallel) ──────────────────────────────
   const handleSaveAll = async () => {
     const total = kmlPlots.length;
@@ -173,6 +277,7 @@ const PlotMarkingModal = ({
     let totalDone  = 0;
     const allSaved: string[]  = [];
     const allFailed: string[] = [];
+    let latestFarmPlots: ApiPlot[] | null = null;
 
     for (let i = 0; i < kmlPlots.length; i += BATCH_SIZE) {
       const end   = Math.min(i + BATCH_SIZE, kmlPlots.length);
@@ -194,7 +299,7 @@ const PlotMarkingModal = ({
           .then(r => r.json())
           .then(data => {
             if (!data?.success) throw new Error(data?.message || 'Failed');
-            return { name, plot };
+            return { name, plot, farmPlots: data.farm?.land_plots as ApiPlot[] | undefined };
           });
         })
       );
@@ -203,6 +308,7 @@ const PlotMarkingModal = ({
         const globalIdx = i + bIdx;
         if (result.status === 'fulfilled') {
           allSaved.push(result.value.name);
+          if (result.value.farmPlots) latestFarmPlots = result.value.farmPlots;
           onSave?.({
             plot_number: result.value.name,
             acres:       result.value.plot.area,
@@ -219,9 +325,21 @@ const PlotMarkingModal = ({
       setProgressFailed([...allFailed]);
     }
 
+    // The response carries the whole updated farm, so use it to pick up the real
+    // (server-generated) plot_id for every plot — needed for Edit/Delete to work
+    // without requiring a full page reload.
+    if (latestFarmPlots) {
+      setSavedPlots(latestFarmPlots.map(p => ({
+        plot_id:     p.plot_id,
+        plot_number: p.plot_name,
+        acres:       p.plot_area,
+        coordinates: p.plot_coordinates,
+      })));
+    }
+
     if (allFailed.length === 0) {
       toast.success(`All ${total} plots saved`);
-      setTimeout(() => onClose(), 1400);
+      setTimeout(() => { setScreen('idle'); setKmlPlots([]); setPlotNames([]); }, 1400);
     } else {
       toast.error(`${allFailed.length} plot${allFailed.length > 1 ? 's' : ''} failed to save`);
     }
@@ -243,7 +361,7 @@ const PlotMarkingModal = ({
             <MapPin className="w-4 h-4 text-emerald-400 shrink-0" />
             <div className="min-w-0">
               <span className="text-sm font-bold text-white">
-                {screen === 'idle'   ? 'Plot Marking — Upload KML'
+                {screen === 'idle'   ? 'Plot Marking — Manage Plots'
                 : screen === 'review' ? `Review & Name Plots (${kmlPlots.length} detected)`
                 :                       'Saving Plots…'}
               </span>
@@ -285,89 +403,185 @@ const PlotMarkingModal = ({
         {/* ══ CONTENT ══════════════════════════════════════ */}
         <div className="flex-1 flex overflow-hidden">
 
-          {/* ── IDLE: upload zone over map ─────────────── */}
+          {/* ── IDLE: saved plots list + map ────────────── */}
           {screen === 'idle' && (
-            <div className="flex-1 relative">
-              <MapContainer
-                center={idleCenter}
-                zoom={initialCoordinates.length > 0 ? 15 : 5}
-                style={{ height: '100%', width: '100%' }}
-                zoomControl
-              >
-                <TileLayer
-                  url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                  maxZoom={19}
-                  attribution="Tiles © Esri"
-                />
-                <TileLayer
-                  url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
-                  opacity={0.6}
-                  maxZoom={19}
-                />
-                {initialCoordinates.length >= 3 && (
-                  <Polygon
-                    positions={initialCoordinates}
-                    pathOptions={{ color: '#94a3b8', fillColor: '#94a3b8', fillOpacity: 0.1, weight: 2, dashArray: '6 4' }}
-                  />
-                )}
-                {savedPlots.map((sp, si) =>
-                  sp.coordinates.length >= 3 ? (
-                    <Polygon
-                      key={si}
-                      positions={sp.coordinates as [number, number][]}
-                      pathOptions={{ color: plotColor(si), fillColor: plotColor(si), fillOpacity: 0.25, weight: 2 }}
-                    />
-                  ) : null
-                )}
-              </MapContainer>
+            <div className="flex-1 flex overflow-hidden">
 
-              {/* Upload overlay */}
-              <div className="absolute inset-0 z-[1000] flex items-center justify-center">
-                <label
-                  className={cn(
-                    'flex flex-col items-center gap-4 bg-gray-900/90 backdrop-blur-sm rounded-2xl border-2 border-dashed px-14 py-12 cursor-pointer transition-colors group',
-                    isParsingKml
-                      ? 'border-emerald-500 cursor-wait'
-                      : 'border-gray-500 hover:border-emerald-500',
-                  )}
-                >
-                  {isParsingKml ? (
-                    <>
-                      <Loader2 className="w-14 h-14 text-emerald-400 animate-spin" />
-                      <p className="text-white font-semibold text-lg">Reading KML file…</p>
-                      <p className="text-gray-400 text-sm">Parsing polygons · calculating areas</p>
-                    </>
+              {/* Left panel — saved plots */}
+              <div className="w-[360px] shrink-0 flex flex-col bg-gray-900 border-r border-gray-700">
+                <div className="px-4 py-3 border-b border-gray-700 shrink-0">
+                  <p className="text-sm font-semibold text-white">
+                    {savedPlots.length} Saved Plot{savedPlots.length === 1 ? '' : 's'}
+                  </p>
+                  <p className="text-xs text-gray-400 mt-0.5">Edit a name/shape, delete, or upload a KML to add more</p>
+                </div>
+
+                <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
+                  {savedPlots.length === 0 ? (
+                    <p className="text-xs text-gray-500 px-1 pt-6 text-center">No plots yet — upload a KML below to get started</p>
                   ) : (
-                    <>
-                      <UploadCloud className="w-14 h-14 text-gray-400 group-hover:text-emerald-400 transition-colors" />
-                      <div className="text-center space-y-1">
-                        <p className="text-white font-bold text-lg">Upload KML File</p>
-                        <p className="text-gray-400 text-sm">
-                          Every polygon in the file becomes a plot
-                        </p>
-                        {savedPlots.length > 0 && (
-                          <p className="text-emerald-400 text-xs pt-1">
-                            {savedPlots.length} existing plot{savedPlots.length > 1 ? 's' : ''} already saved for this farm
-                          </p>
-                        )}
-                      </div>
-                      <span className="px-5 py-2 rounded-lg bg-emerald-600 group-hover:bg-emerald-500 text-white text-sm font-semibold transition-colors">
-                        Choose .kml file
-                      </span>
-                    </>
+                    savedPlots.map((plot, i) => {
+                      const isEditing = editingPlotId === plot.plot_id;
+                      return (
+                        <div
+                          key={plot.plot_id}
+                          className={cn(
+                            'rounded-lg px-3 py-2.5 transition-colors',
+                            isEditing ? 'bg-gray-800 ring-1 ring-emerald-500' : 'bg-gray-800/70',
+                          )}
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: plotColor(i) }} />
+                            {isEditing ? (
+                              <input
+                                type="text"
+                                value={editName}
+                                onChange={e => setEditName(e.target.value)}
+                                placeholder="Plot name…"
+                                autoFocus
+                                className="flex-1 min-w-0 rounded-md border border-gray-600 px-2.5 py-1.5 text-xs text-white bg-gray-700 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                              />
+                            ) : (
+                              <span className="flex-1 min-w-0 truncate text-sm text-white font-medium">{plot.plot_number}</span>
+                            )}
+                            <span className="text-[11px] text-gray-400 shrink-0">
+                              {(isEditing ? editPendingShape?.area ?? plot.acres : plot.acres).toFixed(2)} ac
+                            </span>
+                          </div>
+
+                          {isEditing ? (
+                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                              <label
+                                className={cn(
+                                  'flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] cursor-pointer transition-colors',
+                                  isParsingEditKml
+                                    ? 'border-emerald-500 text-emerald-400 cursor-wait'
+                                    : editPendingShape
+                                      ? 'border-emerald-600 text-emerald-400'
+                                      : 'border-gray-600 text-gray-300 hover:border-emerald-500 hover:text-emerald-400',
+                                )}
+                              >
+                                {isParsingEditKml ? <Loader2 className="w-3 h-3 animate-spin" /> : <UploadCloud className="w-3 h-3" />}
+                                {editPendingShape ? 'Shape replaced' : 'Replace shape'}
+                                <input
+                                  type="file"
+                                  accept=".kml,.kmz"
+                                  className="hidden"
+                                  disabled={isParsingEditKml}
+                                  onChange={e => {
+                                    const f = e.target.files?.[0];
+                                    if (f) handleEditKmlUpload(f);
+                                    e.target.value = '';
+                                  }}
+                                />
+                              </label>
+                              <button
+                                onClick={() => saveEdit(plot)}
+                                disabled={!editName.trim() || savingEditId === plot.plot_id}
+                                className="flex items-center gap-1 rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed px-2.5 py-1 text-[11px] font-semibold text-white transition-colors"
+                              >
+                                {savingEditId === plot.plot_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                                Save
+                              </button>
+                              <button
+                                onClick={cancelEdit}
+                                className="rounded-md border border-gray-600 px-2.5 py-1 text-[11px] text-gray-300 hover:text-white hover:border-gray-400 transition-colors"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="mt-2 flex items-center gap-1.5">
+                              <button
+                                onClick={() => startEdit(plot)}
+                                className="flex items-center gap-1 rounded-md border border-gray-600 px-2.5 py-1 text-[11px] text-gray-300 hover:text-white hover:border-gray-400 transition-colors"
+                              >
+                                <Pencil className="w-3 h-3" /> Edit
+                              </button>
+                              <button
+                                onClick={() => handleDeletePlot(plot)}
+                                disabled={deletingPlotId === plot.plot_id}
+                                className="flex items-center gap-1 rounded-md border border-red-900 px-2.5 py-1 text-[11px] text-red-400 hover:text-red-300 hover:border-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                              >
+                                {deletingPlotId === plot.plot_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                                Delete
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
                   )}
-                  <input
-                    type="file"
-                    accept=".kml,.kmz"
-                    className="hidden"
-                    disabled={isParsingKml}
-                    onChange={e => {
-                      const f = e.target.files?.[0];
-                      if (f) handleKmlUpload(f);
-                      e.target.value = '';
-                    }}
+                </div>
+
+                {/* Upload new plot(s) */}
+                <div className="px-3 py-3 border-t border-gray-700 shrink-0">
+                  <label
+                    className={cn(
+                      'flex items-center justify-center gap-2 rounded-lg border-2 border-dashed px-3 py-3 text-xs font-semibold cursor-pointer transition-colors',
+                      isParsingKml
+                        ? 'border-emerald-500 text-emerald-400 cursor-wait'
+                        : 'border-gray-600 text-gray-300 hover:border-emerald-500 hover:text-emerald-400',
+                    )}
+                  >
+                    {isParsingKml ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+                    {isParsingKml ? 'Reading KML…' : 'Upload KML to add plot(s)'}
+                    <input
+                      type="file"
+                      accept=".kml,.kmz"
+                      className="hidden"
+                      disabled={isParsingKml}
+                      onChange={e => {
+                        const f = e.target.files?.[0];
+                        if (f) handleKmlUpload(f);
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              {/* Right panel — map */}
+              <div className="flex-1 relative">
+                <MapContainer
+                  center={idleCenter}
+                  zoom={initialCoordinates.length > 0 ? 15 : 5}
+                  style={{ height: '100%', width: '100%' }}
+                  zoomControl
+                >
+                  <TileLayer
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                    maxZoom={19}
+                    attribution="Tiles © Esri"
                   />
-                </label>
+                  <TileLayer
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+                    opacity={0.6}
+                    maxZoom={19}
+                  />
+                  {initialCoordinates.length >= 3 && (
+                    <Polygon
+                      positions={initialCoordinates}
+                      pathOptions={{ color: '#94a3b8', fillColor: '#94a3b8', fillOpacity: 0.1, weight: 2, dashArray: '6 4' }}
+                    />
+                  )}
+                  {savedPlots.map((sp, si) => {
+                    const isEditing = editingPlotId === sp.plot_id;
+                    const positions = (isEditing && editPendingShape ? editPendingShape.coordinates : sp.coordinates) as [number, number][];
+                    return positions.length >= 3 ? (
+                      <Polygon
+                        key={sp.plot_id}
+                        positions={positions}
+                        pathOptions={{
+                          color: plotColor(si),
+                          fillColor: plotColor(si),
+                          fillOpacity: isEditing ? 0.45 : 0.25,
+                          weight: isEditing ? 3 : 2,
+                        }}
+                      />
+                    ) : null;
+                  })}
+                </MapContainer>
               </div>
             </div>
           )}

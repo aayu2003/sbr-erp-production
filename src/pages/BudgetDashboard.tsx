@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Plus, X, Upload, FileSpreadsheet, Calendar,
-  ChevronRight, Search, MapPin, Wheat, BarChart3, Lock, Unlock,
+  ChevronRight, Search, MapPin, Wheat, BarChart3, Lock, Unlock, Users, Loader2,
 } from "lucide-react";
 import getBaseUrl from "@/lib/config";
 
@@ -444,6 +444,39 @@ function BudgetCardItem({ budget, onClick }: { budget: BudgetCard; onClick: () =
   const seasonColor = SEASON_COLORS[seasonType] ?? "bg-slate-100 text-slate-600 border-slate-200";
   const farmCount = budget.farm_id ? budget.farm_id.split(",").length : 0;
 
+  const [uploadingHr, setUploadingHr] = useState(false);
+  const hrFileRef = useRef<HTMLInputElement>(null);
+
+  // Step 1: upload the raw HR xlsx to S3. Step 2: attach the returned URL to this budget.
+  const handleHrFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (e.target) e.target.value = "";
+    if (!file) return;
+
+    setUploadingHr(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const upRes = await fetch(`${getBaseUrl()}/admin_accounts/upload_HR_budget`, { method: "POST", body: fd });
+      const upData = await upRes.json();
+      if (!upData.success) throw new Error(upData.message || "Failed to upload HR budget file");
+
+      const addRes = await fetch(`${getBaseUrl()}/admin_accounts/add_HR_budget`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ budget_id: budget.budget_id, hr_budget_xlsx_url: upData.url }),
+      });
+      const addData = await addRes.json();
+      if (!addData.success) throw new Error(addData.message || "Failed to add HR budget");
+
+      alert("HR budget added successfully.");
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to add HR budget");
+    } finally {
+      setUploadingHr(false);
+    }
+  };
+
   return (
     <div
       onClick={budget.locked ? undefined : onClick}
@@ -513,6 +546,25 @@ function BudgetCardItem({ budget, onClick }: { budget: BudgetCard; onClick: () =
           </p>
         </div>
       </div>
+
+      {/* Add HR Budget — just upload an xlsx, merged straight into this budget */}
+      <button
+        type="button"
+        disabled={budget.locked || uploadingHr}
+        onClick={(e) => { e.stopPropagation(); hrFileRef.current?.click(); }}
+        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white py-2 text-xs font-semibold text-slate-600 transition-all hover:border-[#173f70]/40 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {uploadingHr ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
+        {uploadingHr ? "Uploading…" : "Add HR Budget"}
+      </button>
+      <input
+        ref={hrFileRef}
+        type="file"
+        accept=".xlsx,.xls"
+        className="hidden"
+        onClick={(e) => e.stopPropagation()}
+        onChange={handleHrFile}
+      />
 
       {/* Arrow hint on hover — only for unlocked */}
       {!budget.locked && (

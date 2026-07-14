@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval } from 'date-fns';
-import { Lock, Users, UserCheck, UserX, TrendingUp } from 'lucide-react';
+import { Loader2, Lock, Users, UserCheck, UserX, TrendingUp, X } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { getBaseUrl } from '@/lib/config';
@@ -80,6 +80,9 @@ const STATUS: StatusMeta[] = [
 // null (unmarked) -> P -> A -> PL -> PH -> null
 const STATUS_CYCLE: (DayStatus | null)[] = [null, 'P', 'A', 'PL', 'PH'];
 
+// Server sends/expects the full label ("Present", "Absent", ...) rather than the short codes.
+const STATUS_LABEL_TO_CODE = Object.fromEntries(STATUS.map(s => [s.tooltip, s.key])) as Record<string, DayStatus>;
+
 const MONTHS = [
 	'January','February','March','April','May','June',
 	'July','August','September','October','November','December',
@@ -109,6 +112,42 @@ export const AttendanceModule = ({
 	const [markedAt, setMarkedAt] = useState<Record<string, string>>({});
 	const [employees, setEmployees] = useState<Employee[]>([]);
 	const [isLoadingStaff, setIsLoadingStaff] = useState(false);
+	const [markError, setMarkError] = useState<string | null>(null);
+	const [isLoadingAttendance, setIsLoadingAttendance] = useState(false);
+	const [attendanceFetchError, setAttendanceFetchError] = useState<string | null>(null);
+
+	useEffect(() => {
+		let cancelled = false;
+		const monthParam = `${String(month + 1).padStart(2, '0')}/${year}`;
+		(async () => {
+			setIsLoadingAttendance(true);
+			setAttendanceFetchError(null);
+			try {
+				const BASE_URL = getBaseUrl().replace(/\/$/, '');
+				const res = await fetch(`${BASE_URL}/HRMS/get_complete_attandance_of_month/${monthParam}`);
+				const data = await res.json();
+				if (!res.ok || !data.success) throw new Error(data?.message || 'Failed to load attendance for this month');
+				if (cancelled) return;
+				const fetched: Record<string, DayStatus | null> = {};
+				Object.entries(data.attendance ?? {}).forEach(([dateStr, staffStatuses]) => {
+					const [dd, mm, yyyy] = dateStr.split('/');
+					if (!dd || !mm || !yyyy) return;
+					const isoDate = `${yyyy}-${mm}-${dd}`;
+					Object.entries(staffStatuses as Record<string, string>).forEach(([staffId, statusLabel]) => {
+						const code = STATUS_LABEL_TO_CODE[statusLabel];
+						if (code) fetched[`${staffId}_${isoDate}`] = code;
+					});
+				});
+				setMap(prev => ({ ...prev, ...fetched }));
+			} catch (err) {
+				if (!cancelled) setAttendanceFetchError(err instanceof Error ? err.message : 'Failed to load attendance for this month');
+			} finally {
+				if (!cancelled) setIsLoadingAttendance(false);
+			}
+		})();
+		return () => { cancelled = true; };
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [month, year]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -193,7 +232,7 @@ export const AttendanceModule = ({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [holidays, employees]);
 
-	const cycleStatus = (empId: string, empName: string, d: Date, date: string) => {
+	const cycleStatus = async (empId: string, empName: string, d: Date, date: string) => {
 		if (isLocked(empId, date)) {
 			onRequestUnlock?.(empId, empName, date);
 			return;
@@ -214,6 +253,26 @@ export const AttendanceModule = ({
 				onEarnCompLeave?.(empId, empName, date, holiday ? `Worked on holiday: ${holiday.name}` : 'Worked on a Sunday (converted to working day)');
 			} else {
 				onRevokeCompLeave?.(empId, date);
+			}
+		}
+
+		// Only push a status to the backend - cycling back to "unmarked" has no server-side
+		// equivalent, so that step just stays local.
+		if (next) {
+			setMarkError(null);
+			const statusLabel = STATUS.find(s => s.key === next)?.tooltip ?? next;
+			try {
+				const BASE_URL = getBaseUrl().replace(/\/$/, '');
+				const res = await fetch(`${BASE_URL}/HRMS/mark_attendance`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ staff_id: empId, date: format(d, 'dd/MM/yyyy'), status: statusLabel }),
+				});
+				const data = await res.json();
+				if (!res.ok || data?.success === false) throw new Error(data?.message || 'Failed to mark attendance');
+			} catch (err) {
+				setMap(prev => ({ ...prev, [key]: current }));
+				setMarkError(`${empName}: ${err instanceof Error ? err.message : 'Failed to mark attendance'}`);
 			}
 		}
 	};
@@ -260,6 +319,23 @@ export const AttendanceModule = ({
 				))}
 			</div>
 
+			{markError && (
+				<div className="flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-semibold text-red-600">
+					<span>{markError}</span>
+					<button type="button" onClick={() => setMarkError(null)} className="shrink-0 rounded-md p-1 hover:bg-red-100">
+						<X className="h-3.5 w-3.5" />
+					</button>
+				</div>
+			)}
+			{attendanceFetchError && (
+				<div className="flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-semibold text-red-600">
+					<span>{attendanceFetchError}</span>
+					<button type="button" onClick={() => setAttendanceFetchError(null)} className="shrink-0 rounded-md p-1 hover:bg-red-100">
+						<X className="h-3.5 w-3.5" />
+					</button>
+				</div>
+			)}
+
 			{/* ── Register card ── */}
 			<div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
 
@@ -285,6 +361,13 @@ export const AttendanceModule = ({
 							{YEARS.map(y => <option key={y} value={y}>{y}</option>)}
 						</select>
 					</div>
+
+					{isLoadingAttendance && (
+						<div className="flex items-center gap-1.5 text-xs font-bold text-slate-400">
+							<Loader2 className="h-3.5 w-3.5 animate-spin" />
+							Loading attendance…
+						</div>
+					)}
 
 					<div className="ml-auto flex flex-wrap items-center gap-2">
 						{STATUS.map(s => (

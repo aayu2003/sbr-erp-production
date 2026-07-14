@@ -1292,10 +1292,14 @@ const CreateCultivationPlan: React.FC = () => {
     setActivityDetailsOpen(true);
   };
 
-  // Generate 13 months starting from current month
+  // Generate 3 months before the current month (so back-dated plans, e.g. for a month
+  // that already started, can still be created) through 12 months ahead.
   const months = useMemo(() => {
     const today = new Date();
-    return Array.from({ length: 13 }, (_, i) => addMonths(startOfMonth(today), i));
+    const pastMonthsToShow = 3;
+    return Array.from({ length: pastMonthsToShow + 13 }, (_, i) =>
+      addMonths(startOfMonth(today), i - pastMonthsToShow)
+    );
   }, []);
 
   // `blockedDates` is populated from the API (`/admin_cultivation/blocked_dates`)

@@ -12,12 +12,13 @@ import {
   ShieldCheck, ChevronDown, MapPin, Droplet, Cake, ArrowRight, ChevronLeft, ChevronRight,
   UserCheck,
   WalletCards,
-  Heart, Globe, Languages, Home
+  Heart, Globe, Languages, Home,
+  KeyRound, Lock,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getBaseUrl } from '@/lib/config';
 import { toast } from 'sonner';
-import CredentialsDialog, { type FarmerCredentials } from '@/components/farmers/CredentialsDialog';
+import { type FarmerCredentials } from '@/components/farmers/CredentialsDialog';
 
 // --- TYPES ---
 interface VendorItem {
@@ -122,7 +123,10 @@ const StaffOnboarding = () => {
   const [vendors, setVendors] = useState<VendorItem[]>([]);
   const [selectedVendorIndex, setSelectedVendorIndex] = useState<number | null>(null);
   const [isFetchingVendors, setIsFetchingVendors] = useState(false);
-  const [credentialsDialogStaffId, setCredentialsDialogStaffId] = useState<string | null>(null);
+  const [credentialsDraft, setCredentialsDraft] = useState<{ userId: string; password: string } | null>(null);
+  const [credentialsDraftSaved, setCredentialsDraftSaved] = useState(false);
+  const [isGeneratingCredentials, setIsGeneratingCredentials] = useState(false);
+  const [isSavingCredentials, setIsSavingCredentials] = useState(false);
   const [selectedProfileStaff, setSelectedProfileStaff] = useState<StaffApiItem | null>(null);
   const [isEditProfileOpen, setIsEditProfileOpen] = useState(false);
   const [editProfileDetails, setEditProfileDetails] = useState<EditProfileDetails>(emptyEditProfileDetails);
@@ -347,6 +351,65 @@ const StaffOnboarding = () => {
   const handleOpenModal = () => {
     resetForm();
     setIsAddModalOpen(true);
+  };
+
+  const staffDesignationOf = (staff: StaffApiItem) =>
+    typeof staff.staff_information?.staff_designation === 'string' ? staff.staff_information.staff_designation : '';
+
+  const generateStaffCredentials = async (staff: StaffApiItem) => {
+    setIsGeneratingCredentials(true);
+    try {
+      const base = getBaseUrl().replace(/\/$/, '');
+      const resp = await fetch(`${base}/admin_staff/create_redentials`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ staff_id: staff.staff_id, role: staffDesignationOf(staff) }),
+      });
+      if (!resp.ok) throw new Error(`Server responded ${resp.status}`);
+      const result = await resp.json();
+      const userId = result?.user_name ?? result?.userName ?? result?.user_id ?? null;
+      const password = result?.password ?? result?.pass ?? null;
+      if (!userId || !password) throw new Error('Malformed response');
+      setCredentialsDraft({ userId, password });
+      setCredentialsDraftSaved(false);
+    } catch (error) {
+      console.error('Failed to generate credentials:', error);
+      toast.error('Failed to generate credentials');
+    } finally {
+      setIsGeneratingCredentials(false);
+    }
+  };
+
+  const saveStaffCredentials = async (staff: StaffApiItem) => {
+    const userId = credentialsDraft?.userId ?? staff.credentials?.userId ?? null;
+    const password = credentialsDraft?.password ?? staff.credentials?.password ?? null;
+    if (!userId || !password) {
+      toast.error('Generate credentials first');
+      return;
+    }
+    setIsSavingCredentials(true);
+    try {
+      const base = getBaseUrl().replace(/\/$/, '');
+      const resp = await fetch(`${base}/admin_staff/save_credentials`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ staff_id: staff.staff_id, user_name: userId, password, role: staffDesignationOf(staff) }),
+      });
+      if (!resp.ok) throw new Error(`Server responded ${resp.status}`);
+      const result = await resp.json().catch(() => ({}));
+      if (result?.success === false) throw new Error(result?.message || 'Save failed');
+
+      const next: FarmerCredentials = { userId, password, saved: true };
+      setCredentialsDraftSaved(true);
+      setStaffList(prev => prev.map(s => (s.staff_id === staff.staff_id ? { ...s, credentials: next } : s)));
+      setSelectedProfileStaff(prev => (prev && prev.staff_id === staff.staff_id ? { ...prev, credentials: next } : prev));
+      toast.success('Credentials saved');
+    } catch (error) {
+      console.error('Failed to save credentials:', error);
+      toast.error('Failed to save credentials');
+    } finally {
+      setIsSavingCredentials(false);
+    }
   };
 
   const handleOpenEditProfile = (staff: StaffApiItem) => {
@@ -670,6 +733,8 @@ const StaffOnboarding = () => {
           onClick={() => {
             setActiveProfileTab('Personal Details');
             setSelectedProfileStaff(staff);
+            setCredentialsDraft(null);
+            setCredentialsDraftSaved(false);
           }}
           className="relative mt-auto flex h-11 w-full items-center justify-center rounded-lg bg-[#0D3A35] text-sm font-bold text-white transition hover:bg-[#092b27]"
         >
@@ -842,6 +907,9 @@ const StaffOnboarding = () => {
         const staffType = getStaffType(staff);
         const showEmployeeScore = isFieldStaff(staff);
         const payrollConfig = payrollConfigs[staff.staff_id];
+        const effectiveCredUserId = credentialsDraft?.userId ?? staff.credentials?.userId ?? null;
+        const effectiveCredPassword = credentialsDraft?.password ?? staff.credentials?.password ?? null;
+        const credentialsSaved = credentialsDraft ? credentialsDraftSaved : (staff.credentials?.saved ?? false);
         const profileImage = info.profile_image_url;
         const employeeCode = getStaffField(staff, ['employee_code', 'employeeCode'], staff.staff_id || '-');
         const rawScore = getStaffField(staff, ['employee_score', 'employeeScore', 'score'], '');
@@ -890,7 +958,7 @@ const StaffOnboarding = () => {
           { label: employmentDocumentLabel, url: infoAny.agreement_url ?? staffAny.agreement_url ?? infoAny.offer_letter_url ?? staffAny.offer_letter_url ?? infoAny.document_url ?? staffAny.document_url },
           { label: 'Bank Proof', url: infoAny.bank_proof_url ?? staffAny.bank_proof_url },
         ];
-        const profileTabs = ['Personal Details', 'Job Details', 'Experience', 'Documents', 'Leave Balance', 'Payroll'];
+        const profileTabs = ['Personal Details', 'Job Details', 'Experience', 'Documents', 'Leave Balance', 'Payroll', 'Credentials'];
         const aboutItems = [
           { label: 'Employee ID', value: employeeCode, Icon: IdCard },
           { label: 'Join Date', value: formatDisplayDate(joinDate), Icon: Calendar },
@@ -1192,6 +1260,59 @@ const StaffOnboarding = () => {
                     <div className="rounded-xl border border-slate-200 p-4">
                       <p className="text-xs font-bold text-slate-500">Deductions</p>
                       <p className="mt-2 text-lg font-bold text-slate-950">{payrollConfig ? `₹${payrollConfig.deductions.toLocaleString('en-IN')}` : '-'}</p>
+                    </div>
+                  </section>
+                )}
+
+                {activeProfileTab === 'Credentials' && (
+                  <section className="space-y-4">
+                    <div className="rounded-xl border border-slate-200 p-4">
+                      <div className="grid gap-5 sm:grid-cols-2">
+                        <div className="flex gap-3">
+                          <KeyRound className="mt-1 h-4 w-4 shrink-0 text-[#0D3A35]" />
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold text-slate-500">User ID</p>
+                            <div className="mt-1 flex items-center gap-2">
+                              {credentialsSaved && <Lock className="h-3.5 w-3.5 shrink-0 text-slate-400" />}
+                              <p className="truncate text-sm font-bold text-slate-950">{effectiveCredUserId || 'Not generated'}</p>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex gap-3">
+                          <KeyRound className="mt-1 h-4 w-4 shrink-0 text-[#0D3A35]" />
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold text-slate-500">Password</p>
+                            <div className="mt-1 flex items-center gap-2">
+                              {credentialsSaved && <Lock className="h-3.5 w-3.5 shrink-0 text-slate-400" />}
+                              <p className="truncate text-sm font-bold text-slate-950">{effectiveCredPassword || 'Not generated'}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800">
+                      These credentials are sensitive — handle carefully. Exposure could compromise system access.
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => generateStaffCredentials(staff)}
+                        disabled={isGeneratingCredentials}
+                        className="flex h-10 items-center gap-2 rounded-lg bg-[#0D3A35] px-5 text-sm font-bold text-white shadow-md transition hover:bg-[#092b27] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <KeyRound className="h-4 w-4" />
+                        {isGeneratingCredentials ? 'Generating…' : 'Generate New'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => saveStaffCredentials(staff)}
+                        disabled={isSavingCredentials || isGeneratingCredentials || credentialsSaved || !effectiveCredUserId || !effectiveCredPassword}
+                        className="flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-5 text-sm font-bold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {credentialsSaved ? 'Saved' : isSavingCredentials ? 'Saving…' : 'Save Credentials'}
+                      </button>
                     </div>
                   </section>
                 )}
