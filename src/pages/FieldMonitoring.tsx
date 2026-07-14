@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { getBaseUrl } from '@/lib/config';
-import { useLocationTracing } from '@/hooks/useLocationTracing';
+import { useLocationTracing, type LatestTracePoint } from '@/hooks/useLocationTracing';
 import { 
   MapPin, 
   Wheat,
@@ -131,6 +131,43 @@ const countUniqueTracePoints = (traceData: number[][]) => {
   return new Set(traceData.map((point) => `${point[0]}:${point[1]}`)).size;
 };
 
+// get_staff_location_tracing returns tracer_data as rich point objects (latitude, longitude,
+// speed, accuracy, heading, movement_state, timestamp), not just bare [lat, long] pairs —
+// this pulls the full detail out of one entry, same shape the live websocket exposes.
+const parseRichTracePoint = (raw: unknown): LatestTracePoint | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const lat = Number(obj.lat ?? obj.latitude);
+  const lng = Number(obj.long ?? obj.lng ?? obj.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+  const speed = Number(obj.speed);
+  const accuracy = Number(obj.accuracy);
+  const heading = Number(obj.heading);
+  return {
+    latitude: lat,
+    longitude: lng,
+    speed: Number.isFinite(speed) ? speed : undefined,
+    accuracy: Number.isFinite(accuracy) ? accuracy : undefined,
+    heading: Number.isFinite(heading) ? heading : undefined,
+    movementState: typeof obj.movement_state === 'string' ? obj.movement_state : undefined,
+    timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : undefined,
+  };
+};
+
+const formatRelativeTime = (iso?: string) => {
+  if (!iso) return 'just now';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return 'just now';
+  const diffSec = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+  if (diffSec < 5) return 'just now';
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.round(diffMin / 60);
+  return `${diffHr}h ago`;
+};
+
 const ZoomToFarm: React.FC<{ search: string; farms: FarmLocation[] }> = ({ search, farms }) => {
   const map = useMap();
 
@@ -226,14 +263,25 @@ export default function FieldMonitoring({ userRole = 'farm-manager', regionFilte
   const [fetchedTraceData, setFetchedTraceData] = useState<number[][]>([]);
   const [fetchedTraceLoading, setFetchedTraceLoading] = useState(false);
   const [fetchedTraceError, setFetchedTraceError] = useState<string | null>(null);
+  const [fetchedLatestPoint, setFetchedLatestPoint] = useState<LatestTracePoint | null>(null);
 
   const {
     connected: traceConnected,
     tracerData,
     totalPoints,
-    uniquePoints,
+    latestPoint,
     error: traceError,
   } = useLocationTracing(selectedTracingStaffId, liveTracingEnabled);
+
+  // "Updated Xs ago" on the latest-point header — ticks every 5s so it stays fresh even
+  // when no new point has arrived since the last render (also keeps a historical "Xh ago"
+  // readout honest for as long as that staff stays selected).
+  const [, setFreshnessTick] = useState(0);
+  useEffect(() => {
+    if (!selectedTracingStaffId) return;
+    const interval = window.setInterval(() => setFreshnessTick((t) => t + 1), 5000);
+    return () => window.clearInterval(interval);
+  }, [selectedTracingStaffId]);
 
   const activeTraceData = useMemo(() => {
     if (liveTracingEnabled && tracerData.length > 0) {
@@ -242,6 +290,9 @@ export default function FieldMonitoring({ userRole = 'farm-manager', regionFilte
 
     return fetchedTraceData;
   }, [fetchedTraceData, liveTracingEnabled, tracerData]);
+
+  const isLiveLatestPoint = liveTracingEnabled && !!latestPoint;
+  const activeLatestPoint = isLiveLatestPoint ? latestPoint : fetchedLatestPoint;
 
   const activeTracePoints = useMemo(
     () => activeTraceData.map((point, index) => ({ timestamp: String(index), lat: point[0], long: point[1] })),
@@ -253,6 +304,7 @@ export default function FieldMonitoring({ userRole = 'farm-manager', regionFilte
       setFetchedTraceData([]);
       setFetchedTraceError(null);
       setFetchedTraceLoading(false);
+      setFetchedLatestPoint(null);
       return;
     }
 
@@ -263,6 +315,7 @@ export default function FieldMonitoring({ userRole = 'farm-manager', regionFilte
         setFetchedTraceLoading(true);
         setFetchedTraceError(null);
         setFetchedTraceData([]);
+        setFetchedLatestPoint(null);
 
         const response = await fetch(
           `${getBaseUrl()}/admin_staff/get_staff_location_tracing/${selectedTracingStaffId}`,
@@ -280,11 +333,15 @@ export default function FieldMonitoring({ userRole = 'farm-manager', regionFilte
           throw new Error(data?.message || `Failed to load tracing (${response.status})`);
         }
 
-        setFetchedTraceData(normalizeTraceData(data?.tracer_data));
+        const rawTracerArray = Array.isArray(data?.tracer_data) ? data.tracer_data : [];
+        setFetchedTraceData(normalizeTraceData(rawTracerArray));
+        // tracer_data is chronologically ascending — the last entry is the most recent point.
+        setFetchedLatestPoint(parseRichTracePoint(rawTracerArray[rawTracerArray.length - 1]));
       } catch (error) {
         if ((error as Error)?.name === 'AbortError') return;
         console.error('Error fetching selected staff trace:', error);
         setFetchedTraceData([]);
+        setFetchedLatestPoint(null);
         setFetchedTraceError('Unable to load tracing from API.');
       } finally {
         setFetchedTraceLoading(false);
@@ -459,6 +516,46 @@ export default function FieldMonitoring({ userRole = 'farm-manager', regionFilte
           height: 18px;
           border-radius: 9999px;
           background-color: #22c55e;
+          border: 2px solid #ffffff;
+          box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+        "
+      ></div>
+    `,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+    popupAnchor: [0, -10],
+  });
+
+  // Pulsing marker for the staff's live position (distinct from farm markers above).
+  const livePositionIcon = L.divIcon({
+    className: 'live-position-icon',
+    html: `
+      <div style="position: relative; width: 20px; height: 20px;">
+        <div style="position: absolute; inset: 0; border-radius: 9999px; background-color: rgba(250, 204, 21, 0.45); animation: live-position-pulse 1.6s ease-out infinite;"></div>
+        <div style="position: absolute; inset: 5px; border-radius: 9999px; background-color: #facc15; border: 2px solid #ffffff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);"></div>
+      </div>
+      <style>
+        @keyframes live-position-pulse {
+          0% { transform: scale(0.6); opacity: 0.9; }
+          100% { transform: scale(2.2); opacity: 0; }
+        }
+      </style>
+    `,
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
+    popupAnchor: [0, -12],
+  });
+
+  // Static (non-pulsing) marker for a last-known position pulled from history, not live.
+  const lastKnownPositionIcon = L.divIcon({
+    className: 'last-known-position-icon',
+    html: `
+      <div
+        style="
+          width: 18px;
+          height: 18px;
+          border-radius: 9999px;
+          background-color: #94a3b8;
           border: 2px solid #ffffff;
           box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
         "
@@ -645,11 +742,50 @@ export default function FieldMonitoring({ userRole = 'farm-manager', regionFilte
           )}
           {selectedTracingStaffId && liveTracingEnabled && (
             <span>
-              Live: {totalPoints} total, {uniquePoints} unique
+              Live: {totalPoints} total, {countUniqueTracePoints(tracerData)} unique
             </span>
           )}
           {traceError && <span className="text-red-600">{traceError}</span>}
         </div>
+
+        {selectedTracingStaffId && activeLatestPoint && (
+          <div className={isLiveLatestPoint
+            ? 'mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5'
+            : 'mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5'}
+          >
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2.5 w-2.5">
+                {isLiveLatestPoint && (
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                )}
+                <span className={isLiveLatestPoint ? 'relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500' : 'relative inline-flex h-2.5 w-2.5 rounded-full bg-slate-400'} />
+              </span>
+              <span className={isLiveLatestPoint ? 'text-xs font-bold uppercase tracking-wide text-emerald-800' : 'text-xs font-bold uppercase tracking-wide text-slate-600'}>
+                {isLiveLatestPoint ? 'Latest Point · Live' : 'Last Known Point'}
+              </span>
+            </div>
+            <span className={isLiveLatestPoint ? 'font-mono text-xs font-semibold text-emerald-900' : 'font-mono text-xs font-semibold text-slate-700'}>
+              {activeLatestPoint.latitude.toFixed(5)}, {activeLatestPoint.longitude.toFixed(5)}
+            </span>
+            {activeLatestPoint.movementState && (
+              <Badge variant="outline" className={isLiveLatestPoint ? 'border-emerald-300 capitalize text-emerald-800' : 'border-slate-300 capitalize text-slate-600'}>
+                {activeLatestPoint.movementState}
+              </Badge>
+            )}
+            {typeof activeLatestPoint.speed === 'number' && (
+              <span className={isLiveLatestPoint ? 'text-xs font-semibold text-emerald-900' : 'text-xs font-semibold text-slate-700'}>Speed: {activeLatestPoint.speed.toFixed(1)} m/s</span>
+            )}
+            {typeof activeLatestPoint.heading === 'number' && (
+              <span className={isLiveLatestPoint ? 'text-xs font-semibold text-emerald-900' : 'text-xs font-semibold text-slate-700'}>Heading: {Math.round(activeLatestPoint.heading)}°</span>
+            )}
+            {typeof activeLatestPoint.accuracy === 'number' && (
+              <span className={isLiveLatestPoint ? 'text-xs font-semibold text-emerald-900' : 'text-xs font-semibold text-slate-700'}>Accuracy: ±{activeLatestPoint.accuracy.toFixed(0)}m</span>
+            )}
+            <span className={isLiveLatestPoint ? 'ml-auto text-xs font-semibold text-emerald-700' : 'ml-auto text-xs font-semibold text-slate-500'}>
+              {formatRelativeTime(activeLatestPoint.timestamp)}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Full-width Map */}
@@ -675,6 +811,25 @@ export default function FieldMonitoring({ userRole = 'farm-manager', regionFilte
                 pathOptions={{ color: '#facc15', weight: 3, opacity: 0.95 }}
               />
             </>
+          )}
+
+          {activeLatestPoint && (
+            <Marker
+              position={[activeLatestPoint.latitude, activeLatestPoint.longitude]}
+              icon={isLiveLatestPoint ? livePositionIcon : lastKnownPositionIcon}
+            >
+              <Popup>
+                <div className="space-y-1">
+                  <div className="font-semibold text-gray-900">{selectedTracingStaffId}</div>
+                  <div className="text-[11px] font-semibold uppercase text-gray-400">{isLiveLatestPoint ? 'Live' : 'Last known'}</div>
+                  {activeLatestPoint.movementState && <div className="text-xs capitalize text-gray-600">{activeLatestPoint.movementState}</div>}
+                  {typeof activeLatestPoint.speed === 'number' && <div className="text-xs text-gray-600">Speed: {activeLatestPoint.speed.toFixed(1)} m/s</div>}
+                  {typeof activeLatestPoint.heading === 'number' && <div className="text-xs text-gray-600">Heading: {Math.round(activeLatestPoint.heading)}°</div>}
+                  {typeof activeLatestPoint.accuracy === 'number' && <div className="text-xs text-gray-600">Accuracy: ±{activeLatestPoint.accuracy.toFixed(0)}m</div>}
+                  <div className="text-xs text-gray-500">{formatRelativeTime(activeLatestPoint.timestamp)}</div>
+                </div>
+              </Popup>
+            </Marker>
           )}
 
           {showLandMapping && filteredFarms.map((farm) => {

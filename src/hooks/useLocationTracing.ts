@@ -1,45 +1,45 @@
 import { useEffect, useRef, useState } from 'react';
 import { getBaseUrl } from '@/lib/config';
 
+// Real server payload is an incremental update — one new point per message, not a full
+// snapshot — so the route has to be accumulated client-side by appending each latest_point:
+// { event: "LOCATION_TRACING_UPDATED", staff_id, total_points, latest_point: { latitude,
+// longitude, speed, accuracy, heading, movement_state, timestamp } }
 type LocationTracingMessage = {
   event?: unknown;
   staff_id?: unknown;
   total_points?: unknown;
-  unique_points?: unknown;
-  tracer_data?: unknown;
+  latest_point?: {
+    latitude?: unknown;
+    longitude?: unknown;
+    speed?: unknown;
+    accuracy?: unknown;
+    heading?: unknown;
+    movement_state?: unknown;
+    timestamp?: unknown;
+  };
+};
+
+export type LatestTracePoint = {
+  latitude: number;
+  longitude: number;
+  speed?: number;
+  accuracy?: number;
+  heading?: number;
+  movementState?: string;
+  timestamp?: string;
 };
 
 type LocationTracingState = {
   connected: boolean;
   tracerData: number[][];
   totalPoints: number;
-  uniquePoints: number;
+  latestPoint: LatestTracePoint | null;
   error?: string;
 };
 
 const RECONNECT_LIMIT = 5;
 const DEBOUNCE_MS = 100;
-
-const normalizePair = (value: unknown): [number, number] | null => {
-  if (!Array.isArray(value) || value.length < 2) return null;
-
-  const lat = Number(value[0]);
-  const long = Number(value[1]);
-
-  if (!Number.isFinite(lat) || !Number.isFinite(long)) return null;
-  return [lat, long];
-};
-
-const normalizeTracerData = (value: unknown): number[][] => {
-  if (!Array.isArray(value)) return [];
-
-  return value
-    .map((entry) => {
-      const pair = normalizePair(entry);
-      return pair ? [pair[0], pair[1]] : null;
-    })
-    .filter((entry): entry is number[] => Array.isArray(entry) && entry.length === 2);
-};
 
 const buildWsUrl = () => {
   const baseUrl = String(getBaseUrl() || '').trim();
@@ -68,7 +68,7 @@ export function useLocationTracing(staffId: string, enabled: boolean): LocationT
   const [connected, setConnected] = useState(false);
   const [tracerData, setTracerData] = useState<number[][]>([]);
   const [totalPoints, setTotalPoints] = useState(0);
-  const [uniquePoints, setUniquePoints] = useState(0);
+  const [latestPoint, setLatestPoint] = useState<LatestTracePoint | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
 
   const socketRef = useRef<WebSocket | null>(null);
@@ -119,6 +119,10 @@ export function useLocationTracing(staffId: string, enabled: boolean): LocationT
 
     stoppedRef.current = false;
     setError(undefined);
+    // Fresh subscription — don't let a previous staff's accumulated route carry over.
+    setTracerData([]);
+    setTotalPoints(0);
+    setLatestPoint(null);
 
     const scheduleReconnect = () => {
       if (stoppedRef.current || !enabledRef.current || !activeStaffIdRef.current.trim()) {
@@ -187,12 +191,25 @@ export function useLocationTracing(staffId: string, enabled: boolean): LocationT
         if (!parsed || parsed.event !== 'LOCATION_TRACING_UPDATED') return;
         if (String(parsed.staff_id ?? '') !== activeStaffIdRef.current) return;
 
-        const nextTracerData = normalizeTracerData(parsed.tracer_data);
+        const rawPoint = parsed.latest_point;
+        const lat = Number(rawPoint?.latitude);
+        const lng = Number(rawPoint?.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+        const speed = Number(rawPoint?.speed);
+        const accuracy = Number(rawPoint?.accuracy);
+        const heading = Number(rawPoint?.heading);
+        const nextLatestPoint: LatestTracePoint = {
+          latitude: lat,
+          longitude: lng,
+          speed: Number.isFinite(speed) ? speed : undefined,
+          accuracy: Number.isFinite(accuracy) ? accuracy : undefined,
+          heading: Number.isFinite(heading) ? heading : undefined,
+          movementState: typeof rawPoint?.movement_state === 'string' ? rawPoint.movement_state : undefined,
+          timestamp: typeof rawPoint?.timestamp === 'string' ? rawPoint.timestamp : undefined,
+        };
+
         const nextTotalPoints = Number(parsed.total_points);
-        const nextUniquePoints = Number(parsed.unique_points);
-        const uniqueCount = Number.isFinite(nextUniquePoints)
-          ? nextUniquePoints
-          : new Set(nextTracerData.map((point) => `${point[0]}:${point[1]}`)).size;
 
         if (debounceTimerRef.current) {
           window.clearTimeout(debounceTimerRef.current);
@@ -201,9 +218,13 @@ export function useLocationTracing(staffId: string, enabled: boolean): LocationT
         debounceTimerRef.current = window.setTimeout(() => {
           if (stoppedRef.current) return;
 
-          setTracerData(nextTracerData);
-          setTotalPoints(Number.isFinite(nextTotalPoints) ? nextTotalPoints : nextTracerData.length);
-          setUniquePoints(uniqueCount);
+          setTracerData((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && last[0] === lat && last[1] === lng) return prev;
+            return [...prev, [lat, lng]];
+          });
+          setTotalPoints((prevTotal) => (Number.isFinite(nextTotalPoints) ? nextTotalPoints : prevTotal + 1));
+          setLatestPoint(nextLatestPoint);
           setError(undefined);
         }, DEBOUNCE_MS);
       };
@@ -262,7 +283,7 @@ export function useLocationTracing(staffId: string, enabled: boolean): LocationT
     connected,
     tracerData,
     totalPoints,
-    uniquePoints,
+    latestPoint,
     error,
   };
 }

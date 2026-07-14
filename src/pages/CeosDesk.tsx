@@ -663,7 +663,9 @@ const fetchAggregateDisbursementSeries = async (
   return parsedWeeks.map(({ total, parsed }) => {
     const plannedCr = total / 1e7;
     const disbursedCr = parsed.sortValue <= currentWeekSortValue ? plannedCr : 0;
-    cumulative += disbursedCr;
+    // Cumulative runs from the very first week through this one, regardless of whether the
+    // week is in the past or future — it's "how much is due by this point in the sequence".
+    cumulative += plannedCr;
     return {
       week: `${parsed.monthShort} W${parsed.week}`,
       planned: Number(plannedCr.toFixed(2)),
@@ -673,10 +675,19 @@ const fetchAggregateDisbursementSeries = async (
   });
 };
 
-const DisbursementSequenceCard = ({ series, loading }: { series: DisbursementWeek[]; loading: boolean }) => {
-  const totalPlanned = series.reduce((sum, item) => sum + item.planned, 0);
-  const totalDisbursed = series.reduce((sum, item) => sum + item.disbursed, 0);
-  const pctComplete = totalPlanned > 0 ? Math.round((totalDisbursed / totalPlanned) * 100) : 0;
+const DisbursementSequenceCard = ({
+  series,
+  loading,
+  budgets,
+}: {
+  series: DisbursementWeek[];
+  loading: boolean;
+  budgets: BudgetBifurcation[];
+}) => {
+  const expectedTillNow = series.reduce((sum, item) => sum + item.disbursed, 0);
+  const { totalBudget, utilized } = sumBudgetTotals(budgets);
+  const totalBudgetCr = totalBudget / 1e7;
+  const utilizedCr = utilized / 1e7;
 
   return (
     <Card className="p-5">
@@ -714,7 +725,7 @@ const DisbursementSequenceCard = ({ series, loading }: { series: DisbursementWee
                     fontWeight={700}
                     fill="#16a34a"
                   >
-                    {`Rs ${series[props.index]?.cumulative.toFixed(2)}`}
+                    {`${series[props.index]?.cumulative.toFixed(2)}cr / ${totalBudgetCr.toFixed(2)}cr`}
                   </text>
                 )}
               />
@@ -724,16 +735,16 @@ const DisbursementSequenceCard = ({ series, loading }: { series: DisbursementWee
       </div>
       <div className="mt-3 grid grid-cols-3 gap-2 text-center">
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
-          <p className="text-lg font-black text-slate-950">Rs {totalPlanned.toFixed(2)}</p>
-          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Total Planned (Cr)</p>
+          <p className="text-lg font-black text-slate-950">Rs {totalBudgetCr.toFixed(2)}</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Total Budget (Cr)</p>
         </div>
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
-          <p className="text-lg font-black text-slate-950">Rs {totalDisbursed.toFixed(2)}</p>
-          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Total Disbursed (Cr)</p>
+          <p className="text-lg font-black text-slate-950">Rs {expectedTillNow.toFixed(2)}</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Expected Disbursement Till Now (Cr)</p>
         </div>
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
-          <p className="text-lg font-black text-slate-950">{pctComplete}%</p>
-          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Sequence Complete</p>
+          <p className="text-lg font-black text-slate-950">Rs {utilizedCr.toFixed(2)}</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Total Disbursed Till Now (Cr)</p>
         </div>
       </div>
     </Card>
@@ -2369,7 +2380,7 @@ const FinancialAnalysisView = ({
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.3fr_0.7fr]">
         <BudgetBifurcationCard budgets={budgets} loading={budgetsLoading} />
-        <DisbursementSequenceCard series={disbursementSeries} loading={disbursementLoading} />
+        <DisbursementSequenceCard series={disbursementSeries} loading={disbursementLoading} budgets={budgets} />
       </section>
 
       <CategoryWiseBudgetSection budgets={categoryBudgets} loading={categoryBudgetsLoading} />

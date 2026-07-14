@@ -10,7 +10,6 @@
   { "id": "ploughing",                   "name": "Ploughing",                                 "category": "Land Preparation", "icon": "Shovel"     },
   { "id": "soil-pulverization",          "name": "Soil Pulverization",                        "category": "Land Preparation", "icon": "Hammer"     },
   { "id": "sowing",                      "name": "Sowing",                                    "category": "Sowing",           "icon": "Sprout"     },
-
   { "id": "first-ploughing",             "name": "1st Ploughing",                             "category": "Land Preparation", "icon": "Tractor"    },
   { "id": "ssp-spreading",               "name": "SSP Spreading",                             "category": "Fertilizer Spreading", "icon": "Layers"     },
   { "id": "second-ploughing",            "name": "2nd Ploughing",                             "category": "Land Preparation", "icon": "Tractor"    },

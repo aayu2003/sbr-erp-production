@@ -201,7 +201,7 @@ const Blocks = () => {
   const [isAddingBlockLands, setIsAddingBlockLands] = useState(false);
   const [blockLandEditorRows, setBlockLandEditorRows] = useState<LandRow[]>([]);
   const [blockLandOriginalRows, setBlockLandOriginalRows] = useState<LandRow[]>([]);
-  const [deletedBlockFarmerIds, setDeletedBlockFarmerIds] = useState<string[]>([]);
+  const [deletedBlockFarmIds, setDeletedBlockFarmIds] = useState<string[]>([]);
 
   // Zone -> Field Managers (local UI state for now)
   const [zoneFieldManagers, setZoneFieldManagers] = useState<Record<string, FieldManager[]>>({});
@@ -409,7 +409,7 @@ const Blocks = () => {
 
   const openAddLandEditor = async () => {
     setIsAddingBlockLands(true);
-    setDeletedBlockFarmerIds([]);
+    setDeletedBlockFarmIds([]);
 
     try {
       const base = getBaseUrl();
@@ -465,24 +465,27 @@ const Blocks = () => {
   };
 
   const removeBlockEditorRow = (row: LandRow) => {
-    if (!row.isNew && row.farmerId) {
-      setDeletedBlockFarmerIds((prev) => (prev.includes(row.farmerId) ? prev : [...prev, row.farmerId]));
+    if (!row.isNew && row.farmId) {
+      const farmId = row.farmId;
+      setDeletedBlockFarmIds((prev) => (prev.includes(farmId) ? prev : [...prev, farmId]));
     }
     removeLandRow(row.id, blockLandEditorRows, setBlockLandEditorRows);
   };
 
   const buildBlockUpdatePayload = () => {
+    // Identity here must be each plot's own farm_id, not the parent farmer_id — one farmer
+    // can own several plots, so farmer_id alone can't tell rows apart.
     const currentRowKeys = new Set(
       blockLandEditorRows
-        .filter((row) => !!row.farmerId)
-        .map((row) => row.farmerId)
+        .filter((row) => !!row.farmId)
+        .map((row) => row.farmId)
     );
 
     const mergedRows = [
-      ...blockLandEditorRows.filter((row) => !!row.farmerId),
+      ...blockLandEditorRows.filter((row) => !!row.farmId),
       ...blockLandOriginalRows.filter((row) => {
-        return !!row.farmerId && (
-          deletedBlockFarmerIds.includes(row.farmerId) || !currentRowKeys.has(row.farmerId)
+        return !!row.farmId && (
+          deletedBlockFarmIds.includes(row.farmId) || !currentRowKeys.has(row.farmId)
         );
       }).map((row) => ({
         ...row,
@@ -497,9 +500,9 @@ const Blocks = () => {
 
       return {
         priority: row.priority ?? index,
-        farm_id: row.farmerId,
+        farm_id: row.farmId,
         village: row.village,
-        area: areaFromDetails || Number((availableFarms.find((farm) => String(farm.id) === row.farmerId)?.landMapping?.totalArea) ?? 0) || 0,
+        area: areaFromDetails || Number((availableFarms.find((farm) => String(farm.id) === row.farmId)?.landMapping?.totalArea) ?? 0) || 0,
       };
     });
 
@@ -772,6 +775,11 @@ const Blocks = () => {
       if (row.id === id) {
         const updatedRow = { ...row, [field]: value };
         if (field === 'farmerId') {
+          // The dropdown's value is the selected AvailableFarm's id, which is the plot's
+          // own farm_id (see AvailableFarm mapping below) — keep farmId in sync so block
+          // payloads always have each plot's real farm_id available, not just this
+          // (misleadingly named) farmerId field.
+          updatedRow.farmId = value || undefined;
           const selectedFarmer = availableFarms.find(f => f.id.toString() === value);
           if (selectedFarmer) {
             const area = selectedFarmer.landMapping?.totalArea || '0';
@@ -875,11 +883,11 @@ const Blocks = () => {
 
                 return {
                   priority: row.priority ?? idx,
-                  farm_id: row.farmerId,
+                  farm_id: row.farmId || row.farmerId,
                   village: row.village,
                   area:
                     areaFromDetails ||
-                    Number((availableFarms.find((farm) => String(farm.id) === row.farmerId)?.landMapping?.totalArea) ?? 0) ||
+                    Number((availableFarms.find((farm) => String(farm.id) === (row.farmId || row.farmerId))?.landMapping?.totalArea) ?? 0) ||
                     0,
                 };
               }),
@@ -2067,7 +2075,7 @@ const Blocks = () => {
                                       >
                                         <option value="">Select Farmer</option>
                                         {availableFarms
-                                          .filter((farm) => !blockLandEditorRows.some((existingRow) => existingRow.farmerId === String(farm.id) && existingRow.id !== row.id))
+                                          .filter((farm) => !blockLandEditorRows.some((existingRow) => existingRow.farmId === String(farm.id) && existingRow.id !== row.id))
                                           .map((farm) => (
                                             <option key={farm.id} value={farm.id}>{farm.fullName}</option>
                                           ))}
@@ -2127,10 +2135,10 @@ const Blocks = () => {
                                 setFarmsInBlock((prev) => {
                                   const removedIds = new Set(
                                     blockLandOriginalRows
-                                      .filter((row) => row.farmerId && !blockLandEditorRows.some((current) => current.farmerId === row.farmerId))
-                                      .map((row) => row.farmerId)
+                                      .filter((row) => row.farmId && !blockLandEditorRows.some((current) => current.farmId === row.farmId))
+                                      .map((row) => row.farmId)
                                   );
-                                  return prev.filter((farm) => !removedIds.has(String(farm.farmer_id)));
+                                  return prev.filter((farm) => !removedIds.has(String(farm.farm_id)));
                                 });
                                 loadBlocks();
                               } catch (error) {

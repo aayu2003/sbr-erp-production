@@ -49,6 +49,7 @@ interface TaskDetails {
   vehicles?: { vehicle_id: string; vehicle_number: string }[];
   equipment?: { equipment_name: string; equipment_id: string; quantity: number }[];
   allocation_schema?: { allocated_acres: number; farm_id: string; completed_acres: number }[];
+  progress_images?: string[];
 }
 
 interface TaskMonitorModalProps {
@@ -352,6 +353,35 @@ const TaskMonitorModal = ({ task, onClose }: TaskMonitorModalProps) => {
                   );
                 })}
               </div>
+
+              {/* ── Progress Photos — shown whenever available, regardless of how far
+                   along the approval workflow is ── */}
+              {(details.progress_images?.length ?? 0) > 0 && (
+                <div className="mx-6 mb-4 border border-gray-100 rounded-xl overflow-hidden">
+                  <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
+                    <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Progress Photos</p>
+                    <span className="text-[10px] font-bold text-gray-400">{details.progress_images!.length}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 p-3">
+                    {details.progress_images!.map((url, idx) => (
+                      <a
+                        key={url}
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block aspect-square overflow-hidden rounded-lg border border-gray-200 bg-gray-50"
+                      >
+                        <img
+                          src={url}
+                          alt={`Progress photo ${idx + 1}`}
+                          className="h-full w-full object-cover"
+                          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                        />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* ── Plots summary ── */}
               {plots.length > 0 && (

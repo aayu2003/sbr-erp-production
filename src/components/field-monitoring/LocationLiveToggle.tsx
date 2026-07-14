@@ -8,7 +8,8 @@ interface LocationLiveToggleProps {
 
 export function LocationLiveToggle({ staffId }: LocationLiveToggleProps) {
   const [enabled, setEnabled] = useState(false);
-  const { connected, tracerData, totalPoints, uniquePoints, error } = useLocationTracing(staffId, enabled);
+  const { connected, tracerData, totalPoints, error } = useLocationTracing(staffId, enabled);
+  const uniquePoints = new Set(tracerData.map((point) => `${point[0]}:${point[1]}`)).size;
 
   return (
     <div className="rounded-xl border bg-white p-4 shadow-sm space-y-3">

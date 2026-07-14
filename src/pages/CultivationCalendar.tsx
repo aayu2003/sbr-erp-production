@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import {
 Calendar as CalendarIcon,
 ChevronDown,
+ChevronLeft,
 ChevronRight,
 Trash2,
 X,
@@ -38,6 +39,7 @@ import { SidebarTask } from '@/components/cultivation/TaskSidebar';
 import { InlineTimeline } from '@/components/cultivation/InlineTimeline';
 import TaskMonitorModal, { MonitorTask } from '@/components/cultivation/TaskMonitorModal';
 import PlotMapViewModal, { MapViewTask } from '@/components/cultivation/PlotMapViewModal';
+import { TaskTimelinePanel, type TimelineTask, type TimelineAssignment } from '@/components/cultivation/TaskTimelinePanel';
 
 // --- Types ---
 interface PlotItem {
@@ -73,9 +75,18 @@ plan: {
 };
 }
 
+interface ApiLandPlot {
+plot_id: string;
+plot_name: string;
+plot_area: number;
+plot_coordinates: [number, number][];
+crop_type?: string;
+}
+
 interface ApiFarm {
 created_at: string;
 area: number;
+crop_type?: string;
 harvest_log: Record<string, unknown>;
 block_id: string;
 priority: number;
@@ -84,7 +95,9 @@ farming_option: string;
 state: string;
 village: string;
 district: string;
+land_coordinates?: [number, number][];
 };
+land_plots?: ApiLandPlot[];
 farmer_id: string;
 farm_id: string;
 }
@@ -234,6 +247,22 @@ return isCompletedAssignmentStatus(s);
 };
 
 const isOverdueAssignmentStatus = (raw?: string) => normalizeAssignmentStatus(raw) === 'overdue';
+
+// --- Task Timeline panel helpers ---
+const timelineStatusTone = (status?: string): 'green' | 'orange' | 'blue' | 'red' | 'yellow' => {
+const s = normalizeAssignmentStatus(status);
+if (s === 'unassigned') return 'yellow';
+if (isCompletedAssignmentStatus(s)) return 'green';
+if (isPendingAssignmentStatus(s)) return 'orange';
+if (isOverdueAssignmentStatus(s)) return 'red';
+return 'blue';
+};
+
+const timelineStatusLabel = (status?: string) => {
+const s = normalizeAssignmentStatus(status);
+if (!s) return 'Unassigned';
+return s.split('_').map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+};
 
 const combineAssignmentStatus = (a?: string, b?: string) => {
 const s1 = normalizeAssignmentStatus(a);
@@ -615,13 +644,16 @@ null
 const CultivationCalendar = () => {
 const [searchParams] = useSearchParams();
 const [timelineMonth, setTimelineMonth] = useState<Date | null>(null);
-const [baseDate] = useState(() => {
+// Calendar shows a sliding window of 4 months at a time, anchored on this month,
+// defaulting to the ?month= deep link (see CeosDesk.tsx) or the current month.
+const [visibleMonthStart, setVisibleMonthStart] = useState(() => {
 const monthParam = searchParams.get('month');
 if (monthParam && /^\d{4}-\d{2}$/.test(monthParam)) {
 const [y, m] = monthParam.split('-').map(Number);
 return new Date(y, m - 1, 1);
 }
-return new Date();
+const now = new Date();
+return new Date(now.getFullYear(), now.getMonth(), 1);
 });
 const [selectedDate, setSelectedDate] = useState<string | null>(null);
 const [isModalOpen, setIsModalOpen] = useState(false);
@@ -679,7 +711,10 @@ const [collapsedActivityGroups, setCollapsedActivityGroups] = useState<Record<st
 const [multiSelectGroups, setMultiSelectGroups] = useState<Record<string, boolean>>({});
 
 const currentDateKey = formatDateKey(new Date());
-const monthsToDisplay = Array.from({ length: 12 }, (_, i) => new Date(baseDate.getFullYear(), baseDate.getMonth() + i, 1));
+const monthsToDisplay = useMemo(
+() => Array.from({ length: 4 }, (_, i) => new Date(visibleMonthStart.getFullYear(), visibleMonthStart.getMonth() + i, 1)),
+[visibleMonthStart]
+);
 
 const blockOptions = useMemo(() => {
 const set = new Set<string>();
@@ -757,6 +792,90 @@ if (filtered.length > 0) next[dateStr] = filtered;
 }
 return next;
 }, [activitiesData, filterActivity, filterBlockId, filterCropType, filterFarmIds]);
+
+// Flattens the visible 4-month window's (already filtered) activities into the Task
+// Timeline panel's task list — one row per farm assignment, sorted chronologically.
+const timelineTasks = useMemo<TimelineTask[]>(() => {
+const startKey = formatDateKey(monthsToDisplay[0]);
+const lastVisibleMonth = monthsToDisplay[monthsToDisplay.length - 1];
+const endKey = formatDateKey(new Date(lastVisibleMonth.getFullYear(), lastVisibleMonth.getMonth() + 1, 0));
+const rows: TimelineTask[] = [];
+
+Object.entries(filteredActivitiesData).forEach(([dateStr, acts]) => {
+if (dateStr < startKey || dateStr > endKey) return;
+acts.forEach((act, index) => {
+const assignment = act.assignments[0];
+if (!assignment || !assignment.farm_id) return;
+rows.push({
+key: `${act.calander_id}-${dateStr}-${assignment.farm_id}-${assignment.status}-${index}`,
+date: dateStr,
+activity: act.activity,
+cropType: act.crop_type,
+farmId: assignment.farm_id,
+farmerName: farmerNames[assignment.farm_id] || assignment.farm_id,
+assignedArea: assignment.assigned_area,
+plots: assignment.plot ?? [],
+statusTone: timelineStatusTone(assignment.status),
+statusLabel: timelineStatusLabel(assignment.status),
+taskId: assignment.task_id,
+});
+});
+});
+
+return rows.sort((a, b) => a.date.localeCompare(b.date));
+}, [filteredActivitiesData, monthsToDisplay, farmerNames]);
+
+const [timelineAssignmentByFarm, setTimelineAssignmentByFarm] = useState<Record<string, TimelineAssignment>>({});
+const fetchedTimelineFarmIds = useRef<Set<string>>(new Set());
+
+// Team info (supervisor + field manager) for the Task Timeline panel — fetched once per
+// farm_id and cached, independent of the day-popup's own contactsById (which only covers
+// whichever single day is currently open in the modal).
+useEffect(() => {
+const farmIds = Array.from(new Set(timelineTasks.map((task) => task.farmId)));
+farmIds.forEach((farmId) => {
+if (fetchedTimelineFarmIds.current.has(farmId)) return;
+fetchedTimelineFarmIds.current.add(farmId);
+
+fetch(`${BASE_URL}/farmer_managment/get_assigned_supervisor_and_field_manager/${farmId}`)
+.then((res) => res.json())
+.then((data: { assigned_supervisor?: { supervisor_name?: string }; assigned_field_manager?: { name?: string } | { name?: string }[] }) => {
+const fm = Array.isArray(data?.assigned_field_manager) ? data.assigned_field_manager[0] : data?.assigned_field_manager;
+setTimelineAssignmentByFarm((prev) => ({
+...prev,
+[farmId]: {
+supervisorName: data?.assigned_supervisor?.supervisor_name ?? '',
+fieldManagerName: fm?.name ?? '',
+},
+}));
+})
+.catch(() =>
+setTimelineAssignmentByFarm((prev) => ({ ...prev, [farmId]: { supervisorName: '', fieldManagerName: '' } })),
+);
+});
+}, [timelineTasks]);
+
+const [timelineProgressImages, setTimelineProgressImages] = useState<Record<string, string[]>>({});
+const fetchedTimelineTaskIds = useRef<Set<string>>(new Set());
+
+// Progress photos for the Task Timeline panel — only fetched for completed tasks (per-task,
+// cached), since get_task_details is only worth calling once a task actually has photos.
+useEffect(() => {
+const taskIds = Array.from(new Set(
+timelineTasks.filter((task) => task.statusTone === 'green' && task.taskId).map((task) => task.taskId as string)
+));
+taskIds.forEach((taskId) => {
+if (fetchedTimelineTaskIds.current.has(taskId)) return;
+fetchedTimelineTaskIds.current.add(taskId);
+
+fetch(`${BASE_URL}/admin_all_task/get_task_details/${taskId}`)
+.then((res) => res.json())
+.then((data: { progress_images?: string[] }) => {
+setTimelineProgressImages((prev) => ({ ...prev, [taskId]: Array.isArray(data?.progress_images) ? data.progress_images : [] }));
+})
+.catch(() => setTimelineProgressImages((prev) => ({ ...prev, [taskId]: [] })));
+});
+}, [timelineTasks]);
 
 useEffect(() => {
 setLoading(true);
@@ -1666,6 +1785,27 @@ return (
 	<div className="shrink-0">
 		<h1 className="text-2xl md:text-3xl font-semibold text-slate-900">Cultivation Calendar</h1>
 		<p className="mt-1 text-sm text-slate-500 max-w-xl">Manage your cultivation schedule and track pending tasks.</p>
+		<div className="mt-3 flex items-center gap-2">
+			<button
+				type="button"
+				onClick={() => setVisibleMonthStart((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
+				className="inline-flex h-9 items-center gap-1 rounded-lg border border-gray-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm hover:bg-gray-50"
+			>
+				<ChevronLeft className="w-4 h-4" /> Previous
+			</button>
+			<span className="text-center text-sm font-bold text-slate-900">
+				{monthsToDisplay[0]?.toLocaleDateString('default', { month: 'short', year: 'numeric' })}
+				{' – '}
+				{monthsToDisplay[monthsToDisplay.length - 1]?.toLocaleDateString('default', { month: 'short', year: 'numeric' })}
+			</span>
+			<button
+				type="button"
+				onClick={() => setVisibleMonthStart((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+				className="inline-flex h-9 items-center gap-1 rounded-lg border border-gray-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm hover:bg-gray-50"
+			>
+				Next <ChevronRight className="w-4 h-4" />
+			</button>
+		</div>
 	</div>
 	<div className="flex min-w-0 max-w-full flex-nowrap items-center gap-2 overflow-x-auto pb-1">
 		<select value={filterBlockId} onChange={(e) => setFilterBlockId(e.target.value)} className="h-10 w-[135px] shrink-0 rounded-lg border border-gray-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm">
@@ -1699,55 +1839,79 @@ return (
 	</div>
 </div>
 
-<div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
-	<div className="flex items-center gap-3 bg-white border border-gray-200 px-3 py-2 rounded-lg shadow-sm">
-		<div className="flex items-center gap-4">
-			<div className="flex items-center gap-3">
-				<div className="w-3 h-3 bg-green-600 rounded-sm shadow-sm" />
-				<span className="text-xs font-semibold text-slate-700">All Done</span>
-			</div>
-			<div className="flex items-center gap-3">
-				<div className="w-3 h-3 bg-orange-100 border border-orange-200 rounded-sm" />
-				<span className="text-xs font-semibold text-slate-700">Pending</span>
-			</div>
-			<div className="flex items-center gap-3">
-				<div className="w-3 h-3 bg-red-100 border border-red-200 rounded-sm" />
-				<span className="text-xs font-semibold text-slate-700">Overdue</span>
+<div className="grid grid-cols-1 gap-6 xl:grid-cols-[3fr_2fr] xl:items-start">
+	{/* Calendar section — 60% */}
+	<div className="min-w-0 space-y-4">
+		<div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+			<div className="flex items-center gap-3 bg-white border border-gray-200 px-3 py-2 rounded-lg shadow-sm">
+				<div className="flex items-center gap-4">
+					<div className="flex items-center gap-3">
+						<div className="w-3 h-3 bg-green-600 rounded-sm shadow-sm" />
+						<span className="text-xs font-semibold text-slate-700">All Done</span>
+					</div>
+					<div className="flex items-center gap-3">
+						<div className="w-3 h-3 bg-orange-100 border border-orange-200 rounded-sm" />
+						<span className="text-xs font-semibold text-slate-700">Pending</span>
+					</div>
+					<div className="flex items-center gap-3">
+						<div className="w-3 h-3 bg-red-100 border border-red-200 rounded-sm" />
+						<span className="text-xs font-semibold text-slate-700">Overdue</span>
+					</div>
+				</div>
 			</div>
 		</div>
+
+		{/* ✅ REMOVED: Weekly Field Visit Calendar Section (Horizontal Strip) */}
+		{/* Inline Timeline is displayed when month progress is clicked */}
+		{!loading && !error && timelineMonth && (
+		<InlineTimeline
+		activities={filteredActivitiesData}
+		monthDate={timelineMonth}
+		onClose={() => setTimelineMonth(null)}
+		/>
+		)}
+
+		{!loading && !error && (
+		<div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+		{monthsToDisplay.map((monthDate, index) => (
+		<MonthCard
+		key={index}
+		monthDate={monthDate}
+		activities={filteredActivitiesData}
+		onDateClick={handleDateClick}
+		currentDateKey={currentDateKey}
+		pendingByDate={pendingByDate}
+		onFieldVisitClick={(m) =>
+		setTimelineMonth((prev) => {
+		if (prev && prev.getFullYear() === m.getFullYear() && prev.getMonth() === m.getMonth()) return null;
+		return new Date(m);
+		})
+		}
+		/>
+		))}
+		</div>
+		)}
+	</div>
+
+	{/* Timeline section — 40% */}
+	<div className="min-w-0 xl:sticky xl:top-8 xl:h-[calc(100vh-10rem)]">
+		<TaskTimelinePanel
+			tasks={timelineTasks}
+			farmsById={farmsById}
+			assignmentByFarm={timelineAssignmentByFarm}
+			loading={loading}
+			renderActivityIcon={getActivityIcon}
+			onExpandMap={(task) => setMapViewTask({
+				activity: task.activity,
+				date: task.date,
+				farm_id: task.farmId,
+				farmerName: task.farmerName,
+				plots: task.plots,
+			})}
+			progressImagesByTaskId={timelineProgressImages}
+		/>
 	</div>
 </div>
-
-{/* ✅ REMOVED: Weekly Field Visit Calendar Section (Horizontal Strip) */}
-{/* Inline Timeline is displayed when month progress is clicked */}
-{!loading && !error && timelineMonth && (
-<InlineTimeline
-activities={filteredActivitiesData}
-monthDate={timelineMonth}
-onClose={() => setTimelineMonth(null)}
-/>
-)}
-
-{!loading && !error && (
-<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-{monthsToDisplay.map((monthDate, index) => (
-<MonthCard
-key={index}
-monthDate={monthDate}
-activities={filteredActivitiesData}
-onDateClick={handleDateClick}
-currentDateKey={currentDateKey}
-pendingByDate={pendingByDate}
-onFieldVisitClick={(m) =>
-setTimelineMonth((prev) => {
-if (prev && prev.getFullYear() === m.getFullYear() && prev.getMonth() === m.getMonth()) return null;
-return new Date(m);
-})
-}
-/>
-))}
-</div>
-)}
 
 {/* --- MODALS --- */}
 {isModalOpen && selectedDate && (

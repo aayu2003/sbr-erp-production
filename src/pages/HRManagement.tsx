@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
+import * as XLSX from 'xlsx';
 import {
   Background,
   BackgroundVariant,
@@ -23,12 +25,14 @@ import {
   Briefcase,
   Building2,
   CalendarDays,
-  ChevronRight,
   CheckCircle2,
   Clock3,
   Download,
+  Eye,
   FileCheck2,
+  ImageOff,
   IndianRupee,
+  Loader2,
   Lock,
   MapPin,
   Network,
@@ -41,8 +45,8 @@ import {
   TrendingUp,
   Trash2,
   Unlock,
-  Upload,
   UserCheck,
+  UserX,
   Users,
   X,
 } from 'lucide-react';
@@ -110,20 +114,29 @@ type HrConfiguration = {
   salaryStructures: Record<string, SalaryStructure>;
 };
 type DayStatus = 'P' | 'A' | 'PL' | 'PH';
-type HRBudgetCard = {
+// Sourced straight from GET /admin_accounts/get_budgets (the same table the Budget
+// Dashboard reads/writes) — hr_budget_xlsx_url is set once add_HR_budget has been called.
+type HRBudgetRecord = {
   budget_id: string;
   budget_name: string;
   financial_year_start: string;
   financial_year_end: string;
-  budget_cycle: string;
+  crop_season: string;
   project_start_date: string;
   project_end_date: string;
-  budget_heads: string;
-  owner: string;
   status: string;
   locked: boolean;
-  allocated: string;
-  utilized: string;
+  hr_budget_xlsx_url?: string | null;
+};
+
+type HrBudgetRow = {
+  components: string;
+  uom: string;
+  budgetPerMonth: number;
+  nos: number;
+  totalMonthlyBudget: number;
+  numberOfMonths: number;
+  total: number;
 };
 
 const emptySalaryStructure = (): SalaryStructure => ({
@@ -323,76 +336,6 @@ const hrBudgetForecast = [
   { label: 'Hiring Cost Absorption', value: 69 },
   { label: 'Training Utilization', value: 46 },
   { label: 'Welfare Utilization', value: 64 },
-];
-
-const HR_BUDGET_CYCLES: Record<string, string> = {
-  Payroll: 'bg-emerald-100 text-emerald-700 border-emerald-200',
-  Hiring: 'bg-amber-100 text-amber-700 border-amber-200',
-  Welfare: 'bg-orange-100 text-orange-700 border-orange-200',
-  Training: 'bg-blue-100 text-blue-700 border-blue-200',
-};
-
-const initialHRBudgets: HRBudgetCard[] = [
-  {
-    budget_id: 'HRB-2026-001',
-    budget_name: 'FY 2026-27 Payroll Budget',
-    financial_year_start: '2026',
-    financial_year_end: '2027',
-    budget_cycle: 'Payroll',
-    project_start_date: '2026-04-01',
-    project_end_date: '2027-03-31',
-    budget_heads: 'Management, Field Staff, Consultants',
-    owner: 'HR Manager',
-    status: 'active',
-    locked: false,
-    allocated: '₹6.12 Cr',
-    utilized: '₹3.56 Cr',
-  },
-  {
-    budget_id: 'HRB-2026-002',
-    budget_name: 'Hiring & Onboarding Budget',
-    financial_year_start: '2026',
-    financial_year_end: '2027',
-    budget_cycle: 'Hiring',
-    project_start_date: '2026-04-01',
-    project_end_date: '2026-09-30',
-    budget_heads: 'MRF, Joining Kits, Induction',
-    owner: 'HR Executive',
-    status: 'active',
-    locked: false,
-    allocated: '₹28.0L',
-    utilized: '₹19.4L',
-  },
-  {
-    budget_id: 'HRB-2026-003',
-    budget_name: 'Employee Welfare Budget',
-    financial_year_start: '2026',
-    financial_year_end: '2027',
-    budget_cycle: 'Welfare',
-    project_start_date: '2026-04-01',
-    project_end_date: '2027-03-31',
-    budget_heads: 'Benefits, Medical, Engagement',
-    owner: 'Admin HR',
-    status: 'planning',
-    locked: true,
-    allocated: '₹34.0L',
-    utilized: '₹21.8L',
-  },
-  {
-    budget_id: 'HRB-2026-004',
-    budget_name: 'Training & Development Budget',
-    financial_year_start: '2026',
-    financial_year_end: '2027',
-    budget_cycle: 'Training',
-    project_start_date: '2026-07-01',
-    project_end_date: '2026-12-31',
-    budget_heads: 'Safety, Field Training, HR Workshops',
-    owner: 'HR Manager',
-    status: 'active',
-    locked: false,
-    allocated: '₹18.0L',
-    utilized: '₹8.2L',
-  },
 ];
 
 const initialOrgNodes: OrgNode[] = [
@@ -602,22 +545,782 @@ const OrgCanvasNode = ({ data }: NodeProps<Node<OrgCanvasData>>) => {
 
 const orgNodeTypes = { orgNode: OrgCanvasNode };
 
+// ── Connect Payroll — mesh of HR budget line-item nodes and onboarded-staff nodes,
+// connected by the user. No save API yet, so it's kept in sessionStorage per budget until
+// one is wired up (same pattern as the Management Structure organogram below). ──────────
+const CONNECT_PAYROLL_STORAGE_PREFIX = 'sbr-hr-payroll-mesh-';
+
+type PayrollNodeKind = 'lineItem' | 'staff';
+type PayrollNodeInfo = {
+  kind: PayrollNodeKind;
+  label: string;
+  subLabel?: string;
+  refId: string; // line item's Components name, or staff_id
+};
+type PayrollCanvasData = { info: PayrollNodeInfo; onRemove?: (id: string) => void };
+type PayrollEdgeRecord = { id: string; source: string; target: string };
+type StoredPayrollMesh = {
+  nodes: (PayrollNodeInfo & { id: string; position: { x: number; y: number } })[];
+  edges: PayrollEdgeRecord[];
+};
+
+const PayrollFlowNode = ({ id, data }: NodeProps<Node<PayrollCanvasData>>) => {
+  const isStaff = data.info.kind === 'staff';
+  return (
+    <div className={cn('relative min-w-[200px] rounded-xl border-2 bg-white p-3 shadow-md', isStaff ? 'border-blue-300' : 'border-emerald-300')}>
+      <Handle type="target" position={Position.Left} className="!h-3 !w-3 !border-2 !border-white !bg-slate-400" />
+      <Handle type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-white !bg-slate-400" />
+      <Handle type="target" position={Position.Right} id="r-target" className="!h-3 !w-3 !border-2 !border-white !bg-slate-400" />
+      <Handle type="source" position={Position.Left} id="l-source" className="!h-3 !w-3 !border-2 !border-white !bg-slate-400" />
+      {data.onRemove && (
+        <button
+          type="button"
+          onClick={() => data.onRemove?.(id)}
+          className="nodrag absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full bg-white text-slate-400 shadow ring-1 ring-slate-200 hover:text-red-500"
+          aria-label={`Remove ${data.info.label}`}
+        >
+          <X className="h-3 w-3" />
+        </button>
+      )}
+      <div className="flex items-center gap-2">
+        <span className={cn('flex h-7 w-7 shrink-0 items-center justify-center rounded-lg', isStaff ? 'bg-blue-50 text-blue-600' : 'bg-emerald-50 text-emerald-600')}>
+          {isStaff ? <UserCheck className="h-4 w-4" /> : <IndianRupee className="h-4 w-4" />}
+        </span>
+        <div className="min-w-0">
+          <p className="truncate text-xs font-extrabold text-slate-900">{data.info.label}</p>
+          {data.info.subLabel && <p className="truncate text-[10px] font-semibold text-slate-500">{data.info.subLabel}</p>}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const payrollNodeTypes = { payrollNode: PayrollFlowNode };
+
+const ConnectPayrollModal = ({
+  hrBudgets,
+  staffDirectory,
+  onClose,
+}: {
+  hrBudgets: HRBudgetRecord[];
+  staffDirectory: StaffDirectoryEntry[];
+  onClose: () => void;
+}) => {
+  const [selectedBudgetId, setSelectedBudgetId] = useState('');
+  const [lineItems, setLineItems] = useState<HrBudgetRow[] | null>(null);
+  const [loadingLineItems, setLoadingLineItems] = useState(false);
+  const [lineItemsError, setLineItemsError] = useState<string | null>(null);
+  const [staffSearch, setStaffSearch] = useState('');
+
+  const selectedBudget = hrBudgets.find((b) => b.budget_id === selectedBudgetId) ?? null;
+
+  const [meshNodes, setMeshNodes, onMeshNodesChange] = useNodesState<Node<PayrollCanvasData>>([]);
+  const [meshEdges, setMeshEdges] = useState<PayrollEdgeRecord[]>([]);
+
+  const removeNode = (nodeId: string) => {
+    setMeshNodes((prev) => prev.filter((n) => n.id !== nodeId));
+    setMeshEdges((prev) => prev.filter((e) => e.source !== nodeId && e.target !== nodeId));
+  };
+
+  // Fetch + parse the selected budget's HRMS xlsx — same parsing as ViewHrBudgetModal.
+  useEffect(() => {
+    if (!selectedBudgetId) { setLineItems(null); return; }
+    let cancelled = false;
+    (async () => {
+      setLoadingLineItems(true);
+      setLineItemsError(null);
+      try {
+        const BASE_URL = getBaseUrl().replace(/\/$/, '');
+        const res = await fetch(`${BASE_URL}/admin_accounts/get_hr_budget/${selectedBudgetId}`);
+        if (!res.ok) throw new Error(`Failed to fetch file (${res.status})`);
+        const buf = await res.arrayBuffer();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const wb = (XLSX as any).read(new Uint8Array(buf), { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const raw: any[] = ws ? XLSX.utils.sheet_to_json(ws) : [];
+        const parsed: HrBudgetRow[] = raw
+          .map((r) => ({
+            components:         String(r['Components'] ?? '').trim(),
+            uom:                String(r['UoM'] ?? ''),
+            budgetPerMonth:     Number(r['Budget/Month']) || 0,
+            nos:                Number(r['Nos.']) || 0,
+            totalMonthlyBudget: Number(r['Total Monthly Budget']) || 0,
+            numberOfMonths:     Number(r['no. of months']) || 0,
+            total:              Number(r['Total']) || 0,
+          }))
+          .filter((c) => c.components.length > 0);
+        if (!cancelled) setLineItems(parsed);
+      } catch (err) {
+        if (!cancelled) setLineItemsError(err instanceof Error ? err.message : 'Failed to load line items');
+      } finally {
+        if (!cancelled) setLoadingLineItems(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedBudgetId]);
+
+  // Load the mesh saved for this budget (this session), if any.
+  useEffect(() => {
+    if (!selectedBudgetId) { setMeshNodes([]); setMeshEdges([]); return; }
+    try {
+      const raw = window.sessionStorage.getItem(CONNECT_PAYROLL_STORAGE_PREFIX + selectedBudgetId);
+      const stored: StoredPayrollMesh | null = raw ? JSON.parse(raw) : null;
+      if (stored && Array.isArray(stored.nodes)) {
+        setMeshNodes(stored.nodes.map((n) => ({
+          id: n.id,
+          type: 'payrollNode',
+          position: n.position,
+          data: { info: { kind: n.kind, label: n.label, subLabel: n.subLabel, refId: n.refId }, onRemove: removeNode },
+        })));
+        setMeshEdges(Array.isArray(stored.edges) ? stored.edges : []);
+      } else {
+        setMeshNodes([]);
+        setMeshEdges([]);
+      }
+    } catch {
+      setMeshNodes([]);
+      setMeshEdges([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBudgetId]);
+
+  // Persist the mesh for this budget as it changes.
+  useEffect(() => {
+    if (!selectedBudgetId) return;
+    try {
+      const toStore: StoredPayrollMesh = {
+        nodes: meshNodes.map((n) => ({ id: n.id, position: n.position, ...n.data.info })),
+        edges: meshEdges,
+      };
+      window.sessionStorage.setItem(CONNECT_PAYROLL_STORAGE_PREFIX + selectedBudgetId, JSON.stringify(toStore));
+    } catch {
+      // sessionStorage unavailable — mesh still works in-memory for this session
+    }
+  }, [meshNodes, meshEdges, selectedBudgetId]);
+
+  const addLineItemNode = (row: HrBudgetRow) => {
+    if (meshNodes.some((n) => n.data.info.kind === 'lineItem' && n.data.info.refId === row.components)) return;
+    const subLabel = [row.uom, row.budgetPerMonth ? `₹${row.budgetPerMonth.toLocaleString('en-IN')}/mo` : null].filter(Boolean).join(' · ');
+    setMeshNodes((prev) => [...prev, {
+      id: `li-${row.components.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Date.now()}`,
+      type: 'payrollNode',
+      position: { x: 80, y: 60 + prev.length * 90 },
+      data: { info: { kind: 'lineItem', label: row.components, subLabel, refId: row.components }, onRemove: removeNode },
+    }]);
+  };
+
+  const addStaffNode = (staff: StaffDirectoryEntry) => {
+    if (meshNodes.some((n) => n.data.info.kind === 'staff' && n.data.info.refId === staff.id)) return;
+    setMeshNodes((prev) => [...prev, {
+      id: `staff-${staff.id}-${Date.now()}`,
+      type: 'payrollNode',
+      position: { x: 480, y: 60 + prev.length * 90 },
+      data: { info: { kind: 'staff', label: staff.name, subLabel: staff.id, refId: staff.id }, onRemove: removeNode },
+    }]);
+  };
+
+  const onMeshConnect = (connection: Connection) => {
+    const { source, target } = connection;
+    if (!source || !target || source === target) return;
+    const sourceNode = meshNodes.find((n) => n.id === source);
+    const targetNode = meshNodes.find((n) => n.id === target);
+    if (!sourceNode || !targetNode || sourceNode.data.info.kind === targetNode.data.info.kind) return;
+    setMeshEdges((prev) => {
+      if (prev.some((e) => (e.source === source && e.target === target) || (e.source === target && e.target === source))) return prev;
+      return [...prev, { id: `edge-${source}-${target}-${Date.now()}`, source, target }];
+    });
+  };
+
+  const onMeshEdgeClick = (_: React.MouseEvent, edge: Edge) => {
+    setMeshEdges((prev) => prev.filter((e) => e.id !== edge.id));
+  };
+
+  const flowEdges: Edge[] = meshEdges.map((e) => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    type: 'smoothstep',
+    animated: true,
+    style: { stroke: '#173f70', strokeWidth: 2 },
+    markerEnd: { type: MarkerType.ArrowClosed, color: '#173f70' },
+  }));
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+      <div className="flex h-[85vh] w-full max-w-6xl flex-col rounded-2xl bg-white shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-6 py-4">
+          <div>
+            <h2 className="text-xl font-extrabold text-slate-900">Connect Payroll</h2>
+            <p className="mt-0.5 text-xs font-semibold text-slate-500">Map onboarded staff to HR budget line items</p>
+          </div>
+          <button onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {!selectedBudgetId ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 p-10">
+            <p className="text-sm font-bold text-slate-600">Choose a budget with an HRMS budget attached</p>
+            {hrBudgets.length === 0 ? (
+              <p className="max-w-sm text-center text-xs font-semibold text-slate-400">
+                No budgets have an HRMS budget yet — add one from a budget card on the Budget Dashboard first.
+              </p>
+            ) : (
+              <select
+                value={selectedBudgetId}
+                onChange={(e) => setSelectedBudgetId(e.target.value)}
+                className="h-11 w-80 cursor-pointer rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 outline-none focus:border-[#173f70]"
+              >
+                <option value="">Select a budget…</option>
+                {hrBudgets.map((b) => (
+                  <option key={b.budget_id} value={b.budget_id}>{b.budget_name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-1 overflow-hidden">
+            {/* Left sidebar */}
+            <div className="flex w-72 shrink-0 flex-col overflow-hidden border-r border-slate-200">
+              <div className="border-b border-slate-100 px-4 py-3">
+                <button type="button" onClick={() => setSelectedBudgetId('')} className="text-[11px] font-extrabold text-[#173f70] hover:underline">
+                  ← Change budget
+                </button>
+                <p className="mt-1 truncate text-sm font-extrabold text-slate-900">{selectedBudget?.budget_name}</p>
+              </div>
+
+              <div className="flex-1 overflow-y-auto">
+                <div className="border-b border-slate-100 px-4 py-3">
+                  <p className="mb-2 text-[10px] font-black uppercase tracking-wide text-slate-400">Line Items</p>
+                  {loadingLineItems ? (
+                    <p className="text-xs font-semibold text-slate-400">Loading…</p>
+                  ) : lineItemsError ? (
+                    <p className="text-xs font-semibold text-red-500">{lineItemsError}</p>
+                  ) : !lineItems || lineItems.length === 0 ? (
+                    <p className="text-xs font-semibold text-slate-400">No line items found</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {lineItems.map((row) => {
+                        const added = meshNodes.some((n) => n.data.info.kind === 'lineItem' && n.data.info.refId === row.components);
+                        return (
+                          <button
+                            key={row.components}
+                            type="button"
+                            disabled={added}
+                            onClick={() => addLineItemNode(row)}
+                            className={cn(
+                              'flex w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors',
+                              added ? 'cursor-not-allowed border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white hover:border-emerald-300 hover:bg-emerald-50/50'
+                            )}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate text-xs font-bold text-slate-800">{row.components}</span>
+                              <span className="block truncate text-[10px] font-semibold text-slate-400">
+                                {row.uom}{row.budgetPerMonth ? ` · ₹${row.budgetPerMonth.toLocaleString('en-IN')}/mo` : ''}
+                              </span>
+                            </span>
+                            {added ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" /> : <Plus className="h-3.5 w-3.5 shrink-0 text-slate-400" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="px-4 py-3">
+                  <p className="mb-2 text-[10px] font-black uppercase tracking-wide text-slate-400">Staff (Onboarded)</p>
+                  <input
+                    value={staffSearch}
+                    onChange={(e) => setStaffSearch(e.target.value)}
+                    placeholder="Search staff…"
+                    className="mb-2 h-9 w-full rounded-lg border border-slate-200 px-2.5 text-xs font-semibold text-slate-800 outline-none focus:border-[#173f70]"
+                  />
+                  <div className="space-y-1.5">
+                    {staffDirectory.length === 0 && <p className="text-xs font-semibold text-slate-400">No onboarded staff found</p>}
+                    {staffDirectory
+                      .filter((s) => s.name.toLowerCase().includes(staffSearch.toLowerCase()))
+                      .map((s) => {
+                        const added = meshNodes.some((n) => n.data.info.kind === 'staff' && n.data.info.refId === s.id);
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            disabled={added}
+                            onClick={() => addStaffNode(s)}
+                            className={cn(
+                              'flex w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors',
+                              added ? 'cursor-not-allowed border-blue-200 bg-blue-50' : 'border-slate-200 bg-white hover:border-blue-300 hover:bg-blue-50/50'
+                            )}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate text-xs font-bold text-slate-800">{s.name}</span>
+                              <span className="block truncate text-[10px] font-semibold text-slate-400">{s.id}</span>
+                            </span>
+                            {added ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-blue-500" /> : <Plus className="h-3.5 w-3.5 shrink-0 text-slate-400" />}
+                          </button>
+                        );
+                      })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Canvas */}
+            <div className="relative flex-1">
+              <ReactFlowProvider>
+                <ReactFlow
+                  nodes={meshNodes}
+                  edges={flowEdges}
+                  nodeTypes={payrollNodeTypes}
+                  onNodesChange={onMeshNodesChange}
+                  onConnect={onMeshConnect}
+                  onEdgeClick={onMeshEdgeClick}
+                  fitView
+                >
+                  <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
+                  <Controls />
+                  <MiniMap pannable zoomable />
+                </ReactFlow>
+              </ReactFlowProvider>
+              {meshNodes.length === 0 && (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-10">
+                  <p className="max-w-xs text-center text-sm font-semibold text-slate-400">
+                    Add line items and staff from the left, then drag between their handles to connect them.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="flex shrink-0 items-center justify-between border-t border-slate-200 px-6 py-3">
+          <p className="text-[11px] font-semibold text-slate-400">
+            {selectedBudgetId ? `${meshEdges.length} connection${meshEdges.length !== 1 ? 's' : ''} · kept for this session · click an edge to remove it` : ''}
+          </p>
+          <button onClick={onClose} className="h-9 rounded-lg border border-slate-200 px-4 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── HR Budget card — read-only. Uploading/replacing an HR budget only happens from the
+// Budget Dashboard card; this page just shows budgets that already have one attached. ──
+const HrBudgetCard = ({
+  budget,
+  onView,
+}: {
+  budget: HRBudgetRecord;
+  onView: (budget: HRBudgetRecord) => void;
+}) => {
+  const fmtDate = (date: string) =>
+    date ? new Date(date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+  const fy = `${budget.financial_year_start}-${String(parseInt(budget.financial_year_end) % 100).padStart(2, '0')}`;
+
+  return (
+    <div
+      className={cn(
+        'relative flex flex-col gap-4 rounded-xl border p-5 shadow-sm transition-all',
+        budget.locked ? 'border-slate-200 bg-slate-50 opacity-70' : 'border-slate-200 bg-white hover:border-[#173f70]/40 hover:shadow-md'
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-base font-extrabold text-slate-900">{budget.budget_name}</h3>
+          <p className="mt-0.5 text-xs font-semibold text-slate-400">FY {fy}</p>
+        </div>
+        {budget.locked ? (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-extrabold text-red-600">
+            <Lock className="h-3 w-3" />
+            Locked
+          </span>
+        ) : (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-extrabold text-emerald-600">
+            <Unlock className="h-3 w-3" />
+            Open
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        {budget.crop_season && (
+          <div className="flex items-center gap-2 text-xs">
+            <IndianRupee className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+            <span className="font-semibold text-slate-700">{budget.crop_season}</span>
+          </div>
+        )}
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <CalendarDays className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+          <span className="font-semibold">{fmtDate(budget.project_start_date)} → {fmtDate(budget.project_end_date)}</span>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <FileCheck2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+          <span className="font-semibold text-emerald-600">HR budget linked</span>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => onView(budget)}
+        className="mt-auto inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 py-2 text-xs font-extrabold text-emerald-700 hover:bg-emerald-100"
+      >
+        <Eye className="h-3.5 w-3.5" />
+        View
+      </button>
+    </div>
+  );
+};
+
+// ── View HR Budget — fetches the linked xlsx directly and parses the fixed column
+// format: Components, UoM, Budget/Month, Nos., Total Monthly Budget, no. of months, Total.
+const ViewHrBudgetModal = ({ budget, onClose }: { budget: HRBudgetRecord; onClose: () => void }) => {
+  const [rows, setRows] = useState<HrBudgetRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        if (!budget.hr_budget_xlsx_url) throw new Error('No HR budget file linked to this budget');
+        // Go through the backend proxy, not the raw S3 url — the bucket has no CORS policy
+        // allowing direct browser fetches, which is what was throwing "Failed to fetch".
+        const BASE_URL = getBaseUrl().replace(/\/$/, '');
+        const res = await fetch(`${BASE_URL}/admin_accounts/get_hr_budget/${budget.budget_id}`);
+        if (!res.ok) throw new Error(`Failed to fetch file (${res.status})`);
+        const buf = await res.arrayBuffer();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const wb = (XLSX as any).read(new Uint8Array(buf), { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const raw: any[] = ws ? XLSX.utils.sheet_to_json(ws) : [];
+        const parsed: HrBudgetRow[] = raw
+          .map((r) => ({
+            components:         String(r['Components'] ?? ''),
+            uom:                String(r['UoM'] ?? ''),
+            budgetPerMonth:     Number(r['Budget/Month']) || 0,
+            nos:                Number(r['Nos.']) || 0,
+            totalMonthlyBudget: Number(r['Total Monthly Budget']) || 0,
+            numberOfMonths:     Number(r['no. of months']) || 0,
+            total:              Number(r['Total']) || 0,
+          }))
+          .filter((r) => r.components.trim().length > 0);
+        if (!cancelled) setRows(parsed);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load HR budget');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [budget.hr_budget_xlsx_url]);
+
+  const grandTotal = (rows ?? []).reduce((s, r) => s + r.total, 0);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-4xl flex-col rounded-xl bg-white shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-6 py-4">
+          <div>
+            <h2 className="text-xl font-extrabold text-slate-900">HR Budget — {budget.budget_name}</h2>
+            <p className="mt-0.5 text-xs font-semibold text-slate-500">{rows ? `${rows.length} component${rows.length !== 1 ? 's' : ''}` : ''}</p>
+          </div>
+          <button onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-auto p-6">
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-16 text-sm font-semibold text-slate-400">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading HR budget…
+            </div>
+          ) : error ? (
+            <div className="flex items-center justify-center py-16 text-sm font-semibold text-red-500">{error}</div>
+          ) : !rows || rows.length === 0 ? (
+            <div className="flex items-center justify-center py-16 text-sm font-semibold text-slate-400">No rows found in this file</div>
+          ) : (
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-50 text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-4 py-3">Components</th>
+                  <th className="px-4 py-3">UoM</th>
+                  <th className="px-4 py-3 text-right">Budget/Month</th>
+                  <th className="px-4 py-3 text-right">Nos.</th>
+                  <th className="px-4 py-3 text-right">Total Monthly Budget</th>
+                  <th className="px-4 py-3 text-right">No. of Months</th>
+                  <th className="px-4 py-3 text-right">Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-bold text-slate-700">
+                {rows.map((row, i) => (
+                  <tr key={`${row.components}-${i}`}>
+                    <td className="px-4 py-3">{row.components}</td>
+                    <td className="px-4 py-3">{row.uom}</td>
+                    <td className="px-4 py-3 text-right">₹{row.budgetPerMonth.toLocaleString('en-IN')}</td>
+                    <td className="px-4 py-3 text-right">{row.nos}</td>
+                    <td className="px-4 py-3 text-right">₹{row.totalMonthlyBudget.toLocaleString('en-IN')}</td>
+                    <td className="px-4 py-3 text-right">{row.numberOfMonths}</td>
+                    <td className="px-4 py-3 text-right">₹{row.total.toLocaleString('en-IN')}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="border-t-2 border-slate-200 bg-slate-50">
+                <tr>
+                  <td colSpan={6} className="px-4 py-3 text-right font-extrabold text-slate-700">Grand Total</td>
+                  <td className="px-4 py-3 text-right font-extrabold text-[#173f70]">₹{grandTotal.toLocaleString('en-IN')}</td>
+                </tr>
+              </tfoot>
+            </table>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Attendance Approvals — reviews staff-submitted attendance proof (photo) and lets HR
+// approve it or mark the day absent. Approve / mark-absent are optimistic locally until
+// the corresponding write endpoint is wired up.
+type AttendanceApprovalRecord = {
+  approved_by_HR: boolean;
+  date: string;
+  staff_info: {
+    staff_name: string;
+    employment_type: { type?: string; vendor?: string | null; order_number?: string | null };
+    adhar_card_url?: string | null;
+    staff_phone: string;
+    staff_department: string;
+    profile_image_url: string;
+    staff_designation: string;
+  };
+  status: string;
+  staff_id: string;
+  attendance_id: string;
+  attandance_image_url: string;
+};
+
+const AttendanceApprovalCard = ({
+  record,
+  isProcessing,
+  onApprove,
+  onMarkAbsent,
+}: {
+  record: AttendanceApprovalRecord;
+  isProcessing: boolean;
+  onApprove: () => void;
+  onMarkAbsent: () => void;
+}) => {
+  const { staff_info } = record;
+  const employmentType = staff_info.employment_type?.type;
+
+  return (
+    <div className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="aspect-video w-full shrink-0 overflow-hidden bg-slate-100">
+        {record.attandance_image_url ? (
+          <img
+            src={record.attandance_image_url}
+            alt={`Attendance proof for ${staff_info.staff_name}`}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-slate-300">
+            <ImageOff className="h-6 w-6" />
+            <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">No proof image</span>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-1 flex-col gap-3 p-4">
+        <div className="flex items-start gap-3">
+          <div className="h-10 w-10 shrink-0 overflow-hidden rounded-full bg-slate-100 ring-1 ring-slate-200">
+            {staff_info.profile_image_url ? (
+              <img src={staff_info.profile_image_url} alt={staff_info.staff_name} className="h-full w-full object-cover" />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center text-xs font-extrabold text-slate-400">
+                {staff_info.staff_name.charAt(0).toUpperCase()}
+              </div>
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-extrabold text-slate-900">{staff_info.staff_name}</p>
+            <p className="mt-0.5 truncate text-xs font-semibold text-slate-500">
+              {staff_info.staff_designation} · {staff_info.staff_department}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold text-emerald-700 ring-1 ring-emerald-100">
+            <CalendarDays className="h-3 w-3" />
+            {record.date}
+          </span>
+          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-extrabold text-slate-600 ring-1 ring-slate-200">
+            {record.status}
+          </span>
+          {employmentType && (
+            <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-extrabold text-blue-700 ring-1 ring-blue-100">
+              {employmentType}
+            </span>
+          )}
+        </div>
+
+        <div className="mt-auto flex gap-2 pt-1">
+          <button
+            type="button"
+            disabled={isProcessing}
+            onClick={onApprove}
+            className="flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-50 text-xs font-extrabold text-emerald-700 ring-1 ring-emerald-100 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            Approve
+          </button>
+          <button
+            type="button"
+            disabled={isProcessing}
+            onClick={onMarkAbsent}
+            className="flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg bg-rose-50 text-xs font-extrabold text-rose-700 ring-1 ring-rose-100 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <UserX className="h-3.5 w-3.5" />
+            Mark Absent
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AttendanceApprovalsModal = ({ onClose }: { onClose: () => void }) => {
+  const [records, setRecords] = useState<AttendanceApprovalRecord[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [processingId, setProcessingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  // approved_by_HR stays false for both "not yet reviewed" and "marked absent", so once HR
+  // acts on a card it's tracked here and dropped from the pending queue locally either way.
+  const [resolvedIds, setResolvedIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const BASE_URL = getBaseUrl().replace(/\/$/, '');
+        const res = await fetch(`${BASE_URL}/HRMS/get_all_attandance_approvals`);
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error('Failed to load attendance approvals');
+        if (!cancelled) setRecords(Array.isArray(data.attendance_records) ? data.attendance_records : []);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load attendance approvals');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const pending = (records ?? []).filter((r) => !r.approved_by_HR && !resolvedIds.has(r.attendance_id));
+
+  const resolveRecord = async (attendanceId: string, approvedByHR: boolean) => {
+    setProcessingId(attendanceId);
+    setActionError(null);
+    try {
+      const BASE_URL = getBaseUrl().replace(/\/$/, '');
+      const res = await fetch(`${BASE_URL}/HRMS/approve_attendance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ attendance_id: attendanceId, approved_by_HR: approvedByHR }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data?.message || 'Failed to update attendance approval');
+      setResolvedIds((prev) => new Set(prev).add(attendanceId));
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to update attendance approval');
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-5xl flex-col rounded-xl bg-white shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-6 py-4">
+          <div>
+            <h2 className="text-xl font-extrabold text-slate-900">Attendance Approvals</h2>
+            <p className="mt-0.5 text-xs font-semibold text-slate-500">
+              {loading ? 'Loading…' : `${pending.length} pending approval${pending.length !== 1 ? 's' : ''}`}
+            </p>
+          </div>
+          <button onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto p-6">
+          {actionError && (
+            <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-semibold text-red-600">
+              {actionError}
+            </div>
+          )}
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-16 text-sm font-semibold text-slate-400">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading attendance approvals…
+            </div>
+          ) : error ? (
+            <div className="flex items-center justify-center py-16 text-sm font-semibold text-red-500">{error}</div>
+          ) : pending.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-16 text-slate-400">
+              <CheckCircle2 className="h-6 w-6" />
+              <p className="text-sm font-semibold">No pending attendance approvals</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {pending.map((record) => (
+                <AttendanceApprovalCard
+                  key={record.attendance_id}
+                  record={record}
+                  isProcessing={processingId === record.attendance_id}
+                  onApprove={() => resolveRecord(record.attendance_id, true)}
+                  onMarkAbsent={() => resolveRecord(record.attendance_id, false)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const HRManagement = () => {
+  const navigate = useNavigate();
   const [activeView, setActiveView] = useState<HrView>('Dashboard');
-  const [hrBudgets, setHrBudgets] = useState<HRBudgetCard[]>(initialHRBudgets);
+  const [hrBudgets, setHrBudgets] = useState<HRBudgetRecord[]>([]);
+  const [hrBudgetsLoading, setHrBudgetsLoading] = useState(true);
   const [hrBudgetSearch, setHrBudgetSearch] = useState('');
-  const [showCreateHRBudget, setShowCreateHRBudget] = useState(false);
-  const [hrBudgetForm, setHrBudgetForm] = useState({
-    budgetName: '',
-    financialYear: '2026-27',
-    budgetCycle: 'Payroll',
-    startDate: '',
-    endDate: '',
-    budgetHeads: '',
-    owner: '',
-    allocated: '',
-    masterFileName: '',
-  });
+  const [viewingHrBudget, setViewingHrBudget] = useState<HRBudgetRecord | null>(null);
+  const [showConnectPayroll, setShowConnectPayroll] = useState(false);
+  const [showAttendanceApprovals, setShowAttendanceApprovals] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const BASE_URL = getBaseUrl().replace(/\/$/, '');
+    setHrBudgetsLoading(true);
+    fetch(`${BASE_URL}/admin_accounts/get_budgets`)
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled && d.success && Array.isArray(d.data)) setHrBudgets(d.data); })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setHrBudgetsLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
   const storedOrgCanvas = loadStoredOrgCanvas();
   const [orgNodes, setOrgNodes] = useState<OrgNode[]>(storedOrgCanvas?.nodes ?? initialOrgNodes);
   const [orgEdges, setOrgEdges] = useState<OrgEdge[]>(storedOrgCanvas?.edges ?? []);
@@ -1157,317 +1860,137 @@ const HRManagement = () => {
   );
 
   const renderPayroll = () => (
-    <PayrollModule
-      attendanceMap={attendanceMap}
-      salaryStructures={hrConfig.salaryStructures}
-      onSetSalaryField={setSalaryField}
-    />
+    <div className="space-y-4">
+      <div className="flex items-center justify-end">
+        <button
+          type="button"
+          onClick={() => setShowConnectPayroll(true)}
+          className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#173f70] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#12345e]"
+        >
+          <Network className="h-4 w-4" />
+          Connect Payroll
+        </button>
+      </div>
+      <PayrollModule
+        attendanceMap={attendanceMap}
+        salaryStructures={hrConfig.salaryStructures}
+        onSetSalaryField={setSalaryField}
+      />
+      {showConnectPayroll && (
+        <ConnectPayrollModal
+          hrBudgets={hrBudgets.filter((b) => !!b.hr_budget_xlsx_url)}
+          staffDirectory={staffDirectory}
+          onClose={() => setShowConnectPayroll(false)}
+        />
+      )}
+    </div>
   );
 
   const renderAttendance = () => (
-    <AttendanceModule
-      map={attendanceMap}
-      setMap={setAttendanceMap}
-      holidays={hrConfig.holidays}
-      workingDayOverrides={hrConfig.workingDayOverrides}
-      onEarnCompLeave={earnCompLeave}
-      onRevokeCompLeave={revokeCompLeave}
-      lockHours={hrConfig.attendanceLockHours}
-      unlockRequests={hrConfig.unlockRequests}
-      onRequestUnlock={requestAttendanceUnlock}
-    />
+    <div className="space-y-4">
+      <div className="flex items-center justify-end">
+        <button
+          type="button"
+          onClick={() => setShowAttendanceApprovals(true)}
+          className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#0D3A35] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#092b27]"
+        >
+          <BadgeCheck className="h-4 w-4" />
+          Approvals
+        </button>
+      </div>
+      <AttendanceModule
+        map={attendanceMap}
+        setMap={setAttendanceMap}
+        holidays={hrConfig.holidays}
+        workingDayOverrides={hrConfig.workingDayOverrides}
+        onEarnCompLeave={earnCompLeave}
+        onRevokeCompLeave={revokeCompLeave}
+        lockHours={hrConfig.attendanceLockHours}
+        unlockRequests={hrConfig.unlockRequests}
+        onRequestUnlock={requestAttendanceUnlock}
+      />
+      {showAttendanceApprovals && (
+        <AttendanceApprovalsModal onClose={() => setShowAttendanceApprovals(false)} />
+      )}
+    </div>
   );
 
-  const resetHRBudgetForm = () => {
-    setHrBudgetForm({
-      budgetName: '',
-      financialYear: '2026-27',
-      budgetCycle: 'Payroll',
-      startDate: '',
-      endDate: '',
-      budgetHeads: '',
-      owner: '',
-      allocated: '',
-      masterFileName: '',
-    });
-  };
-
-  const createHRBudget = () => {
-    if (!hrBudgetForm.budgetName.trim()) return;
-    const [fyStart, fyEndShort] = hrBudgetForm.financialYear.split('-');
-    const nextBudget: HRBudgetCard = {
-      budget_id: `HRB-${Date.now()}`,
-      budget_name: hrBudgetForm.budgetName.trim(),
-      financial_year_start: fyStart || '2026',
-      financial_year_end: fyStart?.slice(0, 2) + fyEndShort || '2027',
-      budget_cycle: hrBudgetForm.budgetCycle,
-      project_start_date: hrBudgetForm.startDate,
-      project_end_date: hrBudgetForm.endDate,
-      budget_heads: hrBudgetForm.budgetHeads.trim() || hrBudgetForm.budgetCycle,
-      owner: hrBudgetForm.owner.trim() || 'HR Manager',
-      status: 'active',
-      locked: false,
-      allocated: hrBudgetForm.allocated.trim() || '₹0',
-      utilized: '₹0',
-    };
-    setHrBudgets(prev => [nextBudget, ...prev]);
-    resetHRBudgetForm();
-    setShowCreateHRBudget(false);
-  };
-
-  const renderHRBudgetCard = (budget: HRBudgetCard) => {
-    const fmtDate = (date: string) =>
-      date ? new Date(date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
-    const fy = `${budget.financial_year_start}-${String(parseInt(budget.financial_year_end) % 100).padStart(2, '0')}`;
-    const cycleColor = HR_BUDGET_CYCLES[budget.budget_cycle] ?? 'bg-slate-100 text-slate-600 border-slate-200';
+  const renderHRBudget = () => {
+    // Only budgets that already have an HRMS budget xlsx attached show up here at all —
+    // this page is read-only; adding/replacing one only happens from the Budget Dashboard.
+    const hrOnly = hrBudgets.filter((budget) => !!budget.hr_budget_xlsx_url);
+    const filtered = hrBudgetSearch
+      ? hrOnly.filter((budget) => {
+          const q = hrBudgetSearch.toLowerCase();
+          const fy = `${budget.financial_year_start}-${budget.financial_year_end}`;
+          return (
+            budget.budget_name.toLowerCase().includes(q) ||
+            (budget.crop_season ?? '').toLowerCase().includes(q) ||
+            fy.includes(q)
+          );
+        })
+      : hrOnly;
 
     return (
-      <div
-        key={budget.budget_id}
-        className={cn(
-          'group relative flex flex-col gap-4 rounded-xl border p-5 shadow-sm transition-all',
-          budget.locked
-            ? 'cursor-not-allowed border-slate-200 bg-slate-50 opacity-70'
-            : 'cursor-pointer border-slate-200 bg-white hover:border-[#173f70]/40 hover:shadow-md'
-        )}
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <h3 className={cn('truncate text-base font-extrabold transition-colors', budget.locked ? 'text-slate-500' : 'text-slate-900 group-hover:text-[#173f70]')}>
-              {budget.budget_name}
-            </h3>
-            <p className="mt-0.5 text-xs font-semibold text-slate-400">FY {fy}</p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {budget.locked ? (
-              <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-extrabold text-red-600">
-                <Lock className="h-3 w-3" />
-                Locked
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-extrabold text-emerald-600">
-                <Unlock className="h-3 w-3" />
-                Open
-              </span>
-            )}
-            <span className={cn('rounded-full border px-2.5 py-0.5 text-[11px] font-extrabold', cycleColor)}>
-              {budget.budget_cycle}
-            </span>
-          </div>
-        </div>
-
-        <div className="space-y-2">
-          <div className="flex items-center gap-2 text-xs">
-            <IndianRupee className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
-            <span className="font-semibold text-slate-700">{budget.budget_heads}</span>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-slate-500">
-            <CalendarDays className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-            <span className="font-semibold">{fmtDate(budget.project_start_date)} → {fmtDate(budget.project_end_date)}</span>
-          </div>
-          <div className="flex items-center gap-2 text-xs">
-            <Users className="h-3.5 w-3.5 shrink-0 text-blue-500" />
-            <span className="font-semibold text-blue-600">Owner: {budget.owner}</span>
-          </div>
-        </div>
-
-        <div className="mt-auto grid grid-cols-2 gap-3 rounded-lg bg-slate-50 px-3 py-2.5">
+      <div className="space-y-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <p className="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">Allocated</p>
-            <p className="mt-0.5 text-sm font-extrabold text-slate-700">{budget.allocated}</p>
-          </div>
-          <div>
-            <p className="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">Status</p>
-            <p className={cn('mt-0.5 text-sm font-extrabold capitalize', budget.status === 'active' ? 'text-emerald-600' : 'text-slate-500')}>
-              {budget.status}
+            <h1 className="text-2xl font-extrabold text-slate-900">HR Budgets</h1>
+            <p className="mt-1 text-sm font-medium text-slate-500">
+              {hrBudgetsLoading ? 'Loading…' : `${hrOnly.length} budget${hrOnly.length !== 1 ? 's' : ''} with an HRMS budget`}
             </p>
           </div>
+          <button
+            type="button"
+            onClick={() => navigate('/budget')}
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            <Plus className="h-4 w-4" />
+            Add HR Budget in Budget Dashboard
+          </button>
         </div>
 
-        {!budget.locked && (
-          <ChevronRight className="absolute bottom-4 right-4 h-4 w-4 text-[#173f70] opacity-0 transition-opacity group-hover:opacity-100" />
+        <div className="relative max-w-sm">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            value={hrBudgetSearch}
+            onChange={(e) => setHrBudgetSearch(e.target.value)}
+            placeholder="Search by name or year…"
+            className="h-10 w-full rounded-lg border border-slate-200 pl-9 pr-4 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20"
+          />
+        </div>
+
+        {hrBudgetsLoading ? (
+          <div className="flex items-center justify-center gap-2 py-20 text-sm font-semibold text-slate-400">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading budgets…
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-slate-300 py-20">
+            <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-slate-100">
+              <BarChart3 className="h-7 w-7 text-slate-400" />
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-extrabold text-slate-600">{hrBudgetSearch ? 'No budgets match your search' : 'No HRMS budgets yet'}</p>
+              <p className="mt-1 text-xs font-semibold text-slate-400">
+                {hrBudgetSearch ? 'Try a different keyword' : 'Add one from a budget card on the Budget Dashboard — it\'ll show up here once linked'}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {filtered.map((budget) => (
+              <HrBudgetCard key={budget.budget_id} budget={budget} onView={setViewingHrBudget} />
+            ))}
+          </div>
+        )}
+
+        {viewingHrBudget && (
+          <ViewHrBudgetModal budget={viewingHrBudget} onClose={() => setViewingHrBudget(null)} />
         )}
       </div>
     );
   };
-
-  const renderHRBudget = () => (
-    (() => {
-      const filtered = hrBudgetSearch
-        ? hrBudgets.filter(budget => {
-            const q = hrBudgetSearch.toLowerCase();
-            const fy = `${budget.financial_year_start}-${budget.financial_year_end}`;
-            return (
-              budget.budget_name.toLowerCase().includes(q) ||
-              budget.budget_cycle.toLowerCase().includes(q) ||
-              budget.budget_heads.toLowerCase().includes(q) ||
-              fy.includes(q)
-            );
-          })
-        : hrBudgets;
-
-      return (
-        <div className="space-y-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <h1 className="text-2xl font-extrabold text-slate-900">Budgets</h1>
-              <p className="mt-1 text-sm font-medium text-slate-500">{hrBudgets.length} budget{hrBudgets.length !== 1 ? 's' : ''}</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowCreateHRBudget(true)}
-              className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#173f70] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#12345e]"
-            >
-              <Plus className="h-4 w-4" />
-              New Budget
-            </button>
-          </div>
-
-          <div className="relative max-w-sm">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              value={hrBudgetSearch}
-              onChange={(e) => setHrBudgetSearch(e.target.value)}
-              placeholder="Search by name, head, or year…"
-              className="h-10 w-full rounded-lg border border-slate-200 pl-9 pr-4 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20"
-            />
-          </div>
-
-          {filtered.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-slate-300 py-20">
-              <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-slate-100">
-                <BarChart3 className="h-7 w-7 text-slate-400" />
-              </div>
-              <div className="text-center">
-                <p className="text-sm font-extrabold text-slate-600">{hrBudgetSearch ? 'No budgets match your search' : 'No budgets yet'}</p>
-                <p className="mt-1 text-xs font-semibold text-slate-400">{hrBudgetSearch ? 'Try a different keyword' : 'Create your first HR budget to get started'}</p>
-              </div>
-              {!hrBudgetSearch && (
-                <button
-                  type="button"
-                  onClick={() => setShowCreateHRBudget(true)}
-                  className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#173f70] px-4 text-xs font-semibold text-white hover:bg-[#12345e]"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Create Budget
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {filtered.map(renderHRBudgetCard)}
-            </div>
-          )}
-
-          {showCreateHRBudget && (
-            <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/45 p-4 py-10">
-              <div className="w-full max-w-xl rounded-xl bg-white shadow-2xl">
-                <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
-                  <div>
-                    <h2 className="text-xl font-extrabold text-slate-900">Create New Budget</h2>
-                    <p className="mt-0.5 text-xs font-semibold text-slate-500">Set up a new HR budget plan</p>
-                  </div>
-                  <button onClick={() => setShowCreateHRBudget(false)} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100">
-                    <X className="h-5 w-5" />
-                  </button>
-                </div>
-
-                <div className="space-y-4 p-6">
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-extrabold text-slate-600">Budget Name *</label>
-                    <input
-                      value={hrBudgetForm.budgetName}
-                      onChange={(e) => setHrBudgetForm(prev => ({ ...prev, budgetName: e.target.value }))}
-                      placeholder="e.g. FY 2026-27 Payroll Budget"
-                      className="h-10 w-full rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-extrabold text-slate-600">Financial Year *</label>
-                      <select
-                        value={hrBudgetForm.financialYear}
-                        onChange={(e) => setHrBudgetForm(prev => ({ ...prev, financialYear: e.target.value }))}
-                        className="h-10 w-full cursor-pointer rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20"
-                      >
-                        {['2025-26', '2026-27', '2027-28', '2028-29'].map(year => <option key={year} value={year}>{year}</option>)}
-                      </select>
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-extrabold text-slate-600">Budget Cycle *</label>
-                      <div className="flex h-10 gap-1.5">
-                        {['Payroll', 'Hiring', 'Welfare'].map(cycle => (
-                          <button
-                            key={cycle}
-                            type="button"
-                            onClick={() => setHrBudgetForm(prev => ({ ...prev, budgetCycle: cycle }))}
-                            className={cn(
-                              'flex-1 rounded-md border text-xs font-extrabold transition-all',
-                              hrBudgetForm.budgetCycle === cycle
-                                ? HR_BUDGET_CYCLES[cycle]
-                                : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
-                            )}
-                          >
-                            {cycle}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-extrabold text-slate-600">Project Start *</label>
-                      <input type="date" value={hrBudgetForm.startDate} onChange={(e) => setHrBudgetForm(prev => ({ ...prev, startDate: e.target.value }))} className="h-10 w-full rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20" />
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-extrabold text-slate-600">Project End *</label>
-                      <input type="date" value={hrBudgetForm.endDate} onChange={(e) => setHrBudgetForm(prev => ({ ...prev, endDate: e.target.value }))} className="h-10 w-full rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20" />
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-extrabold text-slate-600">Budget Heads</label>
-                    <input value={hrBudgetForm.budgetHeads} onChange={(e) => setHrBudgetForm(prev => ({ ...prev, budgetHeads: e.target.value }))} placeholder="e.g. Management, Field Staff, Consultants" className="h-10 w-full rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20" />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-extrabold text-slate-600">Budget Owner</label>
-                      <input value={hrBudgetForm.owner} onChange={(e) => setHrBudgetForm(prev => ({ ...prev, owner: e.target.value }))} placeholder="HR Manager" className="h-10 w-full rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20" />
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-extrabold text-slate-600">Allocated Amount</label>
-                      <input value={hrBudgetForm.allocated} onChange={(e) => setHrBudgetForm(prev => ({ ...prev, allocated: e.target.value }))} placeholder="₹0" className="h-10 w-full rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20" />
-                    </div>
-                  </div>
-
-                  <div className="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed border-slate-300 px-4 py-3 transition-all hover:border-[#173f70] hover:bg-blue-50/30">
-                    <FileCheck2 className="h-5 w-5 shrink-0 text-slate-400" />
-                    <div>
-                      <p className="text-xs font-extrabold text-slate-600">Upload HR budget working file (optional)</p>
-                      <p className="text-[10px] font-semibold text-slate-400">Linked to all HR budget line items</p>
-                    </div>
-                    <Upload className="ml-auto h-4 w-4 shrink-0 text-slate-400" />
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4">
-                  <button onClick={() => setShowCreateHRBudget(false)} className="h-10 rounded-lg border border-slate-200 px-5 text-sm font-semibold hover:bg-slate-50">
-                    Cancel
-                  </button>
-                  <button type="button" onClick={createHRBudget} className="h-10 rounded-lg bg-[#173f70] px-5 text-sm font-semibold text-white hover:bg-[#12345e]">
-                    Create Budget
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      );
-    })()
-  );
 
   const invalidParentIds = editingNodeId ? collectDescendantIds(editingNodeId, orgNodes) : [];
 
