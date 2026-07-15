@@ -46,6 +46,12 @@ const buildWsUrl = () => {
 
   if (!baseUrl) return 'ws://localhost/ws/location_tracing';
 
+  // Production runs live location tracing on a second FastAPI instance (port 8001, proxied
+  // under /tracking) so the 2-second polling loop can't starve the main API (port 8000).
+  if (baseUrl.includes('saibioresources')) {
+    return 'wss://api.saibioresources.com/tracking/ws/location_tracing';
+  }
+
   try {
     const parsed = new URL(baseUrl);
     const protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
