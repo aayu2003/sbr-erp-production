@@ -7,7 +7,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
   X, Pencil, Trash2, MapPin, CheckCircle,
-  Layers, Hexagon, Minus, Sparkles, Loader2,
+  CircleDashed, Layers, Hexagon, Minus, Sparkles, Loader2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import getBaseUrl from '@/lib/config';
@@ -36,7 +36,7 @@ interface ExistingMapping {
   point_details?: Record<string, unknown>;
 }
 
-interface PlottedFeature {
+export interface PlottedFeature {
   id: string;
   name: string;
   mappingType?: string;
@@ -48,11 +48,20 @@ interface PlottedFeature {
 
 interface PremiumPlotterModalProps {
   embedded?: boolean;
+  mapMode?: boolean;
   farmId: string;
   farmLabel: string;
   landCoordinates: [number, number][];
+  mapParcels?: Array<{
+    id: string;
+    areaAcres: number;
+    ownerName?: string;
+    coordinates: [number, number][];
+  }>;
+  focusCoordinate?: [number, number] | null;
   landPlots?: LandPlot[];
   existingMappings?: ExistingMapping[];
+  onMapFeaturesChange?: (features: PlottedFeature[]) => void;
   onClose: () => void;
 }
 
@@ -61,7 +70,23 @@ interface PremiumPlotterModalProps {
 const FEATURE_COLORS = [
   '#f59e0b', '#ef4444', '#3b82f6', '#8b5cf6',
   '#ec4899', '#06b6d4', '#84cc16', '#f97316',
+  '#14b8a6', '#6366f1', '#a855f7', '#e11d48',
+  '#0ea5e9', '#22c55e', '#92400e',
 ];
+
+const POINT_ICONS = ['📍', '🏭', '📦', '💧', '⚡', '🔌', '🏠', '🛖', '🌳', '🚜'];
+const DEFAULT_POINT_ICONS: Record<string, string> = {
+  'CBG Plant': '🏭',
+  'Storage Yard': '📦',
+  Borewell: '💧',
+  'Electricity Connection': '⚡',
+  Transformer: '🔌',
+  Poles: '📍',
+  'Electric Fencing Setup': '⚡',
+  House: '🏠',
+  Shed: '🛖',
+  'Other (Please Specify)': '📍',
+};
 
 const PLOT_COLORS = [
   '#f59e0b', '#a855f7', '#06b6d4', '#ec4899',
@@ -80,6 +105,7 @@ const QUICK_PICKS = [
   'Unwanted Tree', 'Narrow Road', 'Small Shelter',
   'Bore Well', 'Canal', 'Huge Pipe', 'Boundary Wall',
   'Ditch', 'Pond', 'Electric Pole',
+  'Cluster Area', 'Zone Area', 'Block Area',
 ];
 
 const POINT_TYPES = [
@@ -90,6 +116,9 @@ const POINT_TYPES = [
   'Electric Fencing Setup',
   'House',
   'Shed',
+  'CBG Plant',
+  'Storage Yard',
+  'Cluster Maker',
   'Other (Please Specify)',
 ] as const;
 
@@ -142,6 +171,24 @@ const POINT_DETAIL_FIELDS: Record<string, PointField[]> = {
     { key: 'covered_area', label: 'Covered Area', placeholder: 'Enter covered area' },
     { key: 'capacity', label: 'Capacity', placeholder: 'Enter capacity' },
   ],
+  'CBG Plant': [
+    { key: 'plant_name', label: 'Plant Name', placeholder: 'Enter CBG plant name' },
+    { key: 'plant_capacity', label: 'Plant Capacity', placeholder: 'Enter plant capacity' },
+    { key: 'plant_status', label: 'Status', placeholder: 'Enter operational status' },
+    { key: 'remarks', label: 'Remarks', placeholder: 'Enter remarks' },
+  ],
+  'Storage Yard': [
+    { key: 'yard_name', label: 'Storage Yard Name', placeholder: 'Enter yard name' },
+    { key: 'storage_capacity', label: 'Storage Capacity', placeholder: 'Enter storage capacity' },
+    { key: 'material_type', label: 'Material Type', placeholder: 'Enter stored material' },
+    { key: 'yard_status', label: 'Status', placeholder: 'Enter current status' },
+  ],
+  'Cluster Maker': [
+    { key: 'radius_km', label: 'Radius (km)', placeholder: 'Enter radius in kilometres' },
+    { key: 'cluster_name', label: 'Cluster Name', placeholder: 'Enter cluster name' },
+    { key: 'cluster_code', label: 'Cluster Code', placeholder: 'Enter cluster code' },
+    { key: 'remarks', label: 'Remarks', placeholder: 'Enter remarks' },
+  ],
   'Other (Please Specify)': [
     { key: 'reference_no', label: 'Reference No.', placeholder: 'Enter reference number' },
     { key: 'description', label: 'Description', placeholder: 'Enter description' },
@@ -165,13 +212,59 @@ const SNAP_RADIUS_PX = 14;
 
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
+const buildCircleCoordinates = (
+  center: [number, number],
+  radiusKm: number,
+  steps = 96,
+): [number, number][] => {
+  const [latitude, longitude] = center;
+  const earthRadiusKm = 6371;
+  const angularDistance = radiusKm / earthRadiusKm;
+  const latitudeRadians = latitude * Math.PI / 180;
+  const longitudeRadians = longitude * Math.PI / 180;
+
+  return Array.from({ length: steps + 1 }, (_, index) => {
+    const bearing = index / steps * Math.PI * 2;
+    const pointLatitude = Math.asin(
+      Math.sin(latitudeRadians) * Math.cos(angularDistance)
+      + Math.cos(latitudeRadians) * Math.sin(angularDistance) * Math.cos(bearing)
+    );
+    const pointLongitude = longitudeRadians + Math.atan2(
+      Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(latitudeRadians),
+      Math.cos(angularDistance) - Math.sin(latitudeRadians) * Math.sin(pointLatitude)
+    );
+    return [pointLatitude * 180 / Math.PI, pointLongitude * 180 / Math.PI];
+  });
+};
+
+const isPointInsidePolygon = (
+  point: [number, number],
+  polygon: [number, number][],
+) => {
+  const [pointLat, pointLng] = point;
+  let inside = false;
+  for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index++) {
+    const [currentLat, currentLng] = polygon[index];
+    const [previousLat, previousLng] = polygon[previous];
+    const intersects =
+      (currentLng > pointLng) !== (previousLng > pointLng)
+      && pointLat < (
+        (previousLat - currentLat) * (pointLng - currentLng)
+        / ((previousLng - currentLng) || Number.EPSILON)
+        + currentLat
+      );
+    if (intersects) inside = !inside;
+  }
+  return inside;
+};
+
 // ─── FitBounds ────────────────────────────────────────────────────────────────
 
 const FitBounds = ({ coords }: { coords: [number, number][] }) => {
   const map = useMap();
   useEffect(() => {
     if (coords.length > 0)
-      map.fitBounds(L.latLngBounds(coords as L.LatLngTuple[]), { padding: [40, 40] });
+      map.fitBounds(L.latLngBounds(coords as L.LatLngTuple[]), { padding: [40, 40], maxZoom: 17 });
   }, [map]);
   return null;
 };
@@ -235,22 +328,44 @@ const DrawingHandler = ({
 
 const PremiumPlotterModal = ({
   embedded = false,
+  mapMode = false,
   farmId,
   farmLabel,
   landCoordinates,
+  mapParcels = [],
+  focusCoordinate = null,
   landPlots = [],
   existingMappings = [],
+  onMapFeaturesChange,
   onClose,
 }: PremiumPlotterModalProps) => {
   const [modalState, setModalState]       = useState<ModalState>('idle');
   const [drawMode, setDrawMode]           = useState<DrawMode>('polygon');
   const [currentPoints, setCurrentPoints] = useState<[number, number][]>([]);
   const [pendingGeometry, setPendingGeometry] = useState<SavedGeometry>('polyline');
-  const [features, setFeatures]           = useState<PlottedFeature[]>([]);
+  const [features, setFeatures]           = useState<PlottedFeature[]>(() => {
+    if (!mapMode || typeof window === 'undefined') return [];
+    try {
+      const saved = JSON.parse(window.localStorage.getItem('farm-connect-map-plotter-features') || '[]');
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  });
   const [featureName, setFeatureName]     = useState('');
   const [selectedPointType, setSelectedPointType] = useState('');
   const [customPointType, setCustomPointType] = useState('');
   const [pointDetails, setPointDetails] = useState<Record<string, string>>({});
+  const [manualLatitude, setManualLatitude] = useState('');
+  const [manualLongitude, setManualLongitude] = useState('');
+  const [nestedAreaType, setNestedAreaType] = useState<'Zone Area' | 'Block Area' | null>(null);
+  const [nestedParent, setNestedParent] = useState<PlottedFeature | null>(null);
+  const [selectedFeatureColor, setSelectedFeatureColor] = useState(FEATURE_COLORS[0]);
+  const [selectedPointIcon, setSelectedPointIcon] = useState('📍');
+  const [featureCategory, setFeatureCategory] = useState<'all' | 'points' | 'clusters' | 'zones' | 'blocks'>('all');
+  const [selectedZoneParentId, setSelectedZoneParentId] = useState('');
+  const [selectedBlockParentId, setSelectedBlockParentId] = useState('');
+  const [hierarchyMakerMode, setHierarchyMakerMode] = useState<'zone' | 'block' | null>(null);
   const [editingFeatureId, setEditingFeatureId] = useState<string | null>(null);
   const [editingExistingPointId, setEditingExistingPointId] = useState<string | null>(null);
   const [hiddenExistingPointIds, setHiddenExistingPointIds] = useState<string[]>([]);
@@ -289,11 +404,14 @@ const PremiumPlotterModal = ({
 
   const allCoords: [number, number][] = [
     ...landCoordinates,
+    ...mapParcels.flatMap(parcel => parcel.coordinates),
     ...landPlots.flatMap(p => p.plot_coordinates),
     ...existingPointMappings.flatMap(mapping => mapping.coordinates),
   ];
   const center: [number, number] =
-    allCoords.length > 0
+    focusCoordinate
+      ? focusCoordinate
+      : allCoords.length > 0
       ? [
           allCoords.reduce((s, c) => s + c[0], 0) / allCoords.length,
           allCoords.reduce((s, c) => s + c[1], 0) / allCoords.length,
@@ -312,6 +430,14 @@ const PremiumPlotterModal = ({
     setCurrentPoints(prev => [...prev, pt]);
   }, []);
 
+  const handleConstrainedAddPoint = useCallback((pt: [number, number]) => {
+    if (nestedParent && !isPointInsidePolygon(pt, nestedParent.coordinates)) {
+      toast.error(`${nestedAreaType === 'Zone Area' ? 'Zone' : 'Block'} points must remain inside ${nestedParent.name}`);
+      return;
+    }
+    handleAddPoint(pt);
+  }, [handleAddPoint, nestedAreaType, nestedParent]);
+
   const handlePlacePoint = useCallback((pt: [number, number]) => {
     setCurrentPoints([pt]);
     setPendingGeometry('point');
@@ -322,13 +448,61 @@ const PremiumPlotterModal = ({
     setTimeout(() => nameInputRef.current?.focus(), 60);
   }, []);
 
+  const placePointFromCoordinates = () => {
+    const latitude = Number(manualLatitude);
+    const longitude = Number(manualLongitude);
+    if (
+      !Number.isFinite(latitude)
+      || !Number.isFinite(longitude)
+      || latitude < -90
+      || latitude > 90
+      || longitude < -180
+      || longitude > 180
+    ) {
+      toast.error('Enter valid latitude and longitude');
+      return;
+    }
+    handlePlacePoint([latitude, longitude]);
+  };
+
+  const createClusterFromPoint = (center: [number, number], pointName: string) => {
+    setEditingFeatureId(null);
+    setEditingExistingPointId(null);
+    setDrawMode('point');
+    setCurrentPoints([center]);
+    setPendingGeometry('point');
+    setSelectedPointType('Cluster Maker');
+    setCustomPointType('');
+    setPointDetails({ cluster_name: `${pointName} Cluster` });
+    setFeatureName(`${pointName} Cluster`);
+    setSelectedFeatureColor('#8b5cf6');
+    setModalState('naming');
+    setTimeout(() => nameInputRef.current?.focus(), 60);
+  };
+
+  const createNestedArea = (
+    parent: PlottedFeature,
+    areaType: 'Zone Area' | 'Block Area',
+  ) => {
+    setEditingFeatureId(null);
+    setEditingExistingPointId(null);
+    setNestedParent(parent);
+    setNestedAreaType(areaType);
+    setSelectedPointType('');
+    setCustomPointType('');
+    setPointDetails({});
+    setFeatureName('');
+    setSelectedFeatureColor(areaType === 'Zone Area' ? '#0ea5e9' : '#22c55e');
+    startDrawing('polygon');
+  };
+
   // User closed the polygon by clicking the first point
   const handleClosePolygon = useCallback(() => {
     setPendingGeometry('polygon');
     setModalState('naming');
-    setFeatureName('');
+    setFeatureName(nestedAreaType === 'Zone Area' ? 'New Zone' : nestedAreaType === 'Block Area' ? 'New Block' : '');
     setTimeout(() => nameInputRef.current?.focus(), 60);
-  }, []);
+  }, [nestedAreaType]);
 
   // User finished without closing (double-click or Done button)
   const handleFinishOpen = useCallback(() => {
@@ -350,6 +524,12 @@ const PremiumPlotterModal = ({
       ? customPointType.trim()
       : selectedPointType;
     if (pendingGeometry === 'point' && !pointType) return;
+    const isClusterCircle = pendingGeometry === 'point' && pointType === 'Cluster Maker';
+    const clusterRadiusKm = Number(pointDetails.radius_km);
+    if (isClusterCircle && (!Number.isFinite(clusterRadiusKm) || clusterRadiusKm <= 0)) {
+      toast.error('Enter a valid cluster radius in kilometres');
+      return;
+    }
     if (editingExistingPointId) {
       setExistingPointOverrides(previous => ({
         ...previous,
@@ -376,11 +556,17 @@ const PremiumPlotterModal = ({
       const nextFeature: PlottedFeature = {
         id: existingFeature?.id ?? uid(),
         name: featureName.trim(),
-        mappingType: pendingGeometry === 'point' ? pointType : undefined,
-        pointDetails: pendingGeometry === 'point' ? pointDetails : undefined,
-        geometry: pendingGeometry,
-        coordinates: currentPoints,
-        color: existingFeature?.color ?? FEATURE_COLORS[prev.length % FEATURE_COLORS.length],
+        mappingType: (nestedAreaType ?? pointType) || existingFeature?.mappingType,
+        pointDetails: nestedAreaType
+          ? { ...pointDetails, parent_feature_id: nestedParent?.id ?? '' }
+          : pointType
+            ? { ...pointDetails, icon: selectedPointIcon }
+            : existingFeature?.pointDetails,
+        geometry: isClusterCircle ? 'polygon' : pendingGeometry,
+        coordinates: isClusterCircle
+          ? buildCircleCoordinates(currentPoints[0], clusterRadiusKm)
+          : currentPoints,
+        color: selectedFeatureColor || existingFeature?.color || FEATURE_COLORS[prev.length % FEATURE_COLORS.length],
       };
       return existingFeature
         ? prev.map(feature => feature.id === existingFeature.id ? nextFeature : feature)
@@ -393,6 +579,10 @@ const PremiumPlotterModal = ({
     setPointDetails({});
     setEditingFeatureId(null);
     setEditingExistingPointId(null);
+    setNestedAreaType(null);
+    setNestedParent(null);
+    setSelectedFeatureColor(FEATURE_COLORS[0]);
+    setSelectedPointIcon('📍');
     setPendingGeometry('polyline');
     setModalState('idle');
   };
@@ -404,6 +594,8 @@ const PremiumPlotterModal = ({
     setPendingGeometry(feature.geometry);
     setFeatureName(feature.name);
     setPointDetails(feature.pointDetails ?? {});
+    setSelectedFeatureColor(feature.color);
+    setSelectedPointIcon(feature.pointDetails?.icon ?? DEFAULT_POINT_ICONS[feature.mappingType ?? ''] ?? '📍');
     if (feature.geometry === 'point') {
       setDrawMode('point');
       const knownPointType = POINT_TYPES
@@ -448,9 +640,13 @@ const PremiumPlotterModal = ({
       setSelectedPointType('');
       setCustomPointType('');
       setPointDetails({});
+      setManualLatitude('');
+      setManualLongitude('');
     }
     setEditingFeatureId(null);
     setEditingExistingPointId(null);
+    setNestedAreaType(null);
+    setNestedParent(null);
     setModalState('idle');
   };
 
@@ -458,6 +654,13 @@ const PremiumPlotterModal = ({
     if (features.length === 0) return;
     setSaving(true);
     try {
+      if (mapMode) {
+        window.localStorage.setItem('farm-connect-map-plotter-features', JSON.stringify(features));
+        onMapFeaturesChange?.(features);
+        toast.success(`${features.length} map feature${features.length !== 1 ? 's' : ''} saved`);
+        return;
+      }
+
       const shapeMap: Record<SavedGeometry, string> = {
         polygon:  'polygon',
         polyline: 'line',
@@ -497,9 +700,29 @@ const PremiumPlotterModal = ({
   const canClose  = drawMode === 'polygon' && currentPoints.length >= 3;
   const canFinishOpen = currentPoints.length >= TYPE_CONFIG[drawMode].minPoints;
   const pointTypeReady = selectedPointType !== 'Other (Please Specify)' || customPointType.trim().length > 0;
+  const clusterRadiusReady = selectedPointType !== 'Cluster Maker'
+    || (Number.isFinite(Number(pointDetails.radius_km)) && Number(pointDetails.radius_km) > 0);
   const canSaveFeature = featureName.trim().length > 0
     && currentPoints.length > 0
-    && (pendingGeometry !== 'point' || (selectedPointType.length > 0 && pointTypeReady));
+    && (pendingGeometry !== 'point' || (selectedPointType.length > 0 && pointTypeReady && clusterRadiusReady));
+
+  const categorizedFeatures = features.filter(feature => {
+    if (featureCategory === 'all') return true;
+    if (featureCategory === 'points') return feature.geometry === 'point';
+    if (featureCategory === 'clusters') return feature.mappingType === 'Cluster Maker';
+    if (featureCategory === 'zones') return feature.mappingType === 'Zone Area';
+    return feature.mappingType === 'Block Area';
+  });
+  const showExistingPoints = featureCategory === 'all' || featureCategory === 'points';
+  const categoryCounts = {
+    all: existingPointMappings.length + features.length,
+    points: existingPointMappings.length + features.filter(feature => feature.geometry === 'point').length,
+    clusters: features.filter(feature => feature.mappingType === 'Cluster Maker').length,
+    zones: features.filter(feature => feature.mappingType === 'Zone Area').length,
+    blocks: features.filter(feature => feature.mappingType === 'Block Area').length,
+  };
+  const clusterFeatures = features.filter(feature => feature.mappingType === 'Cluster Maker');
+  const zoneFeatures = features.filter(feature => feature.mappingType === 'Zone Area');
 
   // Hint shown in the drawing banner
   const drawingHint =
@@ -531,8 +754,8 @@ const PremiumPlotterModal = ({
                 <Sparkles className="h-3.5 w-3.5 text-white" />
               </div>
               <div>
-                <h2 className="text-sm font-bold text-slate-900">Premium Plotter</h2>
-                <p className="text-[11px] text-slate-500">{farmLabel || farmId}</p>
+                <h2 className="text-sm font-bold text-slate-900">{mapMode ? 'Map Plotter' : 'Premium Plotter'}</h2>
+                <p className="text-[11px] text-slate-500">{mapMode ? 'Global operational map' : (farmLabel || farmId)}</p>
               </div>
             </div>
             <button onClick={onClose} className="rounded-md p-1.5 transition-colors hover:bg-slate-100">
@@ -584,6 +807,32 @@ const PremiumPlotterModal = ({
                   pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }}
                 />
               )}
+
+              {mapMode && mapParcels.map(parcel => (
+                parcel.coordinates.length >= 3 ? (
+                  <Polygon
+                    key={parcel.id}
+                    positions={parcel.coordinates}
+                    pathOptions={{
+                      color: 'var(--land-boundary-color, #facc15)',
+                      fillColor: 'var(--land-boundary-fill, #fde68a)',
+                      fillOpacity: 0.22,
+                      weight: 2.5,
+                    }}
+                  >
+                    <Tooltip permanent direction="center" opacity={1} className="plot-label-tooltip">
+                      <span className="block text-center text-[10px] font-bold text-slate-900">
+                        <span className="block">{parcel.id} · {parcel.areaAcres.toFixed(3)} ac</span>
+                        {parcel.ownerName && (
+                          <span className="mt-0.5 block text-[9px] font-semibold text-slate-600">
+                            {parcel.ownerName}
+                          </span>
+                        )}
+                      </span>
+                    </Tooltip>
+                  </Polygon>
+                ) : null
+              ))}
 
               {/* Existing plots — colored by crop if assigned */}
               {landPlots.map((plot, i) => {
@@ -640,7 +889,10 @@ const PremiumPlotterModal = ({
                     pathOptions={{ color: '#ffffff', fillColor: f.color, fillOpacity: 1, weight: 2.5 }}
                   >
                     <Tooltip permanent direction="top" offset={[0, -8]} opacity={1} className="plot-label-tooltip">
-                      <span className="text-[11px] font-bold text-slate-900">{f.name}</span>
+                      <span className="text-[11px] font-bold text-slate-900">
+                        {f.pointDetails?.icon && <span className="mr-1">{f.pointDetails.icon}</span>}
+                        {f.name}
+                      </span>
                     </Tooltip>
                   </CircleMarker>
                 ));
@@ -681,12 +933,19 @@ const PremiumPlotterModal = ({
                 mode={drawMode}
                 active={isDrawing}
                 currentPoints={currentPoints}
-                onAddPoint={handleAddPoint}
+                onAddPoint={handleConstrainedAddPoint}
                 onPlacePoint={handlePlacePoint}
                 onFinishOpen={handleFinishOpen}
                 onClosePolygon={handleClosePolygon}
               />
-              <FitBounds coords={allCoords.length > 0 ? allCoords : [[20.5937, 78.9629]]} />
+              <FitBounds
+                coords={focusCoordinate
+                  ? [focusCoordinate]
+                  : allCoords.length > 0
+                    ? allCoords
+                    : [[20.5937, 78.9629]]
+                }
+              />
             </MapContainer>
 
             {/* ── Naming overlay ── */}
@@ -695,7 +954,9 @@ const PremiumPlotterModal = ({
                 <div className="max-h-[calc(100%-2rem)] w-full max-w-xl space-y-4 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
                   <div>
                     <h3 className="font-bold text-slate-900">
-                      {pendingGeometry === 'point'
+                      {selectedPointType === 'Cluster Maker'
+                        ? 'Cluster Area Details'
+                        : pendingGeometry === 'point'
                         ? editingFeatureId || editingExistingPointId ? 'Edit Point Information' : 'Point Information'
                         : editingFeatureId || editingExistingPointId ? 'Edit Feature' : 'What is this?'
                       }
@@ -780,6 +1041,54 @@ const PremiumPlotterModal = ({
                     </div>
                   )}
 
+                  <div>
+                    <span className="mb-2 block text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                      Feature colour
+                    </span>
+                    <div className="flex flex-wrap gap-2">
+                      {FEATURE_COLORS.map(color => (
+                        <button
+                          key={color}
+                          type="button"
+                          onClick={() => setSelectedFeatureColor(color)}
+                          className={`h-7 w-7 rounded-full border-2 transition ${
+                            selectedFeatureColor === color
+                              ? 'scale-110 border-slate-900 shadow-sm'
+                              : 'border-white ring-1 ring-slate-200 hover:scale-105'
+                          }`}
+                          style={{ backgroundColor: color }}
+                          aria-label={`Use colour ${color}`}
+                          title={color}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {pendingGeometry === 'point' && selectedPointType !== 'Cluster Maker' && (
+                    <div>
+                      <span className="mb-2 block text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                        Point icon
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {POINT_ICONS.map(icon => (
+                          <button
+                            key={icon}
+                            type="button"
+                            onClick={() => setSelectedPointIcon(icon)}
+                            className={`flex h-9 w-9 items-center justify-center rounded-lg border text-base transition ${
+                              selectedPointIcon === icon
+                                ? 'border-[#0D3A35] bg-[#0D3A35]/10 shadow-sm'
+                                : 'border-slate-200 bg-white hover:border-[#0D3A35]/40'
+                            }`}
+                            aria-label={`Use ${icon} icon`}
+                          >
+                            {icon}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   <label className="block">
                     <span className="mb-1.5 block text-xs font-semibold text-slate-700">
                       {pendingGeometry === 'point' ? 'Point name / identification number' : 'Feature name'}
@@ -804,7 +1113,9 @@ const PremiumPlotterModal = ({
                       className="flex-1 rounded-lg bg-[#0D3A35] py-2 text-sm font-semibold text-white transition-colors hover:bg-[#092b27] disabled:cursor-not-allowed disabled:opacity-40">
                       {editingFeatureId || editingExistingPointId
                         ? 'Update'
-                        : pendingGeometry === 'point' ? 'Add Point' : 'Save Feature'
+                        : selectedPointType === 'Cluster Maker'
+                          ? 'Create Cluster'
+                          : pendingGeometry === 'point' ? 'Add Point' : 'Save Feature'
                       }
                     </button>
                   </div>
@@ -819,9 +1130,107 @@ const PremiumPlotterModal = ({
             : 'flex w-64 shrink-0 flex-col border-l border-slate-200 bg-slate-50'
           }>
 
-            <div className="space-y-4 border-b border-slate-200 bg-white p-4">
+            <div className="max-h-[58%] space-y-4 overflow-y-auto border-b border-slate-200 bg-white p-4">
               {modalState === 'idle' && (
                 <>
+                  {mapMode && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                        Hierarchy Makers
+                      </p>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setHierarchyMakerMode(null);
+                            setSelectedPointType('Cluster Maker');
+                            setCustomPointType('');
+                            setPointDetails({});
+                            setSelectedFeatureColor('#8b5cf6');
+                            startDrawing('point');
+                          }}
+                          className="flex flex-col items-center gap-1 rounded-lg border border-slate-200 bg-white px-1 py-2 text-[10px] font-bold text-[#0D3A35] transition hover:border-emerald-300 hover:bg-emerald-50"
+                        >
+                          <CircleDashed className="h-4 w-4" />
+                          Cluster
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setHierarchyMakerMode(mode => mode === 'zone' ? null : 'zone')}
+                          className={`rounded-lg border px-1 py-2 text-[10px] font-bold transition ${
+                            hierarchyMakerMode === 'zone'
+                              ? 'border-blue-600 bg-blue-600 text-white'
+                              : 'border-slate-200 bg-white text-blue-700 hover:border-blue-300'
+                          }`}
+                        >
+                          Zone
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setHierarchyMakerMode(mode => mode === 'block' ? null : 'block')}
+                          className={`rounded-lg border px-1 py-2 text-[10px] font-bold transition ${
+                            hierarchyMakerMode === 'block'
+                              ? 'border-emerald-600 bg-emerald-600 text-white'
+                              : 'border-slate-200 bg-white text-emerald-700 hover:border-emerald-300'
+                          }`}
+                        >
+                          Block
+                        </button>
+                      </div>
+
+                      {hierarchyMakerMode === 'zone' && (
+                        <div className="flex gap-1.5">
+                        <select
+                          value={selectedZoneParentId}
+                          onChange={event => setSelectedZoneParentId(event.target.value)}
+                          className="min-w-0 flex-1 rounded-lg border border-blue-200 bg-white px-2 py-2 text-[10px] font-semibold text-slate-700 outline-none"
+                        >
+                          <option value="">Choose parent Cluster</option>
+                          {clusterFeatures.map(feature => (
+                            <option key={feature.id} value={feature.id}>{feature.name}</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          disabled={!clusterFeatures.some(feature => feature.id === selectedZoneParentId)}
+                          onClick={() => {
+                            const parent = clusterFeatures.find(feature => feature.id === selectedZoneParentId);
+                            if (parent) createNestedArea(parent, 'Zone Area');
+                          }}
+                          className="shrink-0 rounded-lg bg-blue-600 px-3 py-2 text-[10px] font-bold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Create
+                        </button>
+                        </div>
+                      )}
+
+                      {hierarchyMakerMode === 'block' && (
+                        <div className="flex gap-1.5">
+                        <select
+                          value={selectedBlockParentId}
+                          onChange={event => setSelectedBlockParentId(event.target.value)}
+                          className="min-w-0 flex-1 rounded-lg border border-emerald-200 bg-white px-2 py-2 text-[10px] font-semibold text-slate-700 outline-none"
+                        >
+                          <option value="">Choose parent Zone</option>
+                          {zoneFeatures.map(feature => (
+                            <option key={feature.id} value={feature.id}>{feature.name}</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          disabled={!zoneFeatures.some(feature => feature.id === selectedBlockParentId)}
+                          onClick={() => {
+                            const parent = zoneFeatures.find(feature => feature.id === selectedBlockParentId);
+                            if (parent) createNestedArea(parent, 'Block Area');
+                          }}
+                          className="shrink-0 rounded-lg bg-emerald-600 px-3 py-2 text-[10px] font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Create
+                        </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
                     Choose draw type
                   </p>
@@ -860,6 +1269,7 @@ const PremiumPlotterModal = ({
                         onChange={event => {
                           const value = event.target.value;
                           setSelectedPointType(value);
+                          setSelectedPointIcon(DEFAULT_POINT_ICONS[value] ?? '📍');
                           setPointDetails({});
                           if (value) startDrawing('point');
                         }}
@@ -889,21 +1299,65 @@ const PremiumPlotterModal = ({
 
                   {/* Polygon-specific close hint */}
                   {drawMode === 'polygon' && (
-                    <div className={`rounded-lg px-3 py-2 text-[11px] leading-relaxed ${
-                      canClose
-                        ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
-                        : 'border border-[#0D3A35]/10 bg-[#0D3A35]/5 text-[#0D3A35]'
-                    }`}>
-                      {canClose
-                        ? '🟢 Click the first point (green) to close the polygon.'
-                        : `Add ${3 - currentPoints.length} more point${3 - currentPoints.length !== 1 ? 's' : ''} to enable closing.`
-                      }
-                    </div>
+                    <>
+                      {nestedParent && (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-medium leading-relaxed text-amber-800">
+                          Creating {nestedAreaType === 'Zone Area' ? 'Zone' : 'Block'} inside {nestedParent.name}
+                        </div>
+                      )}
+                      <div className={`rounded-lg px-3 py-2 text-[11px] leading-relaxed ${
+                        canClose
+                          ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
+                          : 'border border-[#0D3A35]/10 bg-[#0D3A35]/5 text-[#0D3A35]'
+                      }`}>
+                        {canClose
+                          ? '🟢 Click the first point (green) to close the polygon.'
+                          : `Add ${3 - currentPoints.length} more point${3 - currentPoints.length !== 1 ? 's' : ''} to enable closing.`
+                        }
+                      </div>
+                    </>
                   )}
 
                   <p className="text-center text-[11px] text-slate-500">
                     {currentPoints.length} point{currentPoints.length !== 1 ? 's' : ''} added
                   </p>
+
+                  {drawMode === 'point' && (
+                    <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                        Enter coordinates
+                      </p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          type="number"
+                          step="any"
+                          value={manualLatitude}
+                          onChange={event => setManualLatitude(event.target.value)}
+                          placeholder="Latitude"
+                          className="min-w-0 rounded-md border border-slate-200 bg-white px-2 py-2 text-[11px] text-slate-800 outline-none focus:border-[#0D3A35]"
+                        />
+                        <input
+                          type="number"
+                          step="any"
+                          value={manualLongitude}
+                          onChange={event => setManualLongitude(event.target.value)}
+                          placeholder="Longitude"
+                          className="min-w-0 rounded-md border border-slate-200 bg-white px-2 py-2 text-[11px] text-slate-800 outline-none focus:border-[#0D3A35]"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={placePointFromCoordinates}
+                        disabled={!manualLatitude || !manualLongitude}
+                        className="w-full rounded-md bg-[#0D3A35] py-2 text-[11px] font-bold text-white transition hover:bg-[#092b27] disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Place Point at Coordinates
+                      </button>
+                      <p className="text-[10px] leading-relaxed text-slate-400">
+                        Or click directly on the map to place the point.
+                      </p>
+                    </div>
+                  )}
 
                   {canFinishOpen && (
                     <button type="button" onClick={handleFinishOpen}
@@ -927,17 +1381,29 @@ const PremiumPlotterModal = ({
                 Mapped Features ({existingPointMappings.length + features.length})
               </p>
 
-              {existingPointMappings.length === 0 && features.length === 0 ? (
+              <select
+                value={featureCategory}
+                onChange={event => setFeatureCategory(event.target.value as typeof featureCategory)}
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-700 outline-none focus:border-[#0D3A35]"
+              >
+                <option value="all">All features ({categoryCounts.all})</option>
+                <option value="points">Points ({categoryCounts.points})</option>
+                <option value="clusters">Clusters ({categoryCounts.clusters})</option>
+                <option value="zones">Zones ({categoryCounts.zones})</option>
+                <option value="blocks">Blocks ({categoryCounts.blocks})</option>
+              </select>
+
+              {(!showExistingPoints || existingPointMappings.length === 0) && categorizedFeatures.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-10 text-center">
                   <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#0D3A35]/8">
                     <Layers className="h-5 w-5 text-[#0D3A35]" />
                   </div>
-                  <p className="text-xs font-semibold text-slate-600">Nothing mapped yet</p>
-                  <p className="text-[11px] leading-relaxed text-slate-400">Choose Area or Line to draw,<br />or select a Point type</p>
+                  <p className="text-xs font-semibold text-slate-600">No {featureCategory === 'all' ? 'features' : featureCategory} mapped</p>
+                  <p className="text-[11px] leading-relaxed text-slate-400">Create a new map feature to see it here.</p>
                 </div>
               ) : (
                 <>
-                  {existingPointMappings.map((mapping, index) => (
+                  {showExistingPoints && existingPointMappings.map((mapping, index) => (
                     <div
                       key={`saved-${mapping.mapping_name}-${index}`}
                       className="flex items-center gap-2.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5"
@@ -949,6 +1415,15 @@ const PremiumPlotterModal = ({
                           {mapping.mapping_type || 'Point'} · Saved
                         </p>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => createClusterFromPoint(mapping.coordinates[0], mapping.mapping_name)}
+                        className="rounded p-1 text-emerald-700 transition hover:bg-emerald-50"
+                        aria-label={`Create cluster around ${mapping.mapping_name}`}
+                        title="Create Cluster"
+                      >
+                        <CircleDashed className="h-3.5 w-3.5" />
+                      </button>
                       <button
                         type="button"
                         onClick={() => editExistingPoint(mapping)}
@@ -969,7 +1444,7 @@ const PremiumPlotterModal = ({
                       </button>
                     </div>
                   ))}
-                  {features.map(f => (
+                  {categorizedFeatures.map(f => (
                     <div key={f.id}
                       className="group flex items-center gap-2.5 rounded-lg border border-slate-200 bg-white px-3 py-2.5 transition-colors hover:border-[#0D3A35]/30"
                     >
@@ -984,6 +1459,17 @@ const PremiumPlotterModal = ({
                           {f.mappingType || f.geometry}&nbsp;·&nbsp;{f.coordinates.length} pt{f.coordinates.length !== 1 ? 's' : ''}
                         </p>
                       </div>
+                      {f.geometry === 'point' && (
+                        <button
+                          type="button"
+                          onClick={() => createClusterFromPoint(f.coordinates[0], f.name)}
+                          className="rounded p-1 text-emerald-700 transition hover:bg-emerald-50"
+                          aria-label={`Create cluster around ${f.name}`}
+                          title="Create Cluster"
+                        >
+                          <CircleDashed className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => editFeature(f)}
@@ -1017,7 +1503,7 @@ const PremiumPlotterModal = ({
                 >
                   {saving
                     ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving…</>
-                    : `Save All to Farm (${features.length})`
+                    : `${mapMode ? 'Save Map Features' : 'Save All to Farm'} (${features.length})`
                   }
                 </button>
               </div>
