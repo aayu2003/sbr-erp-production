@@ -31,9 +31,9 @@ export type TimelineFarm = {
 export type TimelineAssignment = { supervisorName: string; fieldManagerName: string };
 
 const CROP_COLORS: Record<string, string> = {
-  paddy: '#f59e0b',
-  napier: '#22c55e',
-  rahar: '#f97316',
+  paddy: 'var(--crop-paddy-color, #22c55e)',
+  napier: 'var(--crop-napier-color, #22c55e)',
+  rahar: 'var(--crop-rahar-color, #800000)',
   unspecified: '#94a3b8',
 };
 const FALLBACK_CROP_COLORS = ['#2563eb', '#6d28d9', '#0891b2', '#dc2626', '#0f766e'];
@@ -111,7 +111,7 @@ const TaskPlotMapThumbnail = ({ farm, plotIds }: { farm?: TimelineFarm; plotIds:
       >
         <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={19} />
         {landCoords.length >= 3 && (
-          <Polygon positions={landCoords} pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: hasPlots ? 0.06 : 0.2, weight: 2 }} />
+          <Polygon positions={landCoords} pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }} />
         )}
         {hasPlots &&
           plots.map((plot, index) => {

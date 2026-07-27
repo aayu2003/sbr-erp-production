@@ -363,7 +363,7 @@ const LandAcquisition = () => {
                 {m.coords && m.coords.length > 0 && (
                   <Polygon
                     positions={m.coords}
-                    pathOptions={{ color: "#10b981", weight: 2, fillOpacity: 0.12 }}
+                    pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", weight: 3, fillOpacity: 0.28 }}
                   >
                       <Popup>
                         <div className="space-y-1">

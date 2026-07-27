@@ -154,8 +154,8 @@ const activityStatus = [
 ];
 
 const cropArea = [
-  { crop: "Paddy", acres: 260, fill: "#39b54a" },
-  { crop: "Rahar", acres: 110, fill: "#2f95e8" },
+  { crop: "Paddy", acres: 260, fill: "var(--crop-paddy-color, #22c55e)" },
+  { crop: "Rahar", acres: 110, fill: "var(--crop-rahar-color, #800000)" },
   { crop: "Napier", acres: 80, fill: "#fbbf24" },
   { crop: "Other Crops", acres: 32, fill: "#6d28d9" },
 ];
@@ -919,9 +919,9 @@ type ClusterCropSummary = {
 };
 
 const CROP_COLORS: Record<string, string> = {
-  paddy: "#f59e0b",
-  napier: "#22c55e",
-  rahar: "#f97316",
+  paddy: "var(--crop-paddy-color, #22c55e)",
+  napier: "var(--crop-napier-color, #22c55e)",
+  rahar: "var(--crop-rahar-color, #800000)",
   unspecified: "#94a3b8",
 };
 const FALLBACK_CROP_COLORS = ["#2563eb", "#6d28d9", "#0891b2", "#dc2626", "#0f766e"];
@@ -1750,7 +1750,7 @@ const FarmPlotPreviewCard = ({
             {landCoords.length >= 3 && (
               <Polygon
                 positions={landCoords}
-                pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: hasPlots ? 0.06 : 0.2, weight: 2 }}
+                pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", fillOpacity: 0.28, weight: 3 }}
               />
             )}
             {hasPlots &&
@@ -1935,7 +1935,7 @@ const LeadMapThumbnail = ({ coordinates }: { coordinates?: { lat: number; lng: n
         attributionControl={false}
       >
         <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={19} />
-        <Polygon positions={coords} pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: 0.25, weight: 2 }} />
+        <Polygon positions={coords} pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", fillOpacity: 0.28, weight: 3 }} />
         <FitBounds coords={coords} />
       </MapContainer>
     </div>
@@ -2183,7 +2183,7 @@ const LandMappingThumbnail = ({ farm }: { farm: Farm }) => {
       >
         <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={19} />
         {landCoords.length >= 3 && (
-          <Polygon positions={landCoords} pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: hasPlots ? 0.06 : 0.2, weight: 2 }} />
+          <Polygon positions={landCoords} pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", fillOpacity: 0.28, weight: 3 }} />
         )}
         {hasPlots &&
           plots.map((plot, index) => {
@@ -2465,7 +2465,7 @@ const TaskPlotMapThumbnail = ({ farm, plotIds }: { farm?: Farm; plotIds: string[
       >
         <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={19} />
         {landCoords.length >= 3 && (
-          <Polygon positions={landCoords} pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: hasPlots ? 0.06 : 0.2, weight: 2 }} />
+          <Polygon positions={landCoords} pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", fillOpacity: 0.28, weight: 3 }} />
         )}
         {hasPlots &&
           plots.map((plot, index) => {

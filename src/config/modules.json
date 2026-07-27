@@ -18,6 +18,26 @@
       ]
     },
     {
+      "key": "land-acquisition-section",
+      "label": "LAND ACQUISITION",
+      "description": "Land sourcing and acquisition tracking",
+      "icon": "Map",
+      "enabled": true,
+      "groups": [
+        {
+          "key": "land-acquisition-general",
+          "label": "General",
+          "enabled": true,
+          "items": [
+            { "key": "leads",          "label": "Leads",            "path": "/leads",          "icon": "Users",        "enabled": true },
+            { "key": "farmers",        "label": "Land Owner Directory", "path": "/farmers",        "icon": "UserCheck",    "enabled": true },
+            { "key": "farm-directory", "label": "Land Directory",   "path": "/farm-directory", "icon": "FolderKanban", "enabled": true },
+            { "key": "legal",          "label": "Legal",            "path": "/legal",          "icon": "Scale",        "enabled": true }
+          ]
+        }
+      ]
+    },
+    {
       "key": "admin",
       "label": "ADMIN",
       "description": "Admin controls and farmer operations",
@@ -44,10 +64,7 @@
           "label": "Farm Management",
           "enabled": true,
           "items": [
-            { "key": "leads",            "label": "Leads",            "path": "/leads",            "icon": "Users",       "enabled": true  },
-            { "key": "farmers",          "label": "Farmer Directory",          "path": "/farmers",          "icon": "UserCheck",   "enabled": true  },
             { "key": "land-acquisition", "label": "Land Acquisition", "path": "/land-acquisition", "icon": "Map",         "enabled": true  },
-            { "key": "farm-directory",   "label": "Land Directory",   "path": "/farm-directory",   "icon": "FolderKanban","enabled": true  },
             { "key": "tasks-beta",       "label": "Tasks (Beta)",     "path": "/tasks-beta",       "icon": "CheckSquare", "enabled": true }
           ]
         },

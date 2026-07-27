@@ -27,6 +27,7 @@ export interface AddLeadFormData {
   phoneNumber: string;
   alternatePhone?: string;
   leadSource: string;
+  leadBy?: string;
   farmingOption?: string;
   village: string;
   tehsil?: string;
@@ -70,11 +71,15 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
   const videoInputRef = useRef<HTMLInputElement | null>(null);
   const { toast } = useToast();
 
+  const [staffList, setStaffList] = useState<Array<{ id: string; name: string; designation: string }>>([]);
+  const [staffLoading, setStaffLoading] = useState(false);
+
   const [formData, setFormData] = useState<AddLeadFormData>({
     fullName: '',
     phoneNumber: '',
     alternatePhone: '',
     leadSource: '',
+    leadBy: '',
     farmingOption: '',
     village: '',
     tehsil: '',
@@ -123,6 +128,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
         phoneNumber: '',
         alternatePhone: '',
         leadSource: '',
+        leadBy: '',
         farmingOption: '',
         village: '',
         tehsil: '',
@@ -134,6 +140,32 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
         landCoordinates: [],
       });
     }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const fetchStaff = async () => {
+      setStaffLoading(true);
+      try {
+        const base = getBaseUrl().replace(/\/$/, '');
+        const res = await fetch(`${base}/admin_staff/get_all_staff`);
+        const data = await res.json().catch(() => null);
+        if (res.ok && Array.isArray(data)) {
+          setStaffList(
+            data.map((s: any) => ({
+              id: String(s?.staff_id ?? ''),
+              name: String(s?.staff_information?.staff_name ?? ''),
+              designation: String(s?.staff_information?.staff_designation ?? ''),
+            }))
+          );
+        }
+      } catch {
+        // staff list stays empty; Lead By field just shows no options
+      } finally {
+        setStaffLoading(false);
+      }
+    };
+    fetchStaff();
   }, [open]);
 
   useEffect(() => {
@@ -171,15 +203,8 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
     return '0';
   };
 
-  const isInfoValid = () => {
-    return formData.fullName && formData.phoneNumber && formData.leadSource && 
-           formData.village && formData.district && formData.state;
-  };
-
   const handleNextStep = () => {
-    if (isInfoValid()) {
-      setStep('location');
-    }
+    setStep('location');
   };
 
   const handleLocationNext = () => {
@@ -323,6 +348,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
         phone_number: formData.phoneNumber,
         alternate_phone_number: formData.alternatePhone || '',
         lead_source: formData.leadSource,
+        lead_by: formData.leadBy || '',
         farming_option: formData.farmingOption || '',
         village: formData.village,
         tehsil: formData.tehsil || '',
@@ -423,35 +449,35 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto bg-white">
         <DialogHeader>
-          <DialogTitle className="text-xl font-display flex items-center gap-2">
+          <DialogTitle className="flex items-center gap-2 text-xl font-bold text-slate-950">
             {step === 'info' && <>Add New Lead</>}
-            {step === 'location' && <><MapPin className="w-5 h-5 text-primary" />Provide Land Location - {formData.fullName}</>}
-            {step === 'media' && <><ImagePlus className="w-5 h-5 text-primary" />Add Land Images & Video - {formData.fullName}</>}
-            {step === 'mapping' && <><MapPin className="w-5 h-5 text-primary" />Land Mapping (Optional) - {formData.fullName}</>}
+            {step === 'location' && <><MapPin className="w-5 h-5 text-[#0D3A35]" />Provide Land Location - {formData.fullName}</>}
+            {step === 'media' && <><ImagePlus className="w-5 h-5 text-[#0D3A35]" />Add Land Images & Video - {formData.fullName}</>}
+            {step === 'mapping' && <><MapPin className="w-5 h-5 text-[#0D3A35]" />Land Mapping (Optional) - {formData.fullName}</>}
           </DialogTitle>
         </DialogHeader>
 
         {/* Step Indicator */}
         <div className="flex items-center gap-2 py-2">
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm ${step === 'info' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
-            <span className="w-5 h-5 rounded-full bg-background/20 flex items-center justify-center text-xs font-bold">1</span>
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-bold ${step === 'info' ? 'bg-[#0D3A35] text-white' : 'bg-slate-100 text-slate-500'}`}>
+            <span className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-xs font-bold">1</span>
             Lead Info
           </div>
-          <ArrowRight className="w-4 h-4 text-muted-foreground" />
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm ${step === 'location' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
-            <span className="w-5 h-5 rounded-full bg-background/20 flex items-center justify-center text-xs font-bold">2</span>
+          <ArrowRight className="w-4 h-4 text-slate-400" />
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-bold ${step === 'location' ? 'bg-[#0D3A35] text-white' : 'bg-slate-100 text-slate-500'}`}>
+            <span className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-xs font-bold">2</span>
             Land Location
           </div>
-          <ArrowRight className="w-4 h-4 text-muted-foreground" />
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm ${step === 'media' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
-            <span className="w-5 h-5 rounded-full bg-background/20 flex items-center justify-center text-xs font-bold">3</span>
+          <ArrowRight className="w-4 h-4 text-slate-400" />
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-bold ${step === 'media' ? 'bg-[#0D3A35] text-white' : 'bg-slate-100 text-slate-500'}`}>
+            <span className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-xs font-bold">3</span>
             Land Media
           </div>
-          <ArrowRight className="w-4 h-4 text-muted-foreground" />
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm ${step === 'mapping' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
-            <span className="w-5 h-5 rounded-full bg-background/20 flex items-center justify-center text-xs font-bold">4</span>
+          <ArrowRight className="w-4 h-4 text-slate-400" />
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-bold ${step === 'mapping' ? 'bg-[#0D3A35] text-white' : 'bg-slate-100 text-slate-500'}`}>
+            <span className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-xs font-bold">4</span>
             Land Mapping (Optional)
           </div>
         </div>
@@ -463,28 +489,26 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
             <div className="grid grid-cols-2 gap-4">
               {/* ...existing code for info fields... */}
               <div className="space-y-2">
-                <Label htmlFor="fullName">Full Name *</Label>
-                <Input
+                <Label htmlFor="fullName" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Full Name</Label>
+                <Input className="bg-white border-slate-200 focus-visible:ring-[#0D3A35]"
                   id="fullName"
-                  required
                   value={formData.fullName}
                   onChange={e => setFormData(prev => ({ ...prev, fullName: e.target.value }))}
                   placeholder="Enter farmer's full name"
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="phoneNumber">Phone Number *</Label>
-                <Input
+                <Label htmlFor="phoneNumber" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Phone Number</Label>
+                <Input className="bg-white border-slate-200 focus-visible:ring-[#0D3A35]"
                   id="phoneNumber"
-                  required
                   value={formData.phoneNumber}
                   onChange={e => setFormData(prev => ({ ...prev, phoneNumber: e.target.value }))}
                   placeholder="+91 XXXXX XXXXX"
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="alternatePhone">Alternate Phone</Label>
-                <Input
+                <Label htmlFor="alternatePhone" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Alternate Phone</Label>
+                <Input className="bg-white border-slate-200 focus-visible:ring-[#0D3A35]"
                   id="alternatePhone"
                   value={formData.alternatePhone}
                   onChange={e => setFormData(prev => ({ ...prev, alternatePhone: e.target.value }))}
@@ -492,12 +516,12 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="leadSource">Lead Source *</Label>
+                <Label htmlFor="leadSource" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Lead Source</Label>
                 <Select
                   value={formData.leadSource}
                   onValueChange={value => setFormData(prev => ({ ...prev, leadSource: value }))}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger className="bg-white border-slate-200 focus:ring-[#0D3A35]">
                     <SelectValue placeholder="Select source" />
                   </SelectTrigger>
                   <SelectContent>
@@ -510,33 +534,35 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="farmingOption">Farming Option</Label>
+                <Label htmlFor="leadBy" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Lead By</Label>
                 <Select
-                  value={formData.farmingOption || ''}
-                  onValueChange={value => setFormData(prev => ({ ...prev, farmingOption: value }))}
+                  value={formData.leadBy || ''}
+                  onValueChange={value => setFormData(prev => ({ ...prev, leadBy: value }))}
                 >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select farming option" />
+                  <SelectTrigger className="bg-white border-slate-200 focus:ring-[#0D3A35]">
+                    <SelectValue placeholder={staffLoading ? 'Loading staff…' : 'Select staff member'} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="Contract Farming">Contract Farming</SelectItem>
-                    <SelectItem value="Lease Farming">Lease Farming</SelectItem>
+                    {staffList.filter(s => s.name).map(s => (
+                      <SelectItem key={s.id} value={s.name}>
+                        {s.name}{s.designation ? ` — ${s.designation}` : ''}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="village">Village *</Label>
-                <Input
+                <Label htmlFor="village" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Village</Label>
+                <Input className="bg-white border-slate-200 focus-visible:ring-[#0D3A35]"
                   id="village"
-                  required
                   value={formData.village}
                   onChange={e => setFormData(prev => ({ ...prev, village: e.target.value }))}
                   placeholder="Enter village name"
                 />
               </div>
                     <div className="space-y-2">
-                      <Label htmlFor="tehsil">Tehsil</Label>
-                      <Input
+                      <Label htmlFor="tehsil" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Tehsil</Label>
+                      <Input className="bg-white border-slate-200 focus-visible:ring-[#0D3A35]"
                         id="tehsil"
                         value={(formData as any).tehsil}
                         onChange={e => setFormData(prev => ({ ...prev, tehsil: e.target.value }))}
@@ -544,22 +570,21 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                       />
                     </div>
               <div className="space-y-2">
-                <Label htmlFor="district">District *</Label>
-                <Input
+                <Label htmlFor="district" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">District</Label>
+                <Input className="bg-white border-slate-200 focus-visible:ring-[#0D3A35]"
                   id="district"
-                  required
                   value={formData.district}
                   onChange={e => setFormData(prev => ({ ...prev, district: e.target.value }))}
                   placeholder="Enter district"
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="state">State *</Label>
+                <Label htmlFor="state" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">State</Label>
                 <Select
                   value={formData.state}
                   onValueChange={value => setFormData(prev => ({ ...prev, state: value }))}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger className="bg-white border-slate-200 focus:ring-[#0D3A35]">
                     <SelectValue placeholder="Select state" />
                   </SelectTrigger>
                   <SelectContent>
@@ -603,8 +628,8 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="estimatedLandArea">Estimated Land Area (acres)</Label>
-                <Input
+                <Label htmlFor="estimatedLandArea" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Estimated Land Area (acres)</Label>
+                <Input className="bg-white border-slate-200 focus-visible:ring-[#0D3A35]"
                   id="estimatedLandArea"
                   type="number"
                   value={formData.estimatedLandArea || ''}
@@ -613,21 +638,21 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                 />
               </div>
               <div className="space-y-2">
-                <Label>Water Available</Label>
+                <Label className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Water Available</Label>
                 <div className="flex items-center gap-3 pt-2">
                   <Switch
                     checked={formData.waterAvailable}
                     onCheckedChange={checked => setFormData(prev => ({ ...prev, waterAvailable: checked }))}
                   />
-                  <span className="text-sm text-muted-foreground">
+                  <span className="text-sm text-slate-500">
                     {formData.waterAvailable ? 'Yes' : 'No'}
                   </span>
                 </div>
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="notes">Notes</Label>
-              <Textarea
+              <Label htmlFor="notes" className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Notes</Label>
+              <Textarea className="bg-white border-slate-200 focus-visible:ring-[#0D3A35]"
                 id="notes"
                 value={formData.notes}
                 onChange={e => setFormData(prev => ({ ...prev, notes: e.target.value }))}
@@ -635,11 +660,11 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                 rows={3}
               />
             </div>
-            <div className="flex justify-end gap-3 pt-4 border-t">
-              <Button type="button" variant="outline" onClick={onClose}>
+            <div className="flex justify-end gap-3 pt-4 border-t border-slate-200">
+              <Button type="button" variant="outline" onClick={onClose} className="rounded-lg border-slate-200 font-semibold text-slate-700 hover:bg-slate-50">
                 Cancel
               </Button>
-              <Button type="submit" disabled={!isInfoValid()} className="gap-2">
+              <Button type="submit" className="gap-2 rounded-lg bg-[#0D3A35] font-bold hover:bg-[#092b27]">
                 Next: Land Location
                 <ArrowRight className="w-4 h-4" />
               </Button>
@@ -650,9 +675,9 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
         {/* Step 2: Land Location */}
         {step === 'location' && (
           <div className="space-y-4 pt-4">
-            <div className="flex items-start gap-3 p-3 bg-info/10 rounded-lg border border-info/20">
-              <Info className="w-5 h-5 text-info mt-0.5 shrink-0" />
-              <p className="text-sm text-muted-foreground">
+            <div className="flex items-start gap-3 p-3 bg-blue-50 rounded-lg border border-blue-100">
+              <Info className="w-5 h-5 text-blue-600 mt-0.5 shrink-0" />
+              <p className="text-sm text-slate-500">
                 Confirm or adjust the marker to indicate the main location of your land.
               </p>
             </div>
@@ -662,7 +687,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                 variant="outline"
                 onClick={getUserLocation}
                 disabled={locationLoading}
-                className="gap-2 flex-1"
+                className="gap-2 flex-1 rounded-lg border-slate-200 font-semibold text-slate-700 hover:bg-slate-50"
               >
                 {locationLoading ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -672,7 +697,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                 {locationLoading ? 'Getting Location...' : 'Use My Location'}
               </Button>
             </div>
-            <div className="relative border-2 border-border rounded-lg overflow-hidden h-96">
+            <div className="relative border-2 border-slate-200 rounded-lg overflow-hidden h-96">
               <MapContainer
                 center={landLocation || mapCenter}
                 zoom={18}
@@ -698,20 +723,20 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                 )}
               </MapContainer>
             </div>
-            <div className="flex justify-between gap-3 pt-4 border-t">
-              <Button type="button" variant="outline" onClick={() => setStep('info')} className="gap-2">
+            <div className="flex justify-between gap-3 pt-4 border-t border-slate-200">
+              <Button type="button" variant="outline" onClick={() => setStep('info')} className="gap-2 rounded-lg border-slate-200 font-semibold text-slate-700 hover:bg-slate-50">
                 <ArrowLeft className="w-4 h-4" />
                 Back
               </Button>
               <div className="flex gap-3">
-                <Button type="button" variant="outline" onClick={onClose}>
+                <Button type="button" variant="outline" onClick={onClose} className="rounded-lg border-slate-200 font-semibold text-slate-700 hover:bg-slate-50">
                   Cancel
                 </Button>
                 <Button
                   type="button"
                   onClick={handleLocationNext}
                   disabled={!landLocation}
-                  className="gap-2"
+                  className="gap-2 rounded-lg bg-[#0D3A35] font-bold hover:bg-[#092b27]"
                 >
                   Next: Add Land Images & Video
                   <ArrowRight className="w-4 h-4" />
@@ -724,9 +749,9 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
         {/* Step 3: Land Media */}
         {step === 'media' && (
           <div className="space-y-5 pt-4">
-            <div className="flex items-start gap-3 p-3 bg-info/10 rounded-lg border border-info/20">
-              <Info className="w-5 h-5 text-info mt-0.5 shrink-0" />
-              <p className="text-sm text-muted-foreground">
+            <div className="flex items-start gap-3 p-3 bg-blue-50 rounded-lg border border-blue-100">
+              <Info className="w-5 h-5 text-blue-600 mt-0.5 shrink-0" />
+              <p className="text-sm text-slate-500">
                 Land images and video are optional. If no media is uploaded, the lead will be saved without media.
               </p>
             </div>
@@ -734,7 +759,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {[0, 1, 2].map((index) => (
                 <div key={index} className="space-y-2">
-                  <Label className="text-xs text-muted-foreground">Image {index + 1}</Label>
+                  <Label className="text-xs font-extrabold uppercase tracking-wide text-slate-400">Image {index + 1}</Label>
                   <input
                     ref={(el) => { imageInputRefs.current[index] = el; }}
                     type="file"
@@ -745,12 +770,12 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                   <button
                     type="button"
                     onClick={() => imageInputRefs.current[index]?.click()}
-                    className="relative w-full h-36 rounded-lg border-2 border-dashed border-border hover:border-primary/60 bg-muted/20 hover:bg-muted/30 transition flex items-center justify-center overflow-hidden"
+                    className="relative w-full h-36 rounded-lg border-2 border-dashed border-slate-200 hover:border-[#0D3A35]/50 bg-slate-50 hover:bg-slate-100 transition flex items-center justify-center overflow-hidden"
                   >
                     {landImagePreviews[index] ? (
                       <img src={landImagePreviews[index] as string} alt={`Land image ${index + 1}`} className="h-full w-full object-cover" />
                     ) : (
-                      <div className="flex flex-col items-center gap-2 text-muted-foreground">
+                      <div className="flex flex-col items-center gap-2 text-slate-500">
                         <ImagePlus className="w-6 h-6" />
                         <span className="text-xs">Click to upload image</span>
                       </div>
@@ -758,8 +783,8 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                   </button>
                   {landImages[index] && (
                     <div className="flex items-center justify-between text-xs">
-                      <span className="truncate text-muted-foreground">{landImages[index]?.name}</span>
-                      <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-red-600" onClick={() => clearImagePick(index)}>
+                      <span className="truncate text-slate-500">{landImages[index]?.name}</span>
+                      <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600" onClick={() => clearImagePick(index)}>
                         <X className="w-3.5 h-3.5" />
                       </Button>
                     </div>
@@ -769,7 +794,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
             </div>
 
             <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">Land Video</Label>
+              <Label className="text-xs font-extrabold uppercase tracking-wide text-slate-400">Land Video</Label>
               <input
                 ref={videoInputRef}
                 type="file"
@@ -780,12 +805,12 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
               <button
                 type="button"
                 onClick={() => videoInputRef.current?.click()}
-                className="relative w-full h-40 rounded-lg border-2 border-dashed border-border hover:border-primary/60 bg-muted/20 hover:bg-muted/30 transition flex items-center justify-center overflow-hidden"
+                className="relative w-full h-40 rounded-lg border-2 border-dashed border-slate-200 hover:border-[#0D3A35]/50 bg-slate-50 hover:bg-slate-100 transition flex items-center justify-center overflow-hidden"
               >
                 {landVideoPreview ? (
                   <video src={landVideoPreview} className="h-full w-full object-cover" controls />
                 ) : (
-                  <div className="flex flex-col items-center gap-2 text-muted-foreground">
+                  <div className="flex flex-col items-center gap-2 text-slate-500">
                     <Video className="w-7 h-7" />
                     <span className="text-sm font-medium">Click to upload land video</span>
                     <span className="text-xs">Optional</span>
@@ -794,27 +819,27 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
               </button>
               {landVideo && (
                 <div className="flex items-center justify-between text-xs">
-                  <span className="truncate text-muted-foreground">{landVideo.name}</span>
-                  <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-red-600" onClick={clearVideoPick}>
+                  <span className="truncate text-slate-500">{landVideo.name}</span>
+                  <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600" onClick={clearVideoPick}>
                     <X className="w-3.5 h-3.5" />
                   </Button>
                 </div>
               )}
             </div>
 
-            <div className="flex justify-between gap-3 pt-4 border-t">
-              <Button type="button" variant="outline" onClick={() => setStep('location')} className="gap-2">
+            <div className="flex justify-between gap-3 pt-4 border-t border-slate-200">
+              <Button type="button" variant="outline" onClick={() => setStep('location')} className="gap-2 rounded-lg border-slate-200 font-semibold text-slate-700 hover:bg-slate-50">
                 <ArrowLeft className="w-4 h-4" />
                 Back
               </Button>
               <div className="flex gap-3">
-                <Button type="button" variant="outline" onClick={onClose}>
+                <Button type="button" variant="outline" onClick={onClose} className="rounded-lg border-slate-200 font-semibold text-slate-700 hover:bg-slate-50">
                   Cancel
                 </Button>
                 <Button
                   type="button"
                   onClick={handleMediaNext}
-                  className="gap-2"
+                  className="gap-2 rounded-lg bg-[#0D3A35] font-bold hover:bg-[#092b27]"
                 >
                   Next: Land Mapping (Optional)
                   <ArrowRight className="w-4 h-4" />
@@ -829,9 +854,9 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
           <div className="space-y-4">
             {!skipMapping ? (
               <>
-                <div className="flex items-start gap-3 p-3 bg-info/10 rounded-lg border border-info/20">
-                  <Info className="w-5 h-5 text-info mt-0.5 shrink-0" />
-                  <p className="text-sm text-muted-foreground">
+                <div className="flex items-start gap-3 p-3 bg-blue-50 rounded-lg border border-blue-100">
+                  <Info className="w-5 h-5 text-blue-600 mt-0.5 shrink-0" />
+                  <p className="text-sm text-slate-500">
                     Upload a KML file to auto-map the boundary, or use the drawing tools on the map. This step is optional.
                   </p>
                 </div>
@@ -841,16 +866,16 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                   <label
                     className={`flex items-center justify-center gap-3 w-full rounded-lg border-2 border-dashed py-4 px-4 cursor-pointer transition-colors ${
                       isParsingKml
-                        ? 'border-primary/40 bg-primary/5 cursor-wait'
+                        ? 'border-[#0D3A35]/40 bg-[#0D3A35]/5 cursor-wait'
                         : kmlCoordinates
                         ? 'border-green-400 bg-green-50'
-                        : 'border-border hover:border-primary/50 hover:bg-muted/30'
+                        : 'border-slate-200 hover:border-[#0D3A35]/50 hover:bg-slate-100'
                     }`}
                   >
                     {isParsingKml ? (
                       <>
-                        <Loader2 className="w-5 h-5 text-primary animate-spin shrink-0" />
-                        <span className="text-sm font-medium text-primary">Reading KML file…</span>
+                        <Loader2 className="w-5 h-5 text-[#0D3A35] animate-spin shrink-0" />
+                        <span className="text-sm font-medium text-[#0D3A35]">Reading KML file…</span>
                       </>
                     ) : kmlCoordinates ? (
                       <>
@@ -861,17 +886,17 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                         <button
                           type="button"
                           onClick={e => { e.preventDefault(); setKmlCoordinates(null); }}
-                          className="ml-auto text-muted-foreground hover:text-red-500 transition-colors"
+                          className="ml-auto text-slate-500 hover:text-red-500 transition-colors"
                         >
                           <X className="w-4 h-4" />
                         </button>
                       </>
                     ) : (
                       <>
-                        <UploadCloud className="w-5 h-5 text-muted-foreground shrink-0" />
+                        <UploadCloud className="w-5 h-5 text-slate-500 shrink-0" />
                         <div>
-                          <p className="text-sm font-medium text-foreground">Upload KML file</p>
-                          <p className="text-xs text-muted-foreground">Auto-maps the land boundary from the file</p>
+                          <p className="text-sm font-bold text-slate-800">Upload KML file</p>
+                          <p className="text-xs font-semibold text-slate-400">Auto-maps the land boundary from the file</p>
                         </div>
                       </>
                     )}
@@ -891,13 +916,13 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                   </label>
 
                   {kmlCoordinates && (
-                    <p className="text-xs text-muted-foreground px-1">
+                    <p className="text-xs text-slate-500 px-1">
                       KML boundary will be used for land mapping. You can still draw manually on the map to override it.
                     </p>
                   )}
                 </div>
 
-                <div className="relative border-2 border-border rounded-lg overflow-hidden h-96">
+                <div className="relative border-2 border-slate-200 rounded-lg overflow-hidden h-96">
                   <MapContainer
                     center={landLocation || mapCenter}
                     zoom={18}
@@ -911,7 +936,7 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                     {kmlCoordinates && kmlCoordinates.length >= 3 && (
                       <Polygon
                         positions={kmlCoordinates.map(c => [c.lat, c.lng] as [number, number])}
-                        pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: 0.2, weight: 2.5 }}
+                        pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }}
                       />
                     )}
                     {kmlCoordinates && kmlCoordinates.length > 0 && (() => {
@@ -940,15 +965,15 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
               </>
             ) : (
               <div className="flex flex-col items-center justify-center py-12 text-center">
-                <MapPin className="w-12 h-12 text-muted-foreground mb-3" />
-                <p className="font-medium">Land Mapping Skipped</p>
-                <p className="text-sm text-muted-foreground mt-1">
+                <MapPin className="w-12 h-12 text-slate-400 mb-3" />
+                <p className="font-extrabold text-slate-800">Land Mapping Skipped</p>
+                <p className="text-sm font-semibold text-slate-500 mt-1">
                   You can add land details later
                 </p>
               </div>
             )}
-            <div className="flex justify-between gap-3 pt-4 border-t">
-              <Button type="button" variant="outline" onClick={() => setStep('media')} className="gap-2">
+            <div className="flex justify-between gap-3 pt-4 border-t border-slate-200">
+              <Button type="button" variant="outline" onClick={() => setStep('media')} className="gap-2 rounded-lg border-slate-200 font-semibold text-slate-700 hover:bg-slate-50">
                 <ArrowLeft className="w-4 h-4" />
                 Back
               </Button>
@@ -958,17 +983,18 @@ const AddLeadModal = ({ open, onClose, onSubmit }: AddLeadModalProps) => {
                   variant="outline"
                   onClick={() => setSkipMapping(true)}
                   disabled={skipMapping}
+                  className="rounded-lg border-slate-200 font-semibold text-slate-700 hover:bg-slate-50"
                 >
                   {skipMapping ? 'Mapping Skipped' : 'Skip Mapping'}
                 </Button>
-                <Button type="button" variant="outline" onClick={onClose}>
+                <Button type="button" variant="outline" onClick={onClose} className="rounded-lg border-slate-200 font-semibold text-slate-700 hover:bg-slate-50">
                   Cancel
                 </Button>
                 <Button
                   type="button"
                   onClick={handleSubmit}
                   disabled={loading}
-                  className="gap-2"
+                  className="gap-2 rounded-lg bg-[#0D3A35] font-bold hover:bg-[#092b27]"
                 >
                   {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                   <Check className="w-4 h-4" />
