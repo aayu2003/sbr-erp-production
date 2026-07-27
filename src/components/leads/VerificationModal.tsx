@@ -116,7 +116,7 @@ const VerificationModal = ({ open, onClose, lead, onVerify, onReject, onFollowUp
                 />
                 {normalizedCoords ? (
                   <>
-                    <Polygon positions={normalizedCoords as any} pathOptions={{ color: '#f03' }} />
+                    <Polygon positions={normalizedCoords as any} pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }} />
                     <Marker position={[normalizedCoords[0][0], normalizedCoords[0][1]] as any}>
                       <Popup>Lead land mapping (first point)</Popup>
                     </Marker>

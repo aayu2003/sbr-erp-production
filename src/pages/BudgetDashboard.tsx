@@ -40,7 +40,7 @@ const CROP_TYPES: CropKey[] = ['paddy', 'rahar', 'napier'];
 const CROP_LABELS: Record<CropKey, string> = { paddy: 'Paddy', rahar: 'Rahar', napier: 'Napier' };
 const CROP_BTN: Record<CropKey, { on: string; off: string }> = {
   paddy:  { on: 'border-amber-400 bg-amber-100 text-amber-700',  off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
-  rahar:  { on: 'border-green-400 bg-green-100 text-green-700',  off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
+  rahar:  { on: 'border-[#800000] bg-[#800000]/10 text-[#800000]',  off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
   napier: { on: 'border-[#173f70] bg-[#173f70] text-white',      off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
 };
 

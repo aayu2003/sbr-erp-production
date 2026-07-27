@@ -103,13 +103,15 @@ const NavItem = ({
 /* ---------------- NAV GROUP COMPONENT ---------------- */
 
 interface NavGroupProps {
-  label: string;
+  label?: string;
+  renderHeader?: (isOpen: boolean, toggle: () => void) => React.ReactNode;
   children: React.ReactNode;
   isSidebarCollapsed: boolean;
 }
 
 const NavGroup = ({
   label,
+  renderHeader,
   children,
   isSidebarCollapsed,
 }: NavGroupProps) => {
@@ -125,22 +127,26 @@ const NavGroup = ({
 
   return (
     <div className="space-y-1 py-1">
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between px-3 py-2 text-[11px] font-bold text-white/50 uppercase tracking-[0.08em] hover:text-white"
-      >
-        <span>{label}</span>
-        <ChevronDown
-          className={cn(
-            "w-3 h-3 transition-transform",
-            isOpen && "rotate-180"
-          )}
-        />
-      </button>
+      {renderHeader ? (
+        renderHeader(isOpen, () => setIsOpen(!isOpen))
+      ) : (
+        <button
+          onClick={() => setIsOpen(!isOpen)}
+          className="w-full flex items-center justify-between px-3 py-2 text-[11px] font-bold text-white/50 uppercase tracking-[0.08em] hover:text-white"
+        >
+          <span>{label}</span>
+          <ChevronDown
+            className={cn(
+              "w-3 h-3 transition-transform",
+              isOpen && "rotate-180"
+            )}
+          />
+        </button>
+      )}
 
       <div
         className={cn(
-          "space-y-1 pl-1 overflow-hidden transition-all duration-300 ease-in-out",
+          "space-y-1 px-1 overflow-hidden transition-all duration-300 ease-in-out",
           isOpen
             ? "max-h-[2000px] opacity-100"
             : "max-h-0 opacity-0"
@@ -154,11 +160,7 @@ const NavGroup = ({
 
 /* ---------------- MAIN SIDEBAR COMPONENT ---------------- */
 
-interface AppSidebarProps {
-  leadsComplete: boolean;
-}
-
-const AppSidebar = ({ leadsComplete }: AppSidebarProps) => {
+const AppSidebar = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const { user } = useAuth();
   const isSuperAdmin = user?.id === 'sbr-admin';
@@ -257,42 +259,74 @@ const AppSidebar = ({ leadsComplete }: AppSidebarProps) => {
 
           const SupersetIcon = ICON_MAP[superset.icon] ?? FileText;
 
+          const renderItems = (items: typeof visibleGroups[number]['visibleItems']) =>
+            items.map(item => {
+              const ItemIcon = ICON_MAP[item.icon] ?? FileText;
+              const notif = (item as any).notificationStatus ?? 'none';
+              return (
+                <NavItem
+                  key={item.key}
+                  to={item.path}
+                  icon={ItemIcon}
+                  label={item.label}
+                  isSidebarCollapsed={isCollapsed}
+                  notificationStatus={notif as 'warning' | 'success' | 'none'}
+                />
+              );
+            });
+
+          // Supersets with a single group don't need a separate group-label row —
+          // the section header itself becomes the collapse toggle.
+          const isSingleGroup = visibleGroups.length === 1;
+
           return (
             <div key={superset.key} className={cn("space-y-2 py-1", !isCollapsed && "border-t border-white/10 mt-2 pt-3")}>
-              {!isCollapsed && (
-                <div className="mx-1 mb-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    <SupersetIcon className="h-4 w-4 text-white/70" />
-                    <span className="text-[12px] font-extrabold text-white uppercase tracking-[0.1em]">
-                      {superset.label}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[11px] font-medium text-white/60">
-                    {superset.description}
-                  </p>
-                </div>
-              )}
-
-              {visibleGroups.map(group => (
-                <NavGroup key={group.key} label={group.label} isSidebarCollapsed={isCollapsed}>
-                  {group.visibleItems.map(item => {
-                    const ItemIcon = ICON_MAP[item.icon] ?? FileText;
-                    const notif = item.key === 'leads'
-                      ? (leadsComplete ? 'success' : 'warning')
-                      : ((item as any).notificationStatus ?? 'none');
-                    return (
-                      <NavItem
-                        key={item.key}
-                        to={item.path}
-                        icon={ItemIcon}
-                        label={item.label}
-                        isSidebarCollapsed={isCollapsed}
-                        notificationStatus={notif as 'warning' | 'success' | 'none'}
-                      />
-                    );
-                  })}
+              {isSingleGroup ? (
+                <NavGroup
+                  isSidebarCollapsed={isCollapsed}
+                  renderHeader={(isOpen, toggle) => (
+                    <button
+                      type="button"
+                      onClick={toggle}
+                      className="w-full mx-1 mb-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left hover:bg-white/10 transition-colors"
+                    >
+                      <div className="flex items-center gap-2">
+                        <SupersetIcon className="h-4 w-4 text-white/70 shrink-0" />
+                        <span className="flex-1 text-[12px] font-extrabold text-white uppercase tracking-[0.1em]">
+                          {superset.label}
+                        </span>
+                        <ChevronDown
+                          className={cn(
+                            "w-3.5 h-3.5 text-white/50 transition-transform shrink-0",
+                            isOpen && "rotate-180"
+                          )}
+                        />
+                      </div>
+                    </button>
+                  )}
+                >
+                  {renderItems(visibleGroups[0].visibleItems)}
                 </NavGroup>
-              ))}
+              ) : (
+                <>
+                  {!isCollapsed && (
+                    <div className="mx-1 mb-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <SupersetIcon className="h-4 w-4 text-white/70" />
+                        <span className="text-[12px] font-extrabold text-white uppercase tracking-[0.1em]">
+                          {superset.label}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {visibleGroups.map(group => (
+                    <NavGroup key={group.key} label={group.label} isSidebarCollapsed={isCollapsed}>
+                      {renderItems(group.visibleItems)}
+                    </NavGroup>
+                  ))}
+                </>
+              )}
             </div>
           );
         })}
@@ -350,10 +384,9 @@ const AppSidebar = ({ leadsComplete }: AppSidebarProps) => {
 /* ---------------- LAYOUT WRAPPER ---------------- */
 
 const AppLayout = ({ children }: { children: React.ReactNode }) => {
-  const [leadsComplete] = useState(false);
   return (
     <div className="flex h-screen overflow-hidden bg-[#f8f9fb]">
-      <AppSidebar leadsComplete={leadsComplete} />
+      <AppSidebar />
       <main className="flex-1 min-w-0 overflow-y-auto">
         {children}
       </main>

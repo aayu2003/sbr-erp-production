@@ -1,13 +1,13 @@
 import { useState, useEffect } from 'react';
-import { Plus, Search, Filter } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { Plus, Search, Filter, Users, Phone, BadgeCheck, UserCheck, UserX, AlertTriangle } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { Lead } from '@/types/farm';
 import getBaseUrl from '@/lib/config';
 import LeadsTable from '@/components/leads/LeadsTable';
 import AddLeadModal, { AddLeadFormData } from '@/components/leads/AddLeadModal';
 import VerificationModal from '@/components/leads/VerificationModal';
 import KYCModal from '@/components/leads/KYCModal';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 
 const Leads = () => {
@@ -19,6 +19,8 @@ const Leads = () => {
   const [verifyModalOpen, setVerifyModalOpen] = useState(false);
   const [kycModalOpen, setKycModalOpen] = useState(false);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Lead | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -180,6 +182,38 @@ const Leads = () => {
         description: `Failed to reject lead: ${error instanceof Error ? error.message : 'Unknown error'}`,
         variant: 'destructive',
       });
+    }
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const base = getBaseUrl();
+      const leadId = deleteTarget.backendId || deleteTarget.id;
+      const resp = await fetch(`${base.replace(/\/$/, '')}/farmer_managment/delete_lead`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lead_id: leadId }),
+      });
+
+      if (!resp.ok) throw new Error(`Server responded ${resp.status}`);
+
+      const result = await resp.json();
+      if (!result.success) throw new Error('Server returned success: false');
+
+      setLeads(prev => prev.filter(l => l.id !== deleteTarget.id));
+      toast({ title: 'Lead Deleted', description: `${deleteTarget.fullName} has been removed` });
+      setDeleteTarget(null);
+    } catch (error) {
+      console.error('Delete error:', error);
+      toast({
+        title: 'Error',
+        description: `Failed to delete lead: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        variant: 'destructive',
+      });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -374,86 +408,104 @@ const Leads = () => {
     rejected: leads.filter(l => l.status === 'rejected').length,
   };
 
+  const tabs: { key: typeof selectedTab; label: string }[] = [
+    { key: 'general', label: 'General' },
+    { key: 'follow_up', label: 'Follow Up' },
+    { key: 'rejected', label: 'Rejected' },
+  ];
+
+  const statCards = [
+    { label: 'Total Leads', value: stats.total, Icon: Users, tone: 'bg-blue-50 text-blue-700 ring-blue-100' },
+    { label: 'Contacted', value: stats.contacted, Icon: Phone, tone: 'bg-amber-50 text-amber-700 ring-amber-100' },
+    { label: 'Verified', value: stats.verified, Icon: BadgeCheck, tone: 'bg-emerald-50 text-emerald-700 ring-emerald-100' },
+    { label: 'Registered', value: stats.registered, Icon: UserCheck, tone: 'bg-[#0D3A35]/10 text-[#0D3A35] ring-[#0D3A35]/20' },
+    { label: 'Rejected', value: stats.rejected, Icon: UserX, tone: 'bg-rose-50 text-rose-700 ring-rose-100' },
+  ];
+
   return (
-    <div className="p-8">
+    <div className="min-h-screen bg-[#fbfcfd] p-8 text-slate-900">
       {/* Header */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <h1 className="text-3xl font-display font-bold">Leads</h1>
-          <p className="text-muted-foreground mt-1">Manage farmer onboarding pipeline</p>
+          <h1 className="text-3xl font-bold tracking-tight text-slate-950">Leads</h1>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Manage farmer onboarding pipeline</p>
         </div>
-        <Button onClick={() => setAddModalOpen(true)} className="gap-2">
-          <Plus className="w-4 h-4" />
+        <button
+          type="button"
+          onClick={() => setAddModalOpen(true)}
+          className="flex h-11 items-center gap-2 rounded-lg bg-[#0D3A35] px-4 text-sm font-bold text-white shadow-sm hover:bg-[#092b27]"
+        >
+          <Plus className="h-4 w-4" />
           Add Lead
-        </Button>
+        </button>
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-5 gap-4 mb-8">
-        {[
-          { label: 'Total Leads', value: stats.total, color: 'bg-primary/10 text-primary' },
-          { label: 'Contacted', value: stats.contacted, color: 'bg-info/10 text-info' },
-          { label: 'Verified', value: stats.verified, color: 'bg-success/10 text-success' },
-          { label: 'Registered', value: stats.registered, color: 'bg-primary/10 text-primary' },
-          { label: 'Rejected', value: stats.rejected, color: 'bg-destructive/10 text-destructive' },
-        ].map(stat => (
-          <div key={stat.label} className="bg-card rounded-xl p-4 shadow-card border border-border">
-            <p className="text-sm text-muted-foreground">{stat.label}</p>
-            <p className={`text-2xl font-bold mt-1 ${stat.color.split(' ')[1]}`}>{stat.value}</p>
+      <section className="mt-7 grid gap-5 sm:grid-cols-2 xl:grid-cols-5">
+        {statCards.map(({ label, value, Icon, tone }) => (
+          <div key={label} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-bold text-slate-500">{label}</p>
+                <p className="mt-3 text-3xl font-extrabold text-slate-950">{value}</p>
+              </div>
+              <div className={cn('flex h-12 w-12 items-center justify-center rounded-xl ring-1', tone)}>
+                <Icon className="h-6 w-6" />
+              </div>
+            </div>
           </div>
         ))}
-      </div>
+      </section>
 
       {/* Search, Tabs & Filter */}
-      <div className="flex items-center gap-4 mb-6">
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input
+      <div className="mt-7 flex flex-wrap items-center gap-3">
+        <div className="relative max-w-md flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
             placeholder="Search by name, village, or district..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            className="pl-10"
+            className="h-11 w-full rounded-lg border border-slate-200 bg-white pl-10 pr-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35]"
           />
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            onClick={() => setSelectedTab('general')}
-            className={`${selectedTab === 'general' ? 'bg-primary text-primary-foreground' : 'bg-transparent'} px-3 py-1`}
-          >
-            General
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => setSelectedTab('follow_up')}
-            className={`${selectedTab === 'follow_up' ? 'bg-primary text-primary-foreground' : 'bg-transparent'} px-3 py-1`}
-          >
-            Follow up
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => setSelectedTab('rejected')}
-            className={`${selectedTab === 'rejected' ? 'bg-primary text-primary-foreground' : 'bg-transparent'} px-3 py-1`}
-          >
-            Rejected
-          </Button>
+        <div className="flex rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+          {tabs.map(tab => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setSelectedTab(tab.key)}
+              className={cn(
+                'flex h-9 items-center rounded-lg px-4 text-sm font-extrabold transition',
+                selectedTab === tab.key
+                  ? 'bg-[#0D3A35] text-white shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
+              )}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
-        <Button variant="outline" className="gap-2">
-          <Filter className="w-4 h-4" />
+        <button
+          type="button"
+          className="inline-flex h-11 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+        >
+          <Filter className="h-4 w-4" />
           Filter
-        </Button>
+        </button>
       </div>
 
       {/* Table */}
-      {loading ? (
-        <div className="flex items-center justify-center h-64">
-          <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-        </div>
-      ) : (
-        <LeadsTable leads={filteredLeads} onRegister={handleProceed} />
-      )}
+      <div className="mt-6">
+        {loading ? (
+          <div className="flex h-64 items-center justify-center">
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#0D3A35] border-t-transparent" />
+          </div>
+        ) : (
+          <LeadsTable leads={filteredLeads} onRegister={handleProceed} onDelete={setDeleteTarget} />
+        )}
+      </div>
 
       {/* Modals */}
       <AddLeadModal
@@ -477,6 +529,40 @@ const Leads = () => {
         lead={selectedLead}
         onSubmit={handleKYCSubmit}
       />
+
+      <Dialog open={!!deleteTarget} onOpenChange={open => !open && setDeleteTarget(null)}>
+        <DialogContent className="max-w-sm bg-white">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-lg font-bold text-slate-950">
+              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-rose-50">
+                <AlertTriangle className="h-4.5 w-4.5 text-rose-600" />
+              </span>
+              Delete Lead
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm font-semibold text-slate-500">
+            Are you sure you want to delete <span className="font-extrabold text-slate-800">{deleteTarget?.fullName}</span>? This cannot be undone.
+          </p>
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleting}
+              className="inline-flex h-10 items-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleDeleteConfirm}
+              disabled={deleting}
+              className="inline-flex h-10 items-center rounded-lg bg-rose-600 px-4 text-sm font-bold text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {deleting ? 'Deleting...' : 'Delete'}
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

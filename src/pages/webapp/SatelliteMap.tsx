@@ -42,10 +42,10 @@ export default function SatelliteMap({ lat, lng, coordinates, className }: Satel
     if (isPolygon && coordinates) {
       const points = (coordinates as number[][]).map(p => [p[0], p[1]] as [number, number]);
       const poly = L.polygon(points, {
-        color:       '#10b981',
-        weight:      2.5,
-        fillColor:   '#10b981',
-        fillOpacity: 0.25,
+        color:       'var(--land-boundary-color, #fde047)',
+        weight:      3,
+        fillColor:   'var(--land-boundary-fill, #fef9c3)',
+        fillOpacity: 0.28,
       }).addTo(map);
       map.fitBounds(poly.getBounds(), { padding: [14, 14] });
     } else {

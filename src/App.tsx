@@ -36,6 +36,7 @@ import FleetChart from "./pages/FleetChart";
 import KhasraFinder from "./pages/khasra_finder";
 import FieldMonitoring from "./pages/FieldMonitoring";
 import LandAcquisition from "./pages/LandAcquisition";
+import Legal from "./pages/Legal";
 import AdminOpsIndent from "./pages/AdminOpsIndent";
 import FinanceAdminOpsIndent from "./pages/FinanceAdminOpsIndent";
 import PurchaseRequisition from "./pages/PurchaseRequisition";
@@ -87,6 +88,8 @@ const App = () => (
           <Route path="/index" element={<Index />} />
 
           <Route path="/ceos-desk" element={<AppLayout><CeosDesk /></AppLayout>} />
+
+          <Route path="/legal" element={<AppLayout><Legal /></AppLayout>} />
 
           <Route path="/leads" element={<AppLayout><Leads /></AppLayout>} />
           <Route path="/tasks-beta" element={<AppLayout><TasksBeta /></AppLayout>} />
