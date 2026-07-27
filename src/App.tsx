@@ -64,6 +64,10 @@ import WorkOrder from "./pages/WorkOrder";
 import ScopeOfWork from "./pages/ScopeOfWork";
 import WebApp from "./pages/webapp/WebApp";
 import Inbox from "./pages/Inbox";
+import WccApprovalInbox from "./pages/WccApprovalInbox";
+import GRNModule from "./pages/GRNModule";
+import GrnApprovalInbox from "./pages/GrnApprovalInbox";
+import GateEntryModule from "./pages/GateEntryModule";
 import LabourManagement from "./pages/LabourManagement";
 import UserManagement from "./pages/UserManagement";
 import AccountsDashboard from "./pages/AccountsDashboard";
@@ -226,6 +230,18 @@ const App = () => (
           <Route path="/purchase/inbox"  element={<AppLayout><Inbox department="Purchase" /></AppLayout>} />
           <Route path="/hrms/inbox"      element={<AppLayout><Inbox department="HRMS" /></AppLayout>} />
           <Route path="/director/inbox"  element={<AppLayout><Inbox department="Director" /></AppLayout>} />
+
+          {/* WCC Approval workflow */}
+          <Route path="/admin/wcc-approval"    element={<AppLayout><WccApprovalInbox stage="verification" /></AppLayout>} />
+          <Route path="/director/wcc-approval" element={<AppLayout><WccApprovalInbox stage="approval" /></AppLayout>} />
+
+          {/* GRN Module + GRN Approval workflow */}
+          <Route path="/grn-module"            element={<AppLayout><GRNModule /></AppLayout>} />
+          <Route path="/admin/grn-approval"    element={<AppLayout><GrnApprovalInbox stage="verification" /></AppLayout>} />
+          <Route path="/director/grn-approval" element={<AppLayout><GrnApprovalInbox stage="approval" /></AppLayout>} />
+
+          {/* Gate Entry */}
+          <Route path="/gate-entry" element={<AppLayout><GateEntryModule /></AppLayout>} />
 
           {/* Accounts */}
           <Route path="/accounts/dashboard"    element={<AppLayout><AccountsDashboard /></AppLayout>} />

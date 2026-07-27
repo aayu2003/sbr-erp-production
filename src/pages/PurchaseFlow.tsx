@@ -6,6 +6,7 @@ import * as XLSX from 'xlsx';
 import { Button } from '@/components/ui/button';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
+import { GenerateFromRecordPopup } from '@/components/purchase/GenerateFromRecordPopup';
 
 type LeftPanelInfo = {
   pr_number?: string;
@@ -1133,6 +1134,10 @@ export default function PurchaseFlow() {
     flow: ApiPurchaseFlow;
     step: PurchaseFlowStep;
   } | null>(null);
+  const [generateTarget, setGenerateTarget] = useState<{
+    flow: ApiPurchaseFlow;
+    step: PurchaseFlowStep;
+  } | null>(null);
   const [addToInventoryFor, setAddToInventoryFor] = useState<{ poNumber: string } | null>(null);
   const [createFlowOpen, setCreateFlowOpen] = useState(false);
   const [flowRefreshNonce, setFlowRefreshNonce] = useState(0);
@@ -1496,6 +1501,16 @@ export default function PurchaseFlow() {
         />
       ) : null}
 
+      {generateTarget ? (
+        <GenerateFromRecordPopup
+          orderNumber={safeTrim(generateTarget.flow.order_number)}
+          orderType={safeTrim(generateTarget.flow.order_type)}
+          stepLabel={generateTarget.step.document}
+          onClose={() => setGenerateTarget(null)}
+          onGenerate={(file) => handleUploadStep(generateTarget.flow, generateTarget.step, file)}
+        />
+      ) : null}
+
       {addToInventoryFor ? (
         <AddToInventoryPopup
           poNumber={addToInventoryFor.poNumber}
@@ -1834,6 +1849,20 @@ export default function PurchaseFlow() {
                                     <ChevronRight className="w-3 h-3" />
                                   </button>
                                 </div>
+                              )}
+
+                              {/* GRN (PO) / Completion certificate (WO) step — offer to auto-generate
+                                  the document from an already-approved GRN or WCC certificate,
+                                  instead of only accepting a manually uploaded file. */}
+                              {!s.docLink && s.document.trim().toLowerCase() === 'grn' && (
+                                <button
+                                  type="button"
+                                  onClick={() => setGenerateTarget({ flow, step: s })}
+                                  title="Generate from an approved GRN or WCC certificate"
+                                  className="mt-1 px-2 py-1 text-[10px] font-semibold rounded-md border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors whitespace-nowrap"
+                                >
+                                  Generate from GRN/WCC
+                                </button>
                               )}
 
                               {/* Accounts status actions — only for invoice / proforma invoice steps */}
