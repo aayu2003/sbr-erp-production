@@ -9,6 +9,7 @@ import {
   PackageCheck,
   History,
   Boxes,
+  Layers,
   X,
   Upload,
   Trash2,
@@ -18,6 +19,14 @@ import {
   Undo2,
   IndianRupee,
   ShieldAlert,
+  Settings,
+  ArrowRightLeft,
+  ShieldCheck,
+  MessageCircle,
+  FileCheck,
+  Send,
+  Info,
+  Printer,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -34,6 +43,15 @@ import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@/context/AuthContext';
+import {
+  createInventoryApproval,
+  InventoryTransferApproval,
+  readInventoryApprovals,
+  subscribeToInventoryApprovals,
+  updateInventoryApproval,
+} from '@/lib/inventoryApprovalStore';
+import logo3f from '@/Assets/3f-logo.png';
 
 // ─────────────────────────────────────────────────────────────
 // TYPES
@@ -57,6 +75,21 @@ type StockItem = {
   currentStock: number;
   stockInPipeline?: number;
   minStock: number;
+  inventoryGroup?: string;
+  subCategory?: string;
+  expenseClassification?: string;
+  inventoryClassification?: string;
+  issueClassification?: string;
+  stockIssueMethod?: string;
+  packingSize?: string;
+  shelf?: string;
+  batchTracking?: boolean;
+  expiryTracking?: boolean;
+  batchNumber?: string;
+  manufacturingDate?: string;
+  expiryDate?: string;
+  supplier?: string;
+  storageLocation?: string;
   imageUrl: string;
   location: string;
   description: string;
@@ -71,7 +104,16 @@ type StockItem = {
   // Series number like SBR/INV/P2/
   seriesNumber: string;
   transactions: StockTransaction[];
-  fifoList?: { stock: number; per_unit_cost: number; po_number: string }[];
+  fifoList?: {
+    stock: number;
+    per_unit_cost: number;
+    po_number: string;
+    batch_number?: string;
+    manufacturing_date?: string;
+    expiry_date?: string;
+    supplier?: string;
+    storage_location?: string;
+  }[];
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -105,6 +147,155 @@ const INVENTORY_LOCATIONS = [
   'Equipment Room',
   'Irrigation Store',
 ];
+const INVENTORY_GROUPS = [
+  'Farm Inputs',
+  'Seeds and Planting Material',
+  'Fertilisers and Manure',
+  'Crop Protection Chemicals',
+  'Fuel and Lubricants',
+  'Agricultural Machinery',
+  'Tools and Equipment',
+  'Machinery Spares',
+  'Irrigation Materials',
+  'Fencing Materials',
+  'Construction Materials',
+  'Safety and PPE',
+  'IT Assets',
+  'Office Assets',
+  'Office Consumables',
+  'Electrical Materials',
+  'Plumbing Materials',
+  'Vehicle Spares',
+  'Packaging Materials',
+  'Scrap and Obsolete Stock',
+];
+const EXPENSE_CLASSIFICATIONS = ['CAPEX', 'OPEX'];
+const INVENTORY_CLASSIFICATIONS = ['Asset', 'Consumable', 'Spare', 'Tool', 'Material'];
+const ISSUE_CLASSIFICATIONS = ['Returnable', 'Non-Returnable'];
+
+type StockIssueMethodOption = {
+  value: string;
+  label: string;
+  explanation: string;
+  example: string;
+};
+
+const STOCK_ISSUE_METHODS: StockIssueMethodOption[] = [
+  {
+    value: 'FIFO',
+    label: 'FIFO, First In First Out',
+    explanation: 'Issues the oldest received stock first.',
+    example: 'Fertilisers, diesel, pipes and general materials.',
+  },
+  {
+    value: 'FEFO',
+    label: 'FEFO, First Expiry First Out',
+    explanation: 'Issues the batch with the earliest expiry date first.',
+    example: 'Pesticides, seeds, chemicals and biological inputs.',
+  },
+  {
+    value: 'LIFO',
+    label: 'LIFO, Last In First Out',
+    explanation: 'Issues the most recently received stock first.',
+    example: 'Materials physically stored in stacks where the latest stock is accessed first.',
+  },
+  {
+    value: 'MOVING_WEIGHTED_AVERAGE',
+    label: 'Moving Weighted Average',
+    explanation: 'Uses the recalculated average cost after each stock receipt.',
+    example: 'Bulk consumables purchased repeatedly at different rates.',
+  },
+  {
+    value: 'SPECIFIC_IDENTIFICATION',
+    label: 'Specific Identification',
+    explanation: 'Tracks and issues each item at its exact individual cost.',
+    example: 'Machinery, equipment and serial-number-controlled assets.',
+  },
+];
+
+const getStockIssueMethodOption = (value?: string) => {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return STOCK_ISSUE_METHODS.find((option) => (
+    option.value.toLowerCase() === normalized
+    || option.label.toLowerCase() === String(value || '').trim().toLowerCase()
+    || option.label.toLowerCase().startsWith(`${String(value || '').trim().toLowerCase()},`)
+  ));
+};
+
+const getStockIssueMethodLabel = (value?: string) =>
+  getStockIssueMethodOption(value)?.label || (value ? String(value) : 'Not Recorded');
+
+const DEFAULT_CATEGORY_GROUPS: Record<string, string> = {
+  Seeds: 'Seeds and Planting Material',
+  Fertilizer: 'Fertilisers and Manure',
+  'Agro Chemicals': 'Crop Protection Chemicals',
+  Implements: 'Agricultural Machinery',
+  Machines: 'Agricultural Machinery',
+  'Spare Parts': 'Machinery Spares',
+  'Tools & Consumables': 'Tools and Equipment',
+  'Irrigation Materials': 'Irrigation Materials',
+  'Packaging Material': 'Packaging Materials',
+  'Agro Equipments': 'Agricultural Machinery',
+  'Electrical items': 'Electrical Materials',
+  'Civil & Infra Equipments': 'Construction Materials',
+  'Storage Materials': 'Construction Materials',
+  'IT Assets': 'IT Assets',
+  'Office & Administration': 'Office Assets',
+  Others: 'Farm Inputs',
+};
+
+type InventoryMasterConfig = {
+  inventoryGroups: string[];
+  categories: string[];
+  categoryGroups: Record<string, string>;
+  subCategories: { name: string; category: string }[];
+  units: string[];
+  stores: string[];
+  expenseClassifications: string[];
+  inventoryClassifications: string[];
+  issueClassifications: string[];
+};
+
+const INVENTORY_MASTER_CONFIG_KEY = 'farm-connect.inventory-master-config.v1';
+const DEFAULT_INVENTORY_MASTER_CONFIG: InventoryMasterConfig = {
+  inventoryGroups: INVENTORY_GROUPS,
+  categories: CATEGORIES.filter((category) => category !== 'All'),
+  categoryGroups: DEFAULT_CATEGORY_GROUPS,
+  subCategories: [],
+  units: UNITS,
+  stores: INVENTORY_LOCATIONS,
+  expenseClassifications: EXPENSE_CLASSIFICATIONS,
+  inventoryClassifications: INVENTORY_CLASSIFICATIONS,
+  issueClassifications: ISSUE_CLASSIFICATIONS,
+};
+
+const readInventoryMasterConfig = (): InventoryMasterConfig => {
+  if (typeof window === 'undefined') return DEFAULT_INVENTORY_MASTER_CONFIG;
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(INVENTORY_MASTER_CONFIG_KEY) || '{}');
+    return {
+      inventoryGroups: Array.isArray(stored.inventoryGroups) ? stored.inventoryGroups : DEFAULT_INVENTORY_MASTER_CONFIG.inventoryGroups,
+      categories: Array.isArray(stored.categories) ? stored.categories : DEFAULT_INVENTORY_MASTER_CONFIG.categories,
+      categoryGroups: stored.categoryGroups && typeof stored.categoryGroups === 'object'
+        ? { ...DEFAULT_CATEGORY_GROUPS, ...stored.categoryGroups }
+        : DEFAULT_INVENTORY_MASTER_CONFIG.categoryGroups,
+      subCategories: Array.isArray(stored.subCategories) ? stored.subCategories : [],
+      units: Array.isArray(stored.units) ? stored.units : DEFAULT_INVENTORY_MASTER_CONFIG.units,
+      stores: Array.isArray(stored.stores) ? stored.stores : DEFAULT_INVENTORY_MASTER_CONFIG.stores,
+      expenseClassifications: Array.isArray(stored.expenseClassifications)
+        ? stored.expenseClassifications
+        : DEFAULT_INVENTORY_MASTER_CONFIG.expenseClassifications,
+      inventoryClassifications: Array.isArray(stored.inventoryClassifications)
+        ? stored.inventoryClassifications
+        : DEFAULT_INVENTORY_MASTER_CONFIG.inventoryClassifications,
+      issueClassifications: Array.isArray(stored.issueClassifications)
+        ? stored.issueClassifications
+        : DEFAULT_INVENTORY_MASTER_CONFIG.issueClassifications,
+    };
+  } catch {
+    return DEFAULT_INVENTORY_MASTER_CONFIG;
+  }
+};
 // Category code map with normalization helper.
 // Keys in the raw map may vary; we'll normalize lookup to handle variants (case, & vs and, plurals).
 const CATEGORY_CODE_MAP_RAW: Record<string, string> = {
@@ -281,6 +472,17 @@ const initialItems: StockItem[] = [
 // ─────────────────────────────────────────────────────────────
 const genId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const today = () => new Date().toISOString().split('T')[0];
+const generateTransferSlipNumber = () => {
+  const year = new Date().getFullYear();
+  const prefix = `SBR/INV/TRF/${year}/`;
+  const highestSequence = readInventoryApprovals().reduce((highest, approval) => {
+    const slipNumber = approval.transfer?.transferSlipNumber ?? '';
+    if (!slipNumber.startsWith(prefix)) return highest;
+    const sequence = Number(slipNumber.slice(prefix.length));
+    return Number.isFinite(sequence) ? Math.max(highest, sequence) : highest;
+  }, 0);
+  return `${prefix}${String(highestSequence + 1).padStart(4, '0')}`;
+};
 
 const txBadge: Record<StockTransaction['type'], { label: string; color: string }> = {
   incoming: { label: 'Incoming', color: 'bg-green-100 text-green-700' },
@@ -289,14 +491,420 @@ const txBadge: Record<StockTransaction['type'], { label: string; color: string }
   adjustment: { label: 'Adjustment', color: 'bg-yellow-100 text-yellow-700' },
 };
 
+type MasterConfigValue = {
+  id: string;
+  label: string;
+  meta?: string;
+};
+
+const MasterConfigCard = ({
+  title,
+  description,
+  placeholder,
+  icon: Icon,
+  values,
+  parentOptions,
+  parentLabel,
+  onAdd,
+  onRemove,
+}: {
+  title: string;
+  description: string;
+  placeholder: string;
+  icon: React.ElementType;
+  values: MasterConfigValue[];
+  parentOptions?: string[];
+  parentLabel?: string;
+  onAdd: (value: string, parent?: string) => void;
+  onRemove: (id: string) => void;
+}) => {
+  const [draft, setDraft] = useState('');
+  const [parent, setParent] = useState(parentOptions?.[0] ?? '');
+
+  useEffect(() => {
+    if (parentOptions?.length && !parentOptions.includes(parent)) setParent(parentOptions[0]);
+  }, [parent, parentOptions]);
+
+  const createValue = () => {
+    const value = draft.trim();
+    if (!value) return toast.error(`${title.replace(/s$/, '')} name is required`);
+    if (parentOptions?.length && !parent) return toast.error(`Select ${parentLabel?.toLowerCase() || 'a parent'}`);
+    onAdd(value, parent || undefined);
+    setDraft('');
+  };
+
+  return (
+    <section className="flex min-h-[320px] flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+      <div className="flex items-start gap-3 border-b border-slate-100 bg-slate-50/70 p-5">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35]">
+          <Icon className="h-5 w-5" />
+        </div>
+        <div>
+          <h2 className="text-base font-bold text-slate-950">{title}</h2>
+          <p className="mt-1 text-xs font-medium leading-relaxed text-slate-500">{description}</p>
+        </div>
+      </div>
+
+      <div className="space-y-3 border-b border-slate-100 p-4">
+        {parentOptions && (
+          <label className="block">
+            <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+              {parentLabel}
+            </span>
+            <select
+              value={parent}
+              onChange={(event) => setParent(event.target.value)}
+              className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 outline-none focus:border-[#0D3A35]"
+            >
+              {parentOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </label>
+        )}
+        <div className="flex gap-2">
+          <Input
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                createValue();
+              }
+            }}
+            placeholder={placeholder}
+            className="h-10 rounded-lg border-slate-200 text-sm"
+          />
+          <button
+            type="button"
+            onClick={createValue}
+            className="flex h-10 shrink-0 items-center gap-1.5 rounded-lg bg-[#0D3A35] px-3 text-xs font-bold text-white transition hover:bg-[#092e2a]"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Create
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 p-4">
+        {values.length === 0 ? (
+          <div className="flex h-full min-h-24 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 text-center text-xs font-semibold text-slate-400">
+            No entries created yet
+          </div>
+        ) : (
+          <div className="flex max-h-56 flex-wrap content-start gap-2 overflow-y-auto pr-1">
+            {values.map((value) => (
+              <div
+                key={value.id}
+                className="flex items-center gap-2 rounded-lg border border-[#0D3A35]/10 bg-[#0D3A35]/5 py-1.5 pl-3 pr-1.5"
+              >
+                <span className="text-xs font-bold text-[#0D3A35]">
+                  {value.label}
+                  {value.meta && <span className="ml-1 font-semibold text-slate-400">· {value.meta}</span>}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onRemove(value.id)}
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition hover:bg-red-50 hover:text-red-600"
+                  aria-label={`Remove ${value.label}`}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+};
+
+const formatTransferDate = (value?: string, includeTime = false) => {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    ...(includeTime ? { hour: '2-digit', minute: '2-digit' } : {}),
+  }).format(date);
+};
+
+const TransferSlipDialog = ({
+  record,
+  onClose,
+  onReply,
+}: {
+  record: InventoryTransferApproval | null;
+  onClose: () => void;
+  onReply: (questionId: string, reply: string) => void;
+}) => {
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!record) setReplyDrafts({});
+  }, [record]);
+
+  if (!record) return null;
+  const transfer = record.transfer;
+  const statusClass = record.status === 'pending'
+    ? 'border-amber-200 bg-amber-50 text-amber-700'
+    : record.status === 'approved'
+      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+      : 'border-red-200 bg-red-50 text-red-700';
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="h-[92vh] w-[96vw] max-w-[1480px] overflow-hidden rounded-2xl border-0 p-0">
+        <DialogHeader className="sr-only">
+          <DialogTitle>Stock Transfer Slip Details</DialogTitle>
+        </DialogHeader>
+
+        <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[1.06fr_0.94fr]">
+          <section className="min-h-0 overflow-y-auto bg-slate-200/70 p-5 sm:p-7">
+            <div className="mx-auto min-h-[720px] w-full max-w-[680px] border border-slate-300 bg-white p-6 text-[10px] text-slate-800 shadow-[0_18px_50px_rgba(15,23,42,0.15)] sm:p-8">
+              <div className="border-b-2 border-[#0D3A35] pb-4 text-center">
+                <img src={logo3f} alt="Sai Bioresources" className="mx-auto h-14 w-auto" />
+                <h2 className="mt-2 text-base font-black tracking-wide text-slate-950">SAI BIORESOURCES PRIVATE LIMITED</h2>
+                <p className="mx-auto mt-1 max-w-xl leading-relaxed text-slate-500">
+                  Khasra No. 121/1, Kachandur-Dhour Road, Village Jeora, Durg, Chhattisgarh – 491001
+                </p>
+              </div>
+
+              <div className="mt-3 bg-[#0D3A35] py-2 text-center text-xs font-black tracking-[0.15em] text-white">
+                STOCK TRANSFER SLIP
+              </div>
+              <div className="grid grid-cols-3 border border-t-0 border-slate-300">
+                {[
+                  ['Transfer Slip No.', transfer.transferSlipNumber],
+                  ['Transfer Date', formatTransferDate(transfer.transferDate)],
+                  ['Status', record.status.toUpperCase()],
+                ].map(([label, value]) => (
+                  <div key={label} className="border-r border-slate-300 p-2 last:border-r-0">
+                    <p className="text-[8px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
+                    <p className="mt-1 font-black text-slate-800">{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {[
+                {
+                  title: 'Store Transfer Details',
+                  rows: [
+                    ['From Store', transfer.sourceStore],
+                    ['Destination Store', transfer.destinationStore],
+                    ['Expected Arrival', formatTransferDate(transfer.expectedArrival, true)],
+                    ['Prepared By', record.preparedBy],
+                  ],
+                },
+                {
+                  title: 'Stock Particulars',
+                  rows: [
+                    ['Item Code', transfer.itemCode || '—'],
+                    ['Item', transfer.itemName],
+                    ['Category', transfer.category],
+                    ['Transfer Quantity', `${transfer.quantity.toLocaleString('en-IN')} ${transfer.unit}`],
+                    ['Available Stock', `${transfer.availableStock.toLocaleString('en-IN')} ${transfer.unit}`],
+                  ],
+                },
+                {
+                  title: 'Transport Details',
+                  rows: [
+                    ['Vehicle Number', transfer.vehicleNumber || '—'],
+                    ['Vehicle Type', transfer.vehicleType || '—'],
+                    ['Make / Model', [transfer.vehicleMake, transfer.vehicleModel].filter(Boolean).join(' ') || '—'],
+                    ['Driver', transfer.driverName || '—'],
+                    ['Driver Contact', transfer.driverContact || '—'],
+                  ],
+                },
+                {
+                  title: 'Approval Details',
+                  rows: [
+                    ['Assigned Approver', record.approverName],
+                    ['Designation', record.approverDesignation],
+                    ['Approval Date', formatTransferDate(record.approvedAt, true)],
+                    ['Approval ID', record.id],
+                  ],
+                },
+              ].map((section) => (
+                <div key={section.title} className="mt-3 overflow-hidden border border-slate-300">
+                  <div className="border-b border-slate-300 bg-slate-100 px-2 py-1.5 text-[9px] font-black uppercase tracking-wider text-slate-600">
+                    {section.title}
+                  </div>
+                  <div className="grid grid-cols-2">
+                    {section.rows.map(([label, value]) => (
+                      <div key={label} className="flex min-w-0 justify-between gap-3 border-b border-r border-slate-200 p-2">
+                        <span className="font-semibold text-slate-500">{label}</span>
+                        <strong className="break-words text-right">{value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+
+              <div className="mt-3 overflow-hidden border border-slate-300">
+                <div className="border-b border-slate-300 bg-slate-100 px-2 py-1.5 text-[9px] font-black uppercase tracking-wider text-slate-600">
+                  Remarks / Handling Instructions
+                </div>
+                <p className="min-h-12 p-2 leading-relaxed text-slate-600">{transfer.remarks || 'No additional remarks'}</p>
+              </div>
+
+              <div className="mt-8 grid grid-cols-4 gap-2">
+                {['Prepared By', 'Store Keeper', 'Approved By', 'Received By'].map((label) => (
+                  <div key={label} className="border border-slate-300 px-2 pb-2 pt-10 text-center font-bold">
+                    {label}
+                    {label === 'Approved By' && record.digitalSignature && (
+                      <span className="mt-1 block text-[7px] font-semibold leading-tight text-emerald-700">
+                        {record.digitalSignature.signature}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <aside className="min-h-0 overflow-y-auto border-l border-slate-200 bg-white">
+            <div className="sticky top-0 z-10 border-b border-slate-100 bg-[#0D3A35] px-6 py-5 text-white">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-black">Transfer Details</h2>
+                <span className={cn('rounded-full border px-2.5 py-1 text-[10px] font-bold capitalize', statusClass)}>
+                  {record.status}
+                </span>
+              </div>
+              <p className="mt-1 text-xs font-semibold text-white/65">{transfer.transferSlipNumber}</p>
+            </div>
+
+            <div className="space-y-5 p-5 sm:p-6">
+              <section className="overflow-hidden rounded-xl border border-slate-200">
+                <div className="border-b border-slate-100 bg-slate-50/70 px-4 py-3 text-xs font-black text-slate-800">
+                  Request &amp; Approval Status
+                </div>
+                <div className="grid grid-cols-2 gap-px bg-slate-100">
+                  {[
+                    ['Requested', formatTransferDate(record.requestedAt, true)],
+                    ['Current Status', record.status.toUpperCase()],
+                    ['Prepared By', record.preparedBy],
+                    ['Approver', record.approverName],
+                    ['Designation', record.approverDesignation],
+                    ['Approved On', formatTransferDate(record.approvedAt, true)],
+                  ].map(([label, value]) => (
+                    <div key={label} className="min-w-0 bg-white px-3 py-3">
+                      <p className="text-[9px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
+                      <p className="mt-1 break-words text-xs font-bold text-slate-700">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              {record.rejectionReason && (
+                <section className="rounded-xl border border-red-200 bg-red-50 p-4">
+                  <p className="text-[9px] font-bold uppercase tracking-wide text-red-400">Rejection Reason</p>
+                  <p className="mt-2 text-xs font-bold leading-relaxed text-red-700">{record.rejectionReason}</p>
+                </section>
+              )}
+
+              {record.digitalSignature && (
+                <section className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="flex items-start gap-3">
+                    <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" />
+                    <div>
+                      <p className="text-xs font-black text-emerald-900">Digitally Signed Approval</p>
+                      <p className="mt-1 text-xs font-bold text-emerald-800">
+                        {record.digitalSignature.signerName} · {record.digitalSignature.signerDesignation}
+                      </p>
+                      <p className="mt-1 text-[10px] font-semibold text-emerald-700">
+                        {formatTransferDate(record.digitalSignature.signedAt, true)}
+                      </p>
+                      <p className="mt-2 rounded-lg border border-emerald-200 bg-white/70 px-2.5 py-2 font-mono text-[9px] text-emerald-800">
+                        {record.digitalSignature.signature}
+                      </p>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              <section className="overflow-hidden rounded-xl border border-slate-200">
+                <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+                  <MessageCircle className="h-4 w-4 text-[#0D3A35]" />
+                  <div>
+                    <p className="text-xs font-black text-slate-800">Questions &amp; Replies</p>
+                    <p className="text-[10px] font-semibold text-slate-400">Reply to clarification requests from the approver</p>
+                  </div>
+                </div>
+
+                {(record.questions?.length ?? 0) === 0 ? (
+                  <div className="px-4 py-10 text-center">
+                    <MessageCircle className="mx-auto h-7 w-7 text-slate-300" />
+                    <p className="mt-2 text-xs font-bold text-slate-400">No questions raised</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3 bg-slate-50/40 p-3">
+                    {record.questions!.map((entry) => (
+                      <div key={entry.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                        <div className="p-3">
+                          <p className="text-[9px] font-black uppercase tracking-wide text-amber-700">Question from {entry.askedBy}</p>
+                          <p className="mt-1.5 text-xs font-semibold leading-relaxed text-slate-700">{entry.question}</p>
+                          <p className="mt-2 text-[9px] font-bold text-slate-400">{formatTransferDate(entry.askedAt, true)}</p>
+                        </div>
+                        {entry.reply ? (
+                          <div className="border-t border-emerald-100 bg-emerald-50/70 p-3">
+                            <p className="text-[9px] font-black uppercase tracking-wide text-emerald-700">
+                              Reply from {entry.repliedBy || record.preparedBy}
+                            </p>
+                            <p className="mt-1.5 text-xs font-semibold leading-relaxed text-slate-700">{entry.reply}</p>
+                            <p className="mt-2 text-[9px] font-bold text-slate-400">{formatTransferDate(entry.repliedAt, true)}</p>
+                          </div>
+                        ) : (
+                          <div className="border-t border-slate-100 p-3">
+                            <textarea
+                              value={replyDrafts[entry.id] ?? ''}
+                              onChange={(event) => setReplyDrafts((current) => ({ ...current, [entry.id]: event.target.value }))}
+                              rows={2}
+                              placeholder="Write your reply…"
+                              className="w-full resize-none rounded-lg border border-slate-200 p-2.5 text-xs outline-none focus:border-[#0D3A35]"
+                            />
+                            <Button
+                              type="button"
+                              onClick={() => {
+                                const reply = (replyDrafts[entry.id] ?? '').trim();
+                                if (!reply) return toast.error('Enter a reply');
+                                onReply(entry.id, reply);
+                                setReplyDrafts((current) => ({ ...current, [entry.id]: '' }));
+                              }}
+                              className="mt-2 h-9 w-full gap-2 bg-[#0D3A35] text-xs font-bold text-white hover:bg-[#092e2a]"
+                            >
+                              <Send className="h-3.5 w-3.5" />Send Reply
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </div>
+          </aside>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
 // ─────────────────────────────────────────────────────────────
 // MAIN PAGE
 // ─────────────────────────────────────────────────────────────
 const Inventory = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [items, setItems] = useState<StockItem[]>(initialItems);
+  const [masterConfig, setMasterConfig] = useState<InventoryMasterConfig>(readInventoryMasterConfig);
+  const [activeInventoryTab, setActiveInventoryTab] = useState<'dashboard' | 'central-store' | 'sub-store' | 'configure'>('dashboard');
+  const [centralStoreView, setCentralStoreView] = useState<'stock' | 'transfers'>('stock');
+  const [transferApprovals, setTransferApprovals] = useState<InventoryTransferApproval[]>(readInventoryApprovals);
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
+  const [activeSubStore, setActiveSubStore] = useState('All Locations');
+  const [selectedTransferId, setSelectedTransferId] = useState<string | null>(null);
 
   // modals
   const [addOpen, setAddOpen] = useState(false);
@@ -304,11 +912,15 @@ const Inventory = () => {
   const [alertPanelOpen, setAlertPanelOpen] = useState(true);
   const prevStockRef = useRef<Record<string, number>>({});
   const [editItem, setEditItem] = useState<StockItem | null>(null);
+  const [informationItem, setInformationItem] = useState<StockItem | null>(null);
   const [updateStockItem, setUpdateStockItem] = useState<StockItem | null>(null);
   const [ledgerItem, setLedgerItem] = useState<StockItem | null>(null);
   const [requestStockOpen, setRequestStockOpen] = useState(false);
+  const [transferStockOpen, setTransferStockOpen] = useState(false);
   const [requestStockItems, setRequestStockItems] = useState<StockItem[]>([]);
   const [allocationOpen, setAllocationOpen] = useState(false);
+  const [allocationItem, setAllocationItem] = useState<StockItem | null>(null);
+  const [issueStockItem, setIssueStockItem] = useState<StockItem | null>(null);
   const [issuedItemsOpen, setIssuedItemsOpen] = useState(false);
   const [incomingItem, setIncomingItem] = useState<StockItem | null>(null);
   const [outgoingItem, setOutgoingItem] = useState<StockItem | null>(null);
@@ -360,6 +972,21 @@ const Inventory = () => {
             currentStock: Number(it?.stock) || 0,
             stockInPipeline: Number(it?.stock_in_pipeline || it?.pipeline_stock || 0),
             minStock: Number(it?.threshold) || 0,
+            inventoryGroup: String(it?.inventory_group || it?.inventoryGroup || ''),
+            subCategory: String(it?.sub_category || it?.subcategory || it?.subCategory || ''),
+            expenseClassification: String(it?.expense_classification || it?.expenseClassification || ''),
+            inventoryClassification: String(it?.inventory_classification || it?.inventoryClassification || ''),
+            issueClassification: String(it?.issue_classification || it?.issueClassification || ''),
+            stockIssueMethod: String(it?.stock_issue_method || it?.stockIssueMethod || ''),
+            packingSize: String(it?.packing_size || it?.pack_size || it?.packingSize || ''),
+            shelf: String(it?.shelf || it?.shelf_number || it?.rack || ''),
+            batchTracking: typeof it?.batch_tracking === 'boolean' ? it.batch_tracking : undefined,
+            expiryTracking: typeof it?.expiry_tracking === 'boolean' ? it.expiry_tracking : undefined,
+            batchNumber: String(it?.batch_number || it?.batch_no || ''),
+            manufacturingDate: String(it?.manufacturing_date || it?.mfg_date || ''),
+            expiryDate: String(it?.expiry_date || it?.expiration_date || ''),
+            supplier: String(it?.supplier || it?.supplier_name || ''),
+            storageLocation: String(it?.storage_location || it?.bin_location || it?.shelf || ''),
             imageUrl: String(it?.item_image_url || ''),
             location: String(it?.location || ''),
             description: String(it?.description || ''),
@@ -371,6 +998,11 @@ const Inventory = () => {
                   stock: Number(e?.stock) || 0,
                   per_unit_cost: Number(e?.per_unit_cost) || 0,
                   po_number: String(e?.po_number || ''),
+                  batch_number: String(e?.batch_number || e?.batch_no || ''),
+                  manufacturing_date: String(e?.manufacturing_date || e?.mfg_date || ''),
+                  expiry_date: String(e?.expiry_date || e?.expiration_date || ''),
+                  supplier: String(e?.supplier || e?.supplier_name || ''),
+                  storage_location: String(e?.storage_location || e?.bin_location || ''),
                 }))
               : [],
           };
@@ -403,25 +1035,128 @@ const Inventory = () => {
     fetchOpenLedgers();
   }, []);
 
+  useEffect(() => {
+    window.localStorage.setItem(INVENTORY_MASTER_CONFIG_KEY, JSON.stringify(masterConfig));
+  }, [masterConfig]);
+
+  useEffect(() => {
+    const refreshTransfers = () => setTransferApprovals(readInventoryApprovals());
+    return subscribeToInventoryApprovals(refreshTransfers);
+  }, []);
+
+  const approvedTransfers = useMemo(
+    () => transferApprovals.filter((approval) => approval.status === 'approved'),
+    [transferApprovals],
+  );
+
+  const centralStoreItems = useMemo(() => items.map((item) => {
+    const postedTransfers = approvedTransfers.filter((approval) => (
+      approval.transfer.itemId === item.id
+      || (approval.transfer.itemCode && approval.transfer.itemCode === item.sku)
+    ));
+    const transferredQuantity = postedTransfers.reduce(
+      (total, approval) => total + approval.transfer.quantity,
+      0,
+    );
+    if (transferredQuantity === 0) return item;
+    return {
+      ...item,
+      currentStock: Math.max(0, item.currentStock - transferredQuantity),
+      transactions: [
+        ...postedTransfers.map((approval): StockTransaction => ({
+          id: `transfer-out-${approval.id}`,
+          type: 'outgoing',
+          qty: approval.transfer.quantity,
+          date: approval.approvedAt?.slice(0, 10) || approval.transfer.transferDate,
+          note: `${approval.transfer.transferSlipNumber} · Transfer to ${approval.transfer.destinationStore}`,
+          by: approval.digitalSignature?.signerName || approval.approverName,
+        })),
+        ...item.transactions,
+      ],
+    };
+  }), [approvedTransfers, items]);
+
+  const subStoreItems = useMemo(() => {
+    const grouped = new Map<string, StockItem>();
+    approvedTransfers.forEach((approval) => {
+      const transfer = approval.transfer;
+      const sourceItem = items.find((item) => (
+        item.id === transfer.itemId
+        || (transfer.itemCode && item.sku === transfer.itemCode)
+      ));
+      const key = `${transfer.destinationStore}::${transfer.itemId || transfer.itemCode}`;
+      const incomingTransaction: StockTransaction = {
+        id: `transfer-in-${approval.id}`,
+        type: 'incoming',
+        qty: transfer.quantity,
+        date: approval.approvedAt?.slice(0, 10) || transfer.transferDate,
+        note: `${transfer.transferSlipNumber} · Received from ${transfer.sourceStore}`,
+        by: approval.digitalSignature?.signerName || approval.approverName,
+      };
+      const existing = grouped.get(key);
+      if (existing) {
+        grouped.set(key, {
+          ...existing,
+          currentStock: existing.currentStock + transfer.quantity,
+          transactions: [incomingTransaction, ...existing.transactions],
+        });
+        return;
+      }
+      grouped.set(key, {
+        id: `sub-store-${key}`,
+        name: transfer.itemName,
+        category: transfer.category || sourceItem?.category || 'Others',
+        sku: transfer.itemCode || sourceItem?.sku || '',
+        unit: transfer.unit || sourceItem?.unit || '',
+        currentStock: transfer.quantity,
+        stockInPipeline: 0,
+        minStock: 0,
+        inventoryGroup: sourceItem?.inventoryGroup || '',
+        subCategory: sourceItem?.subCategory || '',
+        expenseClassification: sourceItem?.expenseClassification || '',
+        inventoryClassification: sourceItem?.inventoryClassification || '',
+        issueClassification: sourceItem?.issueClassification || '',
+        stockIssueMethod: sourceItem?.stockIssueMethod || '',
+        packingSize: sourceItem?.packingSize || '',
+        shelf: sourceItem?.shelf || '',
+        imageUrl: sourceItem?.imageUrl || '',
+        location: transfer.destinationStore,
+        description: sourceItem?.description || `Stock received through ${transfer.transferSlipNumber}`,
+        vendors: sourceItem?.vendors || [],
+        seriesNumber: sourceItem?.seriesNumber || '',
+        transactions: [incomingTransaction],
+        fifoList: [],
+      });
+    });
+    return Array.from(grouped.values()).sort((a, b) => (
+      a.location.localeCompare(b.location) || a.name.localeCompare(b.name)
+    ));
+  }, [approvedTransfers, items]);
+
   // ── Low stock derived list ───────────────────────────────
   const lowStockItems = useMemo(
-    () => items.filter((i) => i.currentStock < i.minStock && !dismissedAlerts.has(i.id)),
-    [items, dismissedAlerts],
+    () => centralStoreItems.filter((i) => i.currentStock < i.minStock && !dismissedAlerts.has(i.id)),
+    [centralStoreItems, dismissedAlerts],
   );
 
   const inventoryValue = useMemo(
     () =>
-      items.reduce((sum, item) => {
+      centralStoreItems.reduce((sum, item) => {
         const val = (item.fifoList ?? []).reduce((s, e) => s + e.stock * e.per_unit_cost, 0);
         return sum + val;
       }, 0),
-    [items],
+    [centralStoreItems],
+  );
+
+  const availableCategories = useMemo(
+    () => ['All', ...Array.from(new Set(masterConfig.categories))],
+    [masterConfig.categories],
   );
 
   // ── Toast when an item crosses the low-stock threshold ──
   useEffect(() => {
     const prev = prevStockRef.current;
-    items.forEach((item) => {
+    centralStoreItems.forEach((item) => {
       const wasOk = prev[item.id] === undefined || prev[item.id] >= item.minStock;
       const isLow = item.currentStock < item.minStock;
       if (wasOk && isLow && !dismissedAlerts.has(item.id)) {
@@ -432,20 +1167,156 @@ const Inventory = () => {
       prev[item.id] = item.currentStock;
     });
     prevStockRef.current = prev;
-  }, [items]);
+  }, [centralStoreItems]);
 
   // ── Filtered items ──────────────────────────────────────
+  const inventoryItemsForActiveStore = activeInventoryTab === 'sub-store'
+    ? subStoreItems
+    : centralStoreItems;
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    return items.filter((item) => {
+    return inventoryItemsForActiveStore.filter((item) => {
       const matchCat = activeCategory === 'All' || item.category === activeCategory;
       const matchSearch =
         item.name.toLowerCase().includes(q) ||
         item.sku.toLowerCase().includes(q) ||
-        item.category.toLowerCase().includes(q);
+        item.category.toLowerCase().includes(q) ||
+        (item.inventoryGroup || '').toLowerCase().includes(q) ||
+        (item.subCategory || '').toLowerCase().includes(q) ||
+        (item.expenseClassification || '').toLowerCase().includes(q) ||
+        (item.inventoryClassification || '').toLowerCase().includes(q) ||
+        (item.issueClassification || '').toLowerCase().includes(q);
       return matchCat && matchSearch;
     });
-  }, [items, search, activeCategory]);
+  }, [inventoryItemsForActiveStore, search, activeCategory]);
+
+  const subStoreLocations = useMemo(
+    () => Array.from(new Set([
+      ...masterConfig.stores,
+      ...subStoreItems.map((item) => item.location.trim()).filter(Boolean),
+    ])).sort((a, b) => a.localeCompare(b)),
+    [masterConfig.stores, subStoreItems],
+  );
+
+  const availableUnits = useMemo(
+    () => Array.from(new Set(masterConfig.units)),
+    [masterConfig.units],
+  );
+
+  const availableStores = useMemo(
+    () => Array.from(new Set([
+      ...masterConfig.stores,
+      ...items.map((item) => item.location.trim()).filter(Boolean),
+      ...subStoreLocations,
+    ])),
+    [items, masterConfig.stores, subStoreLocations],
+  );
+
+  const displayedItems = useMemo(
+    () => activeInventoryTab === 'sub-store' && activeSubStore !== 'All Locations'
+      ? filtered.filter((item) => item.location === activeSubStore)
+      : filtered,
+    [activeInventoryTab, activeSubStore, filtered],
+  );
+
+  const visibleTransferApprovals = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return transferApprovals.filter((approval) => {
+      if (!query) return true;
+      return [
+        approval.transfer.transferSlipNumber,
+        approval.transfer.itemName,
+        approval.transfer.itemCode,
+        approval.transfer.destinationStore,
+        approval.approverName,
+        approval.status,
+      ].join(' ').toLowerCase().includes(query);
+    });
+  }, [search, transferApprovals]);
+
+  const pendingTransferCount = useMemo(
+    () => transferApprovals.filter((approval) => approval.status === 'pending').length,
+    [transferApprovals],
+  );
+
+  const selectedTransfer = useMemo(
+    () => transferApprovals.find((approval) => approval.id === selectedTransferId) ?? null,
+    [selectedTransferId, transferApprovals],
+  );
+
+  type StringMasterSection =
+    | 'inventoryGroups'
+    | 'units'
+    | 'stores'
+    | 'expenseClassifications'
+    | 'inventoryClassifications'
+    | 'issueClassifications';
+
+  const addMasterValue = (section: StringMasterSection, value: string) => {
+    if (masterConfig[section].some((entry) => entry.toLowerCase() === value.toLowerCase())) {
+      toast.error(`"${value}" already exists`);
+      return;
+    }
+    setMasterConfig((previous) => ({ ...previous, [section]: [...previous[section], value] }));
+    toast.success(`"${value}" created`);
+  };
+
+  const removeMasterValue = (section: StringMasterSection, value: string) => {
+    setMasterConfig((previous) => ({
+      ...previous,
+      [section]: previous[section].filter((entry) => entry !== value),
+      ...(section === 'inventoryGroups'
+        ? {
+          categoryGroups: Object.fromEntries(
+            Object.entries(previous.categoryGroups).filter(([, group]) => group !== value),
+          ),
+        }
+        : {}),
+    }));
+  };
+
+  const addCategory = (name: string, inventoryGroup?: string) => {
+    if (!inventoryGroup) return toast.error('Select a parent inventory group');
+    if (masterConfig.categories.some((entry) => entry.toLowerCase() === name.toLowerCase())) {
+      toast.error(`"${name}" already exists`);
+      return;
+    }
+    setMasterConfig((previous) => ({
+      ...previous,
+      categories: [...previous.categories, name],
+      categoryGroups: { ...previous.categoryGroups, [name]: inventoryGroup },
+    }));
+    toast.success(`"${name}" created under ${inventoryGroup}`);
+  };
+
+  const removeCategory = (value: string) => {
+    setMasterConfig((previous) => {
+      const categoryGroups = { ...previous.categoryGroups };
+      delete categoryGroups[value];
+      return {
+        ...previous,
+        categories: previous.categories.filter((entry) => entry !== value),
+        categoryGroups,
+        subCategories: previous.subCategories.filter((entry) => entry.category !== value),
+      };
+    });
+  };
+
+  const addSubCategory = (name: string, category?: string) => {
+    if (!category) return toast.error('Select a parent category');
+    if (masterConfig.subCategories.some(
+      (entry) => entry.name.toLowerCase() === name.toLowerCase() && entry.category === category,
+    )) {
+      toast.error(`"${name}" already exists under ${category}`);
+      return;
+    }
+    setMasterConfig((previous) => ({
+      ...previous,
+      subCategories: [...previous.subCategories, { name, category }],
+    }));
+    toast.success(`"${name}" created under ${category}`);
+  };
 
   // ── Helpers to mutate items ─────────────────────────────
   const addTransaction = (itemId: string, tx: Omit<StockTransaction, 'id'>) => {
@@ -469,33 +1340,37 @@ const Inventory = () => {
   // RENDER
   // ─────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
+    <div className="min-h-screen space-y-7 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
       {/* ── Header ── */}
-      <div className="flex items-start justify-between mb-5">
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Inventory Management</h1>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Track stock levels, manage incoming & outgoing goods
+          <p className="text-sm font-bold text-emerald-700">Inventory Operations</p>
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">Inventory Management</h1>
+          <p className="mt-3 text-base font-medium text-slate-600">
+            Track stock, issue materials, and manage equipment from one place
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             onClick={() => setIssuedItemsOpen(true)}
-            className="bg-purple-600 hover:bg-purple-700 text-white gap-2"
+            className="h-11 gap-2 rounded-xl border border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5"
           >
             <ClipboardList className="w-4 h-4" />
             Issue Items
           </Button>
           <Button
-            onClick={() => setAllocationOpen(true)}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white gap-2"
+            onClick={() => {
+              setAllocationItem(null);
+              setAllocationOpen(true);
+            }}
+            className="h-11 gap-2 rounded-xl border border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5"
           >
             <PackageCheck className="w-4 h-4" />
             Equipment Allocation
           </Button>
           <Button
             onClick={() => setAddOpen(true)}
-            className="bg-green-600 hover:bg-green-700 text-white gap-2"
+            className="h-11 gap-2 rounded-xl bg-[#0D3A35] px-5 font-bold text-white shadow-sm hover:bg-[#092e2a]"
           >
             <Plus className="w-4 h-4" />
             Create New Product
@@ -503,10 +1378,42 @@ const Inventory = () => {
         </div>
       </div>
 
+      {/* ── Inventory switch bar ── */}
+      <div className="overflow-x-auto border-b border-slate-200 bg-white px-1">
+        <div className="flex min-w-max items-center gap-10 px-4">
+          {[
+            { key: 'dashboard', label: 'Dashboard', icon: Boxes },
+            { key: 'central-store', label: 'Central Store', icon: PackageCheck },
+            { key: 'sub-store', label: 'Sub-Store', icon: Layers },
+            { key: 'configure', label: 'Configure', icon: Settings },
+          ].map((tab) => {
+            const isActive = activeInventoryTab === tab.key;
+            const TabIcon = tab.icon;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setActiveInventoryTab(tab.key as 'dashboard' | 'central-store' | 'sub-store' | 'configure')}
+                className={cn(
+                  'relative flex h-14 items-center gap-2 px-1 text-sm font-bold transition-colors',
+                  isActive ? 'text-slate-950' : 'text-slate-500 hover:text-[#0D3A35]',
+                )}
+              >
+                <TabIcon className={cn('h-4 w-4', isActive && 'text-[#0D3A35]')} />
+                {tab.label}
+                {isActive && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-[#0D3A35]" />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {activeInventoryTab === 'dashboard' && (
+        <>
       {/* ── Low Stock Alert Panel ── */}
       {lowStockItems.length > 0 && alertPanelOpen && (
-        <div className="mb-5 rounded-xl border border-red-200 bg-red-50 overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-2.5 border-b border-red-200 bg-red-100/60">
+        <div className="overflow-hidden rounded-2xl border border-red-200 bg-white shadow-[0_12px_32px_rgba(15,23,42,0.04)]">
+          <div className="flex items-center justify-between border-b border-red-100 bg-red-50/80 px-4 py-3">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-red-600" />
               <span className="text-sm font-semibold text-red-700">
@@ -521,9 +1428,9 @@ const Inventory = () => {
               <X className="w-4 h-4" />
             </button>
           </div>
-          <div className="divide-y divide-red-100">
+          <div className="divide-y divide-slate-100">
             {lowStockItems.map((item) => (
-              <div key={item.id} className="flex items-center justify-between px-4 py-2.5 hover:bg-red-100/40 transition-colors">
+              <div key={item.id} className="flex items-center justify-between px-4 py-2.5 transition-colors hover:bg-slate-50">
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="w-7 h-7 rounded-full bg-red-200 flex items-center justify-center shrink-0">
                     <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
@@ -555,126 +1462,353 @@ const Inventory = () => {
         </div>
       )}
 
-      {/* ── Search Bar ── */}
-      <div className="relative mb-4">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-        <Input
-          placeholder="Search by name, SKU or category…"
-          className="pl-9 bg-white border-gray-200 shadow-sm h-10"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </div>
-
-      {/* ── Category Tabs ── */}
-      <div className="flex gap-2 flex-wrap mb-6">
-        {CATEGORIES.map((cat) => (
-          <button
-            key={cat}
-            onClick={() => setActiveCategory(cat)}
-            className={cn(
-              'px-3 py-1.5 rounded-full text-sm font-medium border transition-colors',
-              activeCategory === cat
-                ? 'bg-green-600 text-white border-green-600'
-                : 'bg-white text-gray-600 border-gray-200 hover:border-green-400',
-            )}
-          >
-            {cat}
-          </button>
-        ))}
-      </div>
-
       {/* ── KPI Strip ── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
         {/* Total Inventory Value */}
-        <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-7 h-7 rounded-lg bg-green-50 flex items-center justify-center">
-              <IndianRupee className="w-3.5 h-3.5 text-green-600" />
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-slate-500">Inventory Value</p>
+              <p className="mt-3 text-2xl font-bold text-slate-950">
+                ₹{inventoryValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              </p>
+              <p className="mt-1 text-xs font-medium text-slate-400">Based on FIFO cost</p>
             </div>
-            <p className="text-xs font-medium text-gray-500">Inventory Value</p>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35] ring-2 ring-[#0D3A35]/10">
+              <IndianRupee className="h-5 w-5" />
+            </div>
           </div>
-          <p className="text-xl font-bold text-gray-900">
-            ₹{inventoryValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-          </p>
-          <p className="text-[11px] text-gray-400 mt-0.5">Based on FIFO cost</p>
         </div>
 
         {/* Total Items */}
-        <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-7 h-7 rounded-lg bg-blue-50 flex items-center justify-center">
-              <Boxes className="w-3.5 h-3.5 text-blue-600" />
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-slate-500">Total Items</p>
+              <p className="mt-3 text-2xl font-bold text-slate-950">{items.length}</p>
+              <p className="mt-1 text-xs font-medium text-slate-400">{new Set(items.map((i) => i.category)).size} categories</p>
             </div>
-            <p className="text-xs font-medium text-gray-500">Total Items</p>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35] ring-2 ring-[#0D3A35]/10">
+              <Boxes className="h-5 w-5" />
+            </div>
           </div>
-          <p className="text-xl font-bold text-gray-900">{items.length}</p>
-          <p className="text-[11px] text-gray-400 mt-0.5">{new Set(items.map((i) => i.category)).size} categories</p>
         </div>
 
         {/* Open Ledgers */}
-        <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-7 h-7 rounded-lg bg-violet-50 flex items-center justify-center">
-              <ClipboardList className="w-3.5 h-3.5 text-violet-600" />
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-slate-500">Open Ledgers</p>
+              <p className="mt-3 text-2xl font-bold text-slate-950">{openLedgersCount ?? '—'}</p>
+              <p className="mt-1 text-xs font-medium text-slate-400">Pending &amp; active issues</p>
             </div>
-            <p className="text-xs font-medium text-gray-500">Open Ledgers</p>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35] ring-2 ring-[#0D3A35]/10">
+              <ClipboardList className="h-5 w-5" />
+            </div>
           </div>
-          <p className="text-xl font-bold text-violet-600">
-            {openLedgersCount ?? '—'}
-          </p>
-          <p className="text-[11px] text-gray-400 mt-0.5">Pending &amp; active issues</p>
         </div>
 
         {/* Low Stock */}
         <div
           className={cn(
-            'bg-white rounded-xl border p-4 shadow-sm cursor-pointer hover:shadow-md transition-all',
-            lowStockItems.length > 0 ? 'border-red-200 hover:border-red-300' : 'border-gray-100',
+            'cursor-pointer rounded-2xl border bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)] transition-all hover:-translate-y-0.5',
+            lowStockItems.length > 0 ? 'border-red-200 hover:border-red-300' : 'border-slate-200/80',
           )}
           onClick={() => { setDismissedAlerts(new Set()); setAlertPanelOpen(true); }}
         >
-          <div className="flex items-center gap-2 mb-1">
-            <div className={cn(
-              'w-7 h-7 rounded-lg flex items-center justify-center',
-              lowStockItems.length > 0 ? 'bg-red-50' : 'bg-gray-50',
-            )}>
-              <AlertTriangle className={cn('w-3.5 h-3.5', lowStockItems.length > 0 ? 'text-red-600' : 'text-gray-400')} />
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-slate-500">Low Stock</p>
+              <p className={cn('mt-3 text-2xl font-bold', lowStockItems.length > 0 ? 'text-red-600' : 'text-slate-950')}>
+                {lowStockItems.length}
+              </p>
+              <p className="mt-1 text-xs font-medium text-slate-400">Below minimum threshold</p>
             </div>
-            <p className="text-xs font-medium text-gray-500">Low Stock</p>
+            <div className={cn(
+              'flex h-11 w-11 shrink-0 items-center justify-center rounded-full ring-2',
+              lowStockItems.length > 0
+                ? 'bg-red-50 text-red-600 ring-red-100'
+                : 'bg-[#0D3A35]/10 text-[#0D3A35] ring-[#0D3A35]/10',
+            )}>
+              <AlertTriangle className="h-5 w-5" />
+            </div>
           </div>
-          <p className={cn('text-xl font-bold', lowStockItems.length > 0 ? 'text-red-600' : 'text-gray-900')}>
-            {lowStockItems.length}
+        </div>
+      </div>
+        </>
+      )}
+
+      {(activeInventoryTab === 'central-store' || activeInventoryTab === 'sub-store') && (
+        <>
+      {/* ── Search & Category Filter ── */}
+      <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_12px_35px_rgba(15,23,42,0.04)] sm:p-5">
+        {activeInventoryTab === 'central-store' && (
+          <div className="mb-4 flex flex-col gap-3 border-b border-slate-100 pb-4 xl:flex-row xl:items-center xl:justify-between">
+            <div>
+              <h2 className="text-base font-bold text-slate-950">Central Store Inventory</h2>
+              <p className="mt-1 text-xs font-medium text-slate-500">Manage stock held at the central store</p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+                <button
+                  type="button"
+                  onClick={() => { setCentralStoreView('stock'); setSearch(''); }}
+                  className={cn(
+                    'flex h-8 items-center gap-2 rounded-md px-3 text-xs font-bold transition',
+                    centralStoreView === 'stock' ? 'bg-white text-[#0D3A35] shadow-sm' : 'text-slate-500',
+                  )}
+                >
+                  <Boxes className="h-3.5 w-3.5" />Stock Items
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setCentralStoreView('transfers'); setSearch(''); }}
+                  className={cn(
+                    'flex h-8 items-center gap-2 rounded-md px-3 text-xs font-bold transition',
+                    centralStoreView === 'transfers' ? 'bg-white text-[#0D3A35] shadow-sm' : 'text-slate-500',
+                  )}
+                >
+                  <ClipboardList className="h-3.5 w-3.5" />
+                  Transfer Slips
+                  {pendingTransferCount > 0 && (
+                    <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] text-amber-700">{pendingTransferCount}</span>
+                  )}
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTransferStockOpen(true)}
+                className="flex h-10 items-center justify-center gap-2 rounded-lg bg-[#0D3A35] px-4 text-xs font-bold text-white shadow-sm transition hover:bg-[#092e2a]"
+              >
+                <ArrowRightLeft className="h-4 w-4" />
+                Transfer Stock
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <div className="relative w-full lg:max-w-md">
+            <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <Input
+              placeholder={activeInventoryTab === 'central-store' && centralStoreView === 'transfers'
+                ? 'Search transfer slip, item, store, or approver…'
+                : 'Search by name, SKU or category…'}
+              className="h-12 rounded-xl border-slate-200 bg-slate-50/70 pl-11 text-sm font-semibold shadow-none focus-visible:ring-emerald-100"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          {(activeInventoryTab === 'sub-store' || centralStoreView === 'stock') && (
+          <div className="min-w-0 flex-1 overflow-x-auto pb-1">
+            <div className="flex w-max items-center gap-2">
+              {availableCategories.map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setActiveCategory(cat)}
+                  className={cn(
+                    'whitespace-nowrap rounded-lg border px-3 py-2 text-xs font-bold transition-colors',
+                    activeCategory === cat
+                      ? 'border-[#0D3A35] bg-[#0D3A35] text-white'
+                      : 'border-slate-200 bg-white text-slate-600 hover:border-[#0D3A35]/30 hover:bg-[#0D3A35]/5 hover:text-[#0D3A35]',
+                  )}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          </div>
+          )}
+        </div>
+        {activeInventoryTab === 'sub-store' && (
+          <div className="mt-3 border-t border-slate-100 pt-3">
+            <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400">Store Location</p>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {['All Locations', ...availableStores].map((location) => (
+                <button
+                  key={location}
+                  type="button"
+                  onClick={() => setActiveSubStore(location)}
+                  className={cn(
+                    'whitespace-nowrap rounded-lg border px-3 py-2 text-xs font-bold transition-colors',
+                    activeSubStore === location
+                      ? 'border-[#0D3A35] bg-[#0D3A35] text-white'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
+                  )}
+                >
+                  {location}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
+          <p className="text-xs font-semibold text-slate-500">
+            {activeInventoryTab === 'central-store' && centralStoreView === 'transfers' ? (
+              <>Showing <span className="text-[#0D3A35]">{visibleTransferApprovals.length}</span> of {transferApprovals.length} transfer slips</>
+            ) : (
+              <>Showing <span className="text-[#0D3A35]">{displayedItems.length}</span> of {inventoryItemsForActiveStore.length} inventory items</>
+            )}
           </p>
-          <p className="text-[11px] text-gray-400 mt-0.5">Below minimum threshold</p>
+          {(search || (
+            centralStoreView === 'stock'
+            && (activeCategory !== 'All' || (activeInventoryTab === 'sub-store' && activeSubStore !== 'All Locations'))
+          )) && (
+            <button
+              type="button"
+              onClick={() => { setSearch(''); setActiveCategory('All'); setActiveSubStore('All Locations'); }}
+              className="text-xs font-bold text-[#0D3A35] hover:underline"
+            >
+              Clear filters
+            </button>
+          )}
         </div>
       </div>
 
+      {activeInventoryTab === 'central-store' && centralStoreView === 'transfers' && (
+        visibleTransferApprovals.length === 0 ? (
+          <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white py-20 text-slate-400">
+            <ClipboardList className="mb-3 h-11 w-11 opacity-40" />
+            <p className="text-base font-bold">No transfer slips found</p>
+            <p className="mt-1 text-xs font-medium">Create a stock transfer request to see it here.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,340px),1fr))] gap-5">
+            {visibleTransferApprovals.map((approval) => {
+              const latestQuestion = approval.questions?.[approval.questions.length - 1];
+              return (
+                <article
+                  key={approval.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setSelectedTransferId(approval.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') setSelectedTransferId(approval.id);
+                  }}
+                  className="flex min-h-[310px] cursor-pointer flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)] transition hover:-translate-y-0.5 hover:border-[#0D3A35]/20"
+                >
+                  <div className="flex items-start justify-between gap-3 border-b border-slate-100 p-5">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35]">
+                        <ArrowRightLeft className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className="truncate text-sm font-black text-slate-950">{approval.transfer.transferSlipNumber}</h3>
+                        <p className="mt-1 text-[10px] font-semibold text-slate-400">
+                          Submitted {new Date(approval.requestedAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}
+                        </p>
+                      </div>
+                    </div>
+                    <span className={cn(
+                      'shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold capitalize',
+                      approval.status === 'pending'
+                        ? 'border-amber-200 bg-amber-50 text-amber-700'
+                        : approval.status === 'approved'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                          : 'border-red-200 bg-red-50 text-red-700',
+                    )}>
+                      {approval.status}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-px bg-slate-100">
+                    {[
+                      ['Item', approval.transfer.itemName],
+                      ['Quantity', `${approval.transfer.quantity.toLocaleString('en-IN')} ${approval.transfer.unit}`],
+                      ['Destination', approval.transfer.destinationStore],
+                      ['Vehicle', approval.transfer.vehicleNumber || 'N/A'],
+                    ].map(([label, value]) => (
+                      <div key={label} className="min-w-0 bg-white px-4 py-3">
+                        <p className="text-[9px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
+                        <p className="mt-1 truncate text-xs font-bold text-slate-700">{value}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex-1 space-y-3 p-4">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="font-semibold text-slate-400">Assigned Approver</span>
+                      <strong className="truncate text-slate-700">{approval.approverName}</strong>
+                    </div>
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="font-semibold text-slate-400">Approval Date</span>
+                      <strong className="text-slate-700">
+                        {approval.approvedAt
+                          ? new Date(approval.approvedAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })
+                          : 'Pending'}
+                      </strong>
+                    </div>
+
+                    {latestQuestion && (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                        <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-wide text-amber-700">
+                          <MessageCircle className="h-3.5 w-3.5" />
+                          Question from {latestQuestion.askedBy}
+                        </div>
+                        <p className="mt-2 text-xs font-semibold leading-relaxed text-amber-900">{latestQuestion.question}</p>
+                        {(approval.questions?.length ?? 0) > 1 && (
+                          <p className="mt-2 text-[9px] font-bold text-amber-600">
+                            +{approval.questions!.length - 1} earlier question{approval.questions!.length - 1 === 1 ? '' : 's'}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {approval.rejectionReason && (
+                      <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">
+                        Rejection reason: {approval.rejectionReason}
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTransferId(approval.id)}
+                    className="flex items-center justify-center gap-2 border-t border-slate-100 bg-slate-50/70 px-4 py-3 text-xs font-black text-[#0D3A35] transition hover:bg-[#0D3A35]/5"
+                  >
+                    View Transfer Slip
+                    <FileCheck className="h-4 w-4" />
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        )
+      )}
+
+      {(activeInventoryTab === 'sub-store' || centralStoreView === 'stock') && (
+        <>
       {/* ── Restore alerts link ── */}
-      {(!alertPanelOpen || dismissedAlerts.size > 0) && items.some((i) => i.currentStock < i.minStock) && (
+      {(!alertPanelOpen || dismissedAlerts.size > 0) && centralStoreItems.some((i) => i.currentStock < i.minStock) && (
         <button
-          onClick={() => { setDismissedAlerts(new Set()); setAlertPanelOpen(true); }}
+          onClick={() => {
+            setDismissedAlerts(new Set());
+            setAlertPanelOpen(true);
+            setActiveInventoryTab('dashboard');
+          }}
           className="mb-4 flex items-center gap-1.5 text-xs font-medium text-red-500 hover:text-red-700 transition-colors"
         >
           <AlertTriangle className="w-3 h-3" />
-          {items.filter((i) => i.currentStock < i.minStock).length} low-stock alert{items.filter((i) => i.currentStock < i.minStock).length > 1 ? 's' : ''} hidden — click to restore
+          {centralStoreItems.filter((i) => i.currentStock < i.minStock).length} low-stock alert{centralStoreItems.filter((i) => i.currentStock < i.minStock).length > 1 ? 's' : ''} hidden — click to restore
         </button>
       )}
 
       {/* ── Card Grid ── */}
-      {filtered.length === 0 ? (
+      {displayedItems.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-gray-400">
           <Boxes className="w-12 h-12 mb-3 opacity-40" />
           <p className="text-lg font-medium">No items found</p>
           <p className="text-sm">Try a different search or category filter</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-          {filtered.map((item) => (
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,320px),1fr))] items-stretch gap-6">
+          {displayedItems.map((item) => (
             <InventoryCard
               key={item.id}
               item={item}
-              onEdit={() => setEditItem(item)}
+              onInfo={() => setInformationItem(item)}
+              onAllocate={() => {
+                setIssueStockItem(item);
+              }}
               onUpdateStock={() => {
                 setRequestStockItems([item]);
                 setRequestStockOpen(true);
@@ -688,6 +1822,141 @@ const Inventory = () => {
           ))}
         </div>
       )}
+        </>
+      )}
+        </>
+      )}
+
+      {activeInventoryTab === 'configure' && (
+        <div className="space-y-5">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-xl font-bold text-slate-950">Inventory Master Configuration</h2>
+              <p className="mt-1 text-sm font-medium text-slate-500">
+                Create and maintain the master values used across inventory forms.
+              </p>
+            </div>
+            <span className="text-xs font-semibold text-slate-400">Changes are saved automatically</span>
+          </div>
+
+          <div className="rounded-2xl border border-[#0D3A35]/15 bg-[#0D3A35]/5 p-4">
+            <p className="text-[10px] font-black uppercase tracking-[0.14em] text-[#0D3A35]">ERP Item Hierarchy</p>
+            <p className="mt-2 text-sm font-bold text-slate-800">
+              Inventory Group <span className="mx-2 text-slate-300">→</span>
+              Item Category <span className="mx-2 text-slate-300">→</span>
+              Item Subcategory <span className="mx-2 text-slate-300">→</span>
+              Item
+            </p>
+            <p className="mt-2 text-xs font-semibold text-slate-500">
+              Example: Farm Inputs → Fertilisers → Nitrogen Fertilisers → Urea 46% N
+            </p>
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-2">
+            <MasterConfigCard
+              title="Inventory Groups"
+              description="Maintain the highest-level ERP grouping for every inventory item."
+              placeholder="Enter inventory group"
+              icon={Layers}
+              values={masterConfig.inventoryGroups.map((value) => ({ id: value, label: value }))}
+              onAdd={(value) => addMasterValue('inventoryGroups', value)}
+              onRemove={(value) => removeMasterValue('inventoryGroups', value)}
+            />
+            <MasterConfigCard
+              title="Item Categories"
+              description="Create item categories and link each category to an inventory group."
+              placeholder="Enter category name"
+              icon={Boxes}
+              parentLabel="Parent Inventory Group"
+              parentOptions={masterConfig.inventoryGroups}
+              values={masterConfig.categories.map((value) => ({
+                id: value,
+                label: value,
+                meta: masterConfig.categoryGroups[value] || 'Unassigned group',
+              }))}
+              onAdd={addCategory}
+              onRemove={removeCategory}
+            />
+            <MasterConfigCard
+              title="Sub Categories"
+              description="Create sub-categories and link each one to its parent category."
+              placeholder="Enter sub-category name"
+              icon={Layers}
+              parentLabel="Parent Category"
+              parentOptions={masterConfig.categories}
+              values={masterConfig.subCategories.map((value) => ({
+                id: `${value.category}::${value.name}`,
+                label: value.name,
+                meta: value.category,
+              }))}
+              onAdd={addSubCategory}
+              onRemove={(id) => {
+                const [category, name] = id.split('::');
+                setMasterConfig((previous) => ({
+                  ...previous,
+                  subCategories: previous.subCategories.filter(
+                    (entry) => !(entry.category === category && entry.name === name),
+                  ),
+                }));
+              }}
+            />
+            <MasterConfigCard
+              title="Measuring Units"
+              description="Create quantity units available in product and stock forms."
+              placeholder="Enter unit, e.g. Boxes"
+              icon={PackageCheck}
+              values={masterConfig.units.map((value) => ({ id: value, label: value }))}
+              onAdd={(value) => addMasterValue('units', value)}
+              onRemove={(value) => removeMasterValue('units', value)}
+            />
+            <MasterConfigCard
+              title="Stores"
+              description="Create central warehouses, sub-stores, and storage locations."
+              placeholder="Enter store name"
+              icon={Settings}
+              values={masterConfig.stores.map((value) => ({ id: value, label: value }))}
+              onAdd={(value) => addMasterValue('stores', value)}
+              onRemove={(value) => removeMasterValue('stores', value)}
+            />
+          </div>
+
+          <div className="pt-2">
+            <h3 className="text-base font-bold text-slate-950">Classification Standards</h3>
+            <p className="mt-1 text-xs font-semibold text-slate-500">
+              Standard classifications available when creating or editing an inventory item.
+            </p>
+          </div>
+          <div className="grid gap-5 lg:grid-cols-3">
+            <MasterConfigCard
+              title="Expense Classification"
+              description="Classify purchasing and accounting treatment."
+              placeholder="Enter expense class"
+              icon={IndianRupee}
+              values={masterConfig.expenseClassifications.map((value) => ({ id: value, label: value }))}
+              onAdd={(value) => addMasterValue('expenseClassifications', value)}
+              onRemove={(value) => removeMasterValue('expenseClassifications', value)}
+            />
+            <MasterConfigCard
+              title="Inventory Classification"
+              description="Classify the physical nature of inventory."
+              placeholder="Enter inventory class"
+              icon={Boxes}
+              values={masterConfig.inventoryClassifications.map((value) => ({ id: value, label: value }))}
+              onAdd={(value) => addMasterValue('inventoryClassifications', value)}
+              onRemove={(value) => removeMasterValue('inventoryClassifications', value)}
+            />
+            <MasterConfigCard
+              title="Issue Classification"
+              description="Define whether issued stock must be returned."
+              placeholder="Enter issue class"
+              icon={Undo2}
+              values={masterConfig.issueClassifications.map((value) => ({ id: value, label: value }))}
+              onAdd={(value) => addMasterValue('issueClassifications', value)}
+              onRemove={(value) => removeMasterValue('issueClassifications', value)}
+            />
+          </div>
+        </div>
+      )}
 
       {/* ═══════════════════════════════════════════════
           MODALS
@@ -697,6 +1966,15 @@ const Inventory = () => {
       <AddStockModal
         open={addOpen}
         onClose={() => setAddOpen(false)}
+        inventoryGroups={masterConfig.inventoryGroups}
+        categories={masterConfig.categories}
+        categoryGroups={masterConfig.categoryGroups}
+        subCategories={masterConfig.subCategories}
+        expenseClassifications={masterConfig.expenseClassifications}
+        inventoryClassifications={masterConfig.inventoryClassifications}
+        issueClassifications={masterConfig.issueClassifications}
+        units={availableUnits}
+        locations={availableStores}
         onSave={async (data, imageFile, openingStocks) => {
           try {
             let itemImageUrl = '';
@@ -725,6 +2003,7 @@ const Inventory = () => {
               threshold: Number(data.minStock) || 0,
               item_image_url: itemImageUrl,
               description: data.description || '',
+              stock_issue_method: data.stockIssueMethod,
             };
 
             if (validEntries.length > 0) {
@@ -765,10 +2044,96 @@ const Inventory = () => {
         }}
       />
 
+      <TransferStockModal
+        open={transferStockOpen}
+        items={centralStoreItems}
+        stores={availableStores}
+        onClose={() => setTransferStockOpen(false)}
+        onTransfer={(transfer) => {
+          const item = centralStoreItems.find((entry) => entry.id === transfer.itemId);
+          if (!item) return toast.error('Selected inventory item is unavailable');
+          createInventoryApproval({
+            approvalType: 'stock-transfer',
+            title: `Stock Transfer · ${transfer.transferSlipNumber}`,
+            preparedBy: transfer.preparedBy,
+            preparedById: transfer.preparedById,
+            approverId: transfer.approverId,
+            approverName: transfer.approvedBy,
+            approverDesignation: transfer.approverDesignation,
+            transfer: {
+              transferSlipNumber: transfer.transferSlipNumber,
+              transferDate: transfer.transferDate,
+              sourceStore: 'Central Store',
+              destinationStore: transfer.destination,
+              expectedArrival: transfer.expectedArrival,
+              itemId: item.id,
+              itemName: item.name,
+              itemCode: item.sku,
+              category: item.category,
+              unit: item.unit,
+              quantity: transfer.quantity,
+              availableStock: item.currentStock,
+              vehicleId: transfer.vehicleId,
+              vehicleNumber: transfer.vehicleNumber,
+              vehicleType: transfer.vehicleType,
+              vehicleMake: transfer.vehicleMake,
+              vehicleModel: transfer.vehicleModel,
+              driverName: transfer.driverName,
+              driverContact: transfer.driverContact,
+              remarks: transfer.remarks,
+            },
+          });
+          setTransferStockOpen(false);
+          setCentralStoreView('transfers');
+          setSearch('');
+          toast.success(`${transfer.transferSlipNumber} submitted to ${transfer.approvedBy} for approval`);
+        }}
+      />
+
+      <TransferSlipDialog
+        record={selectedTransfer}
+        onClose={() => setSelectedTransferId(null)}
+        onReply={(questionId, reply) => {
+          if (!selectedTransfer) return;
+          updateInventoryApproval(selectedTransfer.id, {
+            questions: (selectedTransfer.questions ?? []).map((entry) => (
+              entry.id === questionId
+                ? {
+                  ...entry,
+                  reply,
+                  repliedAt: new Date().toISOString(),
+                  repliedBy: user?.name || user?.username || selectedTransfer.preparedBy,
+                }
+                : entry
+            )),
+          });
+          toast.success('Reply sent to the approver');
+        }}
+      />
+
+      <ItemInformationDialog
+        item={informationItem}
+        onClose={() => setInformationItem(null)}
+        onEdit={() => {
+          if (!informationItem) return;
+          setEditItem(informationItem);
+          setInformationItem(null);
+        }}
+      />
+
       {/* Edit Item */}
       {editItem && (
         <EditItemModal
           item={editItem}
+          inventoryGroups={masterConfig.inventoryGroups}
+          categories={masterConfig.categories}
+          categoryGroups={masterConfig.categoryGroups}
+          subCategories={masterConfig.subCategories}
+          expenseClassifications={masterConfig.expenseClassifications}
+          inventoryClassifications={masterConfig.inventoryClassifications}
+          issueClassifications={masterConfig.issueClassifications}
+          units={availableUnits}
+          locations={availableStores}
           onClose={() => setEditItem(null)}
           onSave={(updated) => {
             setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
@@ -826,6 +2191,7 @@ const Inventory = () => {
       <EquipmentAllocationModal
         open={allocationOpen}
         items={items}
+        focusedItem={allocationItem}
         onAllocationSuccess={(itemId, quantity) => {
           setItems((prev) =>
             prev.map((stockItem) =>
@@ -835,8 +2201,28 @@ const Inventory = () => {
             ),
           );
         }}
-        onClose={() => setAllocationOpen(false)}
+        onClose={() => {
+          setAllocationOpen(false);
+          setAllocationItem(null);
+        }}
       />
+
+      {issueStockItem && (
+        <IssueStockModal
+          item={issueStockItem}
+          onClose={() => setIssueStockItem(null)}
+          onIssued={({ quantity, issueDate, issuedBy, note }) => {
+            addTransaction(issueStockItem.id, {
+              type: 'issued',
+              qty: quantity,
+              date: issueDate,
+              note,
+              by: issuedBy,
+            });
+            setIssueStockItem(null);
+          }}
+        />
+      )}
 
       {/* Incoming Request */}
       {incomingItem && (
@@ -953,12 +2339,31 @@ type LedgerEntry = {
   balance?: number;
   equipment_id: string;
   description: string;
+  stock_issue_method?: string;
+  stockIssueMethod?: string;
+  issue_method?: string;
+  method_used?: string;
+  transaction_type?: string;
+  batch_number?: string;
+  batch_no?: string;
+  manufacturing_date?: string;
+  mfg_date?: string;
+  expiry_date?: string;
+  expiration_date?: string;
+  supplier?: string;
+  supplier_name?: string;
+  storage_location?: string;
+  running_stock_value?: number;
 };
 
 const LedgerModal = ({ item, onClose }: { item: StockItem; onClose: () => void }) => {
+  const { user } = useAuth();
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [printPeriodOpen, setPrintPeriodOpen] = useState(false);
+  const [printPeriodFrom, setPrintPeriodFrom] = useState('');
+  const [printPeriodTo, setPrintPeriodTo] = useState('');
 
   useEffect(() => {
     const fetchLedger = async () => {
@@ -986,180 +2391,902 @@ const LedgerModal = ({ item, onClose }: { item: StockItem; onClose: () => void }
     } catch { return iso; }
   };
 
+  const orderedEntries = useMemo(
+    () => entries
+      .map((entry, originalIndex) => ({ entry, originalIndex }))
+      .sort((first, second) => {
+        const firstTime = new Date(first.entry.date).getTime();
+        const secondTime = new Date(second.entry.date).getTime();
+        if (Number.isNaN(firstTime) || Number.isNaN(secondTime)) return first.originalIndex - second.originalIndex;
+        return firstTime - secondTime || first.originalIndex - second.originalIndex;
+      })
+      .map(({ entry }) => entry),
+    [entries],
+  );
+
+  const isReturnEntry = (entry: LedgerEntry) => (
+    Number(entry.returned) > 0 || /\breturn(?:ed)?\b/i.test(entry.description || '')
+  );
+
   const getParticulars = (e: LedgerEntry) => {
+    if (isReturnEntry(e)) return 'Stock Returned';
     if (e.input > 0) return 'Goods Received';
     if (e.output > 0) return 'Stock Issued';
     return 'Stock Adjustment';
   };
-
-  const getRef = (e: LedgerEntry) => {
-    const m = e.description.match(/TASK-[A-Z0-9]+/);
-    return m ? m[0] : e.equipment_id;
+  const getTransactionType = (entry: LedgerEntry) => {
+    if (entry.transaction_type) return entry.transaction_type;
+    if (isReturnEntry(entry)) return 'Stock Return';
+    if (entry.input > 0) return 'Receipt';
+    if (entry.output > 0) return 'Issue';
+    return 'Adjustment';
   };
+  const getBatchNumber = (entry: LedgerEntry) => (
+    entry.batch_number || entry.batch_no || item.batchNumber || 'Not Recorded'
+  );
 
   const getVoucherNo = (e: LedgerEntry, idx: number) => {
-    const n = String(idx + 1).padStart(3, '0');
+    const sourceIndex = entries.indexOf(e);
+    const n = String((sourceIndex >= 0 ? sourceIndex : idx) + 1).padStart(3, '0');
+    if (isReturnEntry(e)) return `SRN-${n}`;
     if (e.input > 0)  return `GRN-${n}`;
     if (e.output > 0) return `ISS-${n}`;
     return `ADJ-${n}`;
   };
 
-  const totalReceived = entries.reduce((s, e) => s + e.input, 0);
-  const totalIssued   = entries.reduce((s, e) => s + e.output, 0);
-  const totalAmount   = entries.reduce((s, e) => s + e.amount, 0);
-  const lastDate      = entries.length > 0 ? fmtDate(entries[entries.length - 1].date) : '—';
+  const fifoStock = (item.fifoList ?? []).reduce((sum, batch) => sum + batch.stock, 0);
+  const fifoValue = (item.fifoList ?? []).reduce(
+    (sum, batch) => sum + batch.stock * batch.per_unit_cost,
+    0,
+  );
+  const getEntryRate = (entry: LedgerEntry) => {
+    if (entry.per_unit_cost > 0) return entry.per_unit_cost;
+    const movedQuantity = entry.input || entry.output || entry.quantity || 0;
+    return movedQuantity > 0 ? entry.amount / movedQuantity : 0;
+  };
+  const getTransactionValue = (entry: LedgerEntry) => {
+    const movementQuantity = entry.input || entry.output || entry.quantity || 0;
+    const rate = getEntryRate(entry);
+    return movementQuantity > 0 && rate > 0 ? movementQuantity * rate : entry.amount;
+  };
+  const getRunningStockValue = (entry: LedgerEntry) => {
+    if (Number(entry.running_stock_value) > 0) return Number(entry.running_stock_value);
+    return (entry.balance ?? 0) * (getEntryRate(entry) || weightedAverageRate);
+  };
+  const getOpeningBalance = (entry: LedgerEntry) => (
+    entry.balance != null ? entry.balance - entry.input + entry.output : undefined
+  );
+  const totalReceived = orderedEntries.reduce((sum, entry) => sum + entry.input, 0);
+  const totalIssued = orderedEntries.reduce((sum, entry) => sum + entry.output, 0);
+  const totalReceivedValue = orderedEntries.reduce(
+    (sum, entry) => sum + (entry.input > 0 ? entry.input * getEntryRate(entry) : 0),
+    0,
+  );
+  const totalIssuedValue = orderedEntries.reduce(
+    (sum, entry) => sum + (entry.output > 0 ? entry.output * getEntryRate(entry) : 0),
+    0,
+  );
+  const latestEntry = orderedEntries[orderedEntries.length - 1];
+  const weightedAverageRate = fifoStock > 0
+    ? fifoValue / fifoStock
+    : totalReceived > 0
+      ? totalReceivedValue / totalReceived
+      : latestEntry
+        ? getEntryRate(latestEntry)
+        : 0;
+  const closingValue = fifoValue > 0
+    ? fifoValue
+    : item.currentStock * weightedAverageRate;
+  const openingQuantity = orderedEntries.length > 0
+    ? getOpeningBalance(orderedEntries[0]) ?? 0
+    : item.currentStock;
+  const openingRate = orderedEntries.length > 0
+    ? getEntryRate(orderedEntries[0]) || weightedAverageRate
+    : weightedAverageRate;
+  const openingValue = openingQuantity * openingRate;
+  const netMovement = totalReceived - totalIssued;
+  const stockIssueMethodCode = getStockIssueMethodLabel(item.stockIssueMethod).split(',')[0];
+  const latestBatch = (item.fifoList ?? []).find((batch) => (
+    batch.batch_number || batch.manufacturing_date || batch.expiry_date
+  ));
+  const itemBatchNumber = item.batchNumber
+    || latestEntry?.batch_number
+    || latestEntry?.batch_no
+    || latestBatch?.batch_number
+    || 'Not Recorded';
+  const manufacturingDate = item.manufacturingDate
+    || latestEntry?.manufacturing_date
+    || latestEntry?.mfg_date
+    || latestBatch?.manufacturing_date
+    || '';
+  const expiryDate = item.expiryDate
+    || latestEntry?.expiry_date
+    || latestEntry?.expiration_date
+    || latestBatch?.expiry_date
+    || '';
+  const supplierName = item.supplier
+    || latestEntry?.supplier
+    || latestEntry?.supplier_name
+    || latestBatch?.supplier
+    || item.vendors?.[0]?.company
+    || 'Not Recorded';
+  const storageLocation = item.storageLocation
+    || latestEntry?.storage_location
+    || latestBatch?.storage_location
+    || item.shelf
+    || item.location
+    || 'Not Recorded';
+  const batchTrackingEnabled = item.batchTracking ?? itemBatchNumber !== 'Not Recorded';
+  const expiryTrackingEnabled = item.expiryTracking ?? Boolean(expiryDate);
+  const expiryTime = expiryDate ? new Date(expiryDate).getTime() : Number.NaN;
+  const daysToExpiry = Number.isNaN(expiryTime)
+    ? null
+    : Math.ceil((expiryTime - Date.now()) / 86_400_000);
+  const expiryStatus = daysToExpiry == null
+    ? 'Not Recorded'
+    : daysToExpiry < 0
+      ? 'Expired'
+      : daysToExpiry <= 30
+        ? 'Expiring Soon'
+        : 'Valid';
+  const stockStatus = item.currentStock <= 0
+    ? 'Out of Stock'
+    : item.currentStock < item.minStock
+      ? 'Low Stock'
+      : 'Available';
+  const showControlledInputDetails = /seed|pesticide|chemical/i.test(item.category);
+  const firstTransactionDate = orderedEntries[0]?.date;
+  const latestTransactionDate = orderedEntries[orderedEntries.length - 1]?.date;
+  const statementStartDate = firstTransactionDate
+    ? (() => {
+      const date = new Date(firstTransactionDate);
+      if (Number.isNaN(date.getTime())) return firstTransactionDate;
+      date.setDate(1);
+      return date.toISOString();
+    })()
+    : '';
+  const statementPeriod = latestTransactionDate
+    ? `${fmtDate(statementStartDate)} to ${fmtDate(latestTransactionDate)}`
+    : '—';
+  const formatCurrency = (value: number) => `₹${value.toLocaleString('en-IN', {
+    minimumFractionDigits: value % 1 === 0 ? 0 : 2,
+    maximumFractionDigits: 2,
+  })}`;
+  const toDateInputValue = (value?: string) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+    return new Intl.DateTimeFormat('en-CA', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+  };
+  const openPrintPeriodDialog = () => {
+    setPrintPeriodFrom(toDateInputValue(statementStartDate));
+    setPrintPeriodTo(toDateInputValue(latestTransactionDate));
+    setPrintPeriodOpen(true);
+  };
+  const printLedger = () => {
+    if (!printPeriodFrom || !printPeriodTo) {
+      toast.error('Select the statement start and end dates');
+      return;
+    }
+    const selectedStart = new Date(`${printPeriodFrom}T00:00:00`);
+    const selectedEnd = new Date(`${printPeriodTo}T23:59:59.999`);
+    if (selectedStart > selectedEnd) {
+      toast.error('Statement start date cannot be after the end date');
+      return;
+    }
+    const printEntries = orderedEntries.filter((entry) => {
+      const transactionDate = new Date(entry.date);
+      return !Number.isNaN(transactionDate.getTime())
+        && transactionDate >= selectedStart
+        && transactionDate <= selectedEnd;
+    });
+    if (printEntries.length === 0) {
+      toast.error('There are no ledger entries to print');
+      return;
+    }
+    const printStatementPeriod = `${fmtDate(printPeriodFrom)} to ${fmtDate(printPeriodTo)}`;
+    const printTotalReceived = printEntries.reduce((sum, entry) => sum + entry.input, 0);
+    const printTotalIssued = printEntries.reduce((sum, entry) => sum + entry.output, 0);
+    const printReceivedValue = printEntries.reduce(
+      (sum, entry) => sum + (entry.input > 0 ? entry.input * getEntryRate(entry) : 0),
+      0,
+    );
+    const printIssuedValue = printEntries.reduce(
+      (sum, entry) => sum + (entry.output > 0 ? entry.output * getEntryRate(entry) : 0),
+      0,
+    );
+    const printOpeningQuantity = getOpeningBalance(printEntries[0]) ?? 0;
+    const printOpeningRate = getEntryRate(printEntries[0]) || weightedAverageRate;
+    const printOpeningValue = printOpeningQuantity * printOpeningRate;
+    const printClosingQuantity = printEntries[printEntries.length - 1]?.balance ?? item.currentStock;
+    const printClosingValue = printClosingQuantity * weightedAverageRate;
+    const printLastTransactionDate = printEntries[printEntries.length - 1]?.date;
+    const printNetMovement = printTotalReceived - printTotalIssued;
+    const generatedBy = user?.name || user?.username || 'System User';
+    const reportCode = (item.sku || item.id || 'ITEM')
+      .replace(/[^A-Za-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .toUpperCase();
+    const reportId = `STL-${reportCode}-${printPeriodTo.replace(/-/g, '')}`;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-[2px] p-4">
-      <div className="w-full max-w-6xl bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col max-h-[92vh]">
+    const popup = window.open('', '_blank', 'width=1200,height=900');
+    if (!popup) {
+      toast.error('Pop-up blocked. Please allow pop-ups to print.');
+      return;
+    }
 
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 shrink-0">
-          <div>
-            <h2 className="text-xl font-bold text-gray-900">Stock Ledger</h2>
-            <p className="text-sm text-gray-400 mt-0.5">Summary of stock received, issued and balance.</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5">
-              {item.name} · <span className="font-medium text-gray-700">{item.sku}</span>
-            </span>
-            <button onClick={onClose} className="p-1.5 rounded-md hover:bg-gray-100 transition-colors">
-              <X className="w-4 h-4 text-gray-400" />
-            </button>
+    const escapePrintHtml = (value: unknown) => String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+    const logoUrl = new URL(logo3f, window.location.origin).href;
+    const detail = (label: string, value: unknown) =>
+      `<div class="detail"><span>${escapePrintHtml(label)}</span><strong>${escapePrintHtml(value || '—')}</strong></div>`;
+    const controlledInputDetails = showControlledInputDetails ? `
+      ${detail('Batch Number', itemBatchNumber)}
+      ${detail('Manufacturing Date', manufacturingDate ? fmtDate(manufacturingDate) : 'Not Recorded')}
+      ${detail('Expiry Date', expiryDate ? fmtDate(expiryDate) : 'Not Recorded')}
+      ${detail('Days to Expiry', daysToExpiry == null ? 'Not Recorded' : `${daysToExpiry} days`)}
+      ${detail('Expiry Status', expiryStatus)}
+      ${detail('Supplier', supplierName)}
+      ${detail('Storage Location', storageLocation)}
+    ` : '';
+    const openingBalanceRow = `
+      <tr class="opening-row">
+        <td>${escapePrintHtml(fmtDate(printPeriodFrom))}</td>
+        <td>OPENING</td>
+        <td>Opening Balance</td>
+        <td>Balance brought forward</td>
+        <td>—</td>
+        <td class="center">${escapePrintHtml(item.unit)}</td>
+        <td class="num">${printOpeningRate > 0 ? escapePrintHtml(formatCurrency(printOpeningRate)) : 'N/A'}</td>
+        <td class="num">${printOpeningQuantity.toLocaleString('en-IN')}</td>
+        <td class="num">—</td>
+        <td class="num">—</td>
+        <td class="num">${printOpeningQuantity.toLocaleString('en-IN')}</td>
+        <td class="num">${escapePrintHtml(formatCurrency(printOpeningValue))}</td>
+        <td class="num">${escapePrintHtml(formatCurrency(printOpeningValue))}</td>
+      </tr>
+    `;
+    const transactionRows = printEntries.map((entry, index) => `
+      <tr>
+        <td>${escapePrintHtml(fmtDate(entry.date))}</td>
+        <td>${escapePrintHtml(getVoucherNo(entry, index))}</td>
+        <td>${escapePrintHtml(getTransactionType(entry))}</td>
+        <td><strong>${escapePrintHtml(getParticulars(entry))}</strong><small>${escapePrintHtml(entry.description || '')}</small></td>
+        <td>${escapePrintHtml(getBatchNumber(entry))}</td>
+        <td class="center">${escapePrintHtml(item.unit)}</td>
+        <td class="num">${getEntryRate(entry) > 0 ? escapePrintHtml(formatCurrency(getEntryRate(entry))) : 'N/A'}</td>
+        <td class="num">${getOpeningBalance(entry) != null ? getOpeningBalance(entry)!.toLocaleString('en-IN') : '—'}</td>
+        <td class="num">${entry.input > 0 ? entry.input.toLocaleString('en-IN') : '—'}</td>
+        <td class="num">${entry.output > 0 ? entry.output.toLocaleString('en-IN') : '—'}</td>
+        <td class="num">${entry.balance != null ? entry.balance.toLocaleString('en-IN') : '—'}</td>
+        <td class="num">${escapePrintHtml(formatCurrency(getTransactionValue(entry)))}</td>
+        <td class="num">${escapePrintHtml(formatCurrency(getRunningStockValue(entry)))}</td>
+      </tr>
+    `).join('');
+    const ledgerRows = `${openingBalanceRow}${transactionRows}`;
+
+    popup.document.write(`<!DOCTYPE html><html><head>
+      <title>Generated by: ${escapePrintHtml(generatedBy)} · Report ID: ${escapePrintHtml(reportId)}</title>
+      <style>
+        @page{size:A4 portrait;margin:10mm}*{box-sizing:border-box}
+        body{margin:0;font-family:Arial,sans-serif;color:#18212f;background:#fff;font-size:9px}
+        .sheet{width:190mm;min-height:277mm;border:1px solid #b8c5d1;padding:12px;margin:0 auto}
+        .header{text-align:center;border-bottom:2px solid #0D3A35;padding-bottom:10px}
+        .header img{height:54px;width:auto}.company{font-size:17px;font-weight:900;letter-spacing:.04em;margin-top:3px}
+        .address{font-size:9px;color:#526173;line-height:1.45;margin:3px auto 0;max-width:760px}
+        .company-meta{font-size:8.5px;color:#526173;margin-top:3px}
+        .title{background:#0D3A35;color:#fff;text-align:center;font-size:13px;font-weight:900;letter-spacing:.14em;padding:7px;margin-top:10px}
+        .meta{display:grid;grid-template-columns:repeat(5,1fr);border:1px solid #cbd5e1;border-top:0}
+        .meta>div{padding:7px 9px;border-right:1px solid #cbd5e1}.meta>div:last-child{border-right:0}
+        .label{font-size:8px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:700}
+        .value{font-size:10px;font-weight:800;margin-top:3px}
+        .section{border:1px solid #cbd5e1;margin-top:9px;break-inside:avoid}
+        .section-title{background:#f1f5f9;border-bottom:1px solid #cbd5e1;padding:5px 8px;font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.08em;color:#334155}
+        .grid{display:grid;grid-template-columns:1fr 1fr 1fr}
+        .detail{display:flex;gap:8px;justify-content:space-between;padding:6px 8px;border-bottom:1px solid #e2e8f0;border-right:1px solid #e2e8f0}
+        .detail span{color:#64748b;font-weight:700}.detail strong{text-align:right}
+        table{width:100%;border-collapse:collapse;table-layout:fixed}
+        thead{display:table-header-group}tr{break-inside:avoid}
+        th,td{border:1px solid #cbd5e1;padding:4px 2.5px;text-align:left;vertical-align:middle;overflow-wrap:anywhere}
+        th{background:#0D3A35;color:#fff;font-size:6px;text-transform:uppercase;font-weight:normal;letter-spacing:.01em}
+        thead th{text-align:center!important}
+        td{font-size:6.4px;font-weight:normal;color:#334155}td small{display:block;color:#64748b;margin-top:2px;line-height:1.2}
+        td strong{font-weight:700;color:#1e293b}.num{text-align:right}.center{text-align:center}
+        .opening-row td{background:#f8fafc}
+        .summary-table th{width:25%;background:#f8fafc;color:#64748b;font-size:6.5px;font-weight:700;letter-spacing:.04em;padding:6px;text-align:left!important}
+        .summary-table td{width:25%;background:#fff;color:#0f172a;font-size:8px;font-weight:700;padding:6px;text-align:right}
+        @media print{body{print-color-adjust:exact;-webkit-print-color-adjust:exact}.sheet{border-color:#b8c5d1}}
+      </style></head><body><div class="sheet">
+        <div class="header">
+          <img src="${logoUrl}" alt="Sai Bioresources"/>
+          <div class="company">SAI BIORESOURCES PRIVATE LIMITED</div>
+          <div class="address">Khasra No. 121/1, Amrit Dairy Farm, Kachandur-Dhour Road, Village Jeora (Jeora-Sirsa), Durg, Chhattisgarh - 491001</div>
+          <div class="company-meta">GSTIN: 22ARPCS5442R1ZM &nbsp;|&nbsp; Phone: +91 75870 76870 &nbsp;|&nbsp; Email: rajendra.s@saiobioenergy.com</div>
+        </div>
+        <div class="title">ITEM STOCK LEDGER</div>
+        <div class="meta">
+          <div><div class="label">Item Code</div><div class="value">${escapePrintHtml(item.sku || item.id || '—')}</div></div>
+          <div><div class="label">Item Category</div><div class="value">${escapePrintHtml(item.category || '—')}</div></div>
+          <div><div class="label">Store / Warehouse</div><div class="value">${escapePrintHtml(item.location || '—')}</div></div>
+          <div><div class="label">Statement Period</div><div class="value">${escapePrintHtml(printStatementPeriod)}</div></div>
+          <div><div class="label">Stock Issue Method</div><div class="value">${escapePrintHtml(stockIssueMethodCode)}</div></div>
+        </div>
+        <div class="section">
+          <div class="section-title">Stock Item Details</div>
+          <div class="grid">
+            ${detail('Item Name', item.name)}
+            ${detail('Unit of Measure', item.unit)}
+            ${detail('Opening Stock Qty.', `${printOpeningQuantity.toLocaleString('en-IN')} ${item.unit}`)}
+            ${detail('Opening Stock Value', formatCurrency(printOpeningValue))}
+            ${detail('Current Unit Rate', (weightedAverageRate || printOpeningRate) > 0 ? formatCurrency(weightedAverageRate || printOpeningRate) : 'N/A')}
+            ${detail('Closing Stock Qty.', `${printClosingQuantity.toLocaleString('en-IN')} ${item.unit}`)}
+            ${detail('Closing Stock Value', formatCurrency(printClosingValue))}
+            ${detail('Batch Tracking', batchTrackingEnabled ? 'Enabled' : 'Disabled')}
+            ${detail('Expiry Tracking', expiryTrackingEnabled ? 'Enabled' : 'Disabled')}
+            ${detail('Stock Status', stockStatus)}
+            ${detail('Last Transaction Date', printLastTransactionDate ? fmtDate(printLastTransactionDate) : 'Not Recorded')}
+            ${controlledInputDetails}
           </div>
         </div>
+        <div class="section">
+          <div class="section-title">Ledger Transactions</div>
+          <table>
+            <colgroup>
+              <col style="width:6%"><col style="width:6%"><col style="width:7%"><col style="width:14%">
+              <col style="width:7%"><col style="width:4%"><col style="width:7%"><col style="width:7%">
+              <col style="width:6%"><col style="width:6%"><col style="width:7%"><col style="width:10%">
+              <col style="width:13%">
+            </colgroup>
+            <thead><tr>
+              <th>Date</th><th>Voucher</th><th>Transaction Type</th><th>Particulars</th><th>Batch No.</th>
+              <th class="center">Unit</th><th class="num">Unit Rate</th>
+              <th>Opening Qty.</th><th>Receipt Qty.</th><th>Issue Qty.</th><th>Closing Qty.</th>
+              <th class="num">Transaction Value</th><th class="num">Running Stock Value</th>
+            </tr></thead>
+            <tbody>${ledgerRows}</tbody>
+          </table>
+        </div>
+        <div class="section">
+          <div class="section-title">Ledger Summary</div>
+          <table class="summary-table">
+            <tbody>
+              <tr><th>Opening Stock Qty.</th><td>${printOpeningQuantity.toLocaleString('en-IN')} ${escapePrintHtml(item.unit)}</td><th>Opening Stock Value</th><td>${escapePrintHtml(formatCurrency(printOpeningValue))}</td></tr>
+              <tr><th>Total Received Qty.</th><td>${printTotalReceived.toLocaleString('en-IN')} ${escapePrintHtml(item.unit)}</td><th>Received Value</th><td>${escapePrintHtml(formatCurrency(printReceivedValue))}</td></tr>
+              <tr><th>Total Issued Qty.</th><td>${printTotalIssued.toLocaleString('en-IN')} ${escapePrintHtml(item.unit)}</td><th>Issued Value</th><td>${escapePrintHtml(formatCurrency(printIssuedValue))}</td></tr>
+              <tr><th>Net Movement</th><td>${printNetMovement.toLocaleString('en-IN')} ${escapePrintHtml(item.unit)}</td><th>Average / Closing Rate</th><td>${escapePrintHtml(formatCurrency(weightedAverageRate || printOpeningRate))}</td></tr>
+              <tr><th>Closing Stock Qty.</th><td>${printClosingQuantity.toLocaleString('en-IN')} ${escapePrintHtml(item.unit)}</td><th>Closing Stock Value</th><td>${escapePrintHtml(formatCurrency(printClosingValue))}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div></body></html>`);
+    popup.document.close();
+    setPrintPeriodOpen(false);
+    popup.focus();
+    setTimeout(() => {
+      popup.print();
+      popup.close();
+    }, 450);
+  };
 
-        {/* Table area */}
-        <div className="overflow-auto flex-1">
-          {loading ? (
-            <div className="flex items-center justify-center py-24 gap-2 text-sm text-gray-400">
-              <div className="w-5 h-5 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
-              Loading ledger…
+  return (
+    <>
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="flex max-h-[92vh] w-[96vw] max-w-7xl flex-col gap-0 overflow-hidden rounded-2xl border-0 bg-slate-50 p-0 shadow-[0_28px_80px_rgba(13,58,53,0.30)]">
+        <DialogHeader className="relative shrink-0 bg-[#0D3A35] px-6 py-5 text-white">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close stock ledger"
+            className="absolute right-5 top-5 z-20 flex h-9 w-9 items-center justify-center rounded-full border border-white/30 bg-white/10 text-white transition hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            <X className="h-5 w-5" />
+          </button>
+          <div className="flex flex-col gap-4 pr-12 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/10">
+                <ClipboardList className="h-5 w-5" />
+              </div>
+              <div>
+                <DialogTitle className="text-xl font-black text-white">Item Stock Ledger</DialogTitle>
+                <p className="mt-1 text-xs font-medium text-white/65">Chronological stock movement and valuation history</p>
+              </div>
             </div>
-          ) : error ? (
-            <div className="flex flex-col items-center justify-center py-24 text-red-500 gap-2">
-              <AlertTriangle className="w-8 h-8 opacity-50" />
-              <p className="text-sm font-medium">{error}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="rounded-xl border border-white/15 bg-white/10 px-4 py-2.5">
+                <p className="text-sm font-black text-white">{item.name}</p>
+                <p className="mt-0.5 text-[11px] font-semibold text-white/60">
+                  {item.sku || item.id || 'No item code'} · {item.unit} · {item.location || 'No store'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={openPrintPeriodDialog}
+                disabled={loading || entries.length === 0}
+                className="flex h-11 items-center gap-2 rounded-xl border border-white/25 bg-white px-4 text-xs font-black text-[#0D3A35] shadow-sm transition hover:bg-white/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Printer className="h-4 w-4" />
+                Print Ledger
+              </button>
             </div>
-          ) : entries.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-24 text-gray-400">
-              <ClipboardList className="w-10 h-10 mb-3 opacity-30" />
-              <p className="text-sm font-medium">No ledger entries yet</p>
-              <p className="text-xs mt-1">Entries will appear here once allocations are created.</p>
+          </div>
+        </DialogHeader>
+
+        <div className="grid shrink-0 grid-cols-5 border-b border-[#0D3A35]/10 bg-white">
+          {[
+            ['Item Code', item.sku || item.id || 'N/A'],
+            ['Item Category', item.category || 'N/A'],
+            ['Store / Warehouse', item.location || 'N/A'],
+            ['Statement Period', statementPeriod],
+            ['Stock Issue Method', stockIssueMethodCode],
+          ].map(([label, value], index) => (
+            <div
+              key={label}
+              className={cn(
+                'min-w-0 px-4 py-3',
+                index > 0 && 'border-l border-[#0D3A35]/10',
+              )}
+            >
+              <p className="text-[9px] font-black uppercase tracking-wide text-slate-400">{label}</p>
+              <p className="mt-1 truncate text-xs font-bold text-slate-700" title={value}>{value}</p>
             </div>
-          ) : (
-            <table className="w-full text-sm border-collapse">
-              <thead className="sticky top-0 z-10">
-                <tr className="bg-gray-50 border-b border-gray-200">
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 min-w-[100px]">Date</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 min-w-[100px]">Voucher No.</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 min-w-[200px]">Particulars / Narration</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 min-w-[130px]">Ref. / Description</th>
-                  <th className="text-right px-4 py-3 text-xs font-semibold text-green-600 min-w-[110px]">Received (Qty)</th>
-                  <th className="text-right px-4 py-3 text-xs font-semibold text-red-500 min-w-[100px]">Issued (Qty)</th>
-                  <th className="text-right px-4 py-3 text-xs font-semibold text-blue-500 min-w-[110px]">Balance (Qty)</th>
-                  <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 min-w-[60px]">Unit</th>
-                  <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 min-w-[100px]">Value (₹)</th>
-                </tr>
-              </thead>
+          ))}
+        </div>
+
+        <div className="shrink-0 border-b border-[#0D3A35]/10 bg-[#0D3A35]/[0.035] p-4">
+          <div className="overflow-hidden rounded-xl border border-[#0D3A35]/10 bg-white shadow-[0_8px_22px_rgba(13,58,53,0.04)]">
+            <table className="w-full table-fixed border-collapse">
               <tbody>
-                {entries.map((entry, idx) => (
-                  <tr key={`${entry.input_id}-${idx}`} className="border-b border-gray-100 hover:bg-gray-50/60 transition-colors">
-                    <td className="px-4 py-3.5 text-sm text-gray-600 whitespace-nowrap">{fmtDate(entry.date)}</td>
-                    <td className="px-4 py-3.5">
-                      <span className="text-sm font-semibold text-blue-600">{getVoucherNo(entry, idx)}</span>
+                {[
+                  ['Opening Stock Qty.', `${openingQuantity.toLocaleString('en-IN')} ${item.unit}`, 'Opening Stock Value', formatCurrency(openingValue)],
+                  ['Total Received Qty.', `${totalReceived.toLocaleString('en-IN')} ${item.unit}`, 'Received Value', formatCurrency(totalReceivedValue)],
+                  ['Total Issued Qty.', `${totalIssued.toLocaleString('en-IN')} ${item.unit}`, 'Issued Value', formatCurrency(totalIssuedValue)],
+                  ['Net Movement', `${netMovement.toLocaleString('en-IN')} ${item.unit}`, 'Average / Closing Rate', formatCurrency(weightedAverageRate || openingRate)],
+                  ['Closing Stock Qty.', `${item.currentStock.toLocaleString('en-IN')} ${item.unit}`, 'Closing Stock Value', formatCurrency(closingValue)],
+                ].map(([firstLabel, firstValue, secondLabel, secondValue]) => (
+                  <tr key={firstLabel} className="border-b border-slate-200 last:border-b-0">
+                    <th className="border-r border-slate-200 bg-slate-50 px-3 py-2 text-left text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                      {firstLabel}
+                    </th>
+                    <td className="border-r border-slate-200 px-3 py-2 text-right text-sm font-semibold text-slate-800">
+                      {firstValue}
                     </td>
-                    <td className="px-4 py-3.5 max-w-[200px]">
-                      <p className="text-sm font-semibold text-gray-900">{getParticulars(entry)}</p>
-                      <p className="text-xs text-gray-400 mt-0.5 line-clamp-1" title={entry.description}>{entry.description}</p>
-                    </td>
-                    <td className="px-4 py-3.5 text-sm text-gray-600">{getRef(entry)}</td>
-                    <td className="px-4 py-3.5 text-right">
-                      {entry.input > 0
-                        ? <span className="text-sm font-bold text-green-600">{entry.input.toLocaleString('en-IN')}</span>
-                        : <span className="text-gray-300 text-sm">-</span>}
-                    </td>
-                    <td className="px-4 py-3.5 text-right">
-                      {entry.output > 0
-                        ? <span className="text-sm font-bold text-red-500">{entry.output.toLocaleString('en-IN')}</span>
-                        : <span className="text-gray-300 text-sm">-</span>}
-                    </td>
-                    <td className="px-4 py-3.5 text-right">
-                      {entry.balance != null
-                        ? <span className="text-sm font-bold text-blue-600">{entry.balance.toLocaleString('en-IN')}</span>
-                        : <span className="text-gray-300 text-sm">—</span>}
-                    </td>
-                    <td className="px-4 py-3.5 text-center text-sm text-gray-600">{item.unit}</td>
-                    <td className="px-4 py-3.5 text-right text-sm font-semibold text-gray-800">
-                      ₹{entry.amount.toLocaleString('en-IN')}
+                    <th className="border-r border-slate-200 bg-slate-50 px-3 py-2 text-left text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                      {secondLabel}
+                    </th>
+                    <td className="px-3 py-2 text-right text-sm font-semibold text-slate-800">
+                      {secondValue}
                     </td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
 
-                {/* Total row */}
-                <tr className="bg-gray-50 border-t-2 border-gray-200">
-                  <td colSpan={4} className="px-4 py-3 text-sm font-bold text-gray-700">Total</td>
-                  <td className="px-4 py-3 text-right text-sm font-bold text-green-600">
-                    {totalReceived > 0 ? totalReceived.toLocaleString('en-IN') : '-'}
+        <div className="min-h-0 flex-1 overflow-auto bg-white">
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-24 text-sm font-semibold text-slate-400">
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#0D3A35] border-t-transparent" />
+              Loading ledger…
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-24 text-red-500">
+              <AlertTriangle className="h-8 w-8 opacity-50" />
+              <p className="text-sm font-bold">{error}</p>
+            </div>
+          ) : entries.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-24 text-slate-400">
+              <ClipboardList className="mb-3 h-10 w-10 opacity-30" />
+              <p className="text-sm font-bold">No ledger entries yet</p>
+              <p className="mt-1 text-xs">Entries will appear here once stock is received or issued.</p>
+            </div>
+          ) : (
+            <table className="w-full min-w-[1880px] border-collapse text-sm">
+              <thead className="sticky top-0 z-10">
+                <tr className="border-b border-white/10 bg-[#0D3A35] text-white">
+                  <th className="min-w-[110px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Date</th>
+                  <th className="min-w-[105px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Voucher</th>
+                  <th className="min-w-[130px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Transaction Type</th>
+                  <th className="min-w-[240px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Particulars</th>
+                  <th className="min-w-[125px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Batch No.</th>
+                  <th className="min-w-[70px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Unit</th>
+                  <th className="min-w-[115px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Unit Rate</th>
+                  <th className="min-w-[120px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Opening Qty.</th>
+                  <th className="min-w-[115px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Receipt Qty.</th>
+                  <th className="min-w-[105px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Issue Qty.</th>
+                  <th className="min-w-[110px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Closing Qty.</th>
+                  <th className="min-w-[140px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Transaction Value</th>
+                  <th className="min-w-[155px] px-4 py-3 text-center text-[10px] font-normal uppercase tracking-wide text-white/75">Running Stock Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-b border-slate-200 bg-slate-50/90">
+                  <td className="whitespace-nowrap px-4 py-3.5 text-xs font-semibold text-slate-500">
+                    {fmtDate(statementStartDate)}
                   </td>
-                  <td className="px-4 py-3 text-right text-sm font-bold text-red-500">
-                    {totalIssued > 0 ? totalIssued.toLocaleString('en-IN') : '-'}
+                  <td className="px-4 py-3.5">
+                    <span className="text-xs font-medium text-slate-700">OPENING</span>
                   </td>
-                  <td className="px-4 py-3" />
-                  <td className="px-4 py-3" />
-                  <td className="px-4 py-3 text-right text-sm font-bold text-gray-800">
-                    ₹{totalAmount.toLocaleString('en-IN')}
+                  <td className="px-4 py-3.5 text-xs font-semibold text-slate-700">Opening Balance</td>
+                  <td className="max-w-[240px] px-4 py-3.5">
+                    <p className="text-sm font-medium text-slate-800">Balance brought forward</p>
+                  </td>
+                  <td className="px-4 py-3.5 text-xs text-slate-400">—</td>
+                  <td className="px-4 py-3.5 text-center text-xs font-medium text-slate-600">{item.unit}</td>
+                  <td className="px-4 py-3.5 text-right text-sm font-medium text-slate-700">
+                    {openingRate > 0 ? formatCurrency(openingRate) : 'N/A'}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-sm font-medium text-slate-700">
+                    {openingQuantity.toLocaleString('en-IN')}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-sm text-slate-300">—</td>
+                  <td className="px-4 py-3.5 text-right text-sm text-slate-300">—</td>
+                  <td className="px-4 py-3.5 text-right text-sm font-medium text-slate-700">
+                    {openingQuantity.toLocaleString('en-IN')}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-sm font-medium text-slate-700">
+                    {formatCurrency(openingValue)}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-sm font-medium text-slate-700">
+                    {formatCurrency(openingValue)}
                   </td>
                 </tr>
+                {orderedEntries.map((entry, idx) => (
+                  <tr key={`${entry.input_id}-${idx}`} className="border-b border-slate-100 transition-colors hover:bg-[#0D3A35]/[0.035]">
+                    <td className="whitespace-nowrap px-4 py-3.5 text-xs font-semibold text-slate-500">{fmtDate(entry.date)}</td>
+                    <td className="px-4 py-3.5">
+                      <span className="text-xs font-medium text-slate-700">{getVoucherNo(entry, idx)}</span>
+                    </td>
+                    <td className="px-4 py-3.5 text-xs font-medium text-slate-700">
+                      {getTransactionType(entry)}
+                    </td>
+                    <td className="max-w-[240px] px-4 py-3.5">
+                      <p className="text-sm font-medium text-slate-800">{getParticulars(entry)}</p>
+                      <p className="mt-0.5 line-clamp-1 text-[11px] text-slate-400" title={entry.description}>{entry.description}</p>
+                    </td>
+                    <td className="px-4 py-3.5 text-xs font-medium text-slate-600">{getBatchNumber(entry)}</td>
+                    <td className="px-4 py-3.5 text-center text-xs font-medium text-slate-600">{item.unit}</td>
+                    <td className="px-4 py-3.5 text-right text-sm font-medium text-slate-700">
+                      {getEntryRate(entry) > 0 ? formatCurrency(getEntryRate(entry)) : 'N/A'}
+                    </td>
+                    <td className="px-4 py-3.5 text-right text-sm font-medium text-slate-700">
+                      {getOpeningBalance(entry) != null
+                        ? getOpeningBalance(entry)!.toLocaleString('en-IN')
+                        : '—'}
+                    </td>
+                    <td className="px-4 py-3.5 text-right">
+                      {entry.input > 0
+                        ? <span className="text-sm font-medium text-slate-700">{entry.input.toLocaleString('en-IN')}</span>
+                        : <span className="text-sm text-slate-300">—</span>}
+                    </td>
+                    <td className="px-4 py-3.5 text-right">
+                      {entry.output > 0
+                        ? <span className="text-sm font-medium text-slate-700">{entry.output.toLocaleString('en-IN')}</span>
+                        : <span className="text-sm text-slate-300">—</span>}
+                    </td>
+                    <td className="px-4 py-3.5 text-right">
+                      {entry.balance != null
+                        ? <span className="text-sm font-medium text-slate-700">{entry.balance.toLocaleString('en-IN')}</span>
+                        : <span className="text-sm text-slate-300">—</span>}
+                    </td>
+                    <td className="px-4 py-3.5 text-right text-sm font-medium text-slate-700">
+                      {formatCurrency(getTransactionValue(entry))}
+                    </td>
+                    <td className="px-4 py-3.5 text-right text-sm font-medium text-slate-700">
+                      {formatCurrency(getRunningStockValue(entry))}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           )}
         </div>
 
-        {/* Footer: legend + closing stock card */}
-        <div className="px-6 py-4 border-t border-gray-100 shrink-0 flex items-end justify-between gap-6">
-          <div className="space-y-1.5 text-xs text-gray-600">
-            <p><span className="font-bold text-green-600">Received (Qty)</span> = Quantity added to stock</p>
-            <p><span className="font-bold text-red-500">Issued (Qty)</span> = Quantity issued from stock</p>
-            <p><span className="font-bold text-blue-500">Balance (Qty)</span> = Closing available quantity in stock</p>
-            <p><span className="font-bold text-gray-700">Value (₹)</span> = Valuation of stock balance</p>
+        <div className="flex shrink-0 flex-col gap-2 border-t border-[#0D3A35]/10 bg-slate-50 px-5 py-3 text-[11px] font-semibold text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap gap-x-5 gap-y-1">
+            <span><strong className="text-emerald-700">Received</strong> stock added</span>
+            <span><strong className="text-red-600">Issued</strong> stock removed</span>
+            <span><strong className="text-amber-700">Unit Rate</strong> applicable per-unit cost</span>
           </div>
-
-          {entries.length > 0 ? (
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 min-w-[230px] text-right shrink-0">
-              <p className="text-xs font-semibold text-gray-500">Closing Stock Balance (Qty)</p>
-              <p className="text-3xl font-extrabold text-blue-600 mt-1 leading-none">
-                {item.currentStock.toLocaleString('en-IN')}
-                <span className="text-base font-semibold text-blue-400 ml-1.5">{item.unit}</span>
-              </p>
-              <p className="text-[11px] text-gray-400 mt-1">As on {lastDate}</p>
-              <div className="mt-3 pt-3 border-t border-gray-200">
-                <p className="text-xs font-semibold text-gray-500">Closing Stock Value</p>
-                <p className="text-2xl font-extrabold text-gray-900 mt-0.5">
-                  ₹{totalAmount.toLocaleString('en-IN')}
-                </p>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={onClose}
-              className="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors"
-            >
-              Close
-            </button>
-          )}
+          <span className="font-bold text-slate-500">Statement Period: {statementPeriod}</span>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={printPeriodOpen} onOpenChange={setPrintPeriodOpen}>
+      <DialogContent className="max-w-md rounded-2xl border-0 bg-white p-0 shadow-[0_24px_70px_rgba(13,58,53,0.28)]">
+        <DialogHeader className="rounded-t-2xl bg-[#0D3A35] px-6 py-5 text-white">
+          <DialogTitle className="text-lg font-black text-white">Select Statement Period</DialogTitle>
+          <p className="mt-1 text-xs font-medium text-white/65">
+            Choose the transaction period to include in the printable ledger.
+          </p>
+        </DialogHeader>
+        <div className="grid grid-cols-2 gap-4 px-6 py-5">
+          <Field label="From Date" required>
+            <Input
+              type="date"
+              value={printPeriodFrom}
+              onChange={(event) => setPrintPeriodFrom(event.target.value)}
+              max={printPeriodTo || undefined}
+            />
+          </Field>
+          <Field label="To Date" required>
+            <Input
+              type="date"
+              value={printPeriodTo}
+              onChange={(event) => setPrintPeriodTo(event.target.value)}
+              min={printPeriodFrom || undefined}
+            />
+          </Field>
+        </div>
+        <DialogFooter className="border-t border-slate-100 bg-slate-50 px-6 py-4">
+          <Button type="button" variant="outline" onClick={() => setPrintPeriodOpen(false)}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={printLedger} className="bg-[#0D3A35] hover:bg-[#0D3A35]/90">
+            <Printer className="mr-2 h-4 w-4" />
+            Continue to Print
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 };
 
 // ─────────────────────────────────────────────────────────────
 // INVENTORY CARD
 // ─────────────────────────────────────────────────────────────
+const ItemInformationDialog = ({
+  item,
+  onClose,
+  onEdit,
+}: {
+  item: StockItem | null;
+  onClose: () => void;
+  onEdit: () => void;
+}) => {
+  if (!item) return null;
+
+  const locationParts = item.location.split(/\s+[–—-]\s+/).map((part) => part.trim()).filter(Boolean);
+  const storeName = locationParts[0] || item.location || 'N/A';
+  const shelfName = item.shelf || locationParts.slice(1).join(' – ') || 'N/A';
+  const inventoryValue = (item.fifoList ?? []).reduce(
+    (sum, entry) => sum + entry.stock * entry.per_unit_cost,
+    0,
+  );
+  const stockIssueMethodOption = getStockIssueMethodOption(item.stockIssueMethod);
+  const details = [
+    ['Item Code', item.sku || 'N/A'],
+    ['Series Number', item.seriesNumber || 'N/A'],
+    ['Inventory Group', item.inventoryGroup || DEFAULT_CATEGORY_GROUPS[item.category] || 'N/A'],
+    ['Category', item.category || 'N/A'],
+    ['Subcategory', item.subCategory || 'N/A'],
+    ['Expense Classification', item.expenseClassification || 'N/A'],
+    ['Inventory Classification', item.inventoryClassification || 'N/A'],
+    ['Issue Classification', item.issueClassification || 'N/A'],
+    ['Stock Issue Method', getStockIssueMethodLabel(item.stockIssueMethod)],
+    ['Unit of Measure', item.unit || 'N/A'],
+    ['Packing Size', item.packingSize || 'N/A'],
+    ['Store', storeName],
+    ['Shelf', shelfName],
+  ];
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-h-[92vh] max-w-4xl overflow-y-auto rounded-2xl border-0 bg-slate-50 p-0 shadow-[0_28px_80px_rgba(13,58,53,0.28)]">
+        <DialogHeader className="sticky top-0 z-10 border-b border-white/10 bg-[#0D3A35] px-6 py-5 text-white shadow-sm">
+          <button
+            type="button"
+            onClick={onEdit}
+            aria-label={`Edit ${item.name}`}
+            title="Edit item"
+            className="absolute right-16 top-5 z-20 flex h-9 items-center gap-1.5 rounded-full border border-white/30 bg-white/10 px-3 text-xs font-bold text-white shadow-sm transition hover:border-white/50 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D3A35]"
+          >
+            <Edit3 className="h-3.5 w-3.5" />
+            Edit
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close item information"
+            title="Close"
+            className="absolute right-5 top-5 z-20 flex h-9 w-9 items-center justify-center rounded-full border border-white/30 bg-white/10 text-white shadow-sm transition hover:border-white/50 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D3A35]"
+          >
+            <X className="h-5 w-5" />
+          </button>
+          <div className="flex items-start gap-4 pr-32">
+            <img
+              src={item.imageUrl || PLACEHOLDER_IMG}
+              alt={item.name}
+              className="h-16 w-20 shrink-0 rounded-xl border-2 border-white/30 object-cover shadow-md"
+              onError={(event) => {
+                event.currentTarget.src = PLACEHOLDER_IMG;
+              }}
+            />
+            <div className="min-w-0">
+              <div className="mb-1 flex flex-wrap items-center gap-2">
+                <Badge className="border border-white/20 bg-white/15 text-white hover:bg-white/15">
+                  {item.category || 'Uncategorised'}
+                </Badge>
+                {item.currentStock < item.minStock && (
+                  <Badge className="border border-red-300/40 bg-red-500/90 text-white hover:bg-red-500/90">
+                    Low Stock
+                  </Badge>
+                )}
+              </div>
+              <DialogTitle className="text-xl font-black text-white">{item.name}</DialogTitle>
+              <p className="mt-1 text-xs font-semibold text-white/65">{item.sku || 'No item code'}</p>
+            </div>
+          </div>
+        </DialogHeader>
+
+        <div className="space-y-6 bg-gradient-to-b from-[#0D3A35]/[0.035] to-transparent px-6 py-5">
+          <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              ['Current Stock', `${item.currentStock.toLocaleString('en-IN')} ${item.unit}`],
+              ['Pipeline Stock', `${(item.stockInPipeline ?? 0).toLocaleString('en-IN')} ${item.unit}`],
+              ['Minimum Stock', `${item.minStock.toLocaleString('en-IN')} ${item.unit}`],
+              ['Inventory Value', inventoryValue > 0
+                ? `₹${inventoryValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+                : 'N/A'],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-xl border border-[#0D3A35]/10 bg-white p-4 shadow-[0_8px_24px_rgba(13,58,53,0.05)]">
+                <p className="text-[10px] font-black uppercase tracking-wide text-[#0D3A35]/55">{label}</p>
+                <p className="mt-1.5 break-words text-base font-black text-[#0D3A35]">{value}</p>
+              </div>
+            ))}
+          </section>
+
+          <section>
+            <h3 className="mb-3 text-sm font-black text-[#0D3A35]">Item Details</h3>
+            <div className="grid overflow-hidden rounded-xl border border-[#0D3A35]/10 bg-white shadow-[0_8px_24px_rgba(13,58,53,0.04)] sm:grid-cols-2">
+              {details.map(([label, value], index) => (
+                <div
+                  key={label}
+                  className={cn(
+                    'grid grid-cols-[44%_56%] border-slate-100',
+                    index > 0 && 'border-t',
+                    index === 1 && 'sm:border-t-0',
+                    index % 2 === 0 && 'sm:border-r',
+                  )}
+                >
+                  <div className="bg-[#0D3A35]/[0.045] px-3 py-3 text-[10px] font-black uppercase tracking-wide text-[#0D3A35]/60">
+                    {label}
+                  </div>
+                  <div className="min-w-0 break-words px-3 py-3 text-xs font-bold text-slate-700">{value}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 rounded-xl border border-[#0D3A35]/10 bg-[#0D3A35]/5 p-4">
+              <p className="text-[10px] font-black uppercase tracking-wide text-[#0D3A35]/60">Stock Issue Method</p>
+              <p className="mt-1 text-sm font-black text-[#0D3A35]">
+                {getStockIssueMethodLabel(item.stockIssueMethod)}
+              </p>
+              {stockIssueMethodOption ? (
+                <>
+                  <p className="mt-1 text-xs font-semibold text-slate-600">{stockIssueMethodOption.explanation}</p>
+                  <p className="mt-1 text-[11px] font-medium text-slate-500">
+                    <span className="font-bold text-slate-600">Example:</span> {stockIssueMethodOption.example}
+                  </p>
+                </>
+              ) : (
+                <p className="mt-1 text-xs font-medium text-slate-500">No stock issue method has been recorded for this item.</p>
+              )}
+            </div>
+          </section>
+
+          <section>
+            <h3 className="mb-3 text-sm font-black text-[#0D3A35]">Description</h3>
+            <p className="rounded-xl border border-[#0D3A35]/10 bg-white p-4 text-sm font-medium leading-relaxed text-slate-600 shadow-[0_8px_24px_rgba(13,58,53,0.04)]">
+              {item.description || 'No description has been added for this item.'}
+            </p>
+          </section>
+
+          <section>
+            <h3 className="mb-3 text-sm font-black text-[#0D3A35]">FIFO Stock Batches</h3>
+            {(item.fifoList?.length ?? 0) === 0 ? (
+              <p className="rounded-xl border border-dashed border-slate-200 p-5 text-center text-xs font-semibold text-slate-400">
+                No FIFO stock batches available.
+              </p>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-[#0D3A35]/10 bg-white shadow-[0_8px_24px_rgba(13,58,53,0.04)]">
+                <table className="w-full min-w-[560px] text-left">
+                  <thead className="bg-[#0D3A35] text-[10px] font-black uppercase tracking-wide text-white/80">
+                    <tr>
+                      <th className="px-4 py-3">PO Number</th>
+                      <th className="px-4 py-3 text-right">Stock</th>
+                      <th className="px-4 py-3 text-right">Cost / Unit</th>
+                      <th className="px-4 py-3 text-right">Batch Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {item.fifoList!.map((entry, index) => (
+                      <tr key={`${entry.po_number}-${index}`} className="border-t border-slate-100 text-xs font-semibold text-slate-700">
+                        <td className="px-4 py-3">{entry.po_number || 'N/A'}</td>
+                        <td className="px-4 py-3 text-right">{entry.stock.toLocaleString('en-IN')} {item.unit}</td>
+                        <td className="px-4 py-3 text-right">₹{entry.per_unit_cost.toLocaleString('en-IN')}</td>
+                        <td className="px-4 py-3 text-right font-black text-[#0D3A35]">
+                          ₹{(entry.stock * entry.per_unit_cost).toLocaleString('en-IN')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <section>
+            <h3 className="mb-3 text-sm font-black text-[#0D3A35]">Approved Vendors</h3>
+            {item.vendors.length === 0 ? (
+              <p className="rounded-xl border border-dashed border-slate-200 p-5 text-center text-xs font-semibold text-slate-400">
+                No vendor information available.
+              </p>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2">
+                {item.vendors.map((vendor, index) => (
+                  <div key={`${vendor.level}-${vendor.company}-${index}`} className="rounded-xl border border-[#0D3A35]/10 bg-white p-4 shadow-[0_8px_24px_rgba(13,58,53,0.04)]">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-black text-slate-900">{vendor.company || 'Unnamed vendor'}</p>
+                      <Badge variant="outline">{vendor.level || 'Vendor'}</Badge>
+                    </div>
+                    <div className="mt-3 space-y-1 text-xs font-semibold text-slate-500">
+                      <p>GST: <span className="text-slate-700">{vendor.gstNumber || 'N/A'}</span></p>
+                      <p>MSME: <span className="text-slate-700">{vendor.msmeCertificate || 'N/A'}</span></p>
+                      <p>Contact: <span className="text-slate-700">{vendor.contact || 'N/A'}</span></p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <h3 className="mb-3 text-sm font-black text-[#0D3A35]">
+              Stock History ({item.transactions.length})
+            </h3>
+            {item.transactions.length === 0 ? (
+              <p className="rounded-xl border border-dashed border-slate-200 p-5 text-center text-xs font-semibold text-slate-400">
+                No stock transactions available.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {item.transactions.map((transaction) => (
+                  <div key={transaction.id} className="flex flex-wrap items-center gap-3 rounded-xl border border-[#0D3A35]/10 bg-white px-4 py-3 shadow-[0_8px_24px_rgba(13,58,53,0.035)]">
+                    <Badge className={cn('border-0', txBadge[transaction.type].color)}>
+                      {txBadge[transaction.type].label}
+                    </Badge>
+                    <p className="text-sm font-black text-slate-800">
+                      {transaction.qty.toLocaleString('en-IN')} {item.unit}
+                    </p>
+                    <p className="text-xs font-semibold text-slate-500">{transaction.date || 'No date'}</p>
+                    <p className="min-w-[180px] flex-1 text-xs font-medium text-slate-500">
+                      {transaction.note || 'No note'}
+                    </p>
+                    <p className="text-xs font-bold text-slate-600">{transaction.by || 'N/A'}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
 interface CardProps {
   item: StockItem;
-  onEdit: () => void;
+  onInfo: () => void;
+  onAllocate: () => void;
   onUpdateStock: () => void;
   onLedger: () => void;
   onDamage: () => void;
@@ -1170,7 +3297,8 @@ interface CardProps {
 
 const InventoryCard = ({
   item,
-  onEdit,
+  onInfo,
+  onAllocate,
   onUpdateStock,
   onLedger,
   onDamage,
@@ -1179,90 +3307,109 @@ const InventoryCard = ({
   onDelete,
 }: CardProps) => {
   const isLow = item.currentStock < item.minStock;
+  const inventoryValue = (item.fifoList ?? []).reduce((sum, entry) => sum + entry.stock * entry.per_unit_cost, 0);
 
   return (
-    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden flex flex-col hover:shadow-md transition-shadow">
+    <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.06)] transition hover:-translate-y-0.5 hover:shadow-[0_18px_52px_rgba(15,23,42,0.10)]">
       {/* Image */}
-      <div className="relative h-40 bg-gray-50 overflow-hidden">
+      <div className="relative h-44 overflow-hidden border-b border-slate-100 bg-slate-50">
         <img
           src={item.imageUrl || PLACEHOLDER_IMG}
           alt={item.name}
-          className="w-full h-full object-cover"
+          className="h-full w-full object-cover transition duration-300 hover:scale-[1.02]"
           onError={(e) => {
             (e.currentTarget as HTMLImageElement).src = PLACEHOLDER_IMG;
           }}
         />
         {isLow && (
-          <div className="absolute top-2 left-2 flex items-center gap-1 bg-red-500 text-white text-xs font-semibold px-2 py-0.5 rounded-full">
+          <div className="absolute left-3 top-3 flex items-center gap-1 rounded-lg bg-red-600 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm">
             <AlertTriangle className="w-3 h-3" />
             Low Stock
           </div>
         )}
-        <div className="absolute top-2 right-2 bg-white/90 backdrop-blur-sm text-xs font-medium text-gray-600 px-2 py-0.5 rounded-full border border-gray-200">
-          {item.category}
-        </div>
+        <button
+          type="button"
+          onClick={onInfo}
+          aria-label={`View complete information for ${item.name}`}
+          title="Item information"
+          className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-full border border-white/80 bg-white/95 text-[#0D3A35] shadow-md backdrop-blur-sm transition hover:scale-105 hover:bg-[#0D3A35] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0D3A35] focus-visible:ring-offset-2"
+        >
+          <Info className="h-5 w-5" strokeWidth={2.5} />
+        </button>
       </div>
 
       {/* Body */}
-      <div className="p-4 flex flex-col flex-1 gap-3">
+      <div className="flex flex-1 flex-col gap-4 p-5">
         {/* Name & SKU */}
         <div>
-          <h3 className="font-semibold text-gray-900 text-base leading-tight">{item.name}</h3>
-          <p className="text-xs text-gray-400 mt-0.5">{item.sku} · {item.location}</p>
+          <h3 className="text-lg font-bold leading-tight text-slate-950">{item.name}</h3>
         </div>
 
-        {/* Stock Level */}
-        <div className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
-          <div>
-            <p className="text-xs text-gray-400">Current Stock</p>
-            <p className={cn('text-lg font-bold', isLow ? 'text-red-600' : 'text-gray-800')}>
-              {item.currentStock.toLocaleString()}
-              <span className="text-xs font-normal text-gray-400 ml-1">{item.unit}</span>
-            </p>
-          </div>
-          <div className="text-right">
-            <p className="text-xs text-gray-400">Min Level</p>
-            <p className="text-sm font-semibold text-gray-600">
-              {item.minStock.toLocaleString()}
-              <span className="text-xs font-normal text-gray-400 ml-1">{item.unit}</span>
-            </p>
-          </div>
-        </div>
-
-        {/* FIFO inventory value */}
-        {(() => {
-          const val = (item.fifoList ?? []).reduce((s, e) => s + e.stock * e.per_unit_cost, 0);
-          if (val <= 0) return null;
-          return (
-            <div className="flex items-center justify-between text-xs px-1">
-              <span className="text-gray-400">Inventory Value</span>
-              <span className="font-semibold text-green-700">
-                ₹{val.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-              </span>
+        {/* Item information */}
+        <div className="overflow-hidden rounded-xl border border-slate-200">
+          {[
+            ['Item Code', item.sku || 'N/A'],
+            ['Inventory Group', item.inventoryGroup || DEFAULT_CATEGORY_GROUPS[item.category] || 'N/A'],
+            ['Item Category', item.category || 'N/A'],
+          ].map(([label, value], index) => (
+            <div
+              key={label}
+              className={cn(
+                'grid grid-cols-[42%_58%] items-center',
+                index > 0 && 'border-t border-slate-100',
+              )}
+            >
+              <div className="bg-slate-50/80 px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                {label}
+              </div>
+              <div className={cn(
+                'min-w-0 break-words px-3 py-2.5 text-xs font-bold text-slate-700',
+              )}>
+                {value}
+              </div>
             </div>
-          );
-        })()}
+          ))}
+        </div>
 
-        {/* Stock bar */}
-        <div className="w-full bg-gray-100 rounded-full h-1.5">
+        {/* Stock summary chips */}
+        <div className="flex flex-wrap gap-2">
           <div
-            className={cn('h-1.5 rounded-full transition-all', isLow ? 'bg-red-500' : 'bg-green-500')}
-            style={{ width: `${Math.min(100, (item.currentStock / (item.minStock * 3)) * 100)}%` }}
-          />
+            className={cn(
+              'inline-flex min-w-0 flex-1 items-center gap-2 rounded-full border px-3 py-2',
+              isLow
+                ? 'border-red-200 bg-red-50 text-red-700'
+                : 'border-[#0D3A35]/15 bg-[#0D3A35]/5 text-[#0D3A35]',
+            )}
+          >
+            <Boxes className="h-3.5 w-3.5 shrink-0" />
+            <span className="text-[10px] font-black uppercase tracking-wide opacity-65">Current Stock</span>
+            <span className="ml-auto whitespace-nowrap text-xs font-black">
+              {item.currentStock.toLocaleString('en-IN')} {item.unit}
+            </span>
+          </div>
+          <div className="inline-flex min-w-0 flex-1 items-center gap-2 rounded-full border border-[#0D3A35]/15 bg-[#0D3A35]/5 px-3 py-2 text-[#0D3A35]">
+            <IndianRupee className="h-3.5 w-3.5 shrink-0" />
+            <span className="text-[10px] font-black uppercase tracking-wide opacity-65">Item Value</span>
+            <span className="ml-auto whitespace-nowrap text-xs font-black">
+              {inventoryValue > 0
+                ? `₹${inventoryValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+                : 'N/A'}
+            </span>
+          </div>
         </div>
 
         {/* Primary action row */}
         <div className="grid grid-cols-2 gap-2">
           <button
-            onClick={onEdit}
-            className="flex items-center justify-center gap-1.5 text-xs font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg py-2 transition-colors"
+            onClick={onAllocate}
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-[#0D3A35]/15 bg-[#0D3A35]/5 py-2.5 text-xs font-bold text-[#0D3A35] transition-colors hover:bg-[#0D3A35]/10"
           >
-            <Edit3 className="w-3.5 h-3.5" />
-            Edit
+            <ArrowUpFromLine className="w-3.5 h-3.5" />
+            Issue Stock
           </button>
           <button
             onClick={onUpdateStock}
-            className="flex items-center justify-center gap-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg py-2 transition-colors"
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-[#0D3A35] bg-[#0D3A35] py-2.5 text-xs font-bold text-white transition-colors hover:bg-[#092e2a]"
           >
             <Boxes className="w-3.5 h-3.5" />
             Request Stock
@@ -1273,21 +3420,21 @@ const InventoryCard = ({
         <div className="grid grid-cols-3 gap-2">
           <button
             onClick={onDamage}
-            className="flex flex-col items-center gap-1 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg py-2 transition-colors"
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-red-100 bg-red-50/70 py-2 text-[11px] font-bold text-red-600 transition-colors hover:bg-red-100"
           >
             <ShieldAlert className="w-4 h-4" />
             Damage
           </button>
           <button
             onClick={onReturnEntry}
-            className="flex flex-col items-center gap-1 text-xs font-medium text-orange-600 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg py-2 transition-colors"
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 py-2 text-[11px] font-bold text-slate-600 transition-colors hover:bg-slate-100"
           >
             <Undo2 className="w-4 h-4" />
             Return
           </button>
           <button
             onClick={onLedger}
-            className="flex flex-col items-center gap-1 text-xs font-medium text-violet-700 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-lg py-2 transition-colors"
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-[#0D3A35]/15 bg-[#0D3A35]/5 py-2 text-[11px] font-bold text-[#0D3A35] transition-colors hover:bg-[#0D3A35]/10"
           >
             <ClipboardList className="w-4 h-4" />
             Ledger
@@ -1295,10 +3442,10 @@ const InventoryCard = ({
         </div>
 
         {/* Footer actions */}
-        <div className="flex items-center justify-between pt-1 border-t border-gray-100">
+        <div className="mt-auto flex items-center justify-between border-t border-slate-100 pt-3">
           <button
             onClick={onHistory}
-            className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-800 transition-colors"
+            className="flex items-center gap-1.5 text-xs font-bold text-slate-500 transition-colors hover:text-[#0D3A35]"
           >
             <History className="w-3.5 h-3.5" />
             View History ({item.transactions.length})
@@ -1333,6 +3480,14 @@ const emptyForm = (): AddStockForm => ({
   unit: 'KGS',
   currentStock: 0,
   minStock: 0,
+  inventoryGroup: DEFAULT_CATEGORY_GROUPS.Seeds,
+  subCategory: '',
+  expenseClassification: EXPENSE_CLASSIFICATIONS[1],
+  inventoryClassification: INVENTORY_CLASSIFICATIONS[1],
+  issueClassification: ISSUE_CLASSIFICATIONS[1],
+  stockIssueMethod: '',
+  packingSize: '',
+  shelf: '',
   imageUrl: '',
   location: INVENTORY_LOCATIONS[0],
   description: '',
@@ -1344,16 +3499,75 @@ const AddStockModal = ({
   open,
   onClose,
   onSave,
+  inventoryGroups,
+  categories,
+  categoryGroups,
+  subCategories,
+  expenseClassifications,
+  inventoryClassifications,
+  issueClassifications,
+  units,
+  locations,
 }: {
   open: boolean;
   onClose: () => void;
   onSave: (data: AddStockForm, imageFile: File | null, openingStocks: OpeningStockEntry[]) => Promise<void> | void;
+  inventoryGroups: string[];
+  categories: string[];
+  categoryGroups: Record<string, string>;
+  subCategories: { name: string; category: string }[];
+  expenseClassifications: string[];
+  inventoryClassifications: string[];
+  issueClassifications: string[];
+  units: string[];
+  locations: string[];
 }) => {
   const [form, setForm] = useState<AddStockForm>(emptyForm());
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [codeLoading, setCodeLoading] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [openingStocks, setOpeningStocks] = useState<OpeningStockEntry[]>([]);
+  const categoryOptions = useMemo(() => {
+    const mapped = categories.filter((category) => categoryGroups[category] === form.inventoryGroup);
+    return mapped.length ? mapped : categories;
+  }, [categories, categoryGroups, form.inventoryGroup]);
+  const subCategoryOptions = useMemo(
+    () => subCategories.filter((entry) => entry.category === form.category).map((entry) => entry.name),
+    [form.category, subCategories],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    setForm((previous) => ({
+      ...previous,
+      inventoryGroup: inventoryGroups.includes(previous.inventoryGroup || '')
+        ? previous.inventoryGroup
+        : inventoryGroups[0] ?? '',
+      category: categoryOptions.includes(previous.category) ? previous.category : categoryOptions[0] ?? '',
+      subCategory: subCategoryOptions.includes(previous.subCategory || '') ? previous.subCategory : '',
+      expenseClassification: expenseClassifications.includes(previous.expenseClassification || '')
+        ? previous.expenseClassification
+        : expenseClassifications[0] ?? '',
+      inventoryClassification: inventoryClassifications.includes(previous.inventoryClassification || '')
+        ? previous.inventoryClassification
+        : inventoryClassifications[0] ?? '',
+      issueClassification: issueClassifications.includes(previous.issueClassification || '')
+        ? previous.issueClassification
+        : issueClassifications[0] ?? '',
+      unit: units.includes(previous.unit) ? previous.unit : units[0] ?? '',
+      location: locations.includes(previous.location) ? previous.location : locations[0] ?? '',
+    }));
+  }, [
+    categoryOptions,
+    expenseClassifications,
+    inventoryClassifications,
+    inventoryGroups,
+    issueClassifications,
+    locations,
+    open,
+    subCategoryOptions,
+    units,
+  ]);
 
   const set = (k: keyof AddStockForm, v: string | number) =>
     setForm((p) => ({ ...p, [k]: v }));
@@ -1396,6 +3610,7 @@ const AddStockModal = ({
 
   const handleSave = async () => {
     if (!form.name.trim()) return toast.error('Item name is required');
+    if (!form.stockIssueMethod) return toast.error('Stock Issue Method is required');
     setIsCreating(true);
     try {
       await onSave({
@@ -1430,11 +3645,36 @@ const AddStockModal = ({
           </Field>
 
           <div className="grid grid-cols-2 gap-3">
+            <Field label="Inventory Group">
+              <SelectField
+                value={form.inventoryGroup || ''}
+                options={inventoryGroups}
+                onChange={(value) => {
+                  const nextCategories = categories.filter((category) => categoryGroups[category] === value);
+                  setForm((previous) => ({
+                    ...previous,
+                    inventoryGroup: value,
+                    category: nextCategories[0] || categories[0] || '',
+                    subCategory: '',
+                  }));
+                }}
+              />
+            </Field>
             <Field label="Category">
               <SelectField
                 value={form.category}
-                options={CATEGORIES.filter((c) => c !== 'All')}
-                onChange={(v) => set('category', v)}
+                options={categoryOptions}
+                onChange={(value) => setForm((previous) => ({ ...previous, category: value, subCategory: '' }))}
+              />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Subcategory">
+              <SelectField
+                value={form.subCategory || ''}
+                options={subCategoryOptions.length ? subCategoryOptions : ['Not Configured']}
+                onChange={(value) => set('subCategory', value === 'Not Configured' ? '' : value)}
               />
             </Field>
             <Field label="Item Code">
@@ -1443,12 +3683,46 @@ const AddStockModal = ({
             </Field>
           </div>
 
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Field label="Expense Classification">
+              <SelectField value={form.expenseClassification || ''} options={expenseClassifications} onChange={(value) => set('expenseClassification', value)} />
+            </Field>
+            <Field label="Inventory Classification">
+              <SelectField value={form.inventoryClassification || ''} options={inventoryClassifications} onChange={(value) => set('inventoryClassification', value)} />
+            </Field>
+            <Field label="Issue Classification">
+              <SelectField value={form.issueClassification || ''} options={issueClassifications} onChange={(value) => set('issueClassification', value)} />
+            </Field>
+          </div>
+
+          <StockIssueMethodField
+            value={form.stockIssueMethod || ''}
+            onChange={(value) => set('stockIssueMethod', value)}
+          />
+
           <div className="grid grid-cols-2 gap-3">
             <Field label="Unit">
-              <SelectField value={form.unit} options={UNITS} onChange={(v) => set('unit', v)} />
+              <SelectField value={form.unit} options={units} onChange={(v) => set('unit', v)} />
             </Field>
             <Field label="Location">
-              <SelectField value={form.location} options={INVENTORY_LOCATIONS} onChange={(v) => set('location', v)} />
+              <SelectField value={form.location} options={locations} onChange={(v) => set('location', v)} />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Packing Size">
+              <Input
+                value={form.packingSize || ''}
+                onChange={(e) => set('packingSize', e.target.value)}
+                placeholder="e.g. 50 kg bag"
+              />
+            </Field>
+            <Field label="Shelf">
+              <Input
+                value={form.shelf || ''}
+                onChange={(e) => set('shelf', e.target.value)}
+                placeholder="e.g. Shelf A-03"
+              />
             </Field>
           </div>
 
@@ -1571,20 +3845,553 @@ const AddStockModal = ({
 };
 
 // ─────────────────────────────────────────────────────────────
+// TRANSFER STOCK MODAL
+// ─────────────────────────────────────────────────────────────
+const TransferStockModal = ({
+  open,
+  items,
+  stores,
+  onClose,
+  onTransfer,
+}: {
+  open: boolean;
+  items: StockItem[];
+  stores: string[];
+  onClose: () => void;
+  onTransfer: (transfer: {
+    itemId: string;
+    destination: string;
+    quantity: number;
+    transferDate: string;
+    vehicleId: string;
+    vehicleNumber: string;
+    vehicleType: string;
+    vehicleMake: string;
+    vehicleModel: string;
+    transferSlipNumber: string;
+    driverName: string;
+    driverContact: string;
+    expectedArrival: string;
+    preparedBy: string;
+    preparedById: string;
+    approverId: string;
+    approvedBy: string;
+    approverDesignation: string;
+    remarks: string;
+  }) => void;
+}) => {
+  const { user } = useAuth();
+  const [itemId, setItemId] = useState('');
+  const [destination, setDestination] = useState('');
+  const [quantity, setQuantity] = useState('');
+  const [transferDate, setTransferDate] = useState(today());
+  const [vehicleSelection, setVehicleSelection] = useState('');
+  const [vehicleOptions, setVehicleOptions] = useState<Array<{
+    id: string;
+    registrationNo: string;
+    type: string;
+    make: string;
+    model: string;
+    driverName: string;
+    driverContact: string;
+  }>>([]);
+  const [vehiclesLoading, setVehiclesLoading] = useState(false);
+  const [vehicleNumber, setVehicleNumber] = useState('');
+  const [vehicleType, setVehicleType] = useState('');
+  const [vehicleMake, setVehicleMake] = useState('');
+  const [vehicleModel, setVehicleModel] = useState('');
+  const [transferSlipNumber, setTransferSlipNumber] = useState('');
+  const [driverName, setDriverName] = useState('');
+  const [driverContact, setDriverContact] = useState('');
+  const [expectedArrival, setExpectedArrival] = useState('');
+  const [approverId, setApproverId] = useState('');
+  const [approverOptions, setApproverOptions] = useState<Array<{ id: string; name: string; designation: string }>>([]);
+  const [approversLoading, setApproversLoading] = useState(false);
+  const [remarks, setRemarks] = useState('');
+  const selectedItem = items.find((item) => item.id === itemId);
+  const selectedVehicle = vehicleOptions.find((vehicle) => vehicle.id === vehicleSelection);
+  const isOtherVehicle = vehicleSelection === 'other';
+  const resolvedVehicleNumber = isOtherVehicle ? vehicleNumber.trim().toUpperCase() : selectedVehicle?.registrationNo ?? '';
+  const resolvedVehicleType = isOtherVehicle ? vehicleType.trim() : selectedVehicle?.type ?? '';
+  const resolvedVehicleMake = isOtherVehicle ? vehicleMake.trim() : selectedVehicle?.make ?? '';
+  const resolvedVehicleModel = isOtherVehicle ? vehicleModel.trim() : selectedVehicle?.model ?? '';
+  const resolvedDriverName = isOtherVehicle ? driverName.trim() : selectedVehicle?.driverName ?? '';
+  const resolvedDriverContact = isOtherVehicle ? driverContact.trim() : selectedVehicle?.driverContact ?? '';
+  const selectedApprover = approverOptions.find((employee) => employee.id === approverId);
+  const preparedBy = user?.name || user?.username || 'Logged-in user';
+  const preparedById = user?.id || user?.username || '';
+  const approvedBy = selectedApprover?.name ?? '';
+  const approverDesignation = selectedApprover?.designation ?? '';
+  const destinationStores = stores.filter((store) => store.toLowerCase() !== 'central store');
+
+  useEffect(() => {
+    if (!open) return;
+    setItemId((previous) => items.some((item) => item.id === previous) ? previous : items[0]?.id ?? '');
+    setDestination((previous) => destinationStores.includes(previous) ? previous : destinationStores[0] ?? '');
+    setQuantity('');
+    setTransferDate(today());
+    setVehicleSelection('');
+    setVehicleNumber('');
+    setVehicleType('');
+    setVehicleMake('');
+    setVehicleModel('');
+    setTransferSlipNumber(generateTransferSlipNumber());
+    setDriverName('');
+    setDriverContact('');
+    setExpectedArrival('');
+    setApproverId('');
+    setRemarks('');
+  }, [destinationStores.join('|'), items, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const fetchVehicles = async () => {
+      setVehiclesLoading(true);
+      try {
+        const response = await fetch(`${BASE_URL}/admin_vehicles/get_all_vehicles`);
+        const data: any = await response.json().catch(() => null);
+        if (!response.ok || !Array.isArray(data)) throw new Error('Failed to load vehicles');
+        setVehicleOptions(
+          data
+            .map((vehicle: any) => {
+              const information = vehicle?.vehicle_information ?? {};
+              const assigned = Array.isArray(vehicle?.assigned_staff)
+                ? vehicle.assigned_staff[0]
+                : vehicle?.assigned_staff;
+              const staffInformation = assigned?.staff_information ?? assigned ?? {};
+              return {
+                id: String(vehicle?.vehicle_id ?? ''),
+                registrationNo: String(information?.vehicle_number ?? '').trim(),
+                type: String(information?.type ?? '').trim(),
+                make: String(information?.company ?? '').trim(),
+                model: String(information?.model ?? '').trim(),
+                driverName: String(
+                  staffInformation?.staff_name ??
+                  staffInformation?.name ??
+                  staffInformation?.full_name ??
+                  assigned?.staff_name ??
+                  '',
+                ).trim(),
+                driverContact: String(
+                  staffInformation?.staff_phone ??
+                  staffInformation?.phone ??
+                  staffInformation?.contact ??
+                  assigned?.staff_phone ??
+                  '',
+                ).trim(),
+              };
+            })
+            .filter((vehicle: { id: string; registrationNo: string }) => vehicle.id && vehicle.registrationNo)
+            .sort((first: { registrationNo: string }, second: { registrationNo: string }) =>
+              first.registrationNo.localeCompare(second.registrationNo)),
+        );
+      } catch (error: any) {
+        setVehicleOptions([]);
+        toast.error(error?.message || 'Failed to load fleet vehicles');
+      } finally {
+        setVehiclesLoading(false);
+      }
+    };
+    fetchVehicles();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const fetchApprovers = async () => {
+      setApproversLoading(true);
+      try {
+        const response = await fetch(`${BASE_URL}/admin_staff/get_all_staff`);
+        const data: any = await response.json().catch(() => null);
+        if (!response.ok || !Array.isArray(data)) throw new Error('Failed to load employees');
+        setApproverOptions(
+          data
+            .map((staff: any) => ({
+              id: String(staff?.staff_id ?? ''),
+              name: String(staff?.staff_information?.staff_name ?? '').trim(),
+              designation: String(staff?.staff_information?.staff_designation ?? '').trim(),
+            }))
+            .filter((staff: { id: string; name: string }) => staff.id && staff.name)
+            .sort((first: { name: string }, second: { name: string }) => first.name.localeCompare(second.name)),
+        );
+      } catch (error: any) {
+        setApproverOptions([]);
+        toast.error(error?.message || 'Failed to load employees for approval');
+      } finally {
+        setApproversLoading(false);
+      }
+    };
+    fetchApprovers();
+  }, [open]);
+
+  const submitTransfer = () => {
+    const numericQuantity = Number(quantity);
+    if (!selectedItem) return toast.error('Select an inventory item');
+    if (!destination) return toast.error('Select a destination store');
+    if (!Number.isFinite(numericQuantity) || numericQuantity <= 0) return toast.error('Enter a valid transfer quantity');
+    if (numericQuantity > selectedItem.currentStock) {
+      return toast.error(`Only ${selectedItem.currentStock.toLocaleString()} ${selectedItem.unit} is available`);
+    }
+    if (!transferSlipNumber.trim()) return toast.error('Transfer slip number is required');
+    if (!vehicleSelection) return toast.error('Select a vehicle');
+    if (!resolvedVehicleNumber) return toast.error('Vehicle number is required');
+    if (isOtherVehicle && (!resolvedVehicleType || !resolvedVehicleMake || !resolvedVehicleModel)) {
+      return toast.error('Complete all manual vehicle details');
+    }
+    if (isOtherVehicle && (!resolvedDriverName || !resolvedDriverContact)) {
+      return toast.error('Driver name and contact are required for an Other vehicle');
+    }
+    if (!approvedBy) return toast.error('Select an approving employee');
+    if (!approverDesignation) return toast.error('The selected employee has no designation');
+    onTransfer({
+      itemId: selectedItem.id,
+      destination,
+      quantity: numericQuantity,
+      transferDate,
+      vehicleId: isOtherVehicle ? '' : selectedVehicle?.id ?? '',
+      vehicleNumber: resolvedVehicleNumber,
+      vehicleType: resolvedVehicleType,
+      vehicleMake: resolvedVehicleMake,
+      vehicleModel: resolvedVehicleModel,
+      transferSlipNumber: transferSlipNumber.trim(),
+      driverName: resolvedDriverName,
+      driverContact: resolvedDriverContact,
+      expectedArrival,
+      preparedBy,
+      preparedById,
+      approverId,
+      approvedBy,
+      approverDesignation,
+      remarks: remarks.trim(),
+    });
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
+      <DialogContent className="max-h-[90vh] max-w-xl overflow-y-auto rounded-2xl border-0 p-0">
+        <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+          <DialogTitle className="flex items-center gap-2 text-lg font-bold text-white">
+            <ArrowRightLeft className="h-5 w-5" />
+            Transfer Stock
+          </DialogTitle>
+          <p className="text-xs font-medium text-white/70">Move available stock from the Central Store to a configured sub-store.</p>
+        </DialogHeader>
+
+        <div className="space-y-4 px-6 py-5">
+          <Field label="Inventory Item">
+            <select
+              value={itemId}
+              onChange={(event) => {
+                setItemId(event.target.value);
+                setQuantity('');
+              }}
+              className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35]"
+            >
+              {items.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name} ({item.sku || 'No SKU'})
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          {selectedItem && (
+            <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-slate-200">
+              <div className="border-r border-slate-200 bg-slate-50/70 px-4 py-3">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Available Stock</p>
+                <p className="mt-1 text-base font-bold text-[#0D3A35]">
+                  {selectedItem.currentStock.toLocaleString()} <span className="text-xs text-slate-400">{selectedItem.unit}</span>
+                </p>
+              </div>
+              <div className="px-4 py-3">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">From Store</p>
+                <p className="mt-1 text-sm font-bold text-slate-700">Central Store</p>
+              </div>
+            </div>
+          )}
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Destination Store">
+              <select
+                value={destination}
+                onChange={(event) => setDestination(event.target.value)}
+                className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35]"
+              >
+                {destinationStores.length === 0
+                  ? <option value="">No sub-store configured</option>
+                  : destinationStores.map((store) => <option key={store} value={store}>{store}</option>)}
+              </select>
+            </Field>
+            <Field label={`Transfer Quantity${selectedItem?.unit ? ` (${selectedItem.unit})` : ''}`}>
+              <Input
+                type="number"
+                min={0}
+                max={selectedItem?.currentStock}
+                value={quantity}
+                onChange={(event) => setQuantity(event.target.value)}
+                placeholder="Enter quantity"
+                className="h-11"
+              />
+            </Field>
+          </div>
+
+          <Field label="Transfer Date">
+            <Input
+              type="date"
+              value={transferDate}
+              onChange={(event) => setTransferDate(event.target.value)}
+              className="h-11"
+            />
+          </Field>
+
+          <div className="overflow-hidden rounded-xl border border-slate-200">
+            <div className="border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+              <h3 className="text-xs font-bold text-slate-800">Transport &amp; Slip Details</h3>
+              <p className="mt-0.5 text-[11px] font-medium text-slate-400">Record dispatch and vehicle information for this transfer.</p>
+            </div>
+            <div className="grid gap-4 p-4 sm:grid-cols-2">
+              <Field label="Transfer Slip No.">
+                <Input
+                  value={transferSlipNumber}
+                  readOnly
+                  className="h-11 bg-slate-50 font-semibold text-[#0D3A35]"
+                />
+              </Field>
+              <Field label="Choose Vehicle">
+                <select
+                  value={vehicleSelection}
+                  onChange={(event) => {
+                    setVehicleSelection(event.target.value);
+                  }}
+                  disabled={vehiclesLoading}
+                  className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35] disabled:bg-slate-50"
+                >
+                  <option value="">{vehiclesLoading ? 'Loading vehicles…' : 'Select vehicle'}</option>
+                  {vehicleOptions.map((vehicle) => (
+                    <option key={vehicle.id} value={vehicle.id}>
+                      {vehicle.registrationNo} · {[vehicle.type, vehicle.make, vehicle.model].filter(Boolean).join(' ')}
+                    </option>
+                  ))}
+                  <option value="other">Other — Enter manually</option>
+                </select>
+              </Field>
+
+              {selectedVehicle && (
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl border border-[#0D3A35]/10 bg-[#0D3A35]/5 p-4 sm:col-span-2">
+                  {[
+                    ['Vehicle Number', selectedVehicle.registrationNo],
+                    ['Vehicle Type', selectedVehicle.type || 'N/A'],
+                    ['Make / Company', selectedVehicle.make || 'N/A'],
+                    ['Model', selectedVehicle.model || 'N/A'],
+                    ['Assigned Driver', selectedVehicle.driverName || 'Not assigned'],
+                    ['Driver Contact', selectedVehicle.driverContact || 'N/A'],
+                  ].map(([label, value]) => (
+                    <div key={label}>
+                      <p className="text-[9px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
+                      <p className="mt-1 text-xs font-bold text-slate-700">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {isOtherVehicle && (
+                <>
+                  <Field label="Vehicle Number">
+                    <Input
+                      value={vehicleNumber}
+                      onChange={(event) => setVehicleNumber(event.target.value.toUpperCase())}
+                      placeholder="e.g. CG 07 AB 1234"
+                      className="h-11 uppercase"
+                    />
+                  </Field>
+                  <Field label="Vehicle Type">
+                    <Input
+                      value={vehicleType}
+                      onChange={(event) => setVehicleType(event.target.value)}
+                      placeholder="e.g. Truck, Pickup"
+                      className="h-11"
+                    />
+                  </Field>
+                  <Field label="Make / Company">
+                    <Input
+                      value={vehicleMake}
+                      onChange={(event) => setVehicleMake(event.target.value)}
+                      placeholder="Enter vehicle make"
+                      className="h-11"
+                    />
+                  </Field>
+                  <Field label="Model">
+                    <Input
+                      value={vehicleModel}
+                      onChange={(event) => setVehicleModel(event.target.value)}
+                      placeholder="Enter vehicle model"
+                      className="h-11"
+                    />
+                  </Field>
+                  <Field label="Driver Name">
+                    <Input
+                      value={driverName}
+                      onChange={(event) => setDriverName(event.target.value)}
+                      placeholder="Enter driver name"
+                      className="h-11"
+                    />
+                  </Field>
+                  <Field label="Driver Contact No.">
+                    <Input
+                      type="tel"
+                      value={driverContact}
+                      onChange={(event) => setDriverContact(event.target.value.replace(/[^\d+ -]/g, ''))}
+                      placeholder="Enter contact number"
+                      className="h-11"
+                    />
+                  </Field>
+                </>
+              )}
+              <div className="sm:col-span-2">
+                <Field label="Expected Arrival">
+                  <Input
+                    type="datetime-local"
+                    value={expectedArrival}
+                    onChange={(event) => setExpectedArrival(event.target.value)}
+                    className="h-11"
+                  />
+                </Field>
+              </div>
+            </div>
+          </div>
+
+          <Field label="Remarks">
+            <textarea
+              value={remarks}
+              onChange={(event) => setRemarks(event.target.value)}
+              rows={3}
+              placeholder="Add transfer purpose or handling instructions"
+              className="w-full resize-none rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-[#0D3A35]"
+            />
+          </Field>
+
+          <div className="overflow-hidden rounded-xl border border-slate-200">
+            <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+              <div>
+                <h3 className="flex items-center gap-2 text-xs font-bold text-slate-800">
+                  <ShieldCheck className="h-4 w-4 text-[#0D3A35]" />
+                  Transfer Approval
+                </h3>
+                <p className="mt-0.5 text-[11px] font-medium text-slate-400">Approval is mandatory before dispatch or printing.</p>
+              </div>
+              <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-700">Pending</span>
+            </div>
+            <div className="grid gap-4 p-4 sm:grid-cols-2">
+              <Field label="Prepared By">
+                <Input
+                  value={preparedBy}
+                  readOnly
+                  className="h-11 bg-slate-50 font-semibold text-slate-700"
+                />
+              </Field>
+              <Field label="Approval Employee">
+                <select
+                  value={approverId}
+                  onChange={(event) => setApproverId(event.target.value)}
+                  disabled={approversLoading}
+                  className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35] disabled:bg-slate-50"
+                >
+                  <option value="">{approversLoading ? 'Loading employees…' : 'Select employee'}</option>
+                  {approverOptions.map((employee) => (
+                    <option key={employee.id} value={employee.id}>{employee.name}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Approver Designation">
+                <Input
+                  value={approverDesignation}
+                  readOnly
+                  placeholder="Filled from employee profile"
+                  className="h-11 bg-slate-50 font-semibold text-slate-700"
+                />
+              </Field>
+              <Field label="Approval Status">
+                <Input
+                  value={selectedApprover ? `Pending with ${approvedBy}` : 'Select an employee'}
+                  readOnly
+                  className="h-11 bg-slate-50 font-semibold text-slate-700"
+                />
+              </Field>
+              <div className="flex items-start gap-3 rounded-lg border border-[#0D3A35]/15 bg-[#0D3A35]/5 p-3 sm:col-span-2">
+                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#0D3A35]" />
+                <span>
+                  <span className="block text-xs font-bold text-[#0D3A35]">Approval will be completed in Inventory Approvals</span>
+                  <span className="mt-1 block text-[11px] font-medium leading-relaxed text-slate-500">
+                    The selected employee will review this request. Approval date is recorded automatically when they approve it.
+                  </span>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter className="border-t border-slate-100 bg-slate-50/70 px-6 py-4">
+          <Button variant="outline" onClick={onClose} className="font-bold">Cancel</Button>
+          <Button
+            onClick={submitTransfer}
+            disabled={!items.length || !destinationStores.length}
+            className="gap-2 bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]"
+          >
+            <ShieldCheck className="h-4 w-4" />
+            Submit for Approval
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // EDIT ITEM MODAL
 // ─────────────────────────────────────────────────────────────
 const EditItemModal = ({
   item,
   onClose,
   onSave,
+  inventoryGroups,
+  categories,
+  categoryGroups,
+  subCategories,
+  expenseClassifications,
+  inventoryClassifications,
+  issueClassifications,
+  units,
+  locations,
 }: {
   item: StockItem;
   onClose: () => void;
   onSave: (updated: StockItem) => void;
+  inventoryGroups: string[];
+  categories: string[];
+  categoryGroups: Record<string, string>;
+  subCategories: { name: string; category: string }[];
+  expenseClassifications: string[];
+  inventoryClassifications: string[];
+  issueClassifications: string[];
+  units: string[];
+  locations: string[];
 }) => {
   const [form, setForm] = useState<StockItem>(item);
+  const categoryOptions = useMemo(() => {
+    const mapped = categories.filter((category) => categoryGroups[category] === form.inventoryGroup);
+    return mapped.length ? mapped : categories;
+  }, [categories, categoryGroups, form.inventoryGroup]);
+  const subCategoryOptions = useMemo(
+    () => subCategories.filter((entry) => entry.category === form.category).map((entry) => entry.name),
+    [form.category, subCategories],
+  );
   const set = (k: keyof StockItem, v: string | number) =>
     setForm((p) => ({ ...p, [k]: v }));
+
+  const handleSave = () => {
+    if (!form.name.trim()) return toast.error('Item name is required');
+    if (!form.stockIssueMethod) return toast.error('Stock Issue Method is required');
+    onSave(form);
+  };
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -1601,23 +4408,70 @@ const EditItemModal = ({
             <Input value={form.name} onChange={(e) => set('name', e.target.value)} />
           </Field>
           <div className="grid grid-cols-2 gap-3">
+            <Field label="Inventory Group">
+              <SelectField
+                value={form.inventoryGroup || ''}
+                options={inventoryGroups}
+                onChange={(value) => {
+                  const nextCategories = categories.filter((category) => categoryGroups[category] === value);
+                  setForm((previous) => ({
+                    ...previous,
+                    inventoryGroup: value,
+                    category: nextCategories[0] || categories[0] || '',
+                    subCategory: '',
+                  }));
+                }}
+              />
+            </Field>
             <Field label="Category">
               <SelectField
                 value={form.category}
-                options={CATEGORIES.filter((c) => c !== 'All')}
-                onChange={(v) => set('category', v)}
+                options={categoryOptions}
+                onChange={(value) => setForm((previous) => ({ ...previous, category: value, subCategory: '' }))}
+              />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Subcategory">
+              <SelectField
+                value={form.subCategory || ''}
+                options={subCategoryOptions.length ? subCategoryOptions : ['Not Configured']}
+                onChange={(value) => set('subCategory', value === 'Not Configured' ? '' : value)}
               />
             </Field>
             <Field label="SKU">
               <Input value={form.sku} onChange={(e) => set('sku', e.target.value)} />
             </Field>
           </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Field label="Expense Classification">
+              <SelectField value={form.expenseClassification || ''} options={expenseClassifications} onChange={(value) => set('expenseClassification', value)} />
+            </Field>
+            <Field label="Inventory Classification">
+              <SelectField value={form.inventoryClassification || ''} options={inventoryClassifications} onChange={(value) => set('inventoryClassification', value)} />
+            </Field>
+            <Field label="Issue Classification">
+              <SelectField value={form.issueClassification || ''} options={issueClassifications} onChange={(value) => set('issueClassification', value)} />
+            </Field>
+          </div>
+          <StockIssueMethodField
+            value={form.stockIssueMethod || ''}
+            onChange={(value) => set('stockIssueMethod', value)}
+          />
           <div className="grid grid-cols-2 gap-3">
             <Field label="Unit">
-              <SelectField value={form.unit} options={UNITS} onChange={(v) => set('unit', v)} />
+              <SelectField value={form.unit} options={units} onChange={(v) => set('unit', v)} />
             </Field>
             <Field label="Location">
-              <Input value={form.location} onChange={(e) => set('location', e.target.value)} />
+              <SelectField value={form.location} options={locations} onChange={(v) => set('location', v)} />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Packing Size">
+              <Input value={form.packingSize || ''} onChange={(e) => set('packingSize', e.target.value)} placeholder="e.g. 50 kg bag" />
+            </Field>
+            <Field label="Shelf">
+              <Input value={form.shelf || ''} onChange={(e) => set('shelf', e.target.value)} placeholder="e.g. Shelf A-03" />
             </Field>
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -1640,7 +4494,7 @@ const EditItemModal = ({
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button className="bg-blue-600 hover:bg-blue-700 text-white" onClick={() => onSave(form)}>
+          <Button className="bg-blue-600 hover:bg-blue-700 text-white" onClick={handleSave}>
             Save Changes
           </Button>
         </DialogFooter>
@@ -2026,6 +4880,398 @@ const RequestStockModal = ({
   );
 };
 
+type IssueDestinationType = 'land' | 'vendor';
+
+type IssueDestinationOption = {
+  id: string;
+  label: string;
+  detail: string;
+};
+
+type IssueStockResult = {
+  quantity: number;
+  issueDate: string;
+  issuedBy: string;
+  note: string;
+};
+
+const IssueStockModal = ({
+  item,
+  onClose,
+  onIssued,
+}: {
+  item: StockItem;
+  onClose: () => void;
+  onIssued: (result: IssueStockResult) => void;
+}) => {
+  const { user } = useAuth();
+  const [destinationType, setDestinationType] = useState<IssueDestinationType>('land');
+  const [destinationId, setDestinationId] = useState('');
+  const [lands, setLands] = useState<IssueDestinationOption[]>([]);
+  const [vendors, setVendors] = useState<IssueDestinationOption[]>([]);
+  const [loadingDestinations, setLoadingDestinations] = useState(false);
+  const [quantity, setQuantity] = useState('');
+  const [issueDate, setIssueDate] = useState(today());
+  const [expectedReturnDate, setExpectedReturnDate] = useState('');
+  const [purpose, setPurpose] = useState('');
+  const [reference, setReference] = useState('');
+  const [batchNumber, setBatchNumber] = useState(item.batchNumber || '');
+  const [receivedBy, setReceivedBy] = useState('');
+  const [remarks, setRemarks] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const issuedBy = user?.name || user?.username || 'System User';
+  const isReturnable = String(item.issueClassification || '').toLowerCase() === 'returnable';
+  const destinationOptions = destinationType === 'land' ? lands : vendors;
+  const selectedDestination = destinationOptions.find((option) => option.id === destinationId);
+  const numericQuantity = Number(quantity) || 0;
+  const remainingStock = Math.max(0, item.currentStock - numericQuantity);
+
+  useEffect(() => {
+    let cancelled = false;
+    const getFirstArray = (value: any, keys: string[]) => {
+      for (const key of keys) {
+        if (Array.isArray(value?.[key])) return value[key];
+      }
+      return Array.isArray(value) ? value : [];
+    };
+
+    const loadDestinations = async () => {
+      setLoadingDestinations(true);
+      try {
+        const [landResponse, vendorResponse] = await Promise.allSettled([
+          fetch(`${BASE_URL}/farmer_managment/get_farms`),
+          fetch(`${BASE_URL}/purchase_flow/get_vendors`),
+        ]);
+        if (cancelled) return;
+
+        if (landResponse.status === 'fulfilled') {
+          const data: any = await landResponse.value.json().catch(() => null);
+          const rows = getFirstArray(data, ['farms', 'farm', 'lands', 'data', 'items']);
+          setLands(rows.map((land: any, index: number) => {
+            const basic = land?.basic_details || {};
+            const id = String(land?.farm_id || land?.land_id || land?.lead_id || land?.id || `land-${index + 1}`);
+            const village = String(land?.land_data?.village || basic?.village || land?.village || '');
+            const owner = String(land?.owner_name || land?.farmer_name || basic?.owner_name || '');
+            const area = Number(land?.area || land?.total_area || basic?.total_area || 0);
+            return {
+              id,
+              label: [id, village].filter(Boolean).join(' — '),
+              detail: [owner, area > 0 ? `${area.toLocaleString('en-IN')} acres` : ''].filter(Boolean).join(' · '),
+            };
+          }).filter((land: IssueDestinationOption) => land.id));
+        }
+
+        if (vendorResponse.status === 'fulfilled') {
+          const data: any = await vendorResponse.value.json().catch(() => null);
+          const rows = getFirstArray(data, ['vendors', 'data', 'items']);
+          setVendors(rows.map((vendor: any) => {
+            const id = String(vendor?.vendor_id || vendor?.id || '');
+            const name = String(vendor?.firm_name || vendor?.vendor_name || id);
+            const contact = String(vendor?.vendor_contact || vendor?.contact || '');
+            const gst = String(vendor?.gst_number || vendor?.gstin || '');
+            return {
+              id,
+              label: name,
+              detail: [id, contact, gst ? `GSTIN ${gst}` : ''].filter(Boolean).join(' · '),
+            };
+          }).filter((vendor: IssueDestinationOption) => vendor.id));
+        }
+      } catch {
+        toast.error('Unable to load land and vendor lists');
+      } finally {
+        if (!cancelled) setLoadingDestinations(false);
+      }
+    };
+
+    loadDestinations();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    setDestinationId('');
+  }, [destinationType]);
+
+  const handleIssue = async () => {
+    if (submitting) return;
+    if (!destinationId || !selectedDestination) {
+      toast.error(`Select the ${destinationType === 'land' ? 'land parcel' : 'vendor'} receiving this stock`);
+      return;
+    }
+    if (numericQuantity <= 0) {
+      toast.error('Enter a quantity greater than zero');
+      return;
+    }
+    if (numericQuantity > item.currentStock) {
+      toast.error(`Only ${item.currentStock.toLocaleString('en-IN')} ${item.unit} is available`);
+      return;
+    }
+    if (!issueDate) {
+      toast.error('Select the issue date');
+      return;
+    }
+    if (!purpose.trim()) {
+      toast.error('Enter the purpose of issue');
+      return;
+    }
+    if (isReturnable && !expectedReturnDate) {
+      toast.error('Select the expected return date for this returnable item');
+      return;
+    }
+    if (expectedReturnDate && expectedReturnDate < issueDate) {
+      toast.error('Expected return date cannot be before the issue date');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const payload = {
+        item_id: item.id,
+        quantity_allocated: numericQuantity,
+        quantity: numericQuantity,
+        stock_issue_method: item.stockIssueMethod || '',
+        recipient_type: destinationType,
+        recipient_id: selectedDestination.id,
+        recipient_name: selectedDestination.label,
+        farm_id: destinationType === 'land' ? selectedDestination.id : '',
+        land_id: destinationType === 'land' ? selectedDestination.id : '',
+        vendor_id: destinationType === 'vendor' ? selectedDestination.id : '',
+        issue_date: issueDate,
+        expected_return_date: expectedReturnDate || null,
+        purpose: purpose.trim(),
+        reference: reference.trim(),
+        batch_number: batchNumber.trim(),
+        issued_by: issuedBy,
+        received_by: receivedBy.trim(),
+        remarks: remarks.trim(),
+      };
+      const response = await fetch(`${BASE_URL}/inventory/update_item_stock_on_allocation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data: any = await response.json().catch(() => null);
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.message || 'Failed to issue stock');
+      }
+
+      const note = [
+        `Issued to ${destinationType === 'land' ? 'land' : 'vendor'}: ${selectedDestination.label}`,
+        `Purpose: ${purpose.trim()}`,
+        reference.trim() ? `Reference: ${reference.trim()}` : '',
+        batchNumber.trim() ? `Batch: ${batchNumber.trim()}` : '',
+        receivedBy.trim() ? `Received by: ${receivedBy.trim()}` : '',
+        expectedReturnDate ? `Expected return: ${expectedReturnDate}` : '',
+        remarks.trim(),
+      ].filter(Boolean).join(' · ');
+      onIssued({
+        quantity: numericQuantity,
+        issueDate,
+        issuedBy,
+        note,
+      });
+      toast.success(`${numericQuantity.toLocaleString('en-IN')} ${item.unit} issued successfully`);
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to issue stock');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Dialog open onOpenChange={(nextOpen) => { if (!nextOpen && !submitting) onClose(); }}>
+      <DialogContent className="max-h-[92vh] max-w-3xl overflow-y-auto rounded-2xl border-0 bg-slate-50 p-0 shadow-[0_28px_80px_rgba(13,58,53,0.28)]">
+        <DialogHeader className="relative bg-[#0D3A35] px-6 py-5 text-white">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            aria-label="Close issue stock"
+            className="absolute right-5 top-5 flex h-9 w-9 items-center justify-center rounded-full border border-white/25 bg-white/10 text-white transition hover:bg-white/20 disabled:opacity-50"
+          >
+            <X className="h-5 w-5" />
+          </button>
+          <div className="flex items-center gap-3 pr-12">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white/10">
+              <ArrowUpFromLine className="h-5 w-5" />
+            </div>
+            <div>
+              <DialogTitle className="text-xl font-black text-white">Issue Stock</DialogTitle>
+              <p className="mt-1 text-xs font-medium text-white/65">Issue inventory to a land parcel or an approved vendor.</p>
+            </div>
+          </div>
+        </DialogHeader>
+
+        <div className="space-y-5 px-6 py-5">
+          <section className="grid gap-3 rounded-xl border border-[#0D3A35]/10 bg-white p-4 shadow-sm sm:grid-cols-[1fr_auto]">
+            <div className="min-w-0">
+              <p className="text-[10px] font-black uppercase tracking-wide text-slate-400">Selected Item</p>
+              <p className="mt-1 text-base font-black text-slate-900">{item.name}</p>
+              <p className="mt-1 text-xs font-semibold text-slate-500">
+                {item.sku || item.id} · {item.category} · {item.location || 'No store'}
+              </p>
+              <Badge className="mt-2 border border-[#0D3A35]/10 bg-[#0D3A35]/5 text-[#0D3A35] hover:bg-[#0D3A35]/5">
+                {getStockIssueMethodLabel(item.stockIssueMethod)}
+              </Badge>
+            </div>
+            <div className="rounded-xl bg-[#0D3A35] px-5 py-3 text-right text-white">
+              <p className="text-[9px] font-bold uppercase tracking-wide text-white/60">Available Stock</p>
+              <p className="mt-1 text-xl font-black">{item.currentStock.toLocaleString('en-IN')} {item.unit}</p>
+              {numericQuantity > 0 && numericQuantity <= item.currentStock && (
+                <p className="mt-1 text-[10px] font-semibold text-white/65">
+                  Balance after issue: {remainingStock.toLocaleString('en-IN')} {item.unit}
+                </p>
+              )}
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="mb-3 text-xs font-black uppercase tracking-[0.08em] text-slate-500">Issue Destination</p>
+            <div className="grid grid-cols-2 gap-2">
+              {([
+                ['land', 'Issue to Land', 'Farm or land parcel'],
+                ['vendor', 'Issue to Vendor', 'Approved external vendor'],
+              ] as const).map(([value, label, description]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setDestinationType(value)}
+                  className={cn(
+                    'rounded-xl border px-4 py-3 text-left transition',
+                    destinationType === value
+                      ? 'border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]'
+                      : 'border-slate-200 hover:border-[#0D3A35]/30',
+                  )}
+                >
+                  <p className="text-sm font-black text-slate-800">{label}</p>
+                  <p className="mt-0.5 text-[11px] text-slate-500">{description}</p>
+                </button>
+              ))}
+            </div>
+            <div className="mt-4">
+              <Field label={destinationType === 'land' ? 'Land / Farm *' : 'Vendor *'}>
+                <div className="relative">
+                  <select
+                    value={destinationId}
+                    disabled={loadingDestinations}
+                    onChange={(event) => setDestinationId(event.target.value)}
+                    className="h-10 w-full appearance-none rounded-lg border border-slate-200 bg-white px-3 pr-9 text-sm outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/15 disabled:bg-slate-50"
+                  >
+                    <option value="">
+                      {loadingDestinations
+                        ? 'Loading destinations…'
+                        : `Select ${destinationType === 'land' ? 'land or farm' : 'vendor'}`}
+                    </option>
+                    {destinationOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}{option.detail ? ` — ${option.detail}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                </div>
+              </Field>
+            </div>
+          </section>
+
+          <section className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 md:grid-cols-2">
+            <Field label={`Quantity to Issue (${item.unit}) *`}>
+              <Input
+                type="number"
+                min={0}
+                max={item.currentStock}
+                step="any"
+                value={quantity}
+                onChange={(event) => setQuantity(event.target.value)}
+                placeholder="Enter quantity"
+              />
+            </Field>
+            <Field label="Issue Date *">
+              <Input type="date" value={issueDate} onChange={(event) => setIssueDate(event.target.value)} />
+            </Field>
+            {isReturnable && (
+              <Field label="Expected Return Date *">
+                <Input
+                  type="date"
+                  min={issueDate}
+                  value={expectedReturnDate}
+                  onChange={(event) => setExpectedReturnDate(event.target.value)}
+                />
+              </Field>
+            )}
+            <Field label="Purpose / Usage *">
+              <Input
+                value={purpose}
+                onChange={(event) => setPurpose(event.target.value)}
+                placeholder="e.g. Paddy sowing, field application"
+              />
+            </Field>
+            <Field label="Reference / Task / Work Order">
+              <Input
+                value={reference}
+                onChange={(event) => setReference(event.target.value)}
+                placeholder="Enter reference number"
+              />
+            </Field>
+            <Field label="Batch Number">
+              <Input
+                value={batchNumber}
+                onChange={(event) => setBatchNumber(event.target.value)}
+                placeholder={item.batchTracking ? 'Enter issued batch' : 'Optional'}
+              />
+            </Field>
+            <Field label="Issued By">
+              <Input value={issuedBy} readOnly className="bg-slate-50 text-slate-600" />
+            </Field>
+            <Field label="Received By / Contact Person">
+              <Input
+                value={receivedBy}
+                onChange={(event) => setReceivedBy(event.target.value)}
+                placeholder="Name of recipient"
+              />
+            </Field>
+            <div className="md:col-span-2">
+              <Field label="Remarks">
+                <textarea
+                  rows={3}
+                  value={remarks}
+                  onChange={(event) => setRemarks(event.target.value)}
+                  placeholder="Handling instructions or additional notes"
+                  className="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/15"
+                />
+              </Field>
+            </div>
+          </section>
+        </div>
+
+        <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>Cancel</Button>
+          <Button
+            type="button"
+            onClick={handleIssue}
+            disabled={submitting || item.currentStock <= 0}
+            className="min-w-36 bg-[#0D3A35] text-white hover:bg-[#092e2a]"
+          >
+            {submitting ? (
+              <>
+                <span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                Issuing…
+              </>
+            ) : (
+              <>
+                <ArrowUpFromLine className="mr-2 h-4 w-4" />
+                Confirm Issue
+              </>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
 type AllocationRowState = {
   quantity: number;
   providedQuantity: number;
@@ -2044,16 +5290,19 @@ type AllocationDisplayRow = {
   quantity: number;
   availableStock: number;
   stockInPipeline: number;
+  stockIssueMethod: string;
 };
 
 const EquipmentAllocationModal = ({
   open,
   items,
+  focusedItem,
   onAllocationSuccess,
   onClose,
 }: {
   open: boolean;
   items: StockItem[];
+  focusedItem: StockItem | null;
   onAllocationSuccess: (itemId: string, quantity: number) => void;
   onClose: () => void;
 }) => {
@@ -2139,7 +5388,7 @@ const EquipmentAllocationModal = ({
   }, [verified, allocationItems]);
 
   const allocationRows = useMemo<AllocationDisplayRow[]>(() => {
-    return allocationItems.map((allocationItem) => {
+    const rows = allocationItems.map((allocationItem) => {
       const inventoryItem = items.find((item) => item.id === allocationItem.equipment_id);
       return {
         itemId: allocationItem.equipment_id,
@@ -2147,9 +5396,14 @@ const EquipmentAllocationModal = ({
         quantity: allocationItem.quantity,
         availableStock: inventoryItem?.currentStock ?? 0,
         stockInPipeline: inventoryItem?.stockInPipeline ?? 0,
+        stockIssueMethod: inventoryItem?.stockIssueMethod || '',
       };
     });
-  }, [allocationItems, items]);
+    if (!focusedItem) return rows;
+    return [...rows].sort((first, second) => (
+      Number(second.itemId === focusedItem.id) - Number(first.itemId === focusedItem.id)
+    ));
+  }, [allocationItems, focusedItem, items]);
 
   const updateRow = (itemId: string, patch: Partial<AllocationRowState>) => {
     setRowState((prev) => ({
@@ -2183,6 +5437,7 @@ const EquipmentAllocationModal = ({
         body: JSON.stringify({
           item_id: item.itemId,
           quantity_allocated: quantity,
+          stock_issue_method: item.stockIssueMethod || '',
         }),
       });
       const data: any = await res.json().catch(() => null);
@@ -2210,14 +5465,24 @@ const EquipmentAllocationModal = ({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <PackageCheck className="w-5 h-5 text-emerald-600" />
-            Equipment Allocation
+            {focusedItem ? `Allocate ${focusedItem.name}` : 'Equipment Allocation'}
           </DialogTitle>
           <p className="text-sm text-gray-500">
-            Enter the OTP first. The item list stays hidden until the OTP is provided.
+            Enter the OTP first. The allocation list stays hidden until the OTP is provided.
           </p>
         </DialogHeader>
 
         <div className="rounded-2xl border border-gray-200 bg-gradient-to-br from-emerald-50 to-white p-4 space-y-4">
+          {focusedItem && (
+            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[#0D3A35]/10 bg-white px-3 py-2.5">
+              <PackageCheck className="h-4 w-4 text-[#0D3A35]" />
+              <span className="text-xs font-bold text-slate-500">Selected stock:</span>
+              <span className="text-xs font-black text-[#0D3A35]">{focusedItem.name}</span>
+              <span className="text-xs font-semibold text-slate-400">
+                {focusedItem.currentStock.toLocaleString('en-IN')} {focusedItem.unit} available
+              </span>
+            </div>
+          )}
           <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
             <div>
               <p className="text-sm font-semibold text-gray-900">Verify allocation access</p>
@@ -2290,7 +5555,13 @@ const EquipmentAllocationModal = ({
                     const state = rowState[item.itemId] || { quantity: item.quantity, providedQuantity: 0, completed: false };
 
                     return (
-                      <tr key={item.itemId} className={state.completed ? 'bg-emerald-50/50 opacity-70' : ''}>
+                      <tr
+                        key={item.itemId}
+                        className={cn(
+                          state.completed && 'bg-emerald-50/50 opacity-70',
+                          focusedItem?.id === item.itemId && !state.completed && 'bg-[#0D3A35]/[0.045]',
+                        )}
+                      >
                         <td className="px-4 py-3 font-medium text-gray-900">{item.itemId}</td>
                         <td className="px-4 py-3 text-gray-800">{item.itemName}</td>
                         <td className="px-4 py-3 text-gray-700">{item.quantity.toLocaleString()}</td>
@@ -2672,10 +5943,16 @@ const IssuedItemsModal = ({
   const handleIssue = async (req: IssueRequest) => {
     setActionLoading(req.issue_id);
     try {
+      const inventoryItem = items.find((item) => item.id === req.item_id);
       const res = await fetch(`${BASE_URL}/inventory/update_issue_request_status`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item_id: req.item_id, issue_id: req.issue_id, new_status: 'issued' }),
+        body: JSON.stringify({
+          item_id: req.item_id,
+          issue_id: req.issue_id,
+          new_status: 'issued',
+          stock_issue_method: inventoryItem?.stockIssueMethod || '',
+        }),
       });
       const data: any = await res.json().catch(() => null);
       if (!res.ok || !data?.success) throw new Error(data?.message || 'Failed to issue item');
@@ -3411,6 +6688,43 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
     {children}
   </div>
 );
+
+const StockIssueMethodField = ({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) => {
+  const selectedMethod = getStockIssueMethodOption(value);
+
+  return (
+    <Field label="Stock Issue Method *">
+      <div className="relative">
+        <select
+          required
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className="w-full appearance-none rounded-lg border border-gray-200 bg-white px-3 py-2 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+        >
+          <option value="" disabled>Select stock issue method</option>
+          {STOCK_ISSUE_METHODS.map((method) => (
+            <option key={method.value} value={method.value}>{method.label}</option>
+          ))}
+        </select>
+        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+      </div>
+      {selectedMethod && (
+        <div className="mt-1.5 rounded-lg border border-[#0D3A35]/10 bg-[#0D3A35]/5 px-3 py-2">
+          <p className="text-xs font-semibold text-[#0D3A35]">{selectedMethod.explanation}</p>
+          <p className="mt-1 text-[11px] font-medium text-slate-500">
+            <span className="font-bold text-slate-600">Example:</span> {selectedMethod.example}
+          </p>
+        </div>
+      )}
+    </Field>
+  );
+};
 
 const SelectField = ({
   value,
