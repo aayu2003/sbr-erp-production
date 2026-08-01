@@ -15,6 +15,7 @@ import HarvestPlanning from "./pages/HarvestPlanning";
 import NotFound from "./pages/NotFound";
 import Inventory from "./pages/Inventory";
 import InventoryIndent from "./pages/InventoryIndent";
+import InventoryApprovals from "./pages/InventoryApprovals";
 import CultivationMaster from "./pages/CultivationMaster";
 import CultivationPlan from "./pages/CultivationPlan";
 import CreateCultivationPlan from "./pages/CreateCultivationPlan";
@@ -125,6 +126,7 @@ const App = () => (
           <Route path="/scope-of-work" element={<AppLayout><ScopeOfWork /></AppLayout>} />
           <Route path="/inventory" element={<AppLayout><Inventory /></AppLayout>} />
           <Route path="/inventory-indents" element={<AppLayout><InventoryIndent /></AppLayout>} />
+          <Route path="/inventory-approvals" element={<AppLayout><InventoryApprovals /></AppLayout>} />
           <Route path="/fuels-and-consumables" element={<AppLayout><FuelsAndConsumables /></AppLayout>} />
           <Route path="/admin-ops-fuel-requests" element={<AppLayout><AdminOpsFuelRequest /></AppLayout>} />
           <Route path="/director-fuel-requests" element={<AppLayout><DirectorFuelRequest /></AppLayout>} />

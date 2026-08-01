@@ -32,6 +32,7 @@
             { "key": "leads",          "label": "Leads",            "path": "/leads",          "icon": "Users",        "enabled": true },
             { "key": "farmers",        "label": "Land Owner Directory", "path": "/farmers",        "icon": "UserCheck",    "enabled": true },
             { "key": "farm-directory", "label": "Land Directory",   "path": "/farm-directory", "icon": "FolderKanban", "enabled": true },
+            { "key": "land-acquisition", "label": "Map",              "path": "/land-acquisition", "icon": "Map",         "enabled": true },
             { "key": "legal",          "label": "Legal",            "path": "/legal",          "icon": "Scale",        "enabled": true }
           ]
         }
@@ -64,7 +65,6 @@
           "label": "Farm Management",
           "enabled": true,
           "items": [
-            { "key": "land-acquisition", "label": "Land Acquisition", "path": "/land-acquisition", "icon": "Map",         "enabled": true  },
             { "key": "tasks-beta",       "label": "Tasks (Beta)",     "path": "/tasks-beta",       "icon": "CheckSquare", "enabled": true }
           ]
         },
@@ -79,9 +79,9 @@
       ]
     },
     {
-      "key": "purchase",
-      "label": "PURCHASE",
-      "description": "Inventory and procurement modules",
+      "key": "inventory-section",
+      "label": "INVENTORY",
+      "description": "Inventory, stock, fuel, and goods receipt management",
       "icon": "Box",
       "enabled": true,
       "groups": [
@@ -90,14 +90,24 @@
           "label": "Inventory Management",
           "enabled": true,
           "items": [
-            { "key": "inventory",          "label": "Inventory",            "path": "/inventory",          "icon": "Box",     "enabled": true  },
-            { "key": "inventory-indents",  "label": "Inventory Indents",    "path": "/inventory-indents",  "icon": "FileText","enabled": true  },
-            { "key": "fuels-consumables",  "label": "Fuels & Consumables",  "path": "/fuels-and-consumables","icon": "Fuel",  "enabled": true  },
-            { "key": "grn-module",         "label": "GRN Module",           "path": "/grn-module",         "icon": "PackageCheck","enabled": true },
-            { "key": "gate-entry",         "label": "Gate Entry",           "path": "/gate-entry",         "icon": "DoorOpen","enabled": true  },
-            { "key": "inventory-inbox",    "label": "Inbox",                "path": "/inventory/inbox",    "icon": "Mail",    "enabled": true  }
+            { "key": "inventory",          "label": "Inventory",            "path": "/inventory",           "icon": "Box",          "enabled": true },
+            { "key": "inventory-approvals","label": "Inventory Approvals",  "path": "/inventory-approvals", "icon": "FileCheck",    "enabled": true },
+            { "key": "inventory-indents",  "label": "Inventory Indents",    "path": "/inventory-indents",   "icon": "FileText",     "enabled": true },
+            { "key": "fuels-consumables",  "label": "Fuels & Consumables",  "path": "/fuels-and-consumables","icon": "Fuel",         "enabled": true },
+            { "key": "grn-module",         "label": "GRN Module",           "path": "/grn-module",          "icon": "PackageCheck", "enabled": true },
+            { "key": "gate-entry",         "label": "Gate Entry",           "path": "/gate-entry",          "icon": "DoorOpen",     "enabled": true },
+            { "key": "inventory-inbox",    "label": "Inbox",                "path": "/inventory/inbox",     "icon": "Mail",         "enabled": true }
           ]
-        },
+        }
+      ]
+    },
+    {
+      "key": "purchase",
+      "label": "PURCHASE",
+      "description": "Purchase and procurement modules",
+      "icon": "Receipt",
+      "enabled": true,
+      "groups": [
         {
           "key": "purchase-procurement",
           "label": "Purchase And Procurement",
