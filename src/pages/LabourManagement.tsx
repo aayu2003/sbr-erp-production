@@ -117,7 +117,7 @@ const FarmMiniMap = ({ geo }: { geo: FarmGeoData }) => {
       {landCoords.length >= 3 && (
         <Polygon
           positions={landCoords}
-          pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: hasPlots ? 0.08 : 0.22, weight: 2.5 }}
+          pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }}
         />
       )}
       {hasPlots && plots.map((plot, i) =>

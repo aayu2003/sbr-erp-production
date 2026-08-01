@@ -242,11 +242,10 @@ const PlotMapViewModal = ({ task, onClose }: PlotMapViewModalProps) => {
                 <Polygon
                   positions={farmCoords}
                   pathOptions={{
-                    color:       '#ffffff',
-                    fillColor:   '#ffffff',
-                    fillOpacity: 0.08,
+                    color:       'var(--land-boundary-color, #fde047)',
+                    fillColor:   'var(--land-boundary-fill, #fef9c3)',
+                    fillOpacity: 0.28,
                     weight:      3,
-                    dashArray:   '10 6',
                   }}
                 >
                   <Tooltip sticky>

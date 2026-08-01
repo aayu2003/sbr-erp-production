@@ -840,9 +840,9 @@ export default function FieldMonitoring({ userRole = 'farm-manager', regionFilte
                   <Polygon
                     positions={farm.boundary}
                     pathOptions={{
-                      color: isSelected ? '#2563eb' : '#16a34a',
-                      fillColor: isSelected ? '#93c5fd' : '#86efac',
-                      fillOpacity: isSelected ? 0.28 : 0.22,
+                      color: 'var(--land-boundary-color, #fde047)',
+                      fillColor: 'var(--land-boundary-fill, #fef9c3)',
+                      fillOpacity: isSelected ? 0.38 : 0.28,
                       weight: isSelected ? 4 : 3,
                     }}
                     eventHandlers={{

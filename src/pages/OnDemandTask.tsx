@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { X, Plus, ChevronDown, UserCheck, Save, Lock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
@@ -6,7 +6,9 @@ import { toast } from 'sonner';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type TaskStepType = 'inventory' | 'logistics' | 'inspection' | 'cultivation' | 'other';
+type TaskStepType = 'inventory' | 'logistics' | 'inspection' | 'cultivation' | 'on_field' | 'other';
+
+type OnFieldTaskMode = 'cultivation' | 'non_cultivation';
 
 interface TaskFlowStep {
   id: string;
@@ -24,10 +26,57 @@ interface TaskFlowStep {
     inspectionInputType: string;
     inspectionFields: Array<{ id: string; fieldName: string; inputType: string; mandatory: boolean; options: string[] }>;
     landId: string;
-    cultivationTaskType: string;
-    dueDate: string;
     otherDescription: string;
+    // On Field Task (vendor-scoped) fields
+    onFieldMode: OnFieldTaskMode;
+    onFieldCalendarId: string;
+    vendorId: string;
+    vendorName: string;
+    onFieldActivity: string;
+    onFieldStartDate: string;
+    onFieldWorkQuantity: string;
+    onFieldFromDate: string;
+    onFieldToDate: string;
+    // Plain-language quantity: "Do [2] [Borewells]", optionally "up to [250] [feet deep]"
+    onFieldQty: string;
+    onFieldUnit: string;
+    onFieldSpecValue: string;
+    onFieldSpecUnit: string;
   };
+}
+
+// Shape returned by /admin_cultivation/get_scope_of_work_for_land/{farmId}
+interface VendorScopeEntry {
+  vendor_details: { vendor_name: string; vendor_contact: string };
+  activities: string[];
+  start_date: string;
+  end_date: string;
+}
+
+// A plot within a land, as returned by /admin_cultivation/get_scope_of_work_for_vendor
+interface OnFieldPlot {
+  plot_id: string;
+  plot_name: string;
+  crop_type: string | null;
+  plot_area: number;
+}
+
+// Shape returned by /admin_cultivation/cultivation_calendars_for_farm/{farmId}
+interface OnFieldCalendarOption {
+  calander_id: string;
+  plan_id: string;
+  farm_id: string[];
+  start_date: string;
+  end_date: string;
+}
+
+// Shape returned by /admin_cultivation/get_cultivation_activities
+interface ApiCultivationActivity {
+  id: string;
+  name: string;
+  category?: string;
+  icon?: string;
+  crop_type?: string[];
 }
 
 type StaffRecord = {
@@ -162,6 +211,12 @@ const taskStepTypeMeta: Record<TaskStepType, { label: string; badge: string; she
     shell: 'border-lime-200 bg-lime-50/60',
     panel: 'border-lime-200 bg-white',
   },
+  on_field: {
+    label: 'On Field Task',
+    badge: 'bg-lime-100 text-lime-800 border-lime-200',
+    shell: 'border-lime-200 bg-lime-50/60',
+    panel: 'border-lime-200 bg-white',
+  },
   other: {
     label: 'Other',
     badge: 'bg-slate-100 text-slate-700 border-slate-200',
@@ -177,6 +232,47 @@ const formatTaskDate = (value?: string) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
+};
+
+const formatShortDate = (dateStr: string) => {
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+};
+
+const addDaysToDate = (dateStr: string, days: number) => {
+  const d = new Date(`${dateStr}T00:00:00`);
+  d.setDate(d.getDate() + days);
+  // Build the date string from local getters, not toISOString() (which is UTC-based) — in any
+  // timezone ahead of UTC (e.g. IST), toISOString() rolls back onto the previous local day,
+  // which silently cancelled out the +1 here and made every rollover collapse onto the start date.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+// Work quantity is a daily capacity, not a one-time total — e.g. 10 acres/day means a day can
+// take anywhere from 7-13 acres (± tolerance). Auto-schedules every plot onto a date by filling
+// each day with whole plots up to that ceiling (workQtyPerDay + tolerance), only rolling over to
+// the next day once the next plot would push the day past it. Plots are never split, so a lone
+// plot bigger than the ceiling still gets a day to itself.
+const DAILY_WORK_QTY_TOLERANCE = 3;
+
+const computePlotSchedule = (plots: OnFieldPlot[], startDate: string, workQtyPerDay: number): Array<{ plot: OnFieldPlot; assignedDate: string }> => {
+  if (!startDate || workQtyPerDay <= 0) return [];
+  const maxPerDay = workQtyPerDay + DAILY_WORK_QTY_TOLERANCE;
+  let currentDate = startDate;
+  let dayTotal = 0;
+  return plots.map(plot => {
+    const area = Number(plot.plot_area) || 0;
+    if (dayTotal > 0 && dayTotal + area > maxPerDay) {
+      currentDate = addDaysToDate(currentDate, 1);
+      dayTotal = 0;
+    }
+    dayTotal += area;
+    return { plot, assignedDate: currentDate };
+  });
 };
 
 const toStepNumber = (stepKey: string) => {
@@ -198,6 +294,7 @@ const stepTypeColor: Record<string, string> = {
   logistics: 'bg-amber-100 text-amber-800 border-amber-200',
   inspection: 'bg-sky-100 text-sky-700 border-sky-200',
   cultivation: 'bg-lime-100 text-lime-800 border-lime-200',
+  on_field: 'bg-lime-100 text-lime-800 border-lime-200',
   others: 'bg-slate-100 text-slate-700 border-slate-200',
   other: 'bg-slate-100 text-slate-700 border-slate-200',
 };
@@ -305,6 +402,58 @@ const renderStepCard = (step: StepViewModel) => {
     </div>
   );
 
+  if (t === 'on_field') return (
+    <div className="space-y-2.5">
+      {step.data.map((item, i) => (
+        <div key={i} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 space-y-1.5 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{item?.work_quantity_per_day != null ? 'Activity' : 'Task'}</span>
+            <span className="font-semibold text-slate-900">{item?.activity || '—'}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Vendor</span>
+            <span className="text-slate-700">{item?.vendor_name || '—'}</span>
+          </div>
+          {item?.work_quantity_per_day != null ? (
+            <>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Start date</span>
+                <span className="text-slate-700">{item?.start_date || '—'}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Work qty</span>
+                <span className="text-slate-700">{item?.work_quantity_per_day} acres/day · {Array.isArray(item?.plot_distribution) ? item.plot_distribution.length : 0} plot(s)</span>
+              </div>
+              {Array.isArray(item?.plot_distribution) && item.plot_distribution.length > 0 && (
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {item.plot_distribution.map((p: any, pi: number) => (
+                    <span key={pi} className="text-[10px] px-1.5 py-0.5 bg-lime-100 text-lime-800 border border-lime-200 rounded font-medium">{p.plot_id}: {p.assigned_date}</span>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Timeline</span>
+                <span className="text-slate-700">{item?.from_date || '—'} → {item?.to_date || '—'}</span>
+              </div>
+              {item?.quantity != null && (
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Quantity</span>
+                  <span className="text-slate-700">
+                    {item.quantity} {item.unit}
+                    {item?.spec_value != null && item?.spec_unit ? `, up to ${item.spec_value} ${item.spec_unit}` : ''}
+                  </span>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+
   if (t === 'inspection') return (
     <div className="space-y-2">
       {step.data.map((field, i) => {
@@ -389,6 +538,7 @@ const OnDemandTask = () => {
   const [inventoryItems, setInventoryItems] = useState<any[]>([]);
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [farms, setFarms] = useState<any[]>([]);
+  const [cultivationActivities, setCultivationActivities] = useState<ApiCultivationActivity[]>([]);
 
   // Modal / task builder state
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -398,6 +548,15 @@ const OnDemandTask = () => {
   const [resourcePopup, setResourcePopup] = useState<{ stepId: string; type: 'inventory' | 'logistics' } | null>(null);
   const [isCreatingTask, setIsCreatingTask] = useState(false);
   const [activeTab, setActiveTab] = useState<'task' | 'allocation'>('task');
+
+  // On Field Task: vendor scope + plots, fetched per-step since each step can target a different farm/vendor
+  const [scopeByStep, setScopeByStep] = useState<Record<string, Record<string, VendorScopeEntry>>>({});
+  const [scopeLoadingByStep, setScopeLoadingByStep] = useState<Record<string, boolean>>({});
+  const [plotsByStep, setPlotsByStep] = useState<Record<string, OnFieldPlot[]>>({});
+  const [plotsLoadingByStep, setPlotsLoadingByStep] = useState<Record<string, boolean>>({});
+  const [excludedPlotsByStep, setExcludedPlotsByStep] = useState<Record<string, string[]>>({});
+  const [calendarsByStep, setCalendarsByStep] = useState<Record<string, OnFieldCalendarOption[]>>({});
+  const [calendarsLoadingByStep, setCalendarsLoadingByStep] = useState<Record<string, boolean>>({});
 
 
   // Allocation modal state
@@ -426,20 +585,24 @@ const OnDemandTask = () => {
   useEffect(() => {
     const fetchResources = async () => {
       try {
-        const [invRes, vehRes, farmRes] = await Promise.all([
+        const [invRes, vehRes, farmRes, actRes] = await Promise.all([
           fetch(`${BASE_URL}/inventory_management/get_inventory_items`),
           fetch(`${BASE_URL}/admin_vehicles/get_all_vehicles`),
           fetch(`${BASE_URL}/admin_ops_requests/get_farm_and_farmer`),
+          fetch(`${BASE_URL}/admin_cultivation/get_cultivation_activities`),
         ]);
         const invJson = await invRes.json().catch(() => ({}));
         const vehJson = await vehRes.json().catch(() => ({}));
         const farmJson = await farmRes.json().catch(() => ({}));
+        const actJson = await actRes.json().catch(() => ({}));
         const invList = Array.isArray(invJson?.inventory_items) ? invJson.inventory_items : [];
         const vehList = Array.isArray(vehJson) ? vehJson : Array.isArray(vehJson?.vehicles) ? vehJson.vehicles : [];
         const farmList = Array.isArray(farmJson?.farm_farmer_mapping) ? farmJson.farm_farmer_mapping : [];
+        const activityList = actJson?.success && Array.isArray(actJson?.activities) ? actJson.activities : [];
         setInventoryItems(invList.length > 0 ? invList : [{ id: 'inv-1', item_name: 'Fertilizer A', stock: 50, unit: 'kg' }, { id: 'inv-2', item_name: 'Pesticide B', stock: 30, unit: 'ltr' }]);
         setVehicles(vehList.length > 0 ? vehList : [{ vehicle_id: 'veh-1', vehicle_information: { vehicle_number: 'TR-001', company: 'AgroCo' } }, { vehicle_id: 'veh-2', vehicle_information: { vehicle_number: 'TR-002', company: 'AgroCo' } }]);
         setFarms(farmList.length > 0 ? farmList : [{ farm_id: 'farm-1', farmer_id: 'farmer-1', area: 2.5, priority: 1, land_data: { village: 'Village A', district: 'District X' } }]);
+        setCultivationActivities(activityList);
       } catch { /* keep defaults */ }
     };
     fetchResources();
@@ -504,7 +667,10 @@ const OnDemandTask = () => {
     stepNumber,
     type: '',
     expanded: true,
-    details: { assignee: '', assigneeDesignation: '', title: `Step ${stepNumber}`, notes: '', inventoryItems: {}, allocationNeeded: false, vehicleIds: [], inspectionInputType: 'text', inspectionFields: [], landId: '', cultivationTaskType: '', dueDate: '', otherDescription: '' },
+    details: {
+      assignee: '', assigneeDesignation: '', title: `Step ${stepNumber}`, notes: '', inventoryItems: {}, allocationNeeded: false, vehicleIds: [], inspectionInputType: 'text', inspectionFields: [], landId: '', otherDescription: '',
+      onFieldMode: 'cultivation', onFieldCalendarId: '', vendorId: '', vendorName: '', onFieldActivity: '', onFieldStartDate: '', onFieldWorkQuantity: '', onFieldFromDate: '', onFieldToDate: '', onFieldQty: '', onFieldUnit: '', onFieldSpecValue: '', onFieldSpecUnit: '',
+    },
   });
 
   const openModal = async () => {
@@ -549,9 +715,30 @@ const OnDemandTask = () => {
         acc[key] = { type: 'logistics', status: 'pending', data: step.details.vehicleIds.map(vid => { const v = vehicles.find(e => getVehicleId(e) === vid); if (!v) return null; return { vehicle_id: getVehicleId(v), vehicle_number: String(v?.vehicle_information?.vehicle_number || getVehicleName(v)) }; }).filter(Boolean) };
         return acc;
       }
-      if (step.type === 'cultivation') {
-        const land = farms.find(f => String(f?.farm_id || f?.id || '') === step.details.landId);
-        acc[key] = { type: 'cultivation', status: 'pending', data: land ? [{ farm_id: String(land?.farm_id || ''), activity: String(step.details.cultivationTaskType || ''), due_date: String(step.details.dueDate || '') }] : [] };
+      if (step.type === 'on_field') {
+        const d = step.details;
+        const land = farms.find(f => String(f?.farm_id || f?.id || '') === d.landId);
+        const base = { farm_id: String(land?.farm_id || ''), vendor_id: d.vendorId, vendor_name: d.vendorName, activity: d.onFieldActivity };
+        const data = d.onFieldMode === 'cultivation'
+          ? [{
+              ...base,
+              calander_id: d.onFieldCalendarId,
+              start_date: d.onFieldStartDate,
+              work_quantity_per_day: Number(d.onFieldWorkQuantity) || 0,
+              plot_distribution: computePlotSchedule(
+                (plotsByStep[step.id] || []).filter(p => !(excludedPlotsByStep[step.id] || []).includes(p.plot_id)),
+                d.onFieldStartDate, Number(d.onFieldWorkQuantity) || 0
+              ).map(({ plot, assignedDate }) => ({ plot_id: plot.plot_id, plot_name: plot.plot_name, crop_type: plot.crop_type, quantity: Number(plot.plot_area) || 0, assigned_date: assignedDate })),
+            }]
+          : [{
+              ...base,
+              from_date: d.onFieldFromDate,
+              to_date: d.onFieldToDate,
+              quantity: Number(d.onFieldQty) || 0,
+              unit: d.onFieldUnit,
+              ...(d.onFieldSpecValue && d.onFieldSpecUnit ? { spec_value: Number(d.onFieldSpecValue) || 0, spec_unit: d.onFieldSpecUnit } : {}),
+            }];
+        acc[key] = { type: 'on_field', status: 'pending', task_mode: d.onFieldMode, data };
         return acc;
       }
       if (step.type === 'inspection') {
@@ -567,6 +754,85 @@ const OnDemandTask = () => {
 
   const updateStepDetails = (stepId: string, patch: Partial<TaskFlowStep['details']>) =>
     setTaskFlowSteps(prev => prev.map(s => s.id === stepId ? { ...s, details: { ...s.details, ...patch } } : s));
+
+  // ── On Field Task helpers ───────────────────────────────────────────────────
+
+  const fetchScopeForStep = async (stepId: string, farmId: string) => {
+    setScopeLoadingByStep(prev => ({ ...prev, [stepId]: true }));
+    setScopeByStep(prev => ({ ...prev, [stepId]: {} }));
+    try {
+      const res = await fetch(`${BASE_URL}/admin_cultivation/get_scope_of_work_for_land/${farmId}`);
+      const data = await res.json().catch(() => null);
+      if (data?.success && data?.scope_of_work && typeof data.scope_of_work === 'object') {
+        setScopeByStep(prev => ({ ...prev, [stepId]: data.scope_of_work as Record<string, VendorScopeEntry> }));
+      }
+    } catch { /* leave empty */ } finally {
+      setScopeLoadingByStep(prev => ({ ...prev, [stepId]: false }));
+    }
+  };
+
+  const fetchCalendarsForStep = async (stepId: string, farmId: string) => {
+    setCalendarsLoadingByStep(prev => ({ ...prev, [stepId]: true }));
+    setCalendarsByStep(prev => ({ ...prev, [stepId]: [] }));
+    try {
+      const res = await fetch(`${BASE_URL}/admin_cultivation/cultivation_calendars_for_farm/${farmId}`);
+      const data = await res.json().catch(() => null);
+      if (data?.success && Array.isArray(data.calendars)) {
+        setCalendarsByStep(prev => ({ ...prev, [stepId]: data.calendars as OnFieldCalendarOption[] }));
+      }
+    } catch { /* leave empty */ } finally {
+      setCalendarsLoadingByStep(prev => ({ ...prev, [stepId]: false }));
+    }
+  };
+
+  const fetchPlotsForStep = async (stepId: string, farmId: string, vendorId: string) => {
+    setPlotsLoadingByStep(prev => ({ ...prev, [stepId]: true }));
+    setPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
+    try {
+      const res = await fetch(`${BASE_URL}/admin_cultivation/get_scope_of_work_for_vendor`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vendor_id: vendorId }),
+      });
+      const data = await res.json().catch(() => null);
+      if (data?.success && Array.isArray(data.scope_of_work)) {
+        const land = data.scope_of_work.find((s: any) => String(s?.land_id || '') === farmId);
+        setPlotsByStep(prev => ({ ...prev, [stepId]: Array.isArray(land?.plots) ? land.plots : [] }));
+      }
+    } catch { /* leave empty */ } finally {
+      setPlotsLoadingByStep(prev => ({ ...prev, [stepId]: false }));
+    }
+  };
+
+  const handleOnFieldModeChange = (stepId: string, mode: OnFieldTaskMode) =>
+    updateStepDetails(stepId, {
+      onFieldMode: mode, vendorId: '', vendorName: '', onFieldActivity: '', onFieldWorkQuantity: '',
+      onFieldQty: '', onFieldUnit: '', onFieldSpecValue: '', onFieldSpecUnit: '',
+    });
+
+  const handleOnFieldFarmChange = (stepId: string, farmId: string) => {
+    updateStepDetails(stepId, { landId: farmId, vendorId: '', vendorName: '', onFieldActivity: '', onFieldCalendarId: '' });
+    setPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
+    setExcludedPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
+    setCalendarsByStep(prev => ({ ...prev, [stepId]: [] }));
+    if (farmId) {
+      fetchScopeForStep(stepId, farmId);
+      fetchCalendarsForStep(stepId, farmId);
+    }
+  };
+
+  const handleOnFieldVendorChange = (stepId: string, farmId: string, vendorId: string, vendorName: string, mode: OnFieldTaskMode) => {
+    updateStepDetails(stepId, { vendorId, vendorName, onFieldActivity: '' });
+    setExcludedPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
+    if (vendorId && mode === 'cultivation') fetchPlotsForStep(stepId, farmId, vendorId);
+  };
+
+  const excludePlotFromStep = (stepId: string, plotId: string) =>
+    setExcludedPlotsByStep(prev => ({ ...prev, [stepId]: [...(prev[stepId] || []), plotId] }));
+
+  const restorePlotToStep = (stepId: string, plotId: string) =>
+    setExcludedPlotsByStep(prev => ({ ...prev, [stepId]: (prev[stepId] || []).filter(id => id !== plotId) }));
+
 
   const addStep = () =>
     setTaskFlowSteps(prev => {
@@ -812,6 +1078,13 @@ const OnDemandTask = () => {
 
   // ─────────────────────────────────────────────────────────────────────────────
 
+  // Deduped by name — the API can return multiple activity records sharing one display name
+  // (different crop_type/category combos), same as ScopeOfWork.tsx's ACTIVITY_OPTIONS.
+  const cultivationActivityOptions = useMemo(
+    () => Array.from(new Set(cultivationActivities.map(a => a.name))).sort(),
+    [cultivationActivities]
+  );
+
   const designationOptions = Object.keys(staffByDesignation).sort();
   const assigneeOptions = taskAssignment.designation ? (staffByDesignation[taskAssignment.designation] || []) : [];
   const canAddSteps = Boolean(taskAssignment.designation && taskAssignment.staffId);
@@ -930,7 +1203,7 @@ const OnDemandTask = () => {
                             <div className={cn('flex items-center justify-between px-3 py-2 border-b', stepTypeColor[step.type] ? `border-b ${stepTypeColor[step.type].split(' ')[0]}/30` : 'border-slate-100')}>
                               <div className="flex items-center gap-2">
                                 <span className={cn('inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold border uppercase tracking-wide', stepTypeColor[step.type] || 'bg-slate-100 text-slate-600 border-slate-200')}>
-                                  {step.type === 'others' ? 'Other' : step.type}
+                                  {step.type === 'others' ? 'Other' : step.type === 'on_field' ? 'On Field' : step.type}
                                 </span>
                                 <span className="text-[10px] font-semibold text-slate-400">#{step.stepNumber}</span>
                               </div>
@@ -1630,7 +1903,7 @@ const OnDemandTask = () => {
                                 <option value="inventory">Inventory</option>
                                 <option value="logistics">Logistics</option>
                                 <option value="inspection">Inspection</option>
-                                <option value="cultivation">Cultivation</option>
+                                <option value="on_field">On Field Task</option>
                                 <option value="other">Others</option>
                               </select>
                             </div>
@@ -1770,42 +2043,201 @@ const OnDemandTask = () => {
                                 </div>
                               )}
 
-                              {/* Cultivation */}
-                              {step.type === 'cultivation' && (
-                                <div className="space-y-2">
-                                  <p className="text-xs font-semibold text-slate-900">Cultivation details</p>
-                                  <div>
-                                    <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Farm</label>
-                                    <select value={step.details.landId} onChange={e => updateStepDetails(step.id, { landId: e.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm focus:border-slate-900 focus:outline-none">
-                                      <option value="">Choose farm</option>
-                                      {farms.map((f: any) => <option key={f.farm_id} value={f.farm_id}>{f?.owner_name || f?.farm_id}{f?.crop_type ? ` · ${f.crop_type}` : ''}{f?.area ? ` (${f.area}ac)` : ''}</option>)}
-                                    </select>
-                                  </div>
-                                  {selectedLand && (
-                                    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs space-y-1">
-                                      <div className="flex gap-6"><span className="text-slate-500">Area</span><span className="font-medium text-slate-900">{Number(selectedLand?.area || 0).toFixed(2)} acres</span></div>
-                                      <div className="flex gap-6"><span className="text-slate-500">Village</span><span className="font-medium text-slate-900">{selectedLand?.land_data?.village || '—'}</span></div>
-                                    </div>
-                                  )}
-                                  <div className="grid grid-cols-2 gap-2">
-                                    <div>
-                                      <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Task type</label>
-                                      <select value={step.details.cultivationTaskType} onChange={e => updateStepDetails(step.id, { cultivationTaskType: e.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm focus:border-slate-900 focus:outline-none">
-                                        <option value="">Choose task type</option>
-                                        <option value="land-preparation">Land preparation</option>
-                                        <option value="sowing">Sowing</option>
-                                        <option value="irrigation">Irrigation</option>
-                                        <option value="spraying">Spraying</option>
-                                        <option value="harvesting">Harvesting</option>
+                              {/* On Field Task */}
+                              {step.type === 'on_field' && (() => {
+                                const scope = scopeByStep[step.id] || {};
+                                const scopeVendorIds = Object.keys(scope);
+                                const selectedScope = step.details.vendorId ? scope[step.details.vendorId] : undefined;
+                                const plots = plotsByStep[step.id] || [];
+                                const excludedPlotIds = excludedPlotsByStep[step.id] || [];
+                                const activePlots = plots.filter(p => !excludedPlotIds.includes(p.plot_id));
+                                const excludedPlots = plots.filter(p => excludedPlotIds.includes(p.plot_id));
+                                const calendars = calendarsByStep[step.id] || [];
+                                const schedule = computePlotSchedule(activePlots, step.details.onFieldStartDate, Number(step.details.onFieldWorkQuantity) || 0);
+                                // Flatten into plot rows + a subtotal row whenever the assigned date changes
+                                const scheduleRows = schedule.reduce<Array<{ kind: 'plot'; plot: OnFieldPlot; assignedDate: string } | { kind: 'subtotal'; date: string; total: number; count: number }>>((rows, { plot, assignedDate }, i) => {
+                                  rows.push({ kind: 'plot', plot, assignedDate });
+                                  const isLastOfDay = i === schedule.length - 1 || schedule[i + 1].assignedDate !== assignedDate;
+                                  if (isLastOfDay) {
+                                    const dayRows = schedule.filter(r => r.assignedDate === assignedDate);
+                                    rows.push({ kind: 'subtotal', date: assignedDate, total: dayRows.reduce((s, r) => s + (Number(r.plot.plot_area) || 0), 0), count: dayRows.length });
+                                  }
+                                  return rows;
+                                }, []);
+                                return (
+                                  <div className="space-y-2">
+                                    {/* Mode switch + Farm, same row */}
+                                    <div className="flex items-center gap-2">
+                                      <div className="flex items-center gap-0.5 rounded-md border border-slate-200 bg-slate-50 p-0.5 shrink-0">
+                                        <button type="button" onClick={() => handleOnFieldModeChange(step.id, 'cultivation')} className={cn('px-2 py-1 rounded text-[11px] font-semibold transition-colors', step.details.onFieldMode === 'cultivation' ? 'bg-lime-700 text-white' : 'text-slate-600 hover:bg-white')}>Cultivation</button>
+                                        <button type="button" onClick={() => handleOnFieldModeChange(step.id, 'non_cultivation')} className={cn('px-2 py-1 rounded text-[11px] font-semibold transition-colors', step.details.onFieldMode === 'non_cultivation' ? 'bg-slate-700 text-white' : 'text-slate-600 hover:bg-white')}>Non-Cult.</button>
+                                      </div>
+                                      <select value={step.details.landId} onChange={e => handleOnFieldFarmChange(step.id, e.target.value)} className="flex-1 min-w-0 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
+                                        <option value="">Choose farm</option>
+                                        {farms.map((f: any) => <option key={f.farm_id} value={f.farm_id}>{f?.owner_name || f?.farm_id}{f?.crop_type ? ` · ${f.crop_type}` : ''}{f?.area ? ` (${f.area}ac)` : ''}</option>)}
                                       </select>
                                     </div>
-                                    <div>
-                                      <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Due date</label>
-                                      <input type="date" value={step.details.dueDate} onChange={e => updateStepDetails(step.id, { dueDate: e.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm focus:border-slate-900 focus:outline-none" />
-                                    </div>
+                                    {selectedLand && (
+                                      <p className="text-[10px] text-slate-400">{Number(selectedLand?.area || 0).toFixed(2)} acres · {selectedLand?.land_data?.village || '—'}</p>
+                                    )}
+
+                                    {/* Calendar select — this farm may have multiple overlapping calendars, so ask which one this task belongs to */}
+                                    {step.details.landId && step.details.onFieldMode === 'cultivation' && (
+                                      <div>
+                                        <select
+                                          value={step.details.onFieldCalendarId}
+                                          onChange={e => updateStepDetails(step.id, { onFieldCalendarId: e.target.value })}
+                                          disabled={calendarsLoadingByStep[step.id] || calendars.length === 0}
+                                          className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100"
+                                        >
+                                          <option value="">
+                                            {calendarsLoadingByStep[step.id] ? 'Loading calendars…' : calendars.length === 0 ? 'No calendar found for this farm' : 'Select calendar'}
+                                          </option>
+                                          {calendars.map(c => (
+                                            <option key={c.calander_id} value={c.calander_id}>{formatShortDate(c.start_date)} - {formatShortDate(c.end_date)}</option>
+                                          ))}
+                                        </select>
+                                        {calendars.length > 1 && (
+                                          <p className="mt-0.5 text-[10px] text-amber-600">This farm has {calendars.length} calendars — pick the one this task belongs to, or it may get created in the wrong one.</p>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* Vendors from scope of work — compact chips */}
+                                    {step.details.landId && (
+                                      <div className="space-y-1">
+                                        {scopeLoadingByStep[step.id] ? (
+                                          <p className="text-[11px] text-slate-400 italic">Loading vendors…</p>
+                                        ) : scopeVendorIds.length === 0 ? (
+                                          <p className="text-[11px] text-slate-400 italic">No vendor scope for this land — assign one in Scope of Work.</p>
+                                        ) : (
+                                          <div className="flex flex-wrap gap-1">
+                                            {scopeVendorIds.map(vendorId => {
+                                              const v = scope[vendorId];
+                                              const isSelected = step.details.vendorId === vendorId;
+                                              return (
+                                                <button
+                                                  key={vendorId}
+                                                  type="button"
+                                                  onClick={() => handleOnFieldVendorChange(step.id, step.details.landId, vendorId, v.vendor_details?.vendor_name || vendorId, step.details.onFieldMode)}
+                                                  className={cn('rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-colors', isSelected ? 'border-lime-600 bg-lime-600 text-white' : 'border-slate-200 bg-white text-slate-700 hover:border-lime-300 hover:bg-lime-50/60')}
+                                                >
+                                                  {v.vendor_details?.vendor_name || vendorId}
+                                                </button>
+                                              );
+                                            })}
+                                          </div>
+                                        )}
+                                        {selectedScope && selectedScope.activities?.length > 0 && step.details.onFieldMode === 'cultivation' && (
+                                          <div className="flex flex-wrap gap-1">
+                                            {selectedScope.activities.map(a => <span key={a} className="text-[10px] px-1.5 py-0.5 bg-lime-100 text-lime-800 border border-lime-200 rounded font-medium">{a}</span>)}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* Cultivation: activity + date + qty in one row */}
+                                    {step.details.vendorId && step.details.onFieldMode === 'cultivation' && (
+                                      <div className="grid grid-cols-3 gap-1.5">
+                                        <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
+                                          <option value="">Activity</option>
+                                          {cultivationActivityOptions.map(a => <option key={a} value={a}>{a}</option>)}
+                                        </select>
+                                        <input type="date" value={step.details.onFieldStartDate} onChange={e => updateStepDetails(step.id, { onFieldStartDate: e.target.value })} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                        <input type="number" min="0" value={step.details.onFieldWorkQuantity} onChange={e => updateStepDetails(step.id, { onFieldWorkQuantity: e.target.value })} placeholder="Qty/day (acres)" className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                      </div>
+                                    )}
+
+                                    {step.details.vendorId && step.details.onFieldMode === 'cultivation' && (
+                                      <div>
+                                        <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Auto-scheduled by plot</p>
+                                        {plotsLoadingByStep[step.id] ? (
+                                          <p className="mt-1 text-[11px] text-slate-400 italic">Loading plots…</p>
+                                        ) : plots.length === 0 ? (
+                                          <p className="mt-1 text-[11px] text-slate-400 italic">No plots found for this vendor's scope on this land.</p>
+                                        ) : activePlots.length === 0 ? (
+                                          <p className="mt-1 text-[11px] text-slate-400 italic">All plots removed — add one back below.</p>
+                                        ) : !step.details.onFieldStartDate || !step.details.onFieldWorkQuantity ? (
+                                          <p className="mt-1 text-[11px] text-slate-400 italic">Set a start date and work quantity to auto-schedule plots.</p>
+                                        ) : (
+                                          <div className="mt-1 overflow-hidden rounded-md border border-slate-200 bg-white">
+                                            <div className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] gap-2 border-b border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                              <div>Plot</div><div>Crop</div><div className="text-right">Acres</div><div className="text-right">Date</div><div />
+                                            </div>
+                                            <div className="divide-y divide-slate-100">
+                                              {scheduleRows.map((row, ri) => row.kind === 'plot' ? (
+                                                <div key={`plot-${row.plot.plot_id}`} className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] items-center gap-2 px-2 py-1 text-[11px]">
+                                                  <span className="truncate font-medium text-slate-900">{row.plot.plot_name || row.plot.plot_id}</span>
+                                                  <span className="truncate text-slate-600">{row.plot.crop_type || '—'}</span>
+                                                  <span className="text-right text-slate-600">{Number(row.plot.plot_area || 0).toFixed(2)}</span>
+                                                  <span className="text-right font-medium text-slate-900">{formatShortDate(row.assignedDate)}</span>
+                                                  <button type="button" onClick={() => excludePlotFromStep(step.id, row.plot.plot_id)} title="Remove plot" className="text-slate-300 hover:text-red-500 shrink-0"><X className="h-3.5 w-3.5" /></button>
+                                                </div>
+                                              ) : (
+                                                <div key={`total-${row.date}-${ri}`} className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] items-center gap-2 bg-lime-50 px-2 py-1 text-[11px]">
+                                                  <span className="col-span-2 font-semibold text-lime-800">Total ({row.count} plot{row.count !== 1 ? 's' : ''})</span>
+                                                  <span className="text-right font-bold text-lime-800">{row.total.toFixed(2)}</span>
+                                                  <span className="text-right font-semibold text-lime-800">{formatShortDate(row.date)}</span>
+                                                  <span />
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+                                        {excludedPlots.length > 0 && (
+                                          <div className="mt-1 flex flex-wrap items-center gap-1">
+                                            <span className="text-[10px] text-slate-400">Removed:</span>
+                                            {excludedPlots.map(p => (
+                                              <button key={p.plot_id} type="button" onClick={() => restorePlotToStep(step.id, p.plot_id)} title="Add back" className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] text-slate-500 hover:border-lime-300 hover:text-lime-700">
+                                                {p.plot_name || p.plot_id} <Plus className="h-2.5 w-2.5" />
+                                              </button>
+                                            ))}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* Non-cultivation: task, timeline, then labelled quantity/unit lines */}
+                                    {step.details.vendorId && step.details.onFieldMode === 'non_cultivation' && (
+                                      <div className="space-y-2">
+                                        <div>
+                                          <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Task / activity</label>
+                                          <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
+                                            <option value="">Choose task</option>
+                                            {cultivationActivityOptions.map(a => <option key={a} value={a}>{a}</option>)}
+                                          </select>
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-1.5">
+                                          <div>
+                                            <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">From date</label>
+                                            <input type="date" value={step.details.onFieldFromDate} onChange={e => updateStepDetails(step.id, { onFieldFromDate: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                          </div>
+                                          <div>
+                                            <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">To date</label>
+                                            <input type="date" value={step.details.onFieldToDate} onChange={e => updateStepDetails(step.id, { onFieldToDate: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                          </div>
+                                        </div>
+
+                                        <div className="rounded-md border border-slate-200 bg-slate-50 p-2 space-y-1.5">
+                                          <div className="flex items-center gap-1.5 text-xs text-slate-700">
+                                            <span className="shrink-0 font-medium">Do</span>
+                                            <input type="number" min="0" value={step.details.onFieldQty} onChange={e => updateStepDetails(step.id, { onFieldQty: e.target.value })} placeholder="2" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
+                                            <input value={step.details.onFieldUnit} onChange={e => updateStepDetails(step.id, { onFieldUnit: e.target.value })} placeholder="Borewells" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                          </div>
+                                          <div className="flex items-center gap-1.5 text-xs text-slate-700">
+                                            <span className="shrink-0 font-medium">Up to</span>
+                                            <input type="number" min="0" value={step.details.onFieldSpecValue} onChange={e => updateStepDetails(step.id, { onFieldSpecValue: e.target.value })} placeholder="250" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
+                                            <input value={step.details.onFieldSpecUnit} onChange={e => updateStepDetails(step.id, { onFieldSpecUnit: e.target.value })} placeholder="feet deep" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                            <span className="shrink-0 text-[10px] text-slate-400">(optional)</span>
+                                          </div>
+                                          <p className="text-[10px] text-slate-400">Reads as: "Do {step.details.onFieldQty || '2'} {step.details.onFieldUnit || 'Borewells'}{step.details.onFieldSpecValue && step.details.onFieldSpecUnit ? `, up to ${step.details.onFieldSpecValue} ${step.details.onFieldSpecUnit}` : ''}".</p>
+                                        </div>
+                                      </div>
+                                    )}
                                   </div>
-                                </div>
-                              )}
+                                );
+                              })()}
 
                               {/* Other */}
                               {step.type === 'other' && (
