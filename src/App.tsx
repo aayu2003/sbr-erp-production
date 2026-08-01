@@ -15,10 +15,12 @@ import HarvestPlanning from "./pages/HarvestPlanning";
 import NotFound from "./pages/NotFound";
 import Inventory from "./pages/Inventory";
 import InventoryIndent from "./pages/InventoryIndent";
+import InventoryApprovals from "./pages/InventoryApprovals";
 import CultivationMaster from "./pages/CultivationMaster";
 import CultivationPlan from "./pages/CultivationPlan";
 import CreateCultivationPlan from "./pages/CreateCultivationPlan";
 import CultivationCalendar from "./pages/CultivationCalendar";
+import OperationalCalendar from "./pages/OperationalCalendar";
 import FieldVisitAnalytics from "./pages/FieldVisitAnalytics";
 import HarvestOrders from "./pages/HarvestOrders";
 import HarvestCards from "./pages/HarvestCards";
@@ -36,6 +38,7 @@ import FleetChart from "./pages/FleetChart";
 import KhasraFinder from "./pages/khasra_finder";
 import FieldMonitoring from "./pages/FieldMonitoring";
 import LandAcquisition from "./pages/LandAcquisition";
+import Legal from "./pages/Legal";
 import AdminOpsIndent from "./pages/AdminOpsIndent";
 import FinanceAdminOpsIndent from "./pages/FinanceAdminOpsIndent";
 import PurchaseRequisition from "./pages/PurchaseRequisition";
@@ -64,11 +67,16 @@ import WorkOrder from "./pages/WorkOrder";
 import ScopeOfWork from "./pages/ScopeOfWork";
 import WebApp from "./pages/webapp/WebApp";
 import Inbox from "./pages/Inbox";
+import WccApprovalInbox from "./pages/WccApprovalInbox";
+import GRNModule from "./pages/GRNModule";
+import GrnApprovalInbox from "./pages/GrnApprovalInbox";
+import GateEntryModule from "./pages/GateEntryModule";
 import LabourManagement from "./pages/LabourManagement";
 import UserManagement from "./pages/UserManagement";
 import AccountsDashboard from "./pages/AccountsDashboard";
 import AccountsLedger from "./pages/AccountsLedger";
 import AccountsPayments from "./pages/AccountsPayments";
+import PRRApprovalInbox from "./pages/PRRApprovalInbox";
 import AccountsPurchaseFlow from "./pages/AccountsPurchaseFlow";
 import Budget from "./pages/Budget";
 import BudgetDashboard from "./pages/BudgetDashboard";
@@ -88,6 +96,8 @@ const App = () => (
 
           <Route path="/ceos-desk" element={<AppLayout><CeosDesk /></AppLayout>} />
 
+          <Route path="/legal" element={<AppLayout><Legal /></AppLayout>} />
+
           <Route path="/leads" element={<AppLayout><Leads /></AppLayout>} />
           <Route path="/tasks-beta" element={<AppLayout><TasksBeta /></AppLayout>} />
           <Route path="/farmers" element={<AppLayout><Farmers /></AppLayout>} />
@@ -97,6 +107,7 @@ const App = () => (
           
           {/* Operations */}
           <Route path="/cultivation-calendar" element={<AppLayout><CultivationCalendar /></AppLayout>} />
+          <Route path="/operational-calendar" element={<AppLayout><OperationalCalendar /></AppLayout>} />
           <Route path="/cultivation-master/*" element={<AppLayout><CultivationMaster /></AppLayout>} />
           <Route path="/cultivation-plan" element={<AppLayout><CultivationPlan /></AppLayout>} />
           <Route path="/cultivation-plan/create" element={<AppLayout><CreateCultivationPlan /></AppLayout>} />
@@ -115,6 +126,7 @@ const App = () => (
           <Route path="/scope-of-work" element={<AppLayout><ScopeOfWork /></AppLayout>} />
           <Route path="/inventory" element={<AppLayout><Inventory /></AppLayout>} />
           <Route path="/inventory-indents" element={<AppLayout><InventoryIndent /></AppLayout>} />
+          <Route path="/inventory-approvals" element={<AppLayout><InventoryApprovals /></AppLayout>} />
           <Route path="/fuels-and-consumables" element={<AppLayout><FuelsAndConsumables /></AppLayout>} />
           <Route path="/admin-ops-fuel-requests" element={<AppLayout><AdminOpsFuelRequest /></AppLayout>} />
           <Route path="/director-fuel-requests" element={<AppLayout><DirectorFuelRequest /></AppLayout>} />
@@ -227,10 +239,23 @@ const App = () => (
           <Route path="/hrms/inbox"      element={<AppLayout><Inbox department="HRMS" /></AppLayout>} />
           <Route path="/director/inbox"  element={<AppLayout><Inbox department="Director" /></AppLayout>} />
 
+          {/* WCC Approval workflow */}
+          <Route path="/admin/wcc-approval"    element={<AppLayout><WccApprovalInbox stage="verification" /></AppLayout>} />
+          <Route path="/director/wcc-approval" element={<AppLayout><WccApprovalInbox stage="approval" /></AppLayout>} />
+
+          {/* GRN Module + GRN Approval workflow */}
+          <Route path="/grn-module"            element={<AppLayout><GRNModule /></AppLayout>} />
+          <Route path="/admin/grn-approval"    element={<AppLayout><GrnApprovalInbox stage="verification" /></AppLayout>} />
+          <Route path="/director/grn-approval" element={<AppLayout><GrnApprovalInbox stage="approval" /></AppLayout>} />
+
+          {/* Gate Entry */}
+          <Route path="/gate-entry" element={<AppLayout><GateEntryModule /></AppLayout>} />
+
           {/* Accounts */}
           <Route path="/accounts/dashboard"    element={<AppLayout><AccountsDashboard /></AppLayout>} />
           <Route path="/accounts/ledger"       element={<AppLayout><AccountsLedger /></AppLayout>} />
           <Route path="/accounts/payments"     element={<AppLayout><AccountsPayments /></AppLayout>} />
+          <Route path="/director/prr-approval" element={<AppLayout><PRRApprovalInbox /></AppLayout>} />
           <Route path="/accounts/purchase-flow" element={<AppLayout><AccountsPurchaseFlow /></AppLayout>} />
           <Route path="/budget"                element={<AppLayout><BudgetDashboard /></AppLayout>} />
           <Route path="/budget/:budgetId"      element={<AppLayout><Budget /></AppLayout>} />

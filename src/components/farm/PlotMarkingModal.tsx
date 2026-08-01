@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Polygon, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polygon, Tooltip, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
@@ -36,6 +36,7 @@ type ApiPlot = {
 };
 
 export type PlotMarkingModalProps = {
+  embedded?: boolean;
   farmId: string;
   farmLabel: string;
   farmTotalAcres: number;
@@ -59,6 +60,8 @@ const PLOT_COLORS = [
   '#14b8a6', '#6366f1', '#84cc16', '#ef4444', '#3b82f6',
 ];
 const plotColor = (i: number) => PLOT_COLORS[i % PLOT_COLORS.length];
+const naturalPlotCompare = (first: string, second: string) =>
+  first.localeCompare(second, undefined, { numeric: true, sensitivity: 'base' });
 
 const BATCH_SIZE = 10;
 
@@ -95,8 +98,12 @@ const centerOf = (coords: LatLng[]): LatLng => {
 const FitBounds = ({ coords }: { coords: LatLng[] }) => {
   const map = useMap();
   useEffect(() => {
-    if (coords.length > 0)
-      map.fitBounds(L.latLngBounds(coords as L.LatLngTuple[]), { padding: [24, 24] });
+    if (coords.length === 0) return;
+    const frame = requestAnimationFrame(() => {
+      map.invalidateSize(false);
+      map.fitBounds(L.latLngBounds(coords as L.LatLngTuple[]), { padding: [36, 36], maxZoom: 18 });
+    });
+    return () => cancelAnimationFrame(frame);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coords.length]);
   return null;
@@ -106,6 +113,7 @@ const FitBounds = ({ coords }: { coords: LatLng[] }) => {
 // MAIN MODAL
 // ─────────────────────────────────────────────────────────────
 const PlotMarkingModal = ({
+  embedded = false,
   farmId, farmLabel, farmTotalAcres: _farmTotalAcres,
   initialCoordinates, initialPlots = [], onClose, onSave,
 }: PlotMarkingModalProps) => {
@@ -124,12 +132,14 @@ const PlotMarkingModal = ({
 
   // Plots already persisted on the server
   const [savedPlots, setSavedPlots] = useState<SavedPlotItem[]>(() =>
-    initialPlots.map(p => ({
-      plot_id:     p.plot_id,
-      plot_number: p.plot_name,
-      acres:       p.plot_area,
-      coordinates: p.plot_coordinates,
-    }))
+    initialPlots
+      .map(p => ({
+        plot_id:     p.plot_id,
+        plot_number: p.plot_name,
+        acres:       p.plot_area,
+        coordinates: p.plot_coordinates,
+      }))
+      .sort((first, second) => naturalPlotCompare(first.plot_number, second.plot_number))
   );
 
   // Editing an existing saved plot (rename and/or replace its shape via a new KML)
@@ -148,8 +158,13 @@ const PlotMarkingModal = ({
   }, [onClose, screen]);
 
   const allKmlCoords  = kmlPlots.flatMap(p => p.coordinates);
+  const sortedSavedPlots = [...savedPlots].sort((first, second) =>
+    naturalPlotCompare(first.plot_number, second.plot_number)
+  );
   const reviewCenter  = centerOf(allKmlCoords.length > 0 ? allKmlCoords : initialCoordinates);
   const idleCenter    = centerOf(initialCoordinates.length > 0 ? initialCoordinates : [[20.5937, 78.9629]]);
+  const savedPlotCoordinates = savedPlots.flatMap(plot => plot.coordinates);
+  const idleFitCoordinates = savedPlotCoordinates.length > 0 ? savedPlotCoordinates : initialCoordinates;
   const allNamed      = plotNames.length > 0 && plotNames.every(n => n.trim().length > 0);
   const namedCount    = plotNames.filter(n => n.trim().length > 0).length;
 
@@ -158,11 +173,13 @@ const PlotMarkingModal = ({
     try {
       setIsParsingKml(true);
       const result = await parseKmlFile(file);
-      const plots: KmlPlot[] = result.allPolygons.map(p => ({
-        kmlName:     p.name,
-        coordinates: p.coordinates,
-        area:        parseFloat(calculateAcres(p.coordinates).toFixed(3)),
-      }));
+      const plots: KmlPlot[] = result.allPolygons
+        .map(p => ({
+          kmlName:     p.name,
+          coordinates: p.coordinates,
+          area:        parseFloat(calculateAcres(p.coordinates).toFixed(3)),
+        }))
+        .sort((first, second) => naturalPlotCompare(first.kmlName, second.kmlName));
       if (plots.length === 0) { toast.error('No polygons found in KML file'); return; }
       setKmlPlots(plots);
       setPlotNames(plots.map(() => ''));
@@ -349,23 +366,29 @@ const PlotMarkingModal = ({
   // RENDER
   // ─────────────────────────────────────────────────────────
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-3">
+    <div className={embedded
+      ? 'flex h-full min-h-0 w-full items-stretch'
+      : 'fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-3'
+    }>
       <div
-        className="w-full max-w-5xl rounded-2xl overflow-hidden shadow-2xl flex flex-col"
-        style={{ height: '88vh', background: '#111827' }}
+        className={`flex w-full flex-col overflow-hidden ${
+          embedded ? 'h-full' : 'max-w-5xl rounded-2xl shadow-2xl'
+        }`}
+        style={{ height: embedded ? '100%' : '88vh', background: '#ffffff' }}
       >
 
         {/* ══ TOOLBAR ══════════════════════════════════════ */}
-        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-700 bg-gray-900 gap-4 shrink-0">
+        {!embedded && (
+        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 bg-white px-5 py-3">
           <div className="flex items-center gap-3 min-w-0">
-            <MapPin className="w-4 h-4 text-emerald-400 shrink-0" />
+            <MapPin className="h-4 w-4 shrink-0 text-[#0D3A35]" />
             <div className="min-w-0">
-              <span className="text-sm font-bold text-white">
+              <span className="text-sm font-bold text-slate-900">
                 {screen === 'idle'   ? 'Plot Marking — Manage Plots'
                 : screen === 'review' ? `Review & Name Plots (${kmlPlots.length} detected)`
                 :                       'Saving Plots…'}
               </span>
-              <p className="text-[11px] text-gray-500 truncate mt-0.5">{farmLabel}</p>
+              <p className="mt-0.5 truncate text-[11px] text-slate-500">{farmLabel}</p>
             </div>
           </div>
 
@@ -374,7 +397,7 @@ const PlotMarkingModal = ({
               <>
                 <button
                   onClick={() => { setScreen('idle'); setKmlPlots([]); setPlotNames([]); }}
-                  className="rounded-lg border border-gray-600 px-3 py-1.5 text-xs font-medium text-gray-300 hover:text-white hover:border-gray-400 transition-colors"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
                 >
                   Re-upload KML
                 </button>
@@ -382,52 +405,53 @@ const PlotMarkingModal = ({
                   onClick={handleSaveAll}
                   disabled={!allNamed}
                   title={!allNamed ? `${kmlPlots.length - namedCount} plot(s) still need a name` : undefined}
-                  className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-1.5 text-xs font-bold text-white transition-colors"
+                  className="flex items-center gap-1.5 rounded-lg bg-[#0D3A35] px-4 py-1.5 text-xs font-bold text-white transition-colors hover:bg-[#092b27] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Save className="w-3.5 h-3.5" />
                   Save {kmlPlots.length} Plots
                 </button>
               </>
             )}
-            {screen !== 'saving' && (
+            {screen !== 'saving' && !embedded && (
               <button
                 onClick={onClose}
-                className="rounded-lg border border-gray-600 bg-gray-800 p-1.5 text-gray-400 hover:text-white hover:border-gray-400 transition-colors"
+                className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-900"
               >
                 <X className="w-4 h-4" />
               </button>
             )}
           </div>
         </div>
+        )}
 
         {/* ══ CONTENT ══════════════════════════════════════ */}
         <div className="flex-1 flex overflow-hidden">
 
           {/* ── IDLE: saved plots list + map ────────────── */}
           {screen === 'idle' && (
-            <div className="flex-1 flex overflow-hidden">
+            <div className="flex flex-1 flex-row-reverse overflow-hidden">
 
               {/* Left panel — saved plots */}
-              <div className="w-[360px] shrink-0 flex flex-col bg-gray-900 border-r border-gray-700">
-                <div className="px-4 py-3 border-b border-gray-700 shrink-0">
-                  <p className="text-sm font-semibold text-white">
+              <div className="flex min-w-[300px] basis-[30%] shrink-0 flex-col border-l border-slate-200 bg-slate-50/70">
+                <div className="shrink-0 border-b border-slate-200 px-4 py-3">
+                  <p className="text-sm font-semibold text-slate-900">
                     {savedPlots.length} Saved Plot{savedPlots.length === 1 ? '' : 's'}
                   </p>
-                  <p className="text-xs text-gray-400 mt-0.5">Edit a name/shape, delete, or upload a KML to add more</p>
+                  <p className="mt-0.5 text-xs text-slate-500">Edit a name/shape, delete, or upload a KML to add more</p>
                 </div>
 
                 <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
                   {savedPlots.length === 0 ? (
-                    <p className="text-xs text-gray-500 px-1 pt-6 text-center">No plots yet — upload a KML below to get started</p>
+                    <p className="px-1 pt-6 text-center text-xs text-slate-500">No plots yet — upload a KML below to get started</p>
                   ) : (
-                    savedPlots.map((plot, i) => {
+                    sortedSavedPlots.map((plot, i) => {
                       const isEditing = editingPlotId === plot.plot_id;
                       return (
                         <div
                           key={plot.plot_id}
                           className={cn(
                             'rounded-lg px-3 py-2.5 transition-colors',
-                            isEditing ? 'bg-gray-800 ring-1 ring-emerald-500' : 'bg-gray-800/70',
+                            isEditing ? 'bg-emerald-50 ring-1 ring-emerald-300' : 'border border-slate-200 bg-white',
                           )}
                         >
                           <div className="flex items-center gap-2.5">
@@ -439,13 +463,13 @@ const PlotMarkingModal = ({
                                 onChange={e => setEditName(e.target.value)}
                                 placeholder="Plot name…"
                                 autoFocus
-                                className="flex-1 min-w-0 rounded-md border border-gray-600 px-2.5 py-1.5 text-xs text-white bg-gray-700 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                                className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
                               />
                             ) : (
-                              <span className="flex-1 min-w-0 truncate text-sm text-white font-medium">{plot.plot_number}</span>
+                              <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800">{plot.plot_number}</span>
                             )}
-                            <span className="text-[11px] text-gray-400 shrink-0">
-                              {(isEditing ? editPendingShape?.area ?? plot.acres : plot.acres).toFixed(2)} ac
+                            <span className="shrink-0 text-[11px] text-slate-500">
+                              {(isEditing ? editPendingShape?.area ?? plot.acres : plot.acres).toFixed(3)} ac
                             </span>
                           </div>
 
@@ -458,7 +482,7 @@ const PlotMarkingModal = ({
                                     ? 'border-emerald-500 text-emerald-400 cursor-wait'
                                     : editPendingShape
                                       ? 'border-emerald-600 text-emerald-400'
-                                      : 'border-gray-600 text-gray-300 hover:border-emerald-500 hover:text-emerald-400',
+                                      : 'border-slate-300 text-slate-600 hover:border-emerald-500 hover:text-emerald-700',
                                 )}
                               >
                                 {isParsingEditKml ? <Loader2 className="w-3 h-3 animate-spin" /> : <UploadCloud className="w-3 h-3" />}
@@ -478,14 +502,14 @@ const PlotMarkingModal = ({
                               <button
                                 onClick={() => saveEdit(plot)}
                                 disabled={!editName.trim() || savingEditId === plot.plot_id}
-                                className="flex items-center gap-1 rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed px-2.5 py-1 text-[11px] font-semibold text-white transition-colors"
+                                className="flex items-center gap-1 rounded-md bg-[#0D3A35] px-2.5 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-[#092b27] disabled:cursor-not-allowed disabled:opacity-40"
                               >
                                 {savingEditId === plot.plot_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
                                 Save
                               </button>
                               <button
                                 onClick={cancelEdit}
-                                className="rounded-md border border-gray-600 px-2.5 py-1 text-[11px] text-gray-300 hover:text-white hover:border-gray-400 transition-colors"
+                                className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
                               >
                                 Cancel
                               </button>
@@ -494,14 +518,14 @@ const PlotMarkingModal = ({
                             <div className="mt-2 flex items-center gap-1.5">
                               <button
                                 onClick={() => startEdit(plot)}
-                                className="flex items-center gap-1 rounded-md border border-gray-600 px-2.5 py-1 text-[11px] text-gray-300 hover:text-white hover:border-gray-400 transition-colors"
+                                className="flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
                               >
                                 <Pencil className="w-3 h-3" /> Edit
                               </button>
                               <button
                                 onClick={() => handleDeletePlot(plot)}
                                 disabled={deletingPlotId === plot.plot_id}
-                                className="flex items-center gap-1 rounded-md border border-red-900 px-2.5 py-1 text-[11px] text-red-400 hover:text-red-300 hover:border-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                className="flex items-center gap-1 rounded-md border border-red-200 bg-white px-2.5 py-1 text-[11px] text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
                               >
                                 {deletingPlotId === plot.plot_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
                                 Delete
@@ -515,13 +539,13 @@ const PlotMarkingModal = ({
                 </div>
 
                 {/* Upload new plot(s) */}
-                <div className="px-3 py-3 border-t border-gray-700 shrink-0">
+                <div className="shrink-0 border-t border-slate-200 bg-white px-3 py-3">
                   <label
                     className={cn(
                       'flex items-center justify-center gap-2 rounded-lg border-2 border-dashed px-3 py-3 text-xs font-semibold cursor-pointer transition-colors',
                       isParsingKml
                         ? 'border-emerald-500 text-emerald-400 cursor-wait'
-                        : 'border-gray-600 text-gray-300 hover:border-emerald-500 hover:text-emerald-400',
+                        : 'border-slate-300 text-slate-600 hover:border-emerald-500 hover:text-emerald-700',
                     )}
                   >
                     {isParsingKml ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
@@ -542,7 +566,7 @@ const PlotMarkingModal = ({
               </div>
 
               {/* Right panel — map */}
-              <div className="flex-1 relative">
+              <div className="relative m-4 min-w-0 basis-[70%] overflow-hidden rounded-xl border border-slate-200 bg-slate-100 shadow-sm">
                 <MapContainer
                   center={idleCenter}
                   zoom={initialCoordinates.length > 0 ? 15 : 5}
@@ -562,10 +586,10 @@ const PlotMarkingModal = ({
                   {initialCoordinates.length >= 3 && (
                     <Polygon
                       positions={initialCoordinates}
-                      pathOptions={{ color: '#94a3b8', fillColor: '#94a3b8', fillOpacity: 0.1, weight: 2, dashArray: '6 4' }}
+                      pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }}
                     />
                   )}
-                  {savedPlots.map((sp, si) => {
+                  {sortedSavedPlots.map((sp, si) => {
                     const isEditing = editingPlotId === sp.plot_id;
                     const positions = (isEditing && editPendingShape ? editPendingShape.coordinates : sp.coordinates) as [number, number][];
                     return positions.length >= 3 ? (
@@ -578,9 +602,16 @@ const PlotMarkingModal = ({
                           fillOpacity: isEditing ? 0.45 : 0.25,
                           weight: isEditing ? 3 : 2,
                         }}
-                      />
+                      >
+                        <Tooltip permanent direction="center" opacity={1} className="plot-label-tooltip">
+                          <span className="text-[11px] font-bold text-slate-900">
+                            {sp.plot_number}
+                          </span>
+                        </Tooltip>
+                      </Polygon>
                     ) : null;
                   })}
+                  <FitBounds coords={idleFitCoordinates} />
                 </MapContainer>
               </div>
             </div>
@@ -588,14 +619,14 @@ const PlotMarkingModal = ({
 
           {/* ── REVIEW: name list + map ─────────────────── */}
           {screen === 'review' && (
-            <div className="flex-1 flex overflow-hidden">
+            <div className="flex flex-1 flex-row-reverse overflow-hidden">
 
               {/* Left panel — plot list */}
-              <div className="w-[360px] shrink-0 flex flex-col bg-gray-900 border-r border-gray-700">
+              <div className="flex min-w-[300px] basis-[30%] shrink-0 flex-col border-l border-slate-200 bg-slate-50/70">
 
-                <div className="px-4 py-3 border-b border-gray-700 shrink-0">
-                  <p className="text-sm font-semibold text-white">{kmlPlots.length} Plots Detected</p>
-                  <p className="text-xs text-gray-400 mt-0.5">
+                <div className="shrink-0 border-b border-slate-200 px-4 py-3">
+                  <p className="text-sm font-semibold text-slate-900">{kmlPlots.length} Plots Detected</p>
+                  <p className="mt-0.5 text-xs text-slate-500">
                     Enter a unique name for every plot — "Save" unlocks when all are filled
                   </p>
                 </div>
@@ -608,7 +639,7 @@ const PlotMarkingModal = ({
                         key={i}
                         className={cn(
                           'flex items-center gap-2.5 rounded-lg px-3 py-2.5 transition-colors',
-                          filled ? 'bg-gray-800/70' : 'bg-gray-800',
+                          filled ? 'border border-emerald-200 bg-emerald-50' : 'border border-slate-200 bg-white',
                         )}
                       >
                         {/* Color swatch */}
@@ -617,9 +648,9 @@ const PlotMarkingModal = ({
                           style={{ background: plotColor(i) }}
                         />
                         {/* Row number */}
-                        <span className="text-[11px] font-mono text-gray-500 w-5 shrink-0 text-right">{i + 1}</span>
+                        <span className="w-5 shrink-0 text-right font-mono text-[11px] text-slate-400">{i + 1}</span>
                         {/* Area */}
-                        <span className="text-[11px] text-gray-400 w-14 shrink-0">{plot.area.toFixed(2)} ac</span>
+                        <span className="w-16 shrink-0 text-[11px] text-slate-500">{plot.area.toFixed(3)} ac</span>
                         {/* Name input */}
                         <input
                           type="text"
@@ -630,10 +661,10 @@ const PlotMarkingModal = ({
                             setPlotNames(prev => { const n = [...prev]; n[i] = v; return n; });
                           }}
                           className={cn(
-                            'flex-1 min-w-0 rounded-md border px-2.5 py-1.5 text-xs text-white bg-gray-700 placeholder-gray-500 focus:outline-none focus:ring-1 transition-colors',
+                            'min-w-0 flex-1 rounded-md border bg-white px-2.5 py-1.5 text-xs text-slate-800 placeholder-slate-400 transition-colors focus:outline-none focus:ring-1',
                             filled
                               ? 'border-emerald-600/70 focus:ring-emerald-500'
-                              : 'border-gray-600 focus:ring-gray-400',
+                              : 'border-slate-300 focus:ring-slate-400',
                           )}
                         />
                         {/* Check */}
@@ -644,31 +675,51 @@ const PlotMarkingModal = ({
                 </div>
 
                 {/* Footer counter */}
-                <div className="px-4 py-3 border-t border-gray-700 shrink-0 bg-gray-900">
+                <div className="shrink-0 border-t border-slate-200 bg-white px-4 py-3">
                   <div className="flex items-center justify-between">
-                    <p className="text-xs text-gray-400">
-                      <span className={cn('font-semibold', allNamed ? 'text-emerald-400' : 'text-white')}>
+                    <p className="text-xs text-slate-500">
+                      <span className={cn('font-semibold', allNamed ? 'text-emerald-700' : 'text-slate-800')}>
                         {namedCount}
                       </span>
                       {' / '}{kmlPlots.length} named
                     </p>
                     {allNamed && (
-                      <span className="text-[11px] text-emerald-400 font-medium">Ready to save ✓</span>
+                      <span className="text-[11px] font-medium text-emerald-700">Ready to save ✓</span>
                     )}
                   </div>
                   {!allNamed && (
-                    <div className="mt-1.5 h-1 w-full bg-gray-700 rounded-full overflow-hidden">
+                    <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-slate-200">
                       <div
                         className="h-full bg-emerald-600 rounded-full transition-all"
                         style={{ width: `${(namedCount / kmlPlots.length) * 100}%` }}
                       />
                     </div>
                   )}
+                  {embedded && (
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { setScreen('idle'); setKmlPlots([]); setPlotNames([]); }}
+                        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                      >
+                        Re-upload KML
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSaveAll}
+                        disabled={!allNamed}
+                        className="flex items-center justify-center gap-1.5 rounded-lg bg-[#0D3A35] px-3 py-2 text-xs font-bold text-white transition hover:bg-[#092b27] disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        Save Plots
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 
               {/* Right panel — map */}
-              <div className="flex-1 relative overflow-hidden">
+              <div className="relative m-4 min-w-0 basis-[70%] overflow-hidden rounded-xl border border-slate-200 bg-slate-100 shadow-sm">
                 <MapContainer
                   center={reviewCenter}
                   zoom={14}
@@ -688,7 +739,7 @@ const PlotMarkingModal = ({
                   {initialCoordinates.length >= 3 && (
                     <Polygon
                       positions={initialCoordinates}
-                      pathOptions={{ color: '#94a3b8', fillColor: '#94a3b8', fillOpacity: 0.05, weight: 2, dashArray: '6 4' }}
+                      pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }}
                     />
                   )}
                   {kmlPlots.map((plot, i) =>
@@ -697,7 +748,13 @@ const PlotMarkingModal = ({
                         key={i}
                         positions={plot.coordinates}
                         pathOptions={{ color: plotColor(i), fillColor: plotColor(i), fillOpacity: 0.3, weight: 2.5 }}
-                      />
+                      >
+                        <Tooltip permanent direction="center" opacity={1} className="plot-label-tooltip">
+                          <span className="text-[11px] font-bold text-slate-900">
+                            {plotNames[i]?.trim() || plot.kmlName || `Plot ${i + 1}`}
+                          </span>
+                        </Tooltip>
+                      </Polygon>
                     ) : null
                   )}
                   <FitBounds coords={allKmlCoords} />
@@ -708,28 +765,28 @@ const PlotMarkingModal = ({
 
           {/* ── SAVING: progress view ───────────────────── */}
           {screen === 'saving' && (
-            <div className="flex-1 flex flex-col items-center justify-center bg-gray-950 px-8">
+            <div className="flex flex-1 flex-col items-center justify-center bg-slate-50 px-8">
               <div className="w-full max-w-lg space-y-7">
 
                 {/* Title */}
                 <div className="text-center space-y-1">
                   {progressDone < progressTotal ? (
                     <>
-                      <Loader2 className="w-10 h-10 text-emerald-400 animate-spin mx-auto mb-3" />
-                      <p className="text-xl font-bold text-white">Saving Plots…</p>
-                      <p className="text-gray-400 text-sm">
+                      <Loader2 className="mx-auto mb-3 h-10 w-10 animate-spin text-[#0D3A35]" />
+                      <p className="text-xl font-bold text-slate-900">Saving Plots…</p>
+                      <p className="text-sm text-slate-500">
                         Processing in batches of {BATCH_SIZE} — please wait
                       </p>
                     </>
                   ) : progressFailed.length === 0 ? (
                     <>
-                      <Check className="w-10 h-10 text-emerald-400 mx-auto mb-3" />
-                      <p className="text-xl font-bold text-white">All Plots Saved!</p>
+                      <Check className="mx-auto mb-3 h-10 w-10 text-[#0D3A35]" />
+                      <p className="text-xl font-bold text-slate-900">All Plots Saved!</p>
                     </>
                   ) : (
                     <>
                       <AlertCircle className="w-10 h-10 text-amber-400 mx-auto mb-3" />
-                      <p className="text-xl font-bold text-white">
+                      <p className="text-xl font-bold text-slate-900">
                         {progressSaved.length} Saved · {progressFailed.length} Failed
                       </p>
                     </>
@@ -738,11 +795,11 @@ const PlotMarkingModal = ({
 
                 {/* Progress bar */}
                 <div className="space-y-2">
-                  <div className="flex justify-between text-xs text-gray-400">
+                  <div className="flex justify-between text-xs text-slate-500">
                     <span>{progressDone} / {progressTotal} plots</span>
                     <span>{progressTotal > 0 ? Math.round((progressDone / progressTotal) * 100) : 0}%</span>
                   </div>
-                  <div className="h-3 w-full bg-gray-800 rounded-full overflow-hidden">
+                  <div className="h-3 w-full overflow-hidden rounded-full bg-slate-200">
                     <div
                       className="h-full rounded-full transition-all duration-300 ease-out"
                       style={{
@@ -755,18 +812,18 @@ const PlotMarkingModal = ({
 
                 {/* Result list */}
                 {(progressSaved.length > 0 || progressFailed.length > 0) && (
-                  <div className="max-h-56 overflow-y-auto bg-gray-900 rounded-xl px-4 py-3 space-y-1.5 border border-gray-800">
+                  <div className="max-h-56 space-y-1.5 overflow-y-auto rounded-xl border border-slate-200 bg-white px-4 py-3">
                     {progressSaved.map((name, i) => (
                       <div key={`s-${i}`} className="flex items-center gap-2 text-sm">
                         <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        <span className="text-emerald-300">{name}</span>
+                        <span className="text-emerald-700">{name}</span>
                       </div>
                     ))}
                     {progressFailed.map((name, i) => (
                       <div key={`f-${i}`} className="flex items-center gap-2 text-sm">
                         <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                        <span className="text-red-300">{name}</span>
-                        <span className="text-gray-500 text-xs ml-auto">failed</span>
+                        <span className="text-red-600">{name}</span>
+                        <span className="ml-auto text-xs text-slate-500">failed</span>
                       </div>
                     ))}
                   </div>
@@ -776,7 +833,7 @@ const PlotMarkingModal = ({
                 {progressDone === progressTotal && progressFailed.length > 0 && (
                   <button
                     onClick={onClose}
-                    className="w-full py-2.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium transition-colors"
+                    className="w-full rounded-lg bg-[#0D3A35] py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#092b27]"
                   >
                     Close
                   </button>

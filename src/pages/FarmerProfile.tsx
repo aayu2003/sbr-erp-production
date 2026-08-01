@@ -477,7 +477,7 @@ const FarmerProfile = () => {
                     {mapCoords.length >= 3 && (
                       <Polygon
                         positions={mapCoords}
-                        pathOptions={{ color: "#22c55e", weight: 2, fillOpacity: 0.15 }}
+                        pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", weight: 3, fillOpacity: 0.28 }}
                       />
                     )}
                   </MapContainer>

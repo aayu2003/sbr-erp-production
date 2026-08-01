@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import {
-  Users, UserCheck, Sprout, Calendar, UserPlus, Fuel,
+  Users, UserCheck, Sprout, Calendar, CalendarClock, UserPlus, Fuel,
   ChevronLeft, ChevronRight, ChevronDown,
   Layers, Box, FileText, Map, AlertCircle, User, LogOut,
   ClipboardCheck, Activity, FolderKanban, Landmark,
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
   Car, Mail, Package, Scale, Truck, CheckSquare,
+  FileCheck, PackageCheck, DoorOpen,
 } from "lucide-react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -14,11 +15,12 @@ import modulesConfig from "@/config/modules.json";
 
 // Map JSON icon name strings → Lucide components
 const ICON_MAP: Record<string, React.ElementType> = {
-  Users, UserCheck, Sprout, Calendar, UserPlus, Fuel,
+  Users, UserCheck, Sprout, Calendar, CalendarClock, UserPlus, Fuel,
   Layers, Box, FileText, Map, AlertCircle, User,
   ClipboardCheck, Activity, FolderKanban, Landmark,
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
   Car, Mail, Package, Scale, Truck, CheckSquare,
+  FileCheck, PackageCheck, DoorOpen,
 };
 
 /* ---------------- NAV ITEM COMPONENT ---------------- */

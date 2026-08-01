@@ -1,7 +1,7 @@
 ﻿import { useMemo, useState, useEffect, useRef } from 'react';
-import { Search, Filter, Users, MapPin, Phone, FileText, ShieldCheck, NotebookText, Wallet, Check, Flag, Leaf, Wheat, Sprout, Image as ImageIcon, Map, Pencil, Trash2, KeyRound, MoreVertical, IdCard, BookOpen, FileBadge2, Landmark, Info, Navigation, Loader2, UploadCloud, X, Camera, Save, UserRound, Home, Banknote, Eye, FileUp } from 'lucide-react';
+import { Search, Filter, Users, MapPin, Phone, Mail, FileText, ShieldCheck, NotebookText, Wallet, Check, Flag, Leaf, Wheat, Sprout, Image as ImageIcon, Map, Pencil, Trash2, KeyRound, IdCard, BookOpen, FileBadge2, Landmark, Info, Navigation, Loader2, UploadCloud, X, Camera, Save, UserRound, Home, Banknote, Eye, FileUp, ArrowRight, ChevronDown, Droplets, Zap, Ruler, Layers3, IndianRupee, CalendarDays, Timer } from 'lucide-react';
 import { Fragment } from 'react';
-import { MapContainer, TileLayer, Polygon, Marker, Popup, FeatureGroup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polygon, Marker, Popup, Tooltip, FeatureGroup, useMap } from 'react-leaflet';
 import { EditControl } from 'react-leaflet-draw';
 import 'leaflet/dist/leaflet.css';
 import 'leaflet-draw/dist/leaflet.draw.css';
@@ -45,6 +45,7 @@ type FarmerRow = {
   id: string;
   fullName: string;
   phoneNumber: string;
+  email?: string | null;
   alternatePhone?: string | null;
   village: string;
   taluka?: string | null;
@@ -56,6 +57,8 @@ type FarmerRow = {
   landMapping?: { totalArea: number; coordinates: unknown[] };
   agreements: unknown[];
   credentials?: { userId: string | null; password: string | null; saved: boolean } | null;
+  clusterAssigned?: string | null;
+  zoneAssigned?: string | null;
   blockAssigned?: string | null;
   createdAt: Date;
   documents?: Record<string, any> | null;
@@ -64,6 +67,13 @@ type FarmerRow = {
   crop?: CropValue;
   farmingOption?: string;
   farmerAddress?: string;
+  coOwner?: {
+    fullName?: string | null;
+    phoneNumber?: string | null;
+    relationship?: string | null;
+    aadhaarNumber?: string | null;
+    panNumber?: string | null;
+  } | null;
 };
 
 type FarmCardData = {
@@ -75,6 +85,9 @@ type FarmCardData = {
   landMapping?: { totalArea: number; coordinates: unknown[] } | null;
   leaseStart?: string | null;
   leaseEnd?: string | null;
+  leaseRate?: number | string | null;
+  cluster?: string | null;
+  zone?: string | null;
   block?: string | null;
 };
 
@@ -84,13 +97,55 @@ const cropOptions: Array<{ value: Exclude<CropValue, ''>; label: string; Icon: R
   { value: 'ragi', label: 'Ragi', Icon: Sprout },
 ];
 
+const CEO_CULTIVATION_CROP_COLORS: Record<string, string> = {
+  paddy: 'var(--crop-paddy-color, #22c55e)',
+  napier: 'var(--crop-napier-color, #22c55e)',
+  rahar: 'var(--crop-rahar-color, #800000)',
+  unspecified: '#94a3b8',
+};
+const CEO_CULTIVATION_FALLBACK_COLORS = ['#2563eb', '#6d28d9', '#0891b2', '#dc2626', '#0f766e'];
+
 const FlyToBounds = ({ coords }: { coords: { lat: number; lng: number }[] | null }) => {
   const map = useMap();
+  const coordinatesKey = coords
+    ?.map(({ lat, lng }) => `${Number(lat)},${Number(lng)}`)
+    .join('|') ?? '';
+
   useEffect(() => {
-    if (!coords || coords.length === 0) return;
-    const latLngs = coords.map(c => L.latLng(c.lat, c.lng));
+    if (!coordinatesKey) return;
+    const latLngs = coordinatesKey.split('|').map((pair) => {
+      const [lat, lng] = pair.split(',').map(Number);
+      return L.latLng(lat, lng);
+    });
     map.flyToBounds(L.latLngBounds(latLngs), { padding: [40, 40], duration: 1.4, animate: true });
-  }, [coords]);
+  }, [coordinatesKey, map]);
+  return null;
+};
+
+const AutoResizeMap = () => {
+  const map = useMap();
+
+  useEffect(() => {
+    const container = map.getContainer();
+    let animationFrame: number | null = null;
+
+    const refreshMapSize = () => {
+      if (animationFrame != null) window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(() => {
+        map.invalidateSize({ pan: false, animate: false });
+      });
+    };
+
+    const observer = new ResizeObserver(refreshMapSize);
+    observer.observe(container);
+    refreshMapSize();
+
+    return () => {
+      observer.disconnect();
+      if (animationFrame != null) window.cancelAnimationFrame(animationFrame);
+    };
+  }, [map]);
+
   return null;
 };
 
@@ -137,12 +192,21 @@ const Farmers = () => {
   const [farmers, setFarmers] = useState<FarmerRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'disputed'>('all');
+  const [stateFilter, setStateFilter] = useState('all');
+  const [districtFilter, setDistrictFilter] = useState('all');
+  const [landFilter, setLandFilter] = useState<'all' | 'with-land' | 'without-land'>('all');
   const [flagged, setFlagged] = useState<Record<string, boolean>>({});
   const [flagging, setFlagging] = useState<Record<string, boolean>>({});
   const [cropSelections, setCropSelections] = useState<Record<string, CropValue>>({});
   const [cropUpdating, setCropUpdating] = useState<Record<string, boolean>>({});
   const [pendingCropChange, setPendingCropChange] = useState<{ farmerId: string; crop: CropValue } | null>(null);
   const [farmsPopupFarmerId, setFarmsPopupFarmerId] = useState<string | null>(null);
+  const [viewProfileFarmerId, setViewProfileFarmerId] = useState<string | null>(null);
+  const [profilePopupTab, setProfilePopupTab] = useState<'details' | 'documents' | 'parcels'>('details');
+  const [parcelPlotView, setParcelPlotView] = useState<Record<string, boolean>>({});
+  const [parcelPlotDetailsOpen, setParcelPlotDetailsOpen] = useState<Record<string, boolean>>({});
   const [newLandModal, setNewLandModal] = useState<{ open: boolean; farmerId: string | null }>({ open: false, farmerId: null });
   const [bankAddModal, setBankAddModal] = useState<{ open: boolean; farmerId: string | null }>({ open: false, farmerId: null });
   const [localBankDetails, setLocalBankDetails] = useState<Record<string, Array<{ holderName: string; bankName: string; accountNumber: string; ifsc: string; passbookPdfName: string }>>>({});
@@ -181,6 +245,7 @@ const Farmers = () => {
 
   // --- Edit Farmer Modal ---
   const [editFarmerModal, setEditFarmerModal] = useState<{ open: boolean; farmerId: string | null }>({ open: false, farmerId: null });
+  const [inlineProfileEditing, setInlineProfileEditing] = useState(false);
   const [editFarmerTab, setEditFarmerTab] = useState<'personal' | 'location' | 'kyc' | 'agreement' | 'bank' | 'farms'>('personal');
   const [editFarmerSaving, setEditFarmerSaving] = useState(false);
   const [editProfilePhotoPreview, setEditProfilePhotoPreview] = useState<string | null>(null);
@@ -256,11 +321,21 @@ const Farmers = () => {
         const rawCreds = item.credentials_data ?? item.credentials ?? fd.credentials ?? null;
         const userId = rawCreds?.user_id ?? rawCreds?.userId ?? rawCreds?.username ?? null;
         const password = rawCreds?.password ?? rawCreds?.pass ?? null;
+        const coOwnerSource = fd.co_owner_details ?? fd.co_owner ?? item.co_owner_data ?? {};
+        const coOwner = {
+          fullName: coOwnerSource?.full_name ?? coOwnerSource?.name ?? fd.co_owner_name ?? null,
+          phoneNumber: coOwnerSource?.phone_number ?? coOwnerSource?.contact_number ?? fd.co_owner_phone ?? null,
+          relationship: coOwnerSource?.relationship ?? coOwnerSource?.relation ?? fd.co_owner_relationship ?? null,
+          aadhaarNumber: coOwnerSource?.adhar_number ?? coOwnerSource?.aadhaar_number ?? fd.co_owner_aadhaar ?? null,
+          panNumber: coOwnerSource?.pan_number ?? fd.co_owner_pan ?? null,
+        };
+        const hasCoOwner = Object.values(coOwner).some(Boolean);
 
         return {
           id: item.farmer_id,
           fullName: fd.full_name || 'Unknown',
           phoneNumber: fd.phone_number || 'N/A',
+          email: fd.email ?? fd.email_address ?? fd.email_id ?? null,
           alternatePhone: fd.alternate_phone_number ?? null,
           farmerAddress: fd.farmer_address || fd.address || '',
           village: fd.village || 'N/A',
@@ -280,6 +355,8 @@ const Farmers = () => {
             : undefined,
           agreements: item.agreement_data || [],
           credentials: userId != null || password != null ? { userId, password, saved: true } : null,
+          clusterAssigned: fd.cluster_assigned ?? fd.cluster ?? fd.cluster_name ?? null,
+          zoneAssigned: fd.zone_assigned ?? fd.zone ?? fd.zone_name ?? null,
           blockAssigned: fd.block_assigned ?? fd.block ?? fd.block_name ?? null,
           crop: cropTypeRaw === 'napier' || cropTypeRaw === 'paddy' || cropTypeRaw === 'ragi' ? (cropTypeRaw as CropValue) : '',
           createdAt: item.created_at ? new Date(item.created_at) : new Date(),
@@ -287,6 +364,7 @@ const Farmers = () => {
           bankDetails: [],
           farms: [],
           farmingOption: fd.farming_option ?? '',
+          coOwner: hasCoOwner ? coOwner : null,
         };
       });
 
@@ -298,11 +376,26 @@ const Farmers = () => {
         const detailDocs = farmerDetail?.documents ?? farmer.documents ?? null;
         const detailBank = Array.isArray(farmerDetail?.bank_details) ? farmerDetail.bank_details : [];
         const detailArea = farmDetail.reduce((sum: number, f: any) => sum + Number(f?.total_area ?? 0), 0);
+        const detailCoOwnerSource = farmerDetail?.co_owner_details ?? farmerDetail?.co_owner ?? {};
+        const detailCoOwner = {
+          fullName: detailCoOwnerSource?.full_name ?? detailCoOwnerSource?.name ?? farmerDetail?.co_owner_name ?? farmer.coOwner?.fullName ?? null,
+          phoneNumber: detailCoOwnerSource?.phone_number ?? detailCoOwnerSource?.contact_number ?? farmerDetail?.co_owner_phone ?? farmer.coOwner?.phoneNumber ?? null,
+          relationship: detailCoOwnerSource?.relationship ?? detailCoOwnerSource?.relation ?? farmerDetail?.co_owner_relationship ?? farmer.coOwner?.relationship ?? null,
+          aadhaarNumber: detailCoOwnerSource?.adhar_number ?? detailCoOwnerSource?.aadhaar_number ?? farmerDetail?.co_owner_aadhaar ?? farmer.coOwner?.aadhaarNumber ?? null,
+          panNumber: detailCoOwnerSource?.pan_number ?? farmerDetail?.co_owner_pan ?? farmer.coOwner?.panNumber ?? null,
+        };
+        const hasDetailCoOwner = Object.values(detailCoOwner).some(Boolean);
 
         return {
           ...farmer,
           fullName: farmerDetail?.farmer_name || farmer.fullName,
           phoneNumber: farmerDetail?.farmer_contact || farmer.phoneNumber,
+          email:
+            farmerDetail?.farmer_email ??
+            farmerDetail?.email ??
+            farmerDetail?.email_address ??
+            farmer.email ??
+            null,
           alternatePhone: farmerDetail?.farmer_alternate_contact ?? farmer.alternatePhone,
           farmerAddress: farmerDetail?.farmer_address ?? farmer.farmerAddress ?? '',
           kyc: detailKyc || farmer.kyc,
@@ -311,6 +404,28 @@ const Farmers = () => {
           bankDetails: detailBank,
           farms: farmDetail,
           farmingOption: farmerDetail?.farming_option || farmer.farmingOption || '',
+          coOwner: hasDetailCoOwner ? detailCoOwner : farmer.coOwner ?? null,
+          clusterAssigned:
+            farmerDetail?.cluster_assigned ??
+            farmerDetail?.cluster ??
+            farmerDetail?.cluster_name ??
+            farmDetail[0]?.cluster_name ??
+            farmer.clusterAssigned ??
+            null,
+          zoneAssigned:
+            farmerDetail?.zone_assigned ??
+            farmerDetail?.zone ??
+            farmerDetail?.zone_name ??
+            farmDetail[0]?.zone_name ??
+            farmer.zoneAssigned ??
+            null,
+          blockAssigned:
+            farmerDetail?.block_assigned ??
+            farmerDetail?.block ??
+            farmerDetail?.block_name ??
+            farmDetail[0]?.block_name ??
+            farmer.blockAssigned ??
+            null,
           landMapping: detailArea > 0
             ? { totalArea: detailArea, coordinates: farmDetail[0]?.land_coordinates || farmer.landMapping?.coordinates || [] }
             : farmer.landMapping,
@@ -381,9 +496,8 @@ const Farmers = () => {
   };
 
   const toggleFlag = async (farmerId: string) => {
-    // If currently flagged, just unflag locally
     if (flagged[farmerId]) {
-      setFlagged(prev => ({ ...prev, [farmerId]: false }));
+      toast({ title: 'Already disputed', description: 'This land owner is already marked as disputed.', variant: 'default' });
       return;
     }
 
@@ -406,7 +520,7 @@ const Farmers = () => {
       }
 
       setFlagged(prev => ({ ...prev, [farmerId]: true }));
-      toast({ title: 'Success', description: 'Farmer flagged', variant: 'success' });
+      toast({ title: 'Dispute flagged', description: 'Land owner marked as disputed.', variant: 'success' });
     } catch (err) {
       console.error('Failed to call flag API', err);
       toast({ title: 'Error', description: 'Failed to flag farmer', variant: 'destructive' });
@@ -422,19 +536,118 @@ const Farmers = () => {
   // --- Filtering & Stats ---
   const filteredFarmers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return farmers;
+    return farmers.filter((farmer) => {
+      const matchesSearch = !q || [
+        farmer.id,
+        farmer.fullName,
+        farmer.phoneNumber,
+        farmer.email,
+        farmer.village,
+        farmer.district,
+        farmer.state,
+      ].some((value) => String(value ?? '').toLowerCase().includes(q));
+      const matchesStatus =
+        statusFilter === 'all' ||
+        (statusFilter === 'disputed' && !!flagged[farmer.id]) ||
+        (statusFilter === 'active' && !flagged[farmer.id]);
+      const matchesState = stateFilter === 'all' || farmer.state === stateFilter;
+      const matchesDistrict = districtFilter === 'all' || farmer.district === districtFilter;
+      const landArea = Number(farmer.landMapping?.totalArea ?? 0);
+      const parcelCount = Array.isArray(farmer.farms) ? farmer.farms.length : 0;
+      const hasLand = landArea > 0 || parcelCount > 0;
+      const matchesLand =
+        landFilter === 'all' ||
+        (landFilter === 'with-land' && hasLand) ||
+        (landFilter === 'without-land' && !hasLand);
 
-    return farmers.filter(farmer =>
-      farmer.fullName.toLowerCase().includes(q) ||
-      farmer.village.toLowerCase().includes(q) ||
-      farmer.district.toLowerCase().includes(q)
-    );
-  }, [farmers, searchQuery]);
+      return matchesSearch && matchesStatus && matchesState && matchesDistrict && matchesLand;
+    });
+  }, [districtFilter, farmers, flagged, landFilter, searchQuery, stateFilter, statusFilter]);
+  const filterStates = Array.from(new Set(farmers.map((farmer) => farmer.state).filter(Boolean))).sort();
+  const filterDistricts = Array.from(new Set(
+    farmers
+      .filter((farmer) => stateFilter === 'all' || farmer.state === stateFilter)
+      .map((farmer) => farmer.district)
+      .filter(Boolean)
+  )).sort();
+  const activeFilterCount = [
+    statusFilter !== 'all',
+    stateFilter !== 'all',
+    districtFilter !== 'all',
+    landFilter !== 'all',
+  ].filter(Boolean).length;
+  const clearFilters = () => {
+    setStatusFilter('all');
+    setStateFilter('all');
+    setDistrictFilter('all');
+    setLandFilter('all');
+  };
 
   const totalArea = farmers.reduce((acc, f) => acc + (f.landMapping?.totalArea || 0), 0);
-  // consider KYC present if backend returned kyc_data
-  const verifiedKYC = farmers.filter(f => !!f.kyc).length;
-  const totalAgreements = farmers.reduce((acc, f) => acc + f.agreements.length, 0);
+  const allAgreements = farmers.flatMap((farmer) => (
+    Array.isArray(farmer.agreements)
+      ? farmer.agreements
+      : farmer.agreements
+        ? [farmer.agreements]
+        : []
+  )) as any[];
+  const average = (values: number[]) => (
+    values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null
+  );
+  const leaseRates = allAgreements
+    .map((agreement) => Number(agreement?.lease_rate ?? agreement?.lease_rent ?? agreement?.leaseRent))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const averageLeaseRate = average(leaseRates);
+  const leasePeriodsInMonths = allAgreements
+    .map((agreement) => {
+      const start = new Date(agreement?.agreement_start_date ?? agreement?.agreementStart ?? '').getTime();
+      const end = new Date(agreement?.agreement_end_date ?? agreement?.agreementEnd ?? '').getTime();
+      return Number.isFinite(start) && Number.isFinite(end) && end > start
+        ? (end - start) / (1000 * 60 * 60 * 24 * 30.4375)
+        : NaN;
+    })
+    .filter((value) => Number.isFinite(value));
+  const lockInPeriodsInMonths = allAgreements
+    .map((agreement) => {
+      const explicitMonths = Number(
+        agreement?.lock_in_months ??
+        agreement?.lockin_months
+      );
+      if (Number.isFinite(explicitMonths) && explicitMonths >= 0) return explicitMonths;
+
+      const explicitYears = Number(
+        agreement?.lock_in_years ??
+        agreement?.lockin_years
+      );
+      if (Number.isFinite(explicitYears) && explicitYears >= 0) return explicitYears * 12;
+
+      const rawDuration = agreement?.lock_in_period ?? agreement?.lockin_period ?? agreement?.lock_in_duration;
+      if (rawDuration != null && String(rawDuration).trim() !== '') {
+        const numericDuration = Number(String(rawDuration).match(/[\d.]+/)?.[0]);
+        if (Number.isFinite(numericDuration)) {
+          const unit = String(rawDuration).toLowerCase();
+          if (unit.includes('month')) return numericDuration;
+          if (unit.includes('day')) return numericDuration / 30.4375;
+          return numericDuration * 12;
+        }
+      }
+
+      const start = new Date(agreement?.lock_in_start_date ?? agreement?.lockin_start_date ?? '').getTime();
+      const end = new Date(agreement?.lock_in_end_date ?? agreement?.lockin_end_date ?? '').getTime();
+      return Number.isFinite(start) && Number.isFinite(end) && end > start
+        ? (end - start) / (1000 * 60 * 60 * 24 * 30.4375)
+        : NaN;
+    })
+    .filter((value) => Number.isFinite(value));
+  const formatAveragePeriod = (months: number | null) => {
+    if (months == null) return 'N/A';
+    if (months >= 12) {
+      return `${(months / 12).toLocaleString('en-IN', { maximumFractionDigits: 1 })} years`;
+    }
+    return `${months.toLocaleString('en-IN', { maximumFractionDigits: 1 })} months`;
+  };
+  const averageLeasePeriod = average(leasePeriodsInMonths);
+  const averageLockInPeriod = average(lockInPeriodsInMonths);
 
   const renderDialogBody = (data: unknown) => {
     if (data == null) {
@@ -461,6 +674,7 @@ const Farmers = () => {
     const agreement = Array.isArray(farmer.agreements) ? farmer.agreements[0] : farmer.agreements;
     const leaseStart = agreement?.agreement_start_date ?? agreement?.agreementStart ?? null;
     const leaseEnd = agreement?.agreement_end_date ?? agreement?.agreementEnd ?? null;
+    const leaseRate = agreement?.lease_rate ?? agreement?.lease_rent ?? agreement?.leaseRent ?? null;
     const farms = Array.isArray(farmer.farms) ? farmer.farms : [];
 
     if (farms.length > 0) {
@@ -476,7 +690,10 @@ const Farmers = () => {
         },
         leaseStart,
         leaseEnd,
-        block: farmer.blockAssigned ?? null,
+        leaseRate: farm?.lease_rate ?? farm?.lease_rent ?? leaseRate,
+        cluster: farm?.cluster_assigned ?? farm?.cluster ?? farm?.cluster_name ?? farmer.clusterAssigned ?? null,
+        zone: farm?.zone_assigned ?? farm?.zone ?? farm?.zone_name ?? farmer.zoneAssigned ?? null,
+        block: farm?.block_assigned ?? farm?.block ?? farm?.block_name ?? farmer.blockAssigned ?? null,
       }));
     }
 
@@ -489,6 +706,9 @@ const Farmers = () => {
       landMapping: farmer.landMapping ?? null,
       leaseStart,
       leaseEnd,
+      leaseRate,
+      cluster: farmer.clusterAssigned ?? null,
+      zone: farmer.zoneAssigned ?? null,
       block: farmer.blockAssigned ?? null,
     }];
   };
@@ -504,34 +724,6 @@ const Farmers = () => {
       return sum + (Number.isFinite(rent) ? rent : 0);
     }, 0);
     return total;
-  };
-
-  const getLandMediaItems = (farmer: FarmerRow) => {
-    const docs = farmer.documents ?? {};
-    const farms = Array.isArray(farmer.farms) ? farmer.farms : [];
-
-    const farmImages = farms.flatMap((farm: any) =>
-      Array.isArray(farm?.land_media?.images) ? farm.land_media.images : []
-    );
-    const farmVideos = farms
-      .map((farm: any) => farm?.land_media?.video)
-      .filter(Boolean) as string[];
-
-    const docImages = [
-      docs?.land_image_1?.url,
-      docs?.land_image_2?.url,
-      docs?.land_image_3?.url,
-      docs?.land_media?.url,
-    ].filter(Boolean) as string[];
-    const docVideo = docs?.land_video?.url ? [docs.land_video.url] : [];
-
-    const images = [...farmImages, ...docImages];
-    const videos = [...farmVideos, ...docVideo];
-    const media = [
-      ...images.map((url) => ({ type: 'image' as const, url })),
-      ...videos.map((url) => ({ type: 'video' as const, url })),
-    ];
-    return media.slice(0, 6);
   };
 
   const getKycValue = (farmer: FarmerRow, key: string) => {
@@ -862,6 +1054,56 @@ const Farmers = () => {
     );
   };
 
+  // Document card used in the "View Profile" popup — mirrors the Employee Directory
+  // profile modal's document tiles (thumbnail/icon + label + Uploaded/Pending state).
+  const ProfileDocumentCard = ({ title, url, Icon }: { title: string; url: string; Icon: typeof FileText }) => {
+    const isImage = /\.(png|jpg|jpeg|webp|gif)(\?|$)/i.test(url.toLowerCase());
+
+    return (
+      <Dialog>
+        <DialogTrigger asChild>
+          <button
+            type="button"
+            disabled={!url}
+            className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white text-left shadow-sm transition hover:border-emerald-200 hover:shadow-md disabled:cursor-not-allowed"
+          >
+            <div className="flex h-24 items-center justify-center bg-slate-50">
+              {url && isImage ? (
+                <img src={url} alt={title} className="h-full w-full object-cover" />
+              ) : (
+                <Icon className="h-8 w-8 text-slate-300" />
+              )}
+            </div>
+            <div className="p-3">
+              <p className="text-sm font-bold text-slate-900">{title}</p>
+              <p className={`mt-0.5 text-xs font-bold ${url ? 'text-emerald-600' : 'text-slate-400'}`}>
+                {url ? 'Uploaded' : 'Pending'}
+              </p>
+            </div>
+          </button>
+        </DialogTrigger>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>{title}</DialogTitle>
+          </DialogHeader>
+          {!url ? (
+            <div className="h-56 flex items-center justify-center text-sm text-muted-foreground">
+              No document uploaded
+            </div>
+          ) : isImage ? (
+            <div className="max-h-[70vh] overflow-auto rounded-md border bg-muted/10 p-2">
+              <img src={url} alt={title} className="w-full h-auto rounded" />
+            </div>
+          ) : (
+            <div className="h-[70vh] rounded-md border overflow-hidden">
+              <iframe src={url} title={title} className="h-full w-full" />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    );
+  };
+
   const EditDocumentUploadCard = ({
     title,
     icon: Icon,
@@ -1165,12 +1407,17 @@ const Farmers = () => {
     [farmers, farmsPopupFarmerId]
   );
 
+  const viewProfileFarmer = useMemo(
+    () => farmers.find((f) => f.id === viewProfileFarmerId) ?? null,
+    [farmers, viewProfileFarmerId]
+  );
+
   const activeEditFarmer = useMemo(
     () => farmers.find((f) => f.id === editFarmerModal.farmerId) ?? null,
     [farmers, editFarmerModal.farmerId]
   );
 
-  const openEditModal = (farmer: FarmerRow) => {
+  const openEditModal = (farmer: FarmerRow, openInSeparateDialog = true) => {
     const kyc = Array.isArray(farmer.kyc) ? farmer.kyc[0] : farmer.kyc;
     const agreement = Array.isArray(farmer.agreements) ? farmer.agreements[0] : farmer.agreements;
     const bank = Array.isArray(farmer.bankDetails) && farmer.bankDetails.length > 0 ? farmer.bankDetails[0] : null;
@@ -1234,12 +1481,14 @@ const Farmers = () => {
     );
     setEditFarmIndex(0);
     setEditFarmerTab('personal');
-    setEditFarmerModal({ open: true, farmerId: farmer.id });
+    setEditFarmerModal({ open: openInSeparateDialog, farmerId: farmer.id });
+    setInlineProfileEditing(!openInSeparateDialog);
   };
 
   const closeEditModal = () => {
     setEditFarmerSaving(false);
     setEditProfilePhotoPreview(null);
+    setInlineProfileEditing(false);
     setEditFarmerModal({ open: false, farmerId: null });
   };
 
@@ -1617,7 +1866,7 @@ const Farmers = () => {
                   url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                   attribution='Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
                 />
-                <Polygon positions={normalizedCoords as any} pathOptions={{ color: '#f03' }} />
+                <Polygon positions={normalizedCoords as any} pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }} />
                 <Marker position={[normalizedCoords[0][0], normalizedCoords[0][1]] as any}>
                   <Popup>Land mapping (first point)</Popup>
                 </Marker>
@@ -1763,304 +2012,1251 @@ const Farmers = () => {
 
   return (
     <>
-    <div className="p-8 space-y-6">
+    <div className="min-h-screen space-y-8 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-display font-bold">Farmers</h1>
-          <p className="text-muted-foreground mt-1">Manage registered farmers</p>
+          <p className="text-sm font-bold text-emerald-700">Land Records</p>
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">Land Owner Directory</h1>
+          <p className="mt-3 text-base font-medium text-slate-600">Manage and view all land owner records</p>
         </div>
       </div>
 
-      {/* Stats - Exact Layout Preserved */}
-      <div className="grid grid-cols-4 gap-4 mb-8">
+      {/* Stats */}
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-5">
         {[
-          { label: 'Total Farmers', value: farmers.length, icon: Users, color: 'text-primary' },
-          { label: 'Total Land Area', value: `${totalArea} acres`, icon: null, color: 'text-blue-600' }, 
-          { label: 'KYC Verified', value: verifiedKYC, icon: null, color: 'text-green-600' }, 
-          { label: 'Agreements', value: totalAgreements, icon: null, color: 'text-orange-600' },
+          { label: 'No. of Land Owners', value: farmers.length.toLocaleString('en-IN'), icon: Users },
+          {
+            label: 'Total Land Area',
+            value: `${totalArea.toLocaleString('en-IN', { maximumFractionDigits: 2 })} acres`,
+            icon: Ruler,
+          },
+          {
+            label: 'Average Lease Rate',
+            value: averageLeaseRate == null
+              ? 'N/A'
+              : `₹${averageLeaseRate.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`,
+            icon: IndianRupee,
+          },
+          { label: 'Average Lease Period', value: formatAveragePeriod(averageLeasePeriod), icon: CalendarDays },
+          { label: 'Average Lock In Period', value: formatAveragePeriod(averageLockInPeriod), icon: Timer },
         ].map(stat => (
-          <div key={stat.label} className="bg-card rounded-xl p-5 shadow-sm border border-border bg-white">
-            <p className="text-sm text-muted-foreground">{stat.label}</p>
-            <p className={`text-2xl font-bold mt-1 ${stat.color}`}>{stat.value}</p>
+          <div key={stat.label} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-slate-500">{stat.label}</p>
+                <p className="mt-3 break-words text-2xl font-bold text-slate-950">{stat.value}</p>
+              </div>
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35] ring-2 ring-[#0D3A35]/10">
+                <stat.icon className="h-5 w-5" />
+              </div>
+            </div>
           </div>
         ))}
       </div>
 
-      {/* Search & Filter - Exact Layout Preserved */}
-      <div className="flex gap-4 mb-6">
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input
-            placeholder="Search by name, village, or district..."
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            className="pl-10"
-          />
+      {/* Search & Filter */}
+      <div className="space-y-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="relative w-full max-w-md flex-1">
+            <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              placeholder="Search by ID, name, contact, or location..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              className="h-12 w-full rounded-lg border border-slate-200 bg-white pl-11 pr-4 text-sm font-semibold text-slate-700 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:ring-4 focus:ring-emerald-100"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => setFiltersOpen((open) => !open)}
+            aria-expanded={filtersOpen}
+            className={`inline-flex h-12 w-full items-center justify-center gap-2 rounded-lg border px-4 text-sm font-semibold shadow-sm transition sm:w-auto ${
+              filtersOpen || activeFilterCount > 0
+                ? 'border-[#0D3A35] bg-[#0D3A35] text-white hover:bg-[#092b27]'
+                : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            <Filter className="h-4 w-4" />
+            Filter
+            {activeFilterCount > 0 && (
+              <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-white px-1.5 text-[10px] font-bold text-[#0D3A35]">
+                {activeFilterCount}
+              </span>
+            )}
+            <ChevronDown className={`h-4 w-4 transition-transform ${filtersOpen ? 'rotate-180' : ''}`} />
+          </button>
         </div>
-        <Button className="gap-2 border border-gray-300 bg-white hover:bg-gray-50">
-          <Filter className="w-4 h-4" />
-          Filter
-        </Button>
+
+        {filtersOpen && (
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-[0_12px_35px_rgba(15,23,42,0.06)]">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <EditField label="Status">
+                <Select value={statusFilter} onValueChange={(value: 'all' | 'active' | 'disputed') => setStatusFilter(value)}>
+                  <SelectTrigger><span>{statusFilter === 'all' ? 'All statuses' : statusFilter === 'active' ? 'Active' : 'Disputed'}</span></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All statuses</SelectItem>
+                    <SelectItem value="active">Active</SelectItem>
+                    <SelectItem value="disputed">Disputed</SelectItem>
+                  </SelectContent>
+                </Select>
+              </EditField>
+              <EditField label="State">
+                <Select
+                  value={stateFilter}
+                  onValueChange={(value) => {
+                    setStateFilter(value);
+                    setDistrictFilter('all');
+                  }}
+                >
+                  <SelectTrigger><span>{stateFilter === 'all' ? 'All states' : stateFilter}</span></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All states</SelectItem>
+                    {filterStates.map((state) => <SelectItem key={state} value={state}>{state}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </EditField>
+              <EditField label="District">
+                <Select value={districtFilter} onValueChange={setDistrictFilter}>
+                  <SelectTrigger><span>{districtFilter === 'all' ? 'All districts' : districtFilter}</span></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All districts</SelectItem>
+                    {filterDistricts.map((district) => <SelectItem key={district} value={district}>{district}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </EditField>
+              <EditField label="Land Availability">
+                <Select value={landFilter} onValueChange={(value: 'all' | 'with-land' | 'without-land') => setLandFilter(value)}>
+                  <SelectTrigger>
+                    <span>{landFilter === 'all' ? 'All land owners' : landFilter === 'with-land' ? 'With land' : 'Without land'}</span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All land owners</SelectItem>
+                    <SelectItem value="with-land">With land</SelectItem>
+                    <SelectItem value="without-land">Without land</SelectItem>
+                  </SelectContent>
+                </Select>
+              </EditField>
+            </div>
+            <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
+              <p className="text-xs font-semibold text-slate-500">
+                Showing {filteredFarmers.length} of {farmers.length} land owners
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={clearFilters}
+                disabled={activeFilterCount === 0}
+                className="h-9 border-slate-200 text-xs font-bold text-slate-700"
+              >
+                Clear filters
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Farmers Card Grid */}
       {loading ? (
         <div className="flex items-center justify-center h-64">
-          <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+          <div className="w-8 h-8 border-4 border-[#0D3A35] border-t-transparent rounded-full animate-spin" />
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,360px),1fr))] items-stretch gap-6">
           {filteredFarmers.map((farmer) => (
             <Fragment key={farmer.id}>
-              <div className={`group overflow-hidden rounded-xl border bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${flagged[farmer.id] ? 'border-red-200 ring-1 ring-red-100' : 'border-gray-200'}`}>
-                <div className="flex items-start justify-between gap-3 bg-gradient-to-r from-emerald-50/80 via-white to-white px-4 py-4">
-                  <div className="flex items-center gap-3 min-w-0">
+              <article className={`group relative flex h-full min-w-0 flex-col overflow-hidden rounded-2xl border bg-white shadow-[0_14px_40px_rgba(15,23,42,0.06)] transition hover:-translate-y-0.5 hover:shadow-[0_18px_52px_rgba(15,23,42,0.10)] ${flagged[farmer.id] ? 'border-rose-200 ring-1 ring-rose-100' : 'border-slate-200/80'}`}>
+                {/* Decorative arcs, matching Employee Directory cards */}
+                <div className="pointer-events-none absolute right-0 top-16 h-24 w-48 opacity-40">
+                  <div className="h-full w-full rounded-[100%] border-t border-emerald-100" />
+                  <div className="-mt-20 ml-8 h-full w-full rounded-[100%] border-t border-emerald-100" />
+                  <div className="-mt-20 ml-16 h-full w-full rounded-[100%] border-t border-emerald-100" />
+                  <div className="-mt-20 ml-24 h-full w-full rounded-[100%] border-t border-emerald-100" />
+                </div>
+
+                {/* Profile */}
+                <div className="relative flex min-h-[132px] items-center gap-4 border-b border-slate-100 px-5 py-5">
+                  <div className="h-20 w-20 shrink-0 overflow-hidden rounded-full bg-emerald-50 shadow-sm ring-2 ring-slate-100">
                     {farmer.profileImageUrl ? (
-                      <img src={farmer.profileImageUrl} alt="profile" className="h-14 w-14 rounded-full object-cover border-2 border-white shadow-sm ring-1 ring-emerald-100" />
+                      <img src={farmer.profileImageUrl} alt={farmer.fullName} className="h-full w-full object-cover" />
                     ) : (
-                      <div className="h-14 w-14 rounded-full border-2 border-white bg-emerald-50 shadow-sm ring-1 ring-emerald-100 flex items-center justify-center text-sm font-semibold text-emerald-800">
+                      <div className="flex h-full w-full items-center justify-center text-2xl font-bold text-emerald-700">
                         {farmer.fullName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'FR'}
                       </div>
                     )}
-                    <div className="min-w-0">
-                      <div className="font-semibold text-base leading-5 truncate text-gray-950">{farmer.fullName}</div>
-                      <div className="mt-0.5 inline-flex items-center rounded-full bg-white/80 px-2 py-0.5 text-[11px] font-medium text-gray-500 ring-1 ring-gray-200">
-                        FRM-{farmer.id.slice(0, 3).toUpperCase()}
-                      </div>
-                      {farmer.farmingOption && (
-                        <div
-                          className={`mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ${
-                            farmer.farmingOption.toLowerCase() === 'lease farming'
-                              ? 'bg-emerald-50 text-emerald-700 ring-emerald-100'
-                              : farmer.farmingOption.toLowerCase() === 'contract farming'
-                                ? 'bg-blue-50 text-blue-700 ring-blue-100'
-                                : 'bg-gray-50 text-gray-700 ring-gray-200'
-                          }`}
-                        >
-                          {farmer.farmingOption.toLowerCase() === 'lease farming'
-                            ? 'Lease Farming'
-                            : farmer.farmingOption.toLowerCase() === 'contract farming'
-                              ? 'Contract Farming'
-                              : farmer.farmingOption}
-                        </div>
-                      )}
-                    </div>
                   </div>
-                  <div className="flex items-center gap-1">
-                    <Button
-                      onClick={() => openEditModal(farmer)}
-                      className="h-8 w-8 rounded-full p-0 bg-white text-blue-700 border border-blue-100 hover:bg-blue-50 shadow-sm"
-                      title="Edit"
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      onClick={() => toast({ title: 'Delete', description: 'Delete action will be connected next.', variant: 'default' })}
-                      className="h-8 w-8 rounded-full p-0 bg-white text-red-700 border border-red-100 hover:bg-red-50 shadow-sm"
-                      title="Delete"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      onClick={() => toggleFlag(farmer.id)}
-                      disabled={!!flagging[farmer.id]}
-                      className={`h-8 w-8 rounded-full p-0 bg-white border shadow-sm ${flagged[farmer.id] ? 'text-red-600 border-red-100 hover:bg-red-50' : 'text-gray-600 border-gray-200 hover:bg-gray-50'}`}
-                      title="Flag"
-                    >
-                      <Flag className="h-4 w-4" />
-                    </Button>
-                    <Button className="h-8 w-8 rounded-full p-0 bg-white border border-gray-200 hover:bg-gray-50 text-gray-600 shadow-sm" title="More">
-                      <MoreVertical className="h-4 w-4" />
-                    </Button>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="line-clamp-2 text-lg font-bold leading-snug text-slate-950">{farmer.fullName}</h3>
+                    <p className="mt-1 truncate text-sm font-semibold text-slate-600">
+                      {farmer.farmingOption || 'Land Owner'}
+                    </p>
+                    <p className="mt-2 break-all text-xs font-bold tracking-wide text-emerald-700">
+                      <span className="text-slate-400">Land Owner ID: </span>{farmer.id}
+                    </p>
                   </div>
                 </div>
 
-                <div className="mx-4 mt-3 rounded-lg border border-gray-200 bg-gray-50/70 p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Farmer Details</div>
-                    <Dialog>
-                      <DialogTrigger asChild>
-                        <Button className="h-7 px-2.5 rounded-md border border-emerald-200 bg-white hover:bg-emerald-50 text-xs text-emerald-700">
-                          <Landmark className="mr-1 h-3.5 w-3.5" />
-                          Bank Details
-                        </Button>
-                      </DialogTrigger>
-                          <DialogContent className="max-w-2xl rounded-2xl border-0 p-0 overflow-hidden">
-                            <DialogHeader>
-                              <div className="bg-gradient-to-r from-emerald-600 to-green-600 px-6 py-4 text-white">
-                                <DialogTitle className="text-lg font-semibold">Bank Details</DialogTitle>
-                                <p className="text-xs text-emerald-50 mt-1">Manage linked bank accounts and passbook documents.</p>
-                              </div>
-                            </DialogHeader>
-                            <div className="space-y-4 text-sm p-6 bg-white">
-                              <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                                {getAllBankDetails(farmer).map((bank, idx) => (
-                                  <div key={`${farmer.id}-bank-${idx}`} className="rounded-xl border border-emerald-100 bg-emerald-50/40 p-3 space-y-2">
-                                    <div className="flex items-center justify-between pb-1 border-b border-emerald-100">
-                                      <span className="text-[11px] font-semibold text-emerald-700">Bank Account {idx + 1}</span>
-                                      <span className="text-[11px] text-emerald-700 bg-white border border-emerald-200 rounded-full px-2 py-0.5">Verified</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-muted-foreground text-xs">Holder's Name</span>
-                                      <span className="font-medium">{bank.holderName || 'N/A'}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-muted-foreground text-xs">Bank Name</span>
-                                      <span className="font-medium">{bank.bankName || 'N/A'}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-muted-foreground text-xs">Account Number</span>
-                                      <span className="font-medium">{bank.accountNumber || 'N/A'}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-muted-foreground text-xs">IFSC</span>
-                                      <span className="font-medium">{bank.ifsc || 'N/A'}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-muted-foreground text-xs">Passbook PDF</span>
-                                      <span className="font-medium truncate max-w-[180px] text-right">{bank.passbookPdfName || 'N/A'}</span>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-
-                              <div className="flex justify-end pt-1">
-                                <Button
-                                  type="button"
-                                  className="h-9 px-4 text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
-                                  onClick={() => setBankAddModal({ open: true, farmerId: farmer.id })}
-                                >
-                                  Add +
-                                </Button>
-                              </div>
-                            </div>
-                          </DialogContent>
-                        </Dialog>
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
-                      <div className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                        <Phone className="h-3.5 w-3.5 text-gray-500" />
-                        Phone Number
-                      </div>
-                      <div className="mt-0.5 truncate text-sm font-semibold text-gray-950">{farmer.phoneNumber}</div>
-                    </div>
-                    <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
-                      <div className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                        <IdCard className="h-3.5 w-3.5 text-gray-500" />
-                        Aadhaar Card
-                      </div>
-                      <div className="mt-0.5 truncate text-sm font-semibold text-gray-950">{getKycValue(farmer, 'adhar_number') || 'N/A'}</div>
-                    </div>
-                    <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
-                      <div className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                        <MapPin className="h-3.5 w-3.5 text-gray-500" />
-                        Location
-                      </div>
-                      <div className="mt-0.5 truncate text-sm font-semibold text-gray-950">{[farmer.village, farmer.district].filter(Boolean).join(', ')}</div>
-                    </div>
-                    <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
-                      <div className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                        <FileBadge2 className="h-3.5 w-3.5 text-gray-500" />
-                        PAN Card
-                      </div>
-                      <div className="mt-0.5 truncate text-sm font-semibold text-gray-950">{getKycValue(farmer, 'pan_numnber') || getKycValue(farmer, 'pan_number') || 'N/A'}</div>
-                    </div>
-                  </div>
+                {/* Contact rows */}
+                <div className="relative mx-5 overflow-hidden rounded-xl border border-slate-200 bg-white">
+                  <table className="w-full table-fixed border-collapse text-left">
+                    <tbody className="divide-y divide-slate-100">
+                      {[
+                        { label: 'Contact No.', value: farmer.phoneNumber || 'N/A' },
+                        { label: 'Email', value: farmer.email || 'N/A' },
+                        { label: 'Aadhaar Card No.', value: getKycValue(farmer, 'adhar_number') || 'N/A' },
+                        { label: 'PAN No.', value: getKycValue(farmer, 'pan_numnber') || getKycValue(farmer, 'pan_number') || 'N/A' },
+                        { label: 'Address', value: farmer.farmerAddress || [farmer.village, farmer.taluka, farmer.district, farmer.state].filter(Boolean).join(', ') || 'N/A' },
+                      ].map(({ label, value }) => (
+                        <tr key={label} className="align-top">
+                          <th className="w-[38%] bg-slate-50/80 px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                            {label}
+                          </th>
+                          <td className="break-words px-3 py-2.5 text-xs font-bold leading-relaxed text-slate-700">
+                            {value}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
 
-                <div className="mx-4 mt-3 grid grid-cols-3 gap-2">
-                  <div className="rounded-lg border border-gray-200 bg-white px-2 py-2.5 text-center">
-                    <div className="text-lg font-bold leading-5 text-gray-950">{Number(farmer.landMapping?.totalArea ?? 0) || 0}</div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">Acres</div>
-                  </div>
-                  <div className="rounded-lg border border-gray-200 bg-white px-2 py-2.5 text-center">
-                    <div className="text-lg font-bold leading-5 text-gray-950">{getFarmCards(farmer).length}</div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">Lands</div>
-                  </div>
-                  <div className="rounded-lg border border-emerald-100 bg-emerald-50/60 px-2 py-2.5 text-center">
-                    <div className="text-lg font-bold leading-5 text-emerald-800">
-                      Rs. {getAmountInvested(farmer).toLocaleString('en-IN')}
-                    </div>
-                    <div className="mt-1 text-[11px] text-emerald-700">Agreeme  nt Amount</div>
-                  </div>
-                </div>
-
-                <div className="mx-4 mt-3">
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Land Media</span>
-                    <span className="text-[11px] text-muted-foreground">{getLandMediaItems(farmer).length} files</span>
-                  </div>
-                  <div className="flex gap-2 overflow-x-auto pb-1">
-                    {getLandMediaItems(farmer).length > 0 ? (
-                      getLandMediaItems(farmer).map((media, idx) => (
-                        <div key={`${farmer.id}-media-${idx}`} className="h-20 w-28 rounded-lg border border-gray-200 bg-muted/10 shrink-0 overflow-hidden shadow-sm">
-                          {media.type === 'image' ? (
-                            <img src={media.url} alt="Land media" className="h-full w-full object-cover" />
-                          ) : (
-                            <video src={media.url} className="h-full w-full object-cover" controls={false} muted />
-                          )}
-                        </div>
-                      ))
-                    ) : (
-                      <div className="h-20 w-full rounded-lg border border-dashed bg-muted/10 text-xs text-muted-foreground flex items-center justify-center">
-                        No land media
+                {/* Land summary */}
+                <div className="relative mx-5 mt-4 grid grid-cols-2 gap-3">
+                    <div className="flex min-w-0 items-center justify-center gap-3 rounded-xl border border-[#0D3A35]/15 bg-[#0D3A35]/[0.04] p-3 text-center">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#0D3A35]/10">
+                        <Ruler className="h-4 w-4 text-[#0D3A35]" />
                       </div>
-                    )}
-                  </div>
+                      <div>
+                        <p className="text-xs font-bold text-[#0D3A35]/65">Acres</p>
+                        <p className="mt-0.5 text-sm font-bold text-[#0D3A35]">
+                          {(Number(farmer.landMapping?.totalArea ?? 0) || 0).toLocaleString('en-IN', {
+                            maximumFractionDigits: 3,
+                          })}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex min-w-0 items-center justify-center gap-3 rounded-xl border border-[#0D3A35]/15 bg-[#0D3A35]/[0.04] p-3 text-center">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#0D3A35]/10">
+                        <Layers3 className="h-4 w-4 text-[#0D3A35]" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-[#0D3A35]/65">Land Parcels</p>
+                        <p className="mt-0.5 text-sm font-bold text-[#0D3A35]">{getFarmCards(farmer).length}</p>
+                      </div>
+                    </div>
                 </div>
 
-                <div className="mx-4 mt-3 flex flex-wrap items-center gap-2">
-                  <span className="inline-flex items-center gap-1 rounded-full bg-green-50 text-green-700 px-2.5 py-1 text-xs font-medium ring-1 ring-green-100">
-                    <ShieldCheck className="h-3.5 w-3.5" />
-                    KYC Verified
-                  </span>
-                  <span className="inline-flex items-center gap-1 rounded-full bg-green-50 text-green-700 px-2.5 py-1 text-xs font-medium ring-1 ring-green-100">
-                    <Check className="h-3.5 w-3.5" />
-                    Agreement Active
-                  </span>
-                </div>
-
-                <div className="mt-3 border-t border-gray-100 bg-gray-50/70 px-4 py-3 flex items-center gap-3 overflow-x-auto">
-                  <span className="inline-flex shrink-0 flex-col items-center gap-1 text-[11px] text-gray-700 font-medium">
-                    <DocumentPreview title="Aadhaar Card" url={getDocumentUrl(farmer, 'adhar_card')} />
-                    <span>Adhar Card</span>
-                  </span>
-                  <span className="inline-flex shrink-0 flex-col items-center gap-1 text-[11px] text-gray-700 font-medium">
-                    <DocumentPreview title="PAN Card" url={getDocumentUrl(farmer, 'pand_card')} />
-                    <span>PAN Card</span>
-                  </span>
-                  <span className="inline-flex shrink-0 flex-col items-center gap-1 text-[11px] text-gray-700 font-medium">
-                    <DocumentPreview title="Kisan Book" url={getDocumentUrl(farmer, 'kisan_book')} />
-                    <span>Kisan Book</span>
-                  </span>
-                  <span className="inline-flex shrink-0 flex-col items-center gap-1 text-[11px] text-gray-700 font-medium">
-                    <DocumentPreview title="B1 Record" url={getDocumentUrl(farmer, 'B1_record')} />
-                    <span>B1 Record</span>
-                  </span>
-                  <span className="inline-flex shrink-0 flex-col items-center gap-1 text-[11px] text-gray-700 font-medium">
-                    <DocumentPreview title="Agreement" url={getDocumentUrl(farmer, 'agreement')} />
-                    <span>Agreement</span>
-                  </span>
-                  <span className="inline-flex shrink-0 flex-col items-center gap-1 text-[11px] text-gray-700 font-medium">
-                    <DocumentPreview title="Passbook" url={getDocumentUrl(farmer, 'bank_passbook')} />
-                    <span>Passbook</span>
-                  </span>
-                  <Button
+                {/* Card actions */}
+                <div className="relative mt-auto border-t border-slate-100 px-5 py-5">
+                  <button
                     type="button"
-                    onClick={() => setFarmsPopupFarmerId(farmer.id)}
-                    className="ml-auto inline-flex shrink-0 h-9 px-3 gap-1 rounded-md border border-green-200 bg-green-600 text-white hover:bg-green-700 text-xs shadow-sm"
+                    onClick={() => {
+                      setProfilePopupTab('details');
+                      setParcelPlotView({});
+                      setViewProfileFarmerId(farmer.id);
+                    }}
+                    className="relative flex h-11 w-full items-center justify-center rounded-lg bg-[#0D3A35] px-10 text-sm font-bold text-white shadow-sm transition hover:bg-[#092b27]"
                   >
-                    View Land
-                  </Button>
+                    View Profile
+                    <ArrowRight className="absolute right-4 h-4 w-4" />
+                  </button>
                 </div>
-              </div>
+              </article>
             </Fragment>
           ))}
         </div>
       )}
     </div>
+
+    {/* View Profile — mirrors the Employee Directory profile popup layout */}
+    <Dialog
+      open={!!viewProfileFarmerId}
+      onOpenChange={(open) => {
+        if (!open) {
+          setViewProfileFarmerId(null);
+          setProfilePopupTab('details');
+          setParcelPlotView({});
+          if (inlineProfileEditing) closeEditModal();
+        }
+      }}
+    >
+      <DialogContent className="h-[85vh] w-[calc(100vw-2rem)] max-w-6xl overflow-hidden rounded-3xl border-0 p-0">
+        {viewProfileFarmer && (
+          <div className="flex h-full min-h-0 flex-col sm:flex-row">
+            {/* Sidebar */}
+            <div className="w-full shrink-0 overflow-y-auto bg-[#0D3A35] px-6 pb-6 pt-5 text-white sm:w-72 sm:pt-8">
+              <div
+                className={`group relative mx-auto mt-6 h-28 w-28 overflow-hidden rounded-full bg-white/10 ring-4 ring-white/15 ${
+                  inlineProfileEditing ? 'cursor-pointer' : ''
+                }`}
+                onClick={() => inlineProfileEditing && editProfilePhotoRef.current?.click()}
+              >
+                {editProfilePhotoPreview || viewProfileFarmer.profileImageUrl ? (
+                  <img src={editProfilePhotoPreview ?? viewProfileFarmer.profileImageUrl} alt={viewProfileFarmer.fullName} className="h-full w-full object-cover" />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-3xl font-semibold">
+                    {viewProfileFarmer.fullName.split(' ').map((p) => p[0]).join('').slice(0, 2).toUpperCase() || 'FR'}
+                  </div>
+                )}
+                {inlineProfileEditing && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
+                    <Camera className="h-5 w-5 text-white" />
+                  </div>
+                )}
+              </div>
+              {inlineProfileEditing && (
+                <input
+                  ref={editProfilePhotoRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] ?? null;
+                    setEditFarmerForm((previous) => ({ ...previous, profilePhoto: file }));
+                    setEditProfilePhotoPreview(file ? URL.createObjectURL(file) : null);
+                  }}
+                />
+              )}
+              <h2 className="mt-4 text-center text-xl font-bold">{viewProfileFarmer.fullName}</h2>
+              <p className="mt-1 break-all text-center text-xs font-bold tracking-wide text-white/55">
+                {viewProfileFarmer.id}
+              </p>
+              <p className="mt-2 text-center text-sm font-semibold text-white/75">Land Owner</p>
+              <span className={`mx-auto mt-4 block w-fit rounded-full px-5 py-1.5 text-xs font-bold text-white ring-1 ring-inset ${
+                flagged[viewProfileFarmer.id]
+                  ? 'bg-red-600 ring-red-400/60'
+                  : 'bg-white/15 ring-white/10'
+              }`}>
+                {flagged[viewProfileFarmer.id] ? 'Disputed' : 'Active'}
+              </span>
+
+              <div className="mt-10 space-y-4 border-t border-white/10 pt-6 text-sm font-semibold">
+                <div className="flex items-center gap-3">
+                  <Phone className="h-4 w-4 shrink-0 text-white/60" />
+                  <span className="truncate">{viewProfileFarmer.phoneNumber}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <MapPin className="h-4 w-4 shrink-0 text-white/60" />
+                  <span className="truncate">{[viewProfileFarmer.village, viewProfileFarmer.district].filter(Boolean).join(', ') || 'N/A'}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Navigation className="h-4 w-4 shrink-0 text-white/60" />
+                  <span className="truncate">{viewProfileFarmer.state || 'N/A'}</span>
+                </div>
+              </div>
+
+              <div className="mt-6 space-y-4 border-t border-white/10 pt-6">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wide text-white/50">Total Land</p>
+                  <p className="mt-1 text-sm font-bold">
+                    {Number(viewProfileFarmer.landMapping?.totalArea ?? 0) || 0} acres · {getFarmCards(viewProfileFarmer).length} parcels
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wide text-white/50">Lease/Rate/Acre</p>
+                  <p className="mt-1 text-sm font-bold">Rs. {getAmountInvested(viewProfileFarmer).toLocaleString('en-IN')}</p>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Right panel */}
+            <div className="relative min-h-0 min-w-0 flex-1 overflow-y-auto bg-white p-5 sm:p-8">
+              <div className="mb-6 flex w-full items-end gap-8 overflow-x-auto border-b border-slate-200 pr-12">
+                <button
+                  type="button"
+                  onClick={() => setProfilePopupTab('details')}
+                  className={`shrink-0 border-b-2 px-0 pb-3 pt-1 text-sm font-bold transition ${
+                    profilePopupTab === 'details'
+                      ? 'border-[#0D3A35] text-slate-950'
+                      : 'border-transparent text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  Land Owner Details
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProfilePopupTab('documents')}
+                  className={`shrink-0 border-b-2 px-0 pb-3 pt-1 text-sm font-bold transition ${
+                    profilePopupTab === 'documents'
+                      ? 'border-[#0D3A35] text-slate-950'
+                      : 'border-transparent text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  Documents
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProfilePopupTab('parcels')}
+                  className={`shrink-0 border-b-2 px-0 pb-3 pt-1 text-sm font-bold transition ${
+                    profilePopupTab === 'parcels'
+                      ? 'border-[#0D3A35] text-slate-950'
+                      : 'border-transparent text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  Land Parcels
+                </button>
+                <div className="ml-auto flex shrink-0 items-center gap-2 pb-2">
+                  {inlineProfileEditing ? (
+                    <>
+                      <Button
+                        onClick={handleSaveEditFarmer}
+                        disabled={editFarmerSaving}
+                        className="h-9 w-9 rounded-full bg-[#0D3A35] p-0 text-white shadow-sm hover:bg-[#092b27]"
+                        title="Save changes"
+                        aria-label="Save changes"
+                      >
+                        {editFarmerSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                      </Button>
+                      <Button
+                        onClick={closeEditModal}
+                        disabled={editFarmerSaving}
+                        className="h-9 w-9 rounded-full border border-[#0D3A35]/20 bg-white p-0 text-[#0D3A35] shadow-sm hover:bg-emerald-50"
+                        title="Cancel editing"
+                        aria-label="Cancel editing"
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button
+                        onClick={() => {
+                          openEditModal(viewProfileFarmer, false);
+                        }}
+                        className="h-9 w-9 rounded-full bg-[#0D3A35] p-0 text-white shadow-sm hover:bg-[#092b27]"
+                        title="Edit"
+                        aria-label="Edit land owner"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        onClick={() => toast({ title: 'Delete', description: 'Delete action is not connected yet.', variant: 'default' })}
+                        className="h-9 w-9 rounded-full border border-[#0D3A35]/20 bg-white p-0 text-[#0D3A35] shadow-sm hover:bg-emerald-50"
+                        title="Delete"
+                        aria-label="Delete land owner"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        onClick={() => toggleFlag(viewProfileFarmer.id)}
+                        disabled={!!flagging[viewProfileFarmer.id] || !!flagged[viewProfileFarmer.id]}
+                        className={`h-9 w-9 rounded-full border p-0 shadow-sm ${
+                          flagged[viewProfileFarmer.id]
+                            ? 'border-red-200 bg-red-50 text-red-600'
+                            : 'border-[#0D3A35]/20 bg-white text-[#0D3A35] hover:bg-emerald-50'
+                        }`}
+                        title={flagged[viewProfileFarmer.id] ? 'Dispute flagged' : 'Flag dispute'}
+                        aria-label={flagged[viewProfileFarmer.id] ? 'Dispute flagged' : 'Flag dispute'}
+                      >
+                        {flagging[viewProfileFarmer.id] ? <Loader2 className="h-4 w-4 animate-spin" /> : <Flag className="h-4 w-4" />}
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {profilePopupTab === 'details' && (
+                <>
+              {(() => {
+                const categories = [
+                  {
+                    title: 'Owner Details',
+                    Icon: UserRound,
+                    items: [
+                      { label: 'Full Name', value: viewProfileFarmer.fullName || 'N/A', Icon: UserRound, field: 'fullName' as const },
+                      { label: 'Phone Number', value: viewProfileFarmer.phoneNumber || 'N/A', Icon: Phone, field: 'phoneNumber' as const },
+                      { label: 'Alternate Phone', value: viewProfileFarmer.alternatePhone || 'N/A', Icon: Phone, field: 'alternatePhone' as const },
+                      { label: 'Email', value: viewProfileFarmer.email || 'N/A', Icon: Mail },
+                      { label: 'Aadhaar Number', value: getKycValue(viewProfileFarmer, 'adhar_number') || 'N/A', Icon: IdCard, field: 'aadhaarNumber' as const },
+                      { label: 'PAN Number', value: getKycValue(viewProfileFarmer, 'pan_numnber') || getKycValue(viewProfileFarmer, 'pan_number') || 'N/A', Icon: FileBadge2, field: 'panNumber' as const },
+                    ],
+                  },
+                  {
+                    title: 'Co-Owner Details',
+                    Icon: Users,
+                    items: [
+                      { label: 'Full Name', value: viewProfileFarmer.coOwner?.fullName || 'N/A', Icon: UserRound },
+                      { label: 'Relationship', value: viewProfileFarmer.coOwner?.relationship || 'N/A', Icon: Users },
+                      { label: 'Phone Number', value: viewProfileFarmer.coOwner?.phoneNumber || 'N/A', Icon: Phone },
+                      { label: 'Aadhaar Number', value: viewProfileFarmer.coOwner?.aadhaarNumber || 'N/A', Icon: IdCard },
+                      { label: 'PAN Number', value: viewProfileFarmer.coOwner?.panNumber || 'N/A', Icon: FileBadge2 },
+                    ],
+                  },
+                  {
+                    title: 'Address',
+                    Icon: MapPin,
+                    items: [
+                      { label: 'Full Address', value: viewProfileFarmer.farmerAddress || 'N/A', Icon: Home },
+                      { label: 'Village', value: viewProfileFarmer.village || 'N/A', Icon: MapPin, field: 'village' as const },
+                      { label: 'Taluka', value: viewProfileFarmer.taluka || 'N/A', Icon: Navigation, field: 'taluka' as const },
+                      { label: 'District', value: viewProfileFarmer.district || 'N/A', Icon: MapPin, field: 'district' as const },
+                      { label: 'State', value: viewProfileFarmer.state || 'N/A', Icon: Navigation, field: 'state' as const },
+                      { label: 'Cluster', value: viewProfileFarmer.clusterAssigned || 'N/A', Icon: Home },
+                      { label: 'Zone', value: viewProfileFarmer.zoneAssigned || 'N/A', Icon: Navigation },
+                      { label: 'Block', value: viewProfileFarmer.blockAssigned || 'N/A', Icon: Map, field: 'blockAssigned' as const },
+                    ],
+                  },
+                ];
+
+                return (
+                  <div className="mt-5 grid grid-cols-1 gap-4">
+                    {categories.map(({ title, Icon: CategoryIcon, items }) => (
+                      <section key={title} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                        <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-3">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50">
+                            <CategoryIcon className="h-4 w-4 text-emerald-700" />
+                          </div>
+                          <h4 className="text-sm font-bold text-slate-900">{title}</h4>
+                        </div>
+                        <div className="grid grid-cols-1 gap-x-6 gap-y-4 p-5 sm:grid-cols-2 xl:grid-cols-3">
+                          {items.map((item) => {
+                            const { label, value, Icon } = item;
+                            const field = 'field' in item ? item.field : undefined;
+                            return (
+                            <div key={label} className="flex min-w-0 gap-3">
+                              <Icon className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-xs font-bold text-slate-500">{label}</p>
+                                {inlineProfileEditing && field ? (
+                                  <Input
+                                    value={String(editFarmerForm[field] ?? '')}
+                                    onChange={(event) => setEditFarmerForm((previous) => ({
+                                      ...previous,
+                                      [field]: field === 'panNumber' ? event.target.value.toUpperCase() : event.target.value,
+                                    }))}
+                                    maxLength={field === 'aadhaarNumber' ? 12 : field === 'panNumber' ? 10 : undefined}
+                                    className="mt-1 h-9 border-slate-200 bg-white text-sm font-semibold"
+                                  />
+                                ) : (
+                                  <p className="mt-1 break-words text-sm font-bold text-slate-800">{value}</p>
+                                )}
+                              </div>
+                            </div>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {(() => {
+                const bank = getBankDetails(viewProfileFarmer);
+                const bankAccounts = getAllBankDetails(viewProfileFarmer);
+                const backendBankCount = Array.isArray(viewProfileFarmer.bankDetails) ? viewProfileFarmer.bankDetails.length : 0;
+                const localBankCount = localBankDetails[viewProfileFarmer.id]?.length ?? 0;
+                const hasKycBank = [bank.bankName, bank.accountNumber, bank.ifsc].some((value) => value && value !== 'N/A');
+                const linkedAccountCount = Math.max(backendBankCount + localBankCount, hasKycBank ? 1 : 0);
+                const items = [
+                  { label: 'Account Holder', value: bankAccounts[0]?.holderName || 'N/A', Icon: UserRound, field: 'bankHolderName' as const },
+                  { label: 'Bank Name', value: bank.bankName || 'N/A', Icon: Landmark, field: 'bankName' as const },
+                  { label: 'Account Number', value: bank.accountNumber || 'N/A', Icon: Banknote, field: 'bankAccountNumber' as const },
+                  { label: 'IFSC Code', value: bank.ifsc || 'N/A', Icon: Landmark, field: 'bankIfsc' as const },
+                  { label: 'Linked Accounts', value: String(linkedAccountCount), Icon: Banknote },
+                ];
+
+                return (
+                  <section className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
+                    <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-3">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50">
+                        <Landmark className="h-4 w-4 text-emerald-700" />
+                      </div>
+                      <h4 className="text-sm font-bold text-slate-900">Bank Details</h4>
+                    </div>
+                    <div className="grid grid-cols-1 gap-x-6 gap-y-4 p-5 sm:grid-cols-2 xl:grid-cols-3">
+                      {items.map((item) => {
+                        const { label, value, Icon } = item;
+                        const field = 'field' in item ? item.field : undefined;
+                        return (
+                        <div key={label} className="flex min-w-0 gap-3">
+                          <Icon className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-bold text-slate-500">{label}</p>
+                            {inlineProfileEditing && field ? (
+                              <Input
+                                value={String(editFarmerForm[field] ?? '')}
+                                onChange={(event) => setEditFarmerForm((previous) => ({
+                                  ...previous,
+                                  [field]: field === 'bankIfsc' ? event.target.value.toUpperCase() : event.target.value,
+                                }))}
+                                className="mt-1 h-9 border-slate-200 bg-white text-sm font-semibold"
+                              />
+                            ) : (
+                              <p className="mt-1 break-words text-sm font-bold text-slate-800">{value}</p>
+                            )}
+                          </div>
+                        </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                );
+              })()}
+
+                </>
+              )}
+
+              {profilePopupTab === 'documents' && (
+                <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                  <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-3">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50">
+                      <FileText className="h-4 w-4 text-emerald-700" />
+                    </div>
+                    <h4 className="text-sm font-bold text-slate-900">Documents</h4>
+                  </div>
+                  {inlineProfileEditing ? (
+                    <div className="grid grid-cols-1 gap-3 p-5 lg:grid-cols-2">
+                      {([
+                        { key: 'aadhaarCardFile', title: 'Aadhaar Card', Icon: IdCard, docKey: 'adhar_card' },
+                        { key: 'panCardFile', title: 'PAN Card', Icon: FileBadge2, docKey: 'pand_card' },
+                        { key: 'kisanBookFile', title: 'Kisan Book', Icon: BookOpen, docKey: 'kisan_book' },
+                        { key: 'b1RecordFile', title: 'B1 Record', Icon: FileBadge2, docKey: 'B1_record' },
+                        { key: 'agreementFile', title: 'Agreement', Icon: FileText, docKey: 'agreement' },
+                        { key: 'passbookFile', title: 'Passbook', Icon: Landmark, docKey: 'bank_passbook' },
+                      ] as const).map(({ key, title, Icon, docKey }) => (
+                        <EditDocumentUploadCard
+                          key={key}
+                          title={title}
+                          icon={Icon}
+                          existingUrl={getDocumentUrl(viewProfileFarmer, docKey)}
+                          file={editFarmerForm[key]}
+                          accept={key === 'agreementFile' ? 'application/pdf' : 'application/pdf,image/*'}
+                          onFileChange={(file) => setEditFarmerForm((previous) => ({ ...previous, [key]: file }))}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-4 p-5 sm:grid-cols-3">
+                      <ProfileDocumentCard title="Aadhaar Card" url={getDocumentUrl(viewProfileFarmer, 'adhar_card')} Icon={IdCard} />
+                      <ProfileDocumentCard title="PAN Card" url={getDocumentUrl(viewProfileFarmer, 'pand_card')} Icon={FileBadge2} />
+                      <ProfileDocumentCard title="Kisan Book" url={getDocumentUrl(viewProfileFarmer, 'kisan_book')} Icon={BookOpen} />
+                      <ProfileDocumentCard title="B1 Record" url={getDocumentUrl(viewProfileFarmer, 'B1_record')} Icon={FileBadge2} />
+                      <ProfileDocumentCard title="Agreement" url={getDocumentUrl(viewProfileFarmer, 'agreement')} Icon={FileText} />
+                      <ProfileDocumentCard title="Passbook" url={getDocumentUrl(viewProfileFarmer, 'bank_passbook')} Icon={Landmark} />
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {profilePopupTab === 'parcels' && (
+                <>
+              <div className="grid grid-cols-1 gap-5">
+                {getFarmCards(viewProfileFarmer).map((farm, farmIndex) => {
+                  const rawFarm = Array.isArray(viewProfileFarmer.farms) ? viewProfileFarmer.farms[farmIndex] : null;
+                  const editableFarm = editFarmerFarms[farmIndex];
+                  const updateEditableFarm = (patch: Partial<(typeof editFarmerFarms)[number]>) => {
+                    setEditFarmerFarms((previous) => previous.map((item, index) => (
+                      index === farmIndex ? { ...item, ...patch } : item
+                    )));
+                  };
+                  const plots = Array.isArray(rawFarm?.plots) ? rawFarm.plots : [];
+                  const images = Array.isArray(rawFarm?.land_media?.images) ? rawFarm.land_media.images : [];
+                  const fallbackImage = farm.mediaUrl && farm.mediaUrl !== '/placeholder.svg' ? farm.mediaUrl : '';
+                  const parcelImages = images.length > 0 ? images : (fallbackImage ? [fallbackImage] : []);
+                  const videoUrl = rawFarm?.land_media?.video || '';
+                  const parcelId = rawFarm?.farm_id ?? rawFarm?.id ?? farm.id;
+                  const cropLabel = cropOptions.find((option) => option.value === farm.cropType)?.label || farm.cropType || 'Not assigned';
+                  const farmCoords: [number, number][] = (Array.isArray(farm.landMapping?.coordinates) ? farm.landMapping.coordinates : [])
+                    .map((coordinate: any) => {
+                      if (Array.isArray(coordinate) && coordinate.length >= 2) {
+                        return [Number(coordinate[0]), Number(coordinate[1])] as [number, number];
+                      }
+                      return [Number(coordinate?.lat), Number(coordinate?.lng)] as [number, number];
+                    })
+                    .filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng));
+                  const hasBoundary = farmCoords.length >= 3;
+                  const plotBoundaries = plots
+                    .map((plot: any, plotIndex: number) => {
+                      const coordinates: [number, number][] = (Array.isArray(plot?.plot_coordinates)
+                        ? plot.plot_coordinates
+                        : Array.isArray(plot?.coordinates)
+                          ? plot.coordinates
+                          : [])
+                        .map((coordinate: any) => {
+                          if (Array.isArray(coordinate) && coordinate.length >= 2) {
+                            return [Number(coordinate[0]), Number(coordinate[1])] as [number, number];
+                          }
+                          return [Number(coordinate?.lat), Number(coordinate?.lng)] as [number, number];
+                        })
+                        .filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng));
+
+                      return {
+                        id: String(plot?.plot_id ?? plot?.id ?? `${farm.id}-plot-${plotIndex + 1}`),
+                        label: (() => {
+                          const value = String(plot?.plot_number ?? plot?.plot_no ?? plot?.plot_name ?? plotIndex + 1);
+                          return value.toLowerCase().startsWith('plot') ? value : `Plot ${value}`;
+                        })(),
+                        area: (() => {
+                          const value = Number(plot?.plot_area ?? plot?.area);
+                          return Number.isFinite(value) ? `${value.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ac` : 'Area N/A';
+                        })(),
+                        crop: (() => {
+                          const value = String(plot?.crop_type ?? rawFarm?.crop_type ?? farm.cropType ?? '').trim();
+                          return value ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : 'Unspecified';
+                        })(),
+                        coordinates,
+                        color: (() => {
+                          const cropKey = String(plot?.crop_type ?? rawFarm?.crop_type ?? farm.cropType ?? '').trim().toLowerCase() || 'unspecified';
+                          return CEO_CULTIVATION_CROP_COLORS[cropKey]
+                            ?? CEO_CULTIVATION_FALLBACK_COLORS[plotIndex % CEO_CULTIVATION_FALLBACK_COLORS.length];
+                        })(),
+                      };
+                    })
+                    .filter((plot) => plot.coordinates.length >= 3);
+                  const showPlots = parcelPlotView[farm.id] === true;
+                  const plotDetailRows = plots
+                    .map((plot: any, plotIndex: number) => {
+                      const numberValue = String(plot?.plot_number ?? plot?.plot_no ?? plot?.plot_name ?? plotIndex + 1);
+                      const plotNumber = numberValue.toLowerCase().startsWith('plot') ? numberValue : `Plot ${numberValue}`;
+                      const areaValue = Number(plot?.plot_area ?? plot?.area);
+                      const cropValue = String(plot?.crop_type ?? rawFarm?.crop_type ?? farm.cropType ?? '').trim();
+                      return {
+                        id: String(plot?.plot_id ?? plot?.id ?? `${farm.id}-plot-row-${plotIndex + 1}`),
+                        number: plotNumber,
+                        area: Number.isFinite(areaValue) ? `${areaValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ac` : 'N/A',
+                        crop: cropValue ? cropValue.charAt(0).toUpperCase() + cropValue.slice(1).toLowerCase() : 'Unspecified',
+                      };
+                    })
+                    .sort((first, second) =>
+                      first.number.localeCompare(second.number, undefined, { numeric: true, sensitivity: 'base' })
+                    );
+                  const additionalMappings = Array.isArray(rawFarm?.additional_mappings)
+                    ? rawFarm.additional_mappings
+                    : Array.isArray(rawFarm?.land_data?.additional_mappings)
+                      ? rawFarm.land_data.additional_mappings
+                      : [];
+                  const borewellMappings = additionalMappings.filter((mapping: any) =>
+                    String(mapping?.mapping_type ?? mapping?.mapping_name ?? '').toLowerCase().includes('bore')
+                  );
+                  const electricityMappings = additionalMappings.filter((mapping: any) =>
+                    String(mapping?.mapping_type ?? mapping?.mapping_name ?? '').toLowerCase().includes('electric')
+                  );
+                  const rawBorewellSource =
+                    rawFarm?.borewells ??
+                    rawFarm?.borewell_details ??
+                    rawFarm?.bore_well_details ??
+                    rawFarm?.borewell ??
+                    [];
+                  const electricitySource =
+                    rawFarm?.electricity_connection_details ??
+                    rawFarm?.electricity_connection ??
+                    rawFarm?.electricity_details ??
+                    rawFarm?.electricity ??
+                    {};
+                  const formatOtherDetail = (value: unknown) => {
+                    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+                    if (value == null || String(value).trim() === '') return 'N/A';
+                    return String(value);
+                  };
+                  const declaredBorewellCount = Number(
+                    rawFarm?.borewell_count ??
+                    (!Array.isArray(rawBorewellSource) ? rawBorewellSource?.count : 0)
+                  );
+                  const borewellEntries: any[] = Array.isArray(rawBorewellSource) && rawBorewellSource.length > 0
+                    ? rawBorewellSource
+                    : borewellMappings.length > 0
+                      ? borewellMappings.map((mapping: any) => ({ ...mapping, ...(mapping?.details ?? {}) }))
+                      : rawBorewellSource && typeof rawBorewellSource === 'object' && Object.keys(rawBorewellSource).length > 0
+                        ? [rawBorewellSource]
+                        : Number.isFinite(declaredBorewellCount) && declaredBorewellCount > 0
+                          ? Array.from({ length: declaredBorewellCount }, () => ({}))
+                          : rawFarm?.has_borewell
+                            ? [{}]
+                            : [];
+                  const borewellDetailGroups = borewellEntries.map((borewell: any, borewellIndex: number) => ({
+                    id: String(borewell?.borewell_id ?? borewell?.id ?? `${farm.id}-borewell-${borewellIndex + 1}`),
+                    title: String(borewell?.borewell_name ?? borewell?.name ?? `Borewell ${borewellIndex + 1}`),
+                    items: [
+                      {
+                        label: 'Borewell No.',
+                        value: formatOtherDetail(
+                          borewell?.borewell_number ??
+                          borewell?.borewell_no ??
+                          borewell?.number ??
+                          borewellIndex + 1
+                        ),
+                      },
+                      {
+                        label: 'Status',
+                        value: formatOtherDetail(borewell?.status ?? borewell?.available ?? rawFarm?.has_borewell),
+                      },
+                      {
+                        label: 'Depth',
+                        value: formatOtherDetail(
+                          borewell?.depth ??
+                          borewell?.depth_ft ??
+                          (borewellEntries.length === 1 ? rawFarm?.borewell_depth : null)
+                        ),
+                      },
+                      {
+                        label: 'Water Status',
+                        value: formatOtherDetail(
+                          borewell?.water_status ??
+                          borewell?.water_availability ??
+                          (borewellEntries.length === 1 ? rawFarm?.water_availability : null)
+                        ),
+                      },
+                      {
+                        label: 'Type',
+                        value: formatOtherDetail(borewell?.borewell_type ?? borewell?.type),
+                      },
+                      {
+                        label: 'Pump Capacity',
+                        value: formatOtherDetail(
+                          borewell?.pump_capacity ??
+                          borewell?.pump_hp ??
+                          borewell?.motor_capacity
+                        ),
+                      },
+                    ],
+                  }));
+                  const electricityDetails = [
+                    {
+                      label: 'Connection',
+                      value: formatOtherDetail(
+                        rawFarm?.has_electricity ??
+                        electricitySource?.available ??
+                        electricitySource?.connection_status ??
+                        electricitySource?.status ??
+                        (electricityMappings.length > 0 ? true : null)
+                      ),
+                    },
+                    {
+                      label: 'Consumer No.',
+                      value: formatOtherDetail(
+                        electricitySource?.consumer_number ??
+                        electricitySource?.consumer_no ??
+                        rawFarm?.electricity_consumer_number
+                      ),
+                    },
+                    {
+                      label: 'Meter No.',
+                      value: formatOtherDetail(
+                        electricitySource?.meter_number ??
+                        electricitySource?.meter_no ??
+                        rawFarm?.electricity_meter_number
+                      ),
+                    },
+                    {
+                      label: 'Connected Load',
+                      value: formatOtherDetail(
+                        electricitySource?.connected_load ??
+                        electricitySource?.load ??
+                        rawFarm?.electricity_load
+                      ),
+                    },
+                  ];
+                  const leaseRateNumber = Number(farm.leaseRate);
+                  const leaseRateDisplay = farm.leaseRate == null || farm.leaseRate === ''
+                    ? 'N/A'
+                    : Number.isFinite(leaseRateNumber)
+                      ? `Rs. ${leaseRateNumber.toLocaleString('en-IN')}`
+                      : String(farm.leaseRate);
+                  const nowMs = Date.now();
+                  const leaseStartMs = farm.leaseStart ? new Date(farm.leaseStart).getTime() : NaN;
+                  const leaseEndMs = farm.leaseEnd ? new Date(farm.leaseEnd).getTime() : NaN;
+                  const hasLeaseRange = Number.isFinite(leaseStartMs) && Number.isFinite(leaseEndMs) && leaseEndMs > leaseStartMs;
+                  const leaseRemainingPct = hasLeaseRange
+                    ? Math.max(0, Math.min(100, ((leaseEndMs - nowMs) / (leaseEndMs - leaseStartMs)) * 100))
+                    : 0;
+                  const leaseStatus = !hasLeaseRange
+                    ? 'Not available'
+                    : nowMs < leaseStartMs
+                      ? 'Upcoming'
+                      : nowMs > leaseEndMs
+                        ? 'Expired'
+                        : 'Active';
+
+                  return (
+                    <article key={farm.id} className="grid overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm md:grid-cols-[minmax(280px,42%)_1fr]">
+                      <div className="relative h-56 border-b border-slate-200 bg-slate-50 md:h-full md:min-h-[480px] md:border-b-0 md:border-r">
+                        {hasBoundary ? (
+                          <MapContainer
+                            center={farmCoords[0]}
+                            zoom={15}
+                            style={{ height: '100%', width: '100%' }}
+                            scrollWheelZoom={true}
+                            dragging={true}
+                            doubleClickZoom={true}
+                            touchZoom={true}
+                            zoomControl={true}
+                            attributionControl={false}
+                          >
+                            <TileLayer
+                              url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                              attribution="Tiles &copy; Esri"
+                            />
+                            <FlyToBounds coords={farmCoords.map(([lat, lng]) => ({ lat, lng }))} />
+                            <AutoResizeMap />
+                            <Polygon
+                              positions={farmCoords}
+                              pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', weight: 3, fillOpacity: 0.28 }}
+                            />
+                            {showPlots && plotBoundaries.map((plot) => (
+                              <Polygon
+                                key={plot.id}
+                                positions={plot.coordinates}
+                                pathOptions={{
+                                  color: plot.color,
+                                  fillColor: plot.color,
+                                  weight: 2.5,
+                                  fillOpacity: 0.55,
+                                }}
+                              >
+                                <Tooltip permanent direction="center" opacity={1} className="plot-label-tooltip">
+                                  <div className="text-center leading-tight">
+                                    <div className="text-[11px] font-bold text-slate-900">{plot.label}</div>
+                                    <div className="mt-0.5 text-[10px] font-semibold text-slate-600">{plot.area}</div>
+                                  </div>
+                                </Tooltip>
+                              </Polygon>
+                            ))}
+                          </MapContainer>
+                        ) : (
+                          <div className="flex h-full items-center justify-center gap-2 text-xs font-semibold text-slate-400">
+                            <Map className="h-5 w-5" />
+                            Boundary mapping unavailable
+                          </div>
+                        )}
+                        {hasBoundary && plotBoundaries.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setParcelPlotView((previous) => ({
+                              ...previous,
+                              [farm.id]: !previous[farm.id],
+                            }))}
+                            className="absolute bottom-3 left-3 z-[500] flex items-center gap-1.5 rounded-md bg-white/95 px-2.5 py-1.5 text-[10px] font-bold text-slate-700 shadow-sm transition hover:bg-white"
+                            title={`${showPlots ? 'Hide' : 'Show'} plot boundaries`}
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            Change View · Plots {showPlots ? 'On' : 'Off'}
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="min-w-0">
+                      {inlineProfileEditing && editableFarm && (
+                        <div className="border-b border-slate-200 bg-slate-50/70 p-4">
+                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <EditField label="Village">
+                              <Input
+                                value={editableFarm.village}
+                                onChange={(event) => updateEditableFarm({ village: event.target.value })}
+                                placeholder="Village"
+                              />
+                            </EditField>
+                            <EditField label="District">
+                              <Input
+                                value={editableFarm.district}
+                                onChange={(event) => updateEditableFarm({ district: event.target.value })}
+                                placeholder="District"
+                              />
+                            </EditField>
+                            <EditField label="State">
+                              <Input
+                                value={editableFarm.state}
+                                onChange={(event) => updateEditableFarm({ state: event.target.value })}
+                                placeholder="State"
+                              />
+                            </EditField>
+                            <EditField label="Total Area" hint="Acres">
+                              <Input
+                                type="number"
+                                step="0.01"
+                                value={editableFarm.totalArea}
+                                onChange={(event) => updateEditableFarm({ totalArea: event.target.value })}
+                                placeholder="Total area"
+                              />
+                            </EditField>
+                            <EditField label="Lease Start">
+                              <Input
+                                type="date"
+                                value={editFarmerForm.agreementStartDate}
+                                onChange={(event) => setEditFarmerForm((previous) => ({ ...previous, agreementStartDate: event.target.value }))}
+                              />
+                            </EditField>
+                            <EditField label="Lease End">
+                              <Input
+                                type="date"
+                                value={editFarmerForm.agreementEndDate}
+                                onChange={(event) => setEditFarmerForm((previous) => ({ ...previous, agreementEndDate: event.target.value }))}
+                              />
+                            </EditField>
+                          </div>
+                          <div className="mt-3">
+                            <EditField label="Lease Rate" hint="Per acre">
+                              <Input
+                                type="number"
+                                value={editFarmerForm.leaseRent}
+                                onChange={(event) => setEditFarmerForm((previous) => ({ ...previous, leaseRent: event.target.value }))}
+                                placeholder="Lease rate"
+                              />
+                            </EditField>
+                          </div>
+                          <div className="mt-4">
+                            <p className="mb-2 text-xs font-bold text-slate-600">Land Media</p>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[0, 1, 2].map((imageIndex) => (
+                                <div key={`${farm.id}-edit-media-${imageIndex}`}>
+                                  <label className="block h-20 cursor-pointer overflow-hidden rounded-lg border-2 border-dashed border-slate-200 bg-white transition hover:border-[#0D3A35]/40">
+                                    {editableFarm.imagePreviews[imageIndex] ? (
+                                      <img
+                                        src={editableFarm.imagePreviews[imageIndex] as string}
+                                        alt={`Land image ${imageIndex + 1}`}
+                                        className="h-full w-full object-cover"
+                                      />
+                                    ) : (
+                                      <span className="flex h-full items-center justify-center">
+                                        <ImageIcon className="h-5 w-5 text-slate-300" />
+                                      </span>
+                                    )}
+                                    <input
+                                      type="file"
+                                      accept="image/*"
+                                      className="hidden"
+                                      onChange={(event) => {
+                                        const file = event.target.files?.[0] ?? null;
+                                        const images = [...editableFarm.images];
+                                        const imagePreviews = [...editableFarm.imagePreviews];
+                                        images[imageIndex] = file;
+                                        imagePreviews[imageIndex] = file
+                                          ? URL.createObjectURL(file)
+                                          : imagePreviews[imageIndex];
+                                        updateEditableFarm({ images, imagePreviews });
+                                      }}
+                                    />
+                                  </label>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      <div className="flex items-start justify-between gap-3 p-4">
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold uppercase tracking-wide text-emerald-700">Parcel {farmIndex + 1}</p>
+                          <h4 className="mt-1 truncate text-sm font-bold text-slate-950">{String(parcelId)}</h4>
+                          <div className="mt-2 flex items-start gap-2 text-xs font-semibold text-slate-600">
+                            <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
+                            <span className="line-clamp-2">{farm.location || 'N/A'}</span>
+                          </div>
+                        </div>
+                        <div className="shrink-0 rounded-lg bg-emerald-50 px-3 py-2 text-right ring-1 ring-inset ring-emerald-100">
+                          <p className="text-[10px] font-bold uppercase tracking-wide text-emerald-700">Total Area</p>
+                          <p className="mt-0.5 text-sm font-bold text-emerald-900">
+                            {Number(farm.acres || 0).toLocaleString('en-IN')} acres
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-px border-y border-slate-100 bg-slate-100">
+                        {[
+                          { label: 'Cluster', value: farm.cluster || 'N/A' },
+                          { label: 'Zone', value: farm.zone || 'N/A' },
+                          { label: 'Block', value: farm.block || 'N/A' },
+                          { label: 'Crop', value: cropLabel },
+                          { label: 'Plots', value: String(plots.length) },
+                          { label: 'Lease Rate', value: leaseRateDisplay },
+                        ].map((item) => (
+                          <div key={item.label} className="min-w-0 bg-white px-3 py-2.5">
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{item.label}</p>
+                            <p className="mt-0.5 truncate text-xs font-bold text-slate-700">{item.value}</p>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="border-b border-slate-100 bg-slate-50/60 px-4 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-bold text-slate-700">Lease Agreement</p>
+                            <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
+                              {farm.leaseStart || 'N/A'} to {farm.leaseEnd || 'N/A'}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-800 ring-1 ring-inset ring-emerald-100">
+                              {leaseStatus}
+                            </span>
+                            <p className="mt-1.5 text-[10px] font-bold text-slate-500">
+                              {hasLeaseRange ? `${Math.round(leaseRemainingPct)}% remaining` : 'Lease dates unavailable'}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-200">
+                          <div
+                            className="h-full rounded-full bg-[#0D3A35] transition-all duration-500"
+                            style={{ width: `${leaseRemainingPct}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="p-4">
+                        <div>
+                          <h5 className="text-sm font-bold text-slate-900">Land Media</h5>
+                          <p className="mt-0.5 text-xs font-medium text-slate-500">
+                            {parcelImages.length} image{parcelImages.length === 1 ? '' : 's'}{videoUrl ? ' · 1 video' : ''}
+                          </p>
+                        </div>
+
+                        <div className="mt-3 grid grid-cols-3 gap-2">
+                          {[0, 1, 2].map((imageIndex) => (
+                            <div key={`${farm.id}-media-${imageIndex}`} className="relative h-20 overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+                              {parcelImages[imageIndex] ? (
+                                <>
+                                  <img
+                                    src={parcelImages[imageIndex]}
+                                    alt={`Parcel ${farmIndex + 1} land image ${imageIndex + 1}`}
+                                    className="h-full w-full object-cover transition duration-300 hover:scale-105"
+                                  />
+                                  {imageIndex === 2 && parcelImages.length > 3 && (
+                                    <span className="absolute inset-0 flex items-center justify-center bg-slate-950/55 text-xs font-bold text-white">
+                                      +{parcelImages.length - 3}
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                <div className="flex h-full flex-col items-center justify-center gap-1 text-[10px] font-semibold text-slate-400">
+                                  <ImageIcon className="h-4 w-4" />
+                                  Image {imageIndex + 1}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        {videoUrl && (
+                          <div className="mt-2 h-20 overflow-hidden rounded-lg border border-slate-200 bg-slate-950">
+                            <video src={videoUrl} className="h-full w-full object-cover" controls muted />
+                          </div>
+                        )}
+                      </div>
+                      </div>
+
+                      <div className="border-t border-slate-100 md:col-span-2">
+                        <button
+                          type="button"
+                          onClick={() => setParcelPlotDetailsOpen((previous) => ({
+                            ...previous,
+                            [farm.id]: !previous[farm.id],
+                          }))}
+                          className="flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition hover:bg-slate-50"
+                          aria-expanded={!!parcelPlotDetailsOpen[farm.id]}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-slate-700">Other Details</span>
+                            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
+                              {plotDetailRows.length} plot{plotDetailRows.length === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                          <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${
+                            parcelPlotDetailsOpen[farm.id] ? 'rotate-180' : ''
+                          }`} />
+                        </button>
+
+                        {parcelPlotDetailsOpen[farm.id] && (
+                          <div className="grid border-t border-slate-100 lg:grid-cols-2">
+                            <section className="min-w-0 border-b border-slate-100 lg:border-b-0 lg:border-r">
+                              <div className="flex items-center gap-2 bg-slate-50/80 px-5 py-3">
+                                <Map className="h-4 w-4 text-emerald-700" />
+                                <h5 className="text-xs font-bold text-slate-800">Plot Information</h5>
+                              </div>
+                              <div className="overflow-x-auto">
+                                <table className="w-full text-left">
+                                  <thead>
+                                    <tr>
+                                      {['Plot No.', 'Area', 'Crop'].map((heading) => (
+                                        <th key={heading} className="border-b border-slate-100 px-5 py-2.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                                          {heading}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100">
+                                    {plotDetailRows.length > 0 ? (
+                                      plotDetailRows.map((plot) => (
+                                        <tr key={plot.id}>
+                                          <td className="px-5 py-3 text-xs font-bold text-slate-700">{plot.number}</td>
+                                          <td className="px-5 py-3 text-xs font-semibold text-slate-600">{plot.area}</td>
+                                          <td className="px-5 py-3 text-xs font-semibold text-slate-600">{plot.crop}</td>
+                                        </tr>
+                                      ))
+                                    ) : (
+                                      <tr>
+                                        <td colSpan={3} className="px-5 py-5 text-center text-xs font-semibold text-slate-400">
+                                          No plots available
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </section>
+
+                            <div className="space-y-3 p-4">
+                              <section className="overflow-hidden rounded-lg border border-slate-200">
+                                <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-slate-50/80 px-4 py-2.5">
+                                  <div className="flex items-center gap-2">
+                                    <Droplets className="h-4 w-4 text-emerald-700" />
+                                    <h5 className="text-xs font-bold text-slate-800">Borewell Details</h5>
+                                  </div>
+                                  <span className="text-[10px] font-bold text-slate-500">
+                                    {borewellDetailGroups.length} borewell{borewellDetailGroups.length === 1 ? '' : 's'}
+                                  </span>
+                                </div>
+                                <div className="space-y-3 p-3">
+                                  {borewellDetailGroups.length > 0 ? (
+                                    borewellDetailGroups.map((borewell) => (
+                                      <div key={borewell.id} className="overflow-hidden rounded-md border border-slate-100">
+                                        <div className="border-b border-slate-100 bg-emerald-50/50 px-3 py-2 text-[11px] font-bold text-emerald-800">
+                                          {borewell.title}
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-x-5 gap-y-3 p-3">
+                                          {borewell.items.map((item) => (
+                                            <div key={item.label} className="min-w-0">
+                                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{item.label}</p>
+                                              <p className="mt-1 truncate text-xs font-bold text-slate-700">{item.value}</p>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    ))
+                                  ) : (
+                                    <div className="py-3 text-center text-xs font-semibold text-slate-400">No borewell details available</div>
+                                  )}
+                                </div>
+                              </section>
+
+                              <section className="overflow-hidden rounded-lg border border-slate-200">
+                                <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50/80 px-4 py-2.5">
+                                  <Zap className="h-4 w-4 text-emerald-700" />
+                                  <h5 className="text-xs font-bold text-slate-800">Electricity Connection Details</h5>
+                                </div>
+                                <div className="grid grid-cols-2 gap-x-5 gap-y-3 p-4">
+                                  {electricityDetails.map((item) => (
+                                      <div key={item.label} className="min-w-0">
+                                        <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{item.label}</p>
+                                        <p className="mt-1 truncate text-xs font-bold text-slate-700">{item.value}</p>
+                                      </div>
+                                  ))}
+                                </div>
+                              </section>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+
     <AlertDialog open={!!pendingCropChange} onOpenChange={(open) => !open && setPendingCropChange(null)}>
       <AlertDialogContent>
         <AlertDialogHeader>
@@ -2258,7 +3454,7 @@ const Farmers = () => {
                   {newLandKmlCoordinates && newLandKmlCoordinates.length >= 3 && (
                     <Polygon
                       positions={newLandKmlCoordinates.map(c => [c.lat, c.lng] as [number, number])}
-                      pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: 0.2, weight: 2.5 }}
+                      pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }}
                     />
                   )}
                   {newLandKmlCoordinates && newLandKmlCoordinates.length > 0 && (() => {
@@ -2431,9 +3627,9 @@ const Farmers = () => {
             const rawFarm   = activeFarmsPopupFarmer.farms?.[farmIndex];
             const landPlots: any[] = Array.isArray(rawFarm?.plots) ? rawFarm.plots : [];
             const plotStats = [
-              { key: 'napier', label: 'Napier', color: '#22c55e' },
-              { key: 'rahar',  label: 'Rahar',  color: '#f97316' },
-              { key: 'paddy',  label: 'Paddy',  color: '#f59e0b' },
+              { key: 'napier', label: 'Napier', color: 'var(--crop-napier-color, #22c55e)' },
+              { key: 'rahar',  label: 'Rahar',  color: 'var(--crop-rahar-color, #800000)' },
+              { key: 'paddy',  label: 'Paddy',  color: 'var(--crop-paddy-color, #22c55e)' },
             ].map(({ key, label, color }) => {
               const matched = landPlots.filter((p: any) => p.crop_type === key);
               return {
@@ -2471,7 +3667,7 @@ const Farmers = () => {
                         url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                         attribution='Tiles &copy; Esri'
                       />
-                      <Polygon positions={farmCoords as any} pathOptions={{ color: '#16a34a', weight: 2 }} />
+                      <Polygon positions={farmCoords as any} pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }} />
                       <Marker position={[farmCoords[0][0], farmCoords[0][1]] as any}>
                         <Popup>Land boundary</Popup>
                       </Marker>
@@ -3073,7 +4269,7 @@ const Farmers = () => {
                                   {effectiveCoords.length >= 3 && (
                                     <Polygon
                                       positions={effectiveCoords.map((c) => [c.lat, c.lng] as [number, number])}
-                                      pathOptions={{ color: '#3b82f6', fillColor: '#3b82f6', fillOpacity: 0.2, weight: 2.5 }}
+                                      pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }}
                                     />
                                   )}
                                   <FeatureGroup>
