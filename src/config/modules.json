@@ -158,6 +158,7 @@
           "enabled": true,
           "items": [
             { "key": "cultivation-calendar","label": "Cultivation Calendar",  "path": "/cultivation-calendar","icon": "Calendar","enabled": true  },
+            { "key": "operational-calendar","label": "Operational Calendar",  "path": "/operational-calendar","icon": "CalendarClock","enabled": true  },
             { "key": "cultivation-master",  "label": "Operations Master",     "path": "/cultivation-master",  "icon": "Sprout",  "enabled": true  },
             { "key": "cultivation-plan",    "label": "Cultivation Planner",   "path": "/cultivation-plan",    "icon": "Layers",  "enabled": true  },
             { "key": "field-monitoring",    "label": "Field Monitoring",      "path": "/field-monitoring",    "icon": "Activity","enabled": true  },
@@ -188,7 +189,8 @@
             { "key": "director-fuel",         "label": "Fuel Requests", "path": "/director-fuel-requests",  "icon": "Fuel",         "enabled": true  },
             { "key": "director-inbox",        "label": "Inbox",         "path": "/director/inbox",          "icon": "Mail",         "enabled": true  },
             { "key": "director-wcc-approval", "label": "WCC Approval",  "path": "/director/wcc-approval",   "icon": "FileCheck",    "enabled": true  },
-            { "key": "director-grn-approval", "label": "GRN Approval",  "path": "/director/grn-approval",   "icon": "PackageCheck", "enabled": true  }
+            { "key": "director-grn-approval", "label": "GRN Approval",  "path": "/director/grn-approval",   "icon": "PackageCheck", "enabled": true  },
+            { "key": "director-prr-approval", "label": "PRR Approval",  "path": "/director/prr-approval",   "icon": "Receipt",      "enabled": true  }
           ]
         }
       ]
