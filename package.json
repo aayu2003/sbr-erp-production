@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "build:dev": "vite build --mode development",
+    "test:wcc": "esbuild tests/wccEnterprise.test.ts --bundle --platform=node --format=esm --outfile=/tmp/farm-connect-wcc-tests.mjs && node /tmp/farm-connect-wcc-tests.mjs",
     "lint": "eslint .",
     "preview": "vite preview"
   },

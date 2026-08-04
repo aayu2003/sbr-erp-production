@@ -6,6 +6,7 @@ import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@
 import { Plus } from 'lucide-react';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
+import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 
 type ApiCultivationPlanItem = {
   plan_id: string;
@@ -209,7 +210,7 @@ export default function CultivationPlanModule() {
                     <TableCell className="text-foreground">{plan.plan_id || '—'}</TableCell>
                     <TableCell className="text-foreground font-semibold">{plan.activities_count}</TableCell>
                     <TableCell className="text-foreground">
-                      {plan.start_date} → {plan.end_date}
+                      {formatDateDDMMYYYY(plan.start_date)} → {formatDateDDMMYYYY(plan.end_date)}
                     </TableCell>
                     <TableCell>
                       <span title="Live" className="inline-flex items-center gap-1 text-green-600 font-bold">

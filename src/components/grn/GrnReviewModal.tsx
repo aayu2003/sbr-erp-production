@@ -14,7 +14,6 @@ import {
 import { useAuth } from '@/context/AuthContext';
 import { actionGrn, type GRNRecord } from '@/lib/grnApi';
 import { GrnPrint } from './GrnPrint';
-import { GrnStickerPrint } from './GrnStickerPrint';
 import { GrnDocumentPreview } from './GrnDocumentPreview';
 
 export interface GrnReviewModalProps {
@@ -84,16 +83,6 @@ export function GrnReviewModal({ grn, onClose, onChanged }: GrnReviewModalProps)
         <DialogFooter className="flex items-center justify-between sm:justify-between gap-2">
           <div className="flex items-center gap-2">
             <GrnPrint grn={grn} />
-            <GrnStickerPrint
-              payload={{
-                tagId: grn.grnNo,
-                grnNo: grn.grnNo,
-                grnDate: grn.grnDate,
-                poNo: grn.poNo,
-                vendorName: grn.vendorName,
-                totalItems: grn.items.length,
-              }}
-            />
           </div>
           <div className="flex items-center gap-2">
             {showReject && (

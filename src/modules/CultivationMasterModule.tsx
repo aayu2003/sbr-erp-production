@@ -1784,7 +1784,7 @@ const PlannerList = ({ planners, activities, onDelete, onSavePlanner, onSaveActi
 																	{planner.name}
 																</CardTitle>
 																<CardDescription className="mt-1 text-xs font-semibold text-[#0D3A35]/60">
-																	{planner.activities.length} activities • Updated {format(planner.updatedAt, 'MMM d, yyyy')}
+																	{planner.activities.length} activities • Updated {format(planner.updatedAt, 'dd-MM-yyyy')}
 																</CardDescription>
 															</div>
 														</div>

@@ -1,38 +1,41 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Search,
   PackageCheck,
   Hash,
-  Building2,
-  FileCheck,
-  User,
-  Layers,
   RefreshCw,
-  ArrowUpRight,
   X,
   Loader2,
   AlertCircle,
-  Phone,
-  Maximize2,
-  Minimize2,
+  Plus,
+  CheckCircle2,
+  ArrowDownToLine,
+  Eye,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import {
-  getGrnsByOrder,
+  getGateEntries,
+  deleteGrn,
   listGrns,
+  type GateEntryRecord,
   type GrnOrderInfo,
   type GRNRecord,
   type GrnStatus,
 } from '@/lib/grnApi';
 import { GrnCreateWizard } from '@/components/grn/GrnCreateWizard';
 import { GrnPrint } from '@/components/grn/GrnPrint';
-import { GrnStickerPrint } from '@/components/grn/GrnStickerPrint';
 import { GrnDocumentPreview } from '@/components/grn/GrnDocumentPreview';
 
 const safeTrim = (v: unknown) => String(v ?? '').trim();
+const displayDate = (value?: string) => {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : value || '—';
+};
 
 // Shape returned by /purchase_flow/get_purchase_flows — only the fields GRN needs.
 type ApiPurchaseFlow = {
@@ -56,11 +59,6 @@ type LeftPanelInfo = {
 };
 
 // Shape returned by /purchase_flow/get_doc_url_of_order/{order_number}.
-type OrderDocResponse = {
-  document_url?: string;
-  detail?: string;
-};
-
 // A live PR/PO row for the GRN left panel — flow metadata merged with its fetched vendor info.
 type GrnPoRow = {
   id: string;
@@ -122,7 +120,7 @@ const STATUS_TONE: Record<GrnStatus, string> = {
 
 type PaneState =
   | { kind: 'empty' }
-  | { kind: 'create'; order: GrnOrderInfo }
+  | { kind: 'create'; order: GrnOrderInfo; gateEntryIds: string[] }
   | { kind: 'revise'; order: GrnOrderInfo; grn: GRNRecord }
   | { kind: 'view'; order: GrnOrderInfo; grn: GRNRecord };
 
@@ -130,6 +128,13 @@ export function GRNModule() {
   const [q, setQ] = useState('');
   const [refreshTick, setRefreshTick] = useState(0);
   const [pane, setPane] = useState<PaneState>({ kind: 'empty' });
+  const [isCreateSetupOpen, setIsCreateSetupOpen] = useState(false);
+  const [setupPoId, setSetupPoId] = useState('');
+  const [setupGateEntryIds, setSetupGateEntryIds] = useState<string[]>([]);
+  const [setupGateEntries, setSetupGateEntries] = useState<GateEntryRecord[]>([]);
+  const [isLoadingSetupEntries, setIsLoadingSetupEntries] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<GRNRecord | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const [flows, setFlows] = useState<ApiPurchaseFlow[]>([]);
   const [isLoadingFlows, setIsLoadingFlows] = useState(true);
@@ -211,44 +216,25 @@ export function GRNModule() {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [prFlows, leftPanelInfoMap]);
 
-  const orders = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    if (!query) return poRows;
-    return poRows.filter((o) => (
-      o.poNo.toLowerCase().includes(query) ||
-      o.vendorName.toLowerCase().includes(query) ||
-      o.prNo.toLowerCase().includes(query)
-    ));
-  }, [poRows, q]);
-
-  // All GRNs, fetched once per refresh — used for the summary stats row.
+  // All GRNs shown in the register.
   const [allGrns, setAllGrns] = useState<GRNRecord[]>([]);
   useEffect(() => {
     listGrns().then(setAllGrns).catch(() => setAllGrns([]));
   }, [refreshTick]);
 
-  const stats = useMemo(() => ({
-    openPOs: poRows.length,
-    pendingVerification: allGrns.filter((g) => g.status === 'pending_verification').length,
-    pendingApproval: allGrns.filter((g) => g.status === 'pending_approval').length,
-    approved: allGrns.filter((g) => g.status === 'approved').length,
-  }), [poRows, allGrns]);
-
-  // Every PO can have multiple GRNs, so each visible row's GRNs are fetched by PO number
-  // (same per-row pattern already used for vendor info above).
-  const [grnsByPoNo, setGrnsByPoNo] = useState<Record<string, GRNRecord[]>>({});
-  useEffect(() => {
-    poRows.forEach((row) => {
-      getGrnsByOrder(row.poNo)
-        .then((grns) => setGrnsByPoNo((prev) => ({ ...prev, [row.poNo]: grns })))
-        .catch(() => {});
-    });
-  }, [poRows, refreshTick]);
+  const filteredGrns = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return allGrns;
+    return allGrns.filter((grn) => (
+      grn.grnNo.toLowerCase().includes(query) ||
+      grn.poNo.toLowerCase().includes(query) ||
+      grn.vendorName.toLowerCase().includes(query) ||
+      grn.gateEntryIds.some((entryId) => entryId.toLowerCase().includes(query)) ||
+      grn.items.some((item) => item.description.toLowerCase().includes(query))
+    ));
+  }, [allGrns, q]);
 
   const refresh = () => setRefreshTick((x) => x + 1);
-
-  const activePoNo = pane.kind === 'empty' ? null : pane.order.poNo;
-  const activeGrnNo = pane.kind === 'create' || pane.kind === 'empty' ? null : pane.grn.grnNo;
 
   const buildOrderInfo = (row: GrnPoRow): GrnOrderInfo => ({
     poNo: row.poNo,
@@ -258,76 +244,96 @@ export function GRNModule() {
     vendorAddress: row.vendorAddress,
   });
 
-  const onCreateNew = (row: GrnPoRow) => {
-    if (!row.vendorId) { toast.error('Vendor could not be resolved for this PO yet — try refreshing.'); return; }
-    setPane({ kind: 'create', order: buildOrderInfo(row) });
+  const openCreateSetup = () => {
+    setSetupPoId('');
+    setSetupGateEntryIds([]);
+    setSetupGateEntries([]);
+    setIsCreateSetupOpen(true);
+    setIsLoadingSetupEntries(true);
+    getGateEntries()
+      .then(setSetupGateEntries)
+      .catch((e: unknown) => toast.error(e instanceof Error ? e.message : 'Failed to load gate entries'))
+      .finally(() => setIsLoadingSetupEntries(false));
   };
 
-  const onOpenGrn = (row: GrnPoRow, grn: GRNRecord) => {
-    const order = buildOrderInfo(row);
-    if (grn.status === 'needs_revision') {
-      setPane({ kind: 'revise', order, grn });
-    } else {
-      setPane({ kind: 'view', order, grn });
+  const setupOrder = poRows.find((row) => row.id === setupPoId) ?? null;
+  const availableSetupGateEntries = setupGateEntries.filter((entry) => (
+    entry.entryType === 'Inward' &&
+    entry.orderNumber === setupOrder?.poNo &&
+    !entry.usedInGrn
+  ));
+
+  const toggleSetupGateEntry = (entryId: string) => {
+    setSetupGateEntryIds((current) => (
+      current.includes(entryId) ? current.filter((id) => id !== entryId) : [...current, entryId]
+    ));
+  };
+
+  const beginGrnCreation = () => {
+    if (!setupOrder) { toast.error('Select a purchase order'); return; }
+    if (!setupOrder.vendorId) { toast.error('Vendor could not be resolved for this purchase order yet'); return; }
+    if (setupGateEntryIds.length === 0) { toast.error('Select at least one inward gate entry'); return; }
+    setPane({ kind: 'create', order: buildOrderInfo(setupOrder), gateEntryIds: setupGateEntryIds });
+    setIsCreateSetupOpen(false);
+  };
+
+  const orderInfoForGrn = (grn: GRNRecord): GrnOrderInfo => {
+    const row = poRows.find((candidate) => candidate.poNo === grn.poNo);
+    return row ? buildOrderInfo(row) : {
+      poNo: grn.poNo,
+      poDate: grn.poDate,
+      prNo: grn.prNo,
+      prDate: grn.prDate,
+      prBy: grn.prBy,
+      vendorId: grn.vendorId,
+      vendorName: grn.vendorName,
+      vendorAddress: grn.vendorAddress,
+      department: grn.department,
+      group: grn.group,
+    };
+  };
+
+  const onOpenGrn = (grn: GRNRecord) => {
+    setPane({ kind: 'view', order: orderInfoForGrn(grn), grn });
+  };
+
+  const onEditGrn = (grn: GRNRecord) => {
+    setPane({ kind: 'revise', order: orderInfoForGrn(grn), grn });
+  };
+
+  const requestDeleteGrn = (grn: GRNRecord) => {
+    if (grn.status === 'approved') { toast.error('Approved GRNs cannot be deleted'); return; }
+    setDeleteTarget(grn);
+  };
+
+  const confirmDeleteGrn = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    try {
+      await deleteGrn(deleteTarget.grnNo);
+      toast.success(`${deleteTarget.grnNo} deleted`);
+      setDeleteTarget(null);
+      refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to delete GRN');
+    } finally {
+      setIsDeleting(false);
     }
   };
 
-  // ── Order document preview — same endpoint/pattern as the WCC certificate's "Preview order
-  // document" arrow (WccCertificatePreview.tsx's handleOpenOrderPreview) ──
-  const [orderPreviewPoNo, setOrderPreviewPoNo] = useState<string | null>(null);
-  const [orderDocUrl, setOrderDocUrl] = useState<string | null>(null);
-  const [orderDocLoading, setOrderDocLoading] = useState(false);
-  const [orderDocError, setOrderDocError] = useState<string | null>(null);
-  const [isPreviewMaximized, setIsPreviewMaximized] = useState(false);
-
-  const openOrderPreview = (poNo: string) => {
-    if (!poNo || poNo === '—') return;
-    setOrderPreviewPoNo(poNo);
-    setOrderDocUrl(null);
-    setOrderDocError(null);
-    setOrderDocLoading(true);
-    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
-    fetch(`${baseUrl}/purchase_flow/get_doc_url_of_order/${encodeURIComponent(poNo)}`)
-      .then(async (res) => {
-        const data: OrderDocResponse | null = await res.json().catch(() => null);
-        if (!res.ok || !data?.document_url) throw new Error(data?.detail || 'Document not found for this order number');
-        setOrderDocUrl(data.document_url);
-      })
-      .catch((err: unknown) => setOrderDocError(err instanceof Error ? err.message : 'Failed to load order document'))
-      .finally(() => setOrderDocLoading(false));
-  };
-
-  // The order document is frequently a fixed-width HTML/PDF page (sized for print) rather
-  // than a responsive one — loaded cross-origin, so we can't reflow its own CSS. Instead we
-  // render the iframe at a fixed baseline "page" width and visually scale *the iframe itself*
-  // to fill however wide the panel actually is, which is what stops it being stranded in the
-  // left half of the panel with blank space on the right.
-  const DOC_BASE_WIDTH = 816; // ~8.5in @ 96dpi — typical print-page width
-  const previewFrameWrapRef = useRef<HTMLDivElement>(null);
-  const [previewScale, setPreviewScale] = useState(1);
-
-  useEffect(() => {
-    const el = previewFrameWrapRef.current;
-    if (!el || !orderDocUrl) return;
-    const ro = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width;
-      if (width) setPreviewScale(width / DOC_BASE_WIDTH);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [orderDocUrl, isPreviewMaximized]);
 
   return (
-    <div className="p-8 space-y-6 animate-in fade-in duration-300 min-h-screen bg-gray-50/50 font-sans">
+    <div className="min-h-screen animate-in space-y-6 bg-slate-50/70 p-4 font-sans duration-300 fade-in sm:p-6 lg:p-8">
 
       {/* ── Page Header ── */}
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
         <div className="flex items-center gap-4">
-          <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-100 shadow-sm">
-            <PackageCheck className="w-7 h-7 text-indigo-600" />
+          <div className="rounded-2xl bg-[#0D3A35] p-3.5 text-white shadow-[0_12px_28px_-12px_rgba(13,58,53,0.75)]">
+            <PackageCheck className="h-7 w-7" />
           </div>
           <div>
-            <h1 className="text-2xl md:text-3xl font-semibold text-slate-900">GRN Module</h1>
+            <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Inventory Operations</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">Goods Receipt Notes</h1>
             <p className="mt-1 text-sm text-slate-500 max-w-lg">
               Generate and track Goods Receipt Notes against live purchase orders.
             </p>
@@ -336,389 +342,343 @@ export function GRNModule() {
         <div className="flex items-center gap-2 self-start md:self-auto">
           <button
             type="button"
-            onClick={refresh}
-            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+            onClick={openCreateSetup}
+            className="inline-flex items-center gap-2 rounded-xl bg-[#0D3A35] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#092e2a]"
           >
-            <RefreshCw className="w-4 h-4 text-gray-400" />
+            <Plus className="h-4 w-4" />
+            Create GRN
+          </button>
+          <button
+            type="button"
+            onClick={refresh}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+          >
+            <RefreshCw className={cn('h-4 w-4 text-slate-500', isLoadingFlows && 'animate-spin')} />
             Refresh
           </button>
         </div>
       </div>
 
-      {/* ── Stats Row ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        {[
-          { label: 'Open Purchase Orders', value: stats.openPOs, icon: Hash, color: 'indigo' as const },
-          { label: 'Pending Verification', value: stats.pendingVerification, icon: FileCheck, color: 'orange' as const },
-          { label: 'Pending Approval', value: stats.pendingApproval, icon: Layers, color: 'blue' as const },
-          { label: 'Approved GRNs', value: stats.approved, icon: PackageCheck, color: 'green' as const },
-        ].map((s) => (
-          <div key={s.label} className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm flex items-center gap-4">
-            <div className={cn(
-              'p-3 rounded-xl border',
-              s.color === 'indigo' && 'bg-indigo-50 border-indigo-100 text-indigo-600',
-              s.color === 'orange' && 'bg-orange-50 border-orange-100 text-orange-600',
-              s.color === 'blue' && 'bg-blue-50 border-blue-100 text-blue-600',
-              s.color === 'green' && 'bg-green-50 border-green-100 text-green-600',
-            )}>
-              <s.icon className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="text-2xl font-bold text-slate-800">{s.value}</div>
-              <div className="text-xs text-slate-500 font-medium mt-0.5">{s.label}</div>
-            </div>
+      {/* ── GRN Register ── */}
+      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_12px_32px_-24px_rgba(15,23,42,0.45)]">
+        <div className="flex flex-col gap-3 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">GRN Register</h2>
+            <p className="mt-0.5 text-xs text-slate-500">{filteredGrns.length} of {allGrns.length} goods receipt notes</p>
           </div>
-        ))}
-      </div>
-
-      {/* ── Main Layout: PO list (25%) + wizard (flex) + optional docked order-doc preview ── */}
-      <div className="flex flex-col lg:flex-row gap-6 items-start">
-
-        {/* ── LEFT: Live / Open PO Panel (25%) ── */}
-        <div className="w-full lg:w-1/4 shrink-0 bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col" style={{ maxHeight: '75vh' }}>
-          <div className="p-4 border-b border-gray-100 shrink-0">
-            <div className="flex items-center gap-2 mb-3">
-              <Hash className="w-4 h-4 text-indigo-600" />
-              <h2 className="text-xs font-bold text-slate-700 uppercase tracking-widest">Live / Open POs</h2>
-              <span className="ml-auto text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full">
-                {orders.length}
-              </span>
-            </div>
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
-              <input
-                type="text"
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="Search PO, vendor or PR…"
-                className="w-full pl-8 pr-3 h-8 rounded-lg border border-gray-200 bg-gray-50 text-xs placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-              />
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
-            {isLoadingFlows ? (
-              <div className="flex flex-col gap-3 p-4">
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="animate-pulse space-y-2 p-3 rounded-lg border border-gray-100">
-                    <div className="h-3 bg-gray-100 rounded w-2/3" />
-                    <div className="h-2.5 bg-gray-50 rounded w-1/2" />
-                    <div className="h-2.5 bg-gray-50 rounded w-1/3" />
-                  </div>
-                ))}
-              </div>
-            ) : flowsError ? (
-              <div className="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
-                <div className="p-4 bg-red-50 border border-red-100 rounded-2xl">
-                  <PackageCheck className="w-8 h-8 text-red-300" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-slate-600">Failed to load purchase orders</p>
-                  <p className="text-xs text-slate-400 mt-1 max-w-xs">{flowsError}</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={refresh}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-white border border-gray-200 hover:bg-gray-50 transition-colors"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" /> Retry
-                </button>
-              </div>
-            ) : orders.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
-                <div className="p-4 bg-slate-50 border border-slate-100 rounded-2xl">
-                  <PackageCheck className="w-8 h-8 text-slate-300" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-slate-600">No open purchase orders</p>
-                  <p className="text-xs text-slate-400 mt-1">Incoming POs will appear here once synced.</p>
-                </div>
-              </div>
-            ) : (
-              orders.map((o) => {
-                const orderGrns = grnsByPoNo[o.poNo] || [];
-                const isActive = activePoNo === o.poNo;
-                return (
-                  <div
-                    key={o.id}
-                    className={cn(
-                      'px-4 py-3.5 transition-all border-l-2',
-                      isActive ? 'bg-indigo-50/80 border-indigo-500' : 'border-transparent hover:bg-gray-50',
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-800 truncate">
-                          <Hash className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                          {o.poNo}
-                        </div>
-                        <div className="mt-1 flex items-center gap-1.5 text-[11px] text-slate-400 truncate">
-                          <FileCheck className="w-3 h-3 shrink-0" />
-                          PR: {o.prNo || '—'}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => openOrderPreview(o.poNo)}
-                        title="Preview order document"
-                        className="shrink-0 p-1 rounded hover:bg-indigo-50 text-indigo-600 transition-colors"
-                      >
-                        <ArrowUpRight className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-
-                    {/* Vendor — shown prominently */}
-                    <div className="mt-2.5 flex items-start gap-2 rounded-lg bg-indigo-50/60 border border-indigo-100 px-2.5 py-2">
-                      <Building2 className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
-                      <div className="min-w-0">
-                        <div className="text-sm font-bold text-slate-800 truncate">{o.vendorName}</div>
-                        {o.vendorContact && (
-                          <div className="mt-0.5 flex items-center gap-1 text-[11px] text-slate-500 truncate">
-                            <Phone className="w-3 h-3 shrink-0" /> {o.vendorContact}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Existing GRNs for this PO — a PO can have several */}
-                    {orderGrns.length > 0 && (
-                      <div className="mt-2.5 space-y-1.5">
-                        {orderGrns.map((g) => (
-                          <button
-                            type="button"
-                            key={g.grnNo}
-                            onClick={() => onOpenGrn(o, g)}
-                            className={cn(
-                              'w-full flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 transition-colors',
-                              activeGrnNo === g.grnNo ? 'bg-indigo-50 border-indigo-300' : 'border-gray-200 hover:bg-gray-50',
-                            )}
-                          >
-                            <span className="font-mono text-[11px] text-slate-600 truncate">{g.grnNo}</span>
-                            <span className={cn(
-                              'inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-bold border whitespace-nowrap shrink-0',
-                              STATUS_TONE[g.status],
-                            )}>
-                              {STATUS_LABEL[g.status]}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    <div className="mt-2.5">
-                      <button
-                        type="button"
-                        onClick={() => onCreateNew(o)}
-                        disabled={!o.vendorId}
-                        title={!o.vendorId ? 'Vendor could not be resolved for this PO yet' : undefined}
-                        className={cn(
-                          'w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shadow-sm',
-                          o.vendorId
-                            ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                            : 'bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none',
-                        )}
-                      >
-                        {orderGrns.length > 0 ? '+ New GRN' : 'Create GRN'}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
+          <div className="relative w-full sm:w-80">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={q}
+              onChange={(event) => setQ(event.target.value)}
+              placeholder="Search GRN, PO, gate entry, vendor or item"
+              className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[#0D3A35] focus:bg-white focus:ring-2 focus:ring-[#0D3A35]/10"
+            />
           </div>
         </div>
 
-        {/* ── MIDDLE: GRN Preview / Wizard Panel (flex-1) ── */}
-        <div className="flex-1 min-w-0 w-full bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col" style={{ maxHeight: '75vh' }}>
-          {pane.kind === 'empty' && (
-            <div className="flex-1 flex flex-col items-center justify-center p-16 gap-5 text-center">
-              <div className="p-6 bg-indigo-50 border border-indigo-100 rounded-3xl">
-                <PackageCheck className="w-12 h-12 text-indigo-300" />
-              </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1240px] table-fixed text-sm">
+            <thead className="bg-[#0D3A35] text-white">
+              <tr>
+                {['GRN No.', 'GRN Date', 'Purchase Order', 'Gate Entry', 'Vendor', 'Items', 'Received Qty.', 'GRN Value', 'Prepared By', 'Status', 'Action'].map((heading) => (
+                  <th key={heading} className="px-3 py-3 text-center text-[10px] font-semibold uppercase tracking-[0.08em]">{heading}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredGrns.length === 0 ? (
+                <tr>
+                  <td colSpan={11} className="px-6 py-16 text-center">
+                    <PackageCheck className="mx-auto h-9 w-9 text-slate-300" />
+                    <p className="mt-3 text-sm font-semibold text-slate-600">No GRNs found</p>
+                    <p className="mt-1 text-xs text-slate-400">Create a GRN after recording the inward gate entry.</p>
+                  </td>
+                </tr>
+              ) : filteredGrns.map((grn) => {
+                const receivedQty = grn.items.reduce((total, item) => total + item.receivedQty, 0);
+                const grnValue = grn.items.reduce((total, item) => total + item.totalGrnValue, 0);
+                const units = Array.from(new Set(grn.items.map((item) => item.uom).filter(Boolean)));
+                return (
+                  <tr key={grn.grnNo} className="transition hover:bg-emerald-50/30">
+                    <td className="px-3 py-3 text-center font-mono text-xs font-bold text-[#0D3A35]">{grn.grnNo}</td>
+                    <td className="px-3 py-3 text-center text-xs text-slate-600">{displayDate(grn.grnDate)}</td>
+                    <td className="px-3 py-3 text-center font-mono text-xs text-slate-700">{grn.poNo || '—'}</td>
+                    <td className="px-3 py-3 text-center text-xs text-slate-600">
+                      <div className="line-clamp-2">{grn.gateEntryIds.join(', ') || '—'}</div>
+                    </td>
+                    <td className="px-3 py-3 text-left text-xs font-medium text-slate-700"><div className="line-clamp-2">{grn.vendorName || '—'}</div></td>
+                    <td className="px-3 py-3 text-center text-xs text-slate-600">{grn.items.length}</td>
+                    <td className="px-3 py-3 text-center text-xs font-semibold text-slate-700">{receivedQty.toLocaleString('en-IN')} {units.length === 1 ? units[0] : ''}</td>
+                    <td className="px-3 py-3 text-right text-xs font-semibold text-slate-800">₹{grnValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                    <td className="px-3 py-3 text-center text-xs text-slate-600">{grn.preparedBy?.name || '—'}</td>
+                    <td className="px-3 py-3 text-center">
+                      <span className={cn('inline-flex rounded-full border px-2 py-1 text-[10px] font-bold', STATUS_TONE[grn.status])}>{STATUS_LABEL[grn.status]}</span>
+                    </td>
+                    <td className="px-2 py-3 text-center">
+                      <div className="flex items-center justify-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => onOpenGrn(grn)}
+                          title="View GRN"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-[#0D3A35] transition hover:border-emerald-300 hover:bg-emerald-50"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onEditGrn(grn)}
+                          title={grn.status === 'approved' ? 'Edit and resend for approval' : 'Edit GRN'}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => requestDeleteGrn(grn)}
+                          title={grn.status === 'approved' ? 'Approved GRNs cannot be deleted' : 'Delete GRN'}
+                          className={cn(
+                            'inline-flex h-8 w-8 items-center justify-center rounded-lg border transition',
+                            grn.status === 'approved' ? 'cursor-not-allowed border-slate-100 bg-slate-50 text-slate-300' : 'border-red-100 bg-white text-red-500 hover:border-red-200 hover:bg-red-50',
+                          )}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* ── GRN Create / Revise / View ── */}
+      {pane.kind !== 'empty' && (
+        <div className="fixed inset-0 z-[105] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+          <div className="flex max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex shrink-0 items-center justify-between bg-[#0D3A35] px-5 py-4 text-white">
               <div>
-                <p className="text-base font-semibold text-slate-700">Select a Purchase Order</p>
-                <p className="text-sm text-slate-400 mt-1 max-w-xs">
-                  Pick an open PO from the left panel to create or review its GRN.
+                <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-200">Goods Receipt Note</p>
+                <h2 className="mt-1 text-lg font-bold">
+                  {pane.kind === 'create' ? `Create GRN · ${pane.order.poNo}` : pane.kind === 'revise' ? `${pane.grn.status === 'needs_revision' ? 'Revise' : 'Edit'} ${pane.grn.grnNo}` : pane.grn.grnNo}
+                </h2>
+              </div>
+              <button type="button" onClick={() => setPane({ kind: 'empty' })} className="rounded-lg p-2 transition hover:bg-white/10" aria-label="Close GRN">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-hidden">
+              {pane.kind === 'create' && (
+                <GrnCreateWizard
+                  order={pane.order}
+                  initialGateEntryIds={pane.gateEntryIds}
+                  onDone={() => { refresh(); setPane({ kind: 'empty' }); }}
+                  onCancel={() => setPane({ kind: 'empty' })}
+                />
+              )}
+              {pane.kind === 'revise' && (
+                <GrnCreateWizard
+                  order={pane.order}
+                  existingGrn={pane.grn}
+                  onDone={() => { refresh(); setPane({ kind: 'empty' }); }}
+                  onCancel={() => setPane({ kind: 'empty' })}
+                />
+              )}
+              {pane.kind === 'view' && (
+                <div className="flex h-[82vh] flex-col">
+                  <div className="flex-1 overflow-y-auto bg-slate-50 p-5"><GrnDocumentPreview grn={pane.grn} /></div>
+                  <div className="flex shrink-0 justify-end gap-2 border-t border-slate-200 bg-white px-5 py-4">
+                    <GrnPrint grn={pane.grn} />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between bg-[#0D3A35] px-5 py-4 text-white">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-200">GRN Register</p>
+                <h2 className="mt-1 text-lg font-bold">Delete GRN</h2>
+              </div>
+              <button type="button" onClick={() => !isDeleting && setDeleteTarget(null)} className="rounded-lg p-2 transition hover:bg-white/10" aria-label="Close delete confirmation">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-5">
+              <div className="rounded-xl border border-red-100 bg-red-50 p-4">
+                <p className="text-sm font-semibold text-slate-800">Delete {deleteTarget.grnNo}?</p>
+                <p className="mt-1.5 text-xs leading-5 text-slate-600">
+                  This will remove the GRN and release its linked gate entries. This action cannot be undone.
                 </p>
               </div>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
+                <div><span className="text-slate-400">Purchase Order</span><p className="mt-1 font-semibold text-slate-700">{deleteTarget.poNo}</p></div>
+                <div><span className="text-slate-400">Vendor</span><p className="mt-1 font-semibold text-slate-700">{deleteTarget.vendorName}</p></div>
+              </div>
             </div>
-          )}
+            <div className="flex justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-4">
+              <button type="button" disabled={isDeleting} onClick={() => setDeleteTarget(null)} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 disabled:opacity-50">Cancel</button>
+              <button type="button" disabled={isDeleting} onClick={confirmDeleteGrn} className="inline-flex items-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60">
+                {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                {isDeleting ? 'Deleting…' : 'Delete GRN'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
-          {pane.kind === 'create' && (
-            <GrnCreateWizard
-              order={pane.order}
-              onDone={() => { refresh(); setPane({ kind: 'empty' }); }}
-              onCancel={() => setPane({ kind: 'empty' })}
-            />
-          )}
+        {/* ── CREATE GRN SETUP: PO first, then its unused inward gate entries ── */}
+        {isCreateSetupOpen && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+            <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+              <div className="flex shrink-0 items-start justify-between bg-[#0D3A35] px-6 py-5 text-white">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-200">Goods Receipt Workflow</p>
+                  <h2 className="mt-1 text-xl font-bold">Create GRN</h2>
+                  <p className="mt-1 text-sm text-emerald-100/75">Select the purchase order, then link its inward gate entry before entering receipt details.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsCreateSetupOpen(false)}
+                  className="rounded-lg p-2 transition hover:bg-white/10"
+                  aria-label="Close create GRN"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
 
-          {pane.kind === 'revise' && (
-            <GrnCreateWizard
-              order={pane.order}
-              existingGrn={pane.grn}
-              onDone={() => { refresh(); setPane({ kind: 'empty' }); }}
-              onCancel={() => setPane({ kind: 'empty' })}
-            />
-          )}
+              <div className="flex-1 space-y-5 overflow-y-auto p-6">
+                <div className="grid grid-cols-[auto_1fr_auto_1fr] items-center gap-3 rounded-xl border border-emerald-100 bg-emerald-50/60 px-4 py-3">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#0D3A35] text-xs font-bold text-white">1</span>
+                  <span className="text-xs font-bold uppercase tracking-wide text-[#0D3A35]">Purchase Order</span>
+                  <span className={cn(
+                    'flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold',
+                    setupPoId ? 'bg-[#0D3A35] text-white' : 'border border-slate-300 bg-white text-slate-400',
+                  )}>2</span>
+                  <span className={cn('text-xs font-bold uppercase tracking-wide', setupPoId ? 'text-[#0D3A35]' : 'text-slate-400')}>Inward Gate Entry</span>
+                </div>
 
-          {pane.kind === 'view' && (
-            <>
-              {/* Detail Header */}
-              <div className="p-5 border-b border-gray-100 bg-gradient-to-r from-indigo-50/50 via-white to-white shrink-0">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex items-start gap-3 min-w-0">
-                    <div className="p-2.5 bg-indigo-100 border border-indigo-200 rounded-xl shrink-0 mt-0.5">
-                      <PackageCheck className="w-5 h-5 text-indigo-600" />
+                <div>
+                  <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-600">
+                    Purchase Order <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    value={setupPoId}
+                    onChange={(event) => {
+                      setSetupPoId(event.target.value);
+                      setSetupGateEntryIds([]);
+                    }}
+                    className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10"
+                  >
+                    <option value="">Select purchase order</option>
+                    {poRows.map((row) => (
+                      <option key={row.id} value={row.id}>
+                        {row.poNo} · {row.vendorName} {row.prNo ? `· PR ${row.prNo}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {setupOrder && (
+                    <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
+                      <span><strong className="text-slate-700">Vendor:</strong> {setupOrder.vendorName}</span>
+                      <span><strong className="text-slate-700">PR:</strong> {setupOrder.prNo || 'Not Recorded'}</span>
                     </div>
-                    <div className="min-w-0">
-                      <h2 className="text-base font-bold text-slate-800 truncate">{pane.grn.grnNo}</h2>
-                      <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-slate-500">
-                        <span className="flex items-center gap-1 font-medium">
-                          <Hash className="w-3 h-3 text-indigo-400" /> PO: {pane.grn.poNo}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Building2 className="w-3 h-3 text-gray-400" /> {pane.grn.vendorName}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <User className="w-3 h-3 text-gray-400" /> {pane.grn.preparedBy?.name || '—'}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {pane.grn.status && (
-                      <span className={cn(
-                        'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-bold border',
-                        STATUS_TONE[pane.grn.status],
-                      )}>
-                        {STATUS_LABEL[pane.grn.status]}
-                      </span>
+                  )}
+                </div>
+
+                <div>
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <label className="block text-xs font-bold uppercase tracking-wide text-slate-600">
+                      Inward Gate Entries <span className="text-red-500">*</span>
+                    </label>
+                    {setupOrder && !isLoadingSetupEntries && (
+                      <span className="text-xs font-medium text-slate-400">{availableSetupGateEntries.length} available</span>
                     )}
                   </div>
+
+                  {!setupOrder ? (
+                    <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+                      Select a purchase order to view its gate entries.
+                    </div>
+                  ) : isLoadingSetupEntries ? (
+                    <div className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-8 text-sm text-slate-500">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Loading inward gate entries…
+                    </div>
+                  ) : availableSetupGateEntries.length === 0 ? (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-5 py-6 text-center">
+                      <AlertCircle className="mx-auto h-7 w-7 text-amber-500" />
+                      <p className="mt-2 text-sm font-semibold text-amber-800">No unused inward gate entry found</p>
+                      <p className="mt-1 text-xs text-amber-700">Material must first be recorded as inward against {setupOrder.poNo} in Gate Entry.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {availableSetupGateEntries.map((entry) => {
+                        const selected = setupGateEntryIds.includes(entry.enteryId);
+                        return (
+                          <button
+                            type="button"
+                            key={entry.enteryId}
+                            onClick={() => toggleSetupGateEntry(entry.enteryId)}
+                            className={cn(
+                              'grid w-full grid-cols-[auto_1fr] gap-3 rounded-xl border p-4 text-left transition sm:grid-cols-[auto_1.2fr_1fr_1fr]',
+                              selected ? 'border-[#0D3A35] bg-emerald-50 shadow-sm' : 'border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/30',
+                            )}
+                          >
+                            <span className={cn(
+                              'mt-0.5 flex h-5 w-5 items-center justify-center rounded-full border',
+                              selected ? 'border-[#0D3A35] bg-[#0D3A35] text-white' : 'border-slate-300 bg-white text-transparent',
+                            )}>
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            </span>
+                            <div>
+                              <p className="font-mono text-xs font-bold text-slate-800">{entry.siteEntryNo || entry.enteryId}</p>
+                              <p className="mt-1 flex items-center gap-1 text-[11px] text-emerald-700"><ArrowDownToLine className="h-3 w-3" /> Inward · {displayDate(entry.entryDate)} {entry.entryTime}</p>
+                            </div>
+                            <div className="text-xs">
+                              <p className="font-semibold text-slate-700">{entry.itemName || 'Item Not Recorded'}</p>
+                              <p className="mt-1 text-slate-500">{entry.itemQuantity ?? '—'} {entry.itemUnit || ''}</p>
+                            </div>
+                            <div className="text-xs">
+                              <p className="font-semibold text-slate-700">{entry.invoiceNumber ? `Invoice ${entry.invoiceNumber}` : 'Invoice Not Recorded'}</p>
+                              <p className="mt-1 text-slate-500">{entry.destinationName || entry.gateNo || 'Destination Not Recorded'}</p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {/* Body */}
-              <div className="flex-1 overflow-y-auto p-5">
-                <GrnDocumentPreview grn={pane.grn} />
-              </div>
-
-              {/* Footer */}
-              <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-gray-100 bg-gray-50/50 shrink-0">
-                <GrnPrint grn={pane.grn} />
-                <GrnStickerPrint
-                  payload={{
-                    tagId: pane.grn.grnNo,
-                    grnNo: pane.grn.grnNo,
-                    grnDate: pane.grn.grnDate,
-                    poNo: pane.grn.poNo,
-                    vendorName: pane.grn.vendorName,
-                    totalItems: pane.grn.items.length,
-                  }}
-                />
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* ── RIGHT: Order Document Preview — docked alongside the wizard (not a blocking
-            modal), so you can keep it open while filling in item values. Can be maximized
-            for a closer look, then restored without losing wizard state. ── */}
-        {orderPreviewPoNo && isPreviewMaximized && (
-          <div
-            className="fixed inset-0 z-[99] bg-black/30 backdrop-blur-[1px]"
-            onClick={() => setIsPreviewMaximized(false)}
-          />
-        )}
-        {orderPreviewPoNo && (
-          <div
-            className={cn(
-              'bg-white border border-gray-200 shadow-sm flex flex-col animate-in duration-200',
-              isPreviewMaximized
-                ? 'fixed inset-4 z-[100] rounded-2xl shadow-2xl zoom-in-95'
-                : 'w-full lg:shrink-0 rounded-xl fade-in slide-in-from-right-2',
-            )}
-            style={isPreviewMaximized ? undefined : { width: 'min(720px, 42vw)', maxHeight: '85vh' }}
-          >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">
-              <div className="min-w-0">
-                <h3 className="text-xs font-bold text-slate-700 uppercase tracking-widest">Order Document</h3>
-                <p className="text-[11px] text-slate-400 font-mono truncate">{orderPreviewPoNo}</p>
-              </div>
-              <div className="flex items-center gap-1 shrink-0">
+              <div className="flex shrink-0 items-center justify-end gap-3 border-t border-slate-200 bg-slate-50 px-6 py-4">
                 <button
                   type="button"
-                  onClick={() => setIsPreviewMaximized((v) => !v)}
-                  title={isPreviewMaximized ? 'Restore' : 'Maximize'}
-                  className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+                  onClick={() => setIsCreateSetupOpen(false)}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
                 >
-                  {isPreviewMaximized ? <Minimize2 className="w-4 h-4 text-gray-500" /> : <Maximize2 className="w-4 h-4 text-gray-500" />}
+                  Cancel
                 </button>
                 <button
                   type="button"
-                  onClick={() => { setOrderPreviewPoNo(null); setIsPreviewMaximized(false); }}
-                  className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+                  onClick={beginGrnCreation}
+                  disabled={!setupOrder || setupGateEntryIds.length === 0}
+                  className="rounded-xl bg-[#0D3A35] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#092e2a] disabled:cursor-not-allowed disabled:bg-slate-300"
                 >
-                  <X className="w-4 h-4 text-gray-500" />
+                  Continue to GRN Details
                 </button>
               </div>
             </div>
-            <div className="flex-1 bg-slate-100 relative overflow-hidden min-h-[300px]">
-              {orderDocLoading ? (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-400">
-                  <Loader2 className="w-8 h-8 animate-spin" />
-                  <span className="text-sm font-medium">Loading order document…</span>
-                </div>
-              ) : orderDocError ? (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-red-400 px-6 text-center">
-                  <AlertCircle className="w-8 h-8" />
-                  <span className="text-sm font-medium">{orderDocError}</span>
-                </div>
-              ) : orderDocUrl ? (
-                /\.(jpe?g|png|gif|webp|bmp)(\?|#|$)/i.test(orderDocUrl) ? (
-                  // Image documents: the browser doesn't stretch a raw <img> to fill an iframe
-                  // on its own, so render it directly and let it scale to the panel's width.
-                  <div className="w-full h-full overflow-auto">
-                    <img src={orderDocUrl} alt="Order document" className="w-full h-auto block" />
-                  </div>
-                ) : (
-                  // PDF/HTML documents: these are frequently fixed-width, print-sized pages
-                  // that won't reflow to the panel's actual width on their own (and being
-                  // cross-origin, we can't reach into the document to fix its own CSS). So the
-                  // iframe is rendered at a fixed baseline width/height and scaled as a whole
-                  // via CSS transform to fill however wide this wrapper measures — that's what
-                  // stops the content being stranded in the left portion of the panel.
-                  <div ref={previewFrameWrapRef} className="w-full h-full overflow-auto">
-                    <iframe
-                      src={`${orderDocUrl}#view=FitH`}
-                      title="Order document preview"
-                      style={{
-                        width: DOC_BASE_WIDTH,
-                        height: DOC_BASE_WIDTH * 1.414,
-                        transform: `scale(${previewScale})`,
-                        transformOrigin: 'top left',
-                        border: 0,
-                      }}
-                    />
-                  </div>
-                )
-              ) : null}
-            </div>
-            {orderDocUrl && (
-              <div className="px-4 py-3 border-t border-gray-100 flex justify-end shrink-0">
-                <a
-                  href={orderDocUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:underline"
-                >
-                  Open in new tab <ArrowUpRight className="w-3 h-3" />
-                </a>
-              </div>
-            )}
           </div>
         )}
-      </div>
+
     </div>
   );
 }

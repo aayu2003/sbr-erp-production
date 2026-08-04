@@ -8,6 +8,7 @@ import { useAuth } from '@/context/AuthContext';
 import {
   createGrn,
   resubmitGrn,
+  updateGrn,
   getGateEntries,
   type GrnOrderInfo,
   type GRNRecord,
@@ -60,6 +61,8 @@ async function fetchInventoryItems(): Promise<InventoryItemOption[]> {
 
 export interface GrnCreateWizardProps {
   order: GrnOrderInfo;
+  /** Gate entries selected before starting a new GRN. */
+  initialGateEntryIds?: string[];
   /** Present when revising a rejected ('needs_revision') GRN instead of creating a new one. */
   existingGrn?: GRNRecord | null;
   onDone: () => void;
@@ -122,13 +125,13 @@ const initialValuesFor = (items: OrderItem[], existingGrn?: GRNRecord | null): R
   return map;
 };
 
-const STEP_LABELS = ['Select Items', 'Enter Values', 'Mark Gate Entry', 'Final Preview'] as const;
+const STEP_LABELS = ['Link Gate Entry', 'Select Items', 'Enter Values', 'Final Preview'] as const;
 type Step = 1 | 2 | 3 | 4;
 
 const Checkmark = ({ checked }: { checked: boolean }) => (
   <div className={cn(
     'shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors',
-    checked ? 'border-indigo-600 bg-indigo-600' : 'border-gray-300 bg-white',
+    checked ? 'border-[#0D3A35] bg-[#0D3A35]' : 'border-slate-300 bg-white',
   )}>
     {checked && (
       <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 10 10" fill="none">
@@ -145,13 +148,13 @@ const CellInput = ({ value, onChange, width = 'w-20' }: { value: string; onChang
     value={value}
     onChange={(e) => onChange(e.target.value)}
     className={cn(
-      'h-8 rounded-lg border border-gray-200 bg-white px-2 text-right text-xs tabular-nums text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-400',
+      'h-8 rounded-lg border border-slate-200 bg-white px-2 text-right text-xs tabular-nums text-slate-700 outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10',
       width,
     )}
   />
 );
 
-export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCreateWizardProps) {
+export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, onDone, onCancel }: GrnCreateWizardProps) {
   const { user } = useAuth();
   const [step, setStep] = useState<Step>(1);
   const [orderItems, setOrderItems] = useState<OrderItem[]>(() => orderItemsFromGrn(existingGrn));
@@ -257,10 +260,12 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
     return { item: it, receivedQty, rejectedQty, shortQty, basicValue, discPercent, freight, gstPercent, gstAmount, valueWithTax, pf, totalGrnValue };
   }), [selectedItems, values]);
 
-  // ── Step 3: Mark Gate Entry ──
+  // ── Step 1: Link inward Gate Entry ──
   const [gateEntries, setGateEntries] = useState<GateEntryRecord[]>([]);
-  const [isLoadingGateEntries, setIsLoadingGateEntries] = useState(false);
-  const [selectedGateEntryIds, setSelectedGateEntryIds] = useState<string[]>(existingGrn?.gateEntryIds ?? []);
+  const [isLoadingGateEntries, setIsLoadingGateEntries] = useState(true);
+  const [selectedGateEntryIds, setSelectedGateEntryIds] = useState<string[]>(
+    existingGrn?.gateEntryIds?.length ? existingGrn.gateEntryIds : initialGateEntryIds,
+  );
 
   useEffect(() => {
     setIsLoadingGateEntries(true);
@@ -275,6 +280,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
   // "available" on reject, but may also still show as locked to this grn_number briefly).
   const gateEntriesForOrder = useMemo(
     () => gateEntries.filter((ge) => (
+      ge.entryType === 'Inward' &&
       ge.orderNumber === order.poNo &&
       (!ge.usedInGrn || ge.usedInGrn === existingGrn?.grnNo)
     )),
@@ -311,6 +317,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
       vendorAddress: order.vendorAddress,
       department: order.department,
       group: order.group,
+      gateEntryIds: selectedGateEntryIds,
       geNo: selectedGateEntries.map((ge) => ge.enteryId).sort().join(', '),
       geDate: joined((ge) => ge.entryDate),
       invNo: joined((ge) => ge.invoiceNumber),
@@ -347,15 +354,24 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
   }, [order, selectedGateEntries, computed, user, existingGrn]);
 
   const goNext = () => {
-    if (step === 1 && selectedItems.length === 0) { toast.error('Select at least one item to continue'); return; }
-    if (step === 3 && selectedGateEntryIds.length === 0) { toast.error('Mark at least one gate entry to continue'); return; }
+    if (step === 1 && isLoadingGateEntries) { toast.error('Please wait while gate entries are verified'); return; }
+    if (step === 1 && selectedGateEntryIds.length === 0) { toast.error('Link at least one inward gate entry to continue'); return; }
+    if (step === 1 && selectedGateEntryIds.some((id) => !gateEntriesForOrder.some((entry) => entry.enteryId === id))) {
+      toast.error('A selected gate entry is no longer available for this purchase order');
+      return;
+    }
+    if (step === 2 && selectedItems.length === 0) { toast.error('Select at least one item to continue'); return; }
     setStep((s) => (s < 4 ? ((s + 1) as Step) : s));
   };
   const goBack = () => setStep((s) => (s > 1 ? ((s - 1) as Step) : s));
 
   const handleSubmit = async () => {
     if (!user?.id || !user?.name) { toast.error('You must be logged in.'); return; }
-    if (selectedGateEntryIds.length === 0) { toast.error('Mark at least one gate entry'); return; }
+    if (selectedGateEntryIds.length === 0) { toast.error('Link at least one inward gate entry'); return; }
+    if (selectedGateEntryIds.some((id) => !gateEntriesForOrder.some((entry) => entry.enteryId === id))) {
+      toast.error('A selected gate entry is no longer available for this purchase order');
+      return;
+    }
 
     const items: GrnLineItemInput[] = computed.map((c) => ({
       itemId: c.item.id,
@@ -382,8 +398,21 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
     try {
       const signer: GrnSigner = { staffId: user.id, name: user.name, designation: user.designation || '', timestamp: new Date().toISOString() };
       if (existingGrn) {
-        const grn = await resubmitGrn({ grnNo: existingGrn.grnNo, gateEntryIds: selectedGateEntryIds, items, preparedBy: signer });
-        toast.success(`${grn.grnNo} resubmitted for verification`);
+        const payload = {
+          grnNo: existingGrn.grnNo,
+          gateEntryIds: selectedGateEntryIds,
+          items,
+          preparedBy: signer,
+          resendForApproval: existingGrn.status === 'approved',
+        };
+        const grn = existingGrn.status === 'needs_revision'
+          ? await resubmitGrn(payload)
+          : await updateGrn(payload);
+        toast.success(existingGrn.status === 'needs_revision'
+          ? `${grn.grnNo} resubmitted for verification`
+          : existingGrn.status === 'approved'
+            ? `${grn.grnNo} updated and sent for fresh approval`
+            : `${grn.grnNo} updated successfully`);
       } else {
         const grn = await createGrn({
           orderNumber: order.poNo,
@@ -413,7 +442,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
   return (
     <div className="flex flex-col h-full">
       {/* Stepper header */}
-      <div className="flex items-center gap-2 px-5 py-3.5 border-b border-gray-100 bg-gradient-to-r from-indigo-50/50 via-white to-white shrink-0 overflow-x-auto">
+      <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-slate-200 bg-gradient-to-r from-emerald-50/80 via-white to-white px-5 py-3.5">
         {STEP_LABELS.map((label, idx) => {
           const n = (idx + 1) as Step;
           return (
@@ -421,15 +450,15 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
               <div
                 className={cn(
                   'h-6 w-6 rounded-full flex items-center justify-center text-xs font-bold border',
-                  step === n ? 'bg-indigo-600 border-indigo-600 text-white' :
-                  step > n ? 'bg-green-100 border-green-200 text-green-700' :
+                  step === n ? 'border-[#0D3A35] bg-[#0D3A35] text-white shadow-sm' :
+                  step > n ? 'border-emerald-200 bg-emerald-100 text-emerald-700' :
                   'bg-slate-100 border-slate-200 text-slate-400',
                 )}
               >
                 {n}
               </div>
               <span className={cn('text-xs font-semibold', step === n ? 'text-slate-800' : 'text-slate-400')}>{label}</span>
-              {idx < STEP_LABELS.length - 1 && <div className="w-6 h-px bg-gray-200 mx-1" />}
+              {idx < STEP_LABELS.length - 1 && <div className="mx-1 h-px w-6 bg-slate-200" />}
             </div>
           );
         })}
@@ -439,7 +468,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
       </div>
 
       <div className="flex-1 overflow-y-auto p-5">
-        {step === 1 && (
+        {step === 2 && (
           <div>
             <p className="text-xs text-slate-400 mb-3">Add the items received against this PO, from inventory.</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -452,7 +481,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
                     onClick={() => setItem(it.id, { selected: !v.selected })}
                     className={cn(
                       'flex items-start gap-3 border rounded-xl p-3.5 transition-colors text-left h-full',
-                      v.selected ? 'bg-indigo-50/60 border-indigo-200 shadow-sm' : 'border-gray-200 hover:bg-gray-50',
+                      v.selected ? 'border-emerald-200 bg-emerald-50/70 shadow-sm' : 'border-slate-200 hover:border-emerald-200 hover:bg-emerald-50/30',
                     )}
                   >
                     <Checkmark checked={v.selected} />
@@ -473,7 +502,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
               <button
                 type="button"
                 onClick={() => setIsAddItemOpen(true)}
-                className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-gray-200 rounded-xl p-3.5 h-full min-h-[84px] text-slate-400 hover:border-indigo-300 hover:text-indigo-500 hover:bg-indigo-50/40 transition-colors"
+                className="flex h-full min-h-[84px] flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-200 p-3.5 text-slate-400 transition-colors hover:border-emerald-300 hover:bg-emerald-50/50 hover:text-[#0D3A35]"
               >
                 <Plus className="w-5 h-5" />
                 <span className="text-xs font-semibold">Add Item</span>
@@ -482,13 +511,13 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
           </div>
         )}
 
-        {step === 2 && (
-          <div className="overflow-x-auto rounded-xl border border-gray-200">
+        {step === 3 && (
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
             <table className="w-full text-xs">
-              <thead className="bg-slate-50 border-b border-gray-200">
+              <thead className="border-b border-[#0D3A35] bg-[#0D3A35] text-white">
                 <tr>
                   {['Item', 'Billed Qty', 'Received Qty', 'Rejected Qty', 'Shortage Qty', 'Basic Value', 'Disc %', 'Freight', 'GST %', 'Value With Tax', 'P&F'].map((h) => (
-                    <th key={h} className={cn('px-3 py-2 text-[10px] font-bold text-slate-500 uppercase tracking-wide whitespace-nowrap', h === 'Item' ? 'text-left' : 'text-right')}>
+                    <th key={h} className="whitespace-nowrap px-3 py-2.5 text-center text-[10px] font-semibold uppercase tracking-wide text-white">
                       {h}
                     </th>
                   ))}
@@ -527,15 +556,17 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
           </div>
         )}
 
-        {step === 3 && (
+        {step === 1 && (
           <div>
             <p className="text-xs text-slate-400 mb-3">
-              Select the gate entries this GRN covers — their invoice, challan and e-way bill numbers will populate the GRN header.
+              Confirm the inward gate entries received against this purchase order. Their invoice, challan and e-way bill details will populate the GRN.
             </p>
             {isLoadingGateEntries ? (
               <div className="py-8 text-xs text-center text-slate-400">Loading gate entries…</div>
             ) : gateEntriesForOrder.length === 0 ? (
-              <div className="py-8 text-xs text-center text-slate-400">No available gate entries logged for this PO yet.</div>
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-8 text-center text-xs text-amber-700">
+                No unused inward gate entries are logged against this purchase order. Record the material inward before raising a GRN.
+              </div>
             ) : (
               <div className="space-y-2">
                 {gateEntriesForOrder.map((ge) => {
@@ -547,7 +578,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
                       onClick={() => toggleGateEntry(ge.enteryId)}
                       className={cn(
                         'w-full flex items-start gap-3 border rounded-xl p-3 text-left transition-colors',
-                        checked ? 'bg-indigo-50/60 border-indigo-200' : 'border-gray-200 hover:bg-gray-50',
+                        checked ? 'border-emerald-200 bg-emerald-50/70' : 'border-slate-200 hover:border-emerald-200 hover:bg-emerald-50/30',
                       )}
                     >
                       <Checkmark checked={checked} />
@@ -579,7 +610,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
         )}
       </div>
 
-      <div className="flex items-center justify-between px-5 py-4 border-t border-gray-100 bg-gray-50/50 shrink-0">
+      <div className="flex shrink-0 items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-4">
         <button type="button" onClick={onCancel} className="px-4 py-2 text-sm font-medium text-slate-500 hover:text-slate-700 transition-colors">
           Cancel
         </button>
@@ -588,7 +619,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
             <button
               type="button"
               onClick={goBack}
-              className="px-4 py-2 text-sm font-medium border border-gray-200 rounded-lg bg-white hover:bg-gray-50 transition-colors"
+              className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium transition-colors hover:bg-slate-100"
             >
               Back
             </button>
@@ -597,7 +628,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
             <button
               type="button"
               onClick={goNext}
-              className="px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm transition-colors"
+              className="rounded-lg bg-[#0D3A35] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#092e2a]"
             >
               Next
             </button>
@@ -609,10 +640,16 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
               disabled={busy}
               className={cn(
                 'px-4 py-2 text-sm font-semibold rounded-lg shadow-sm transition-colors',
-                busy ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 text-white',
+                busy ? 'cursor-not-allowed bg-slate-100 text-slate-400' : 'bg-[#0D3A35] text-white hover:bg-[#092e2a]',
               )}
             >
-              {busy ? 'Submitting…' : existingGrn ? 'Resubmit GRN' : 'Generate GRN'}
+              {busy ? 'Submitting…' : existingGrn
+                ? existingGrn.status === 'needs_revision'
+                  ? 'Resubmit GRN'
+                  : existingGrn.status === 'approved'
+                    ? 'Update & Resend for Approval'
+                    : 'Update GRN'
+                : 'Generate GRN'}
             </button>
           )}
         </div>
@@ -621,18 +658,18 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
       {/* ── Add Item Modal ── */}
       {isAddItemOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="bg-white border border-gray-200 w-full max-w-lg max-h-[85vh] rounded-2xl shadow-2xl animate-in zoom-in-95 duration-200 overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-indigo-50/60 shrink-0">
+          <div className="flex max-h-[85vh] w-full max-w-lg animate-in flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl duration-200 zoom-in-95">
+            <div className="flex shrink-0 items-center justify-between bg-[#0D3A35] px-6 py-4 text-white">
               <div>
-                <h3 className="text-base font-bold text-slate-800">Add Item</h3>
-                <p className="text-xs text-slate-500 mt-0.5">Pick an item from inventory to receive against this order.</p>
+                <h3 className="text-base font-bold">Add Item</h3>
+                <p className="mt-0.5 text-xs text-emerald-100/75">Pick an item from inventory to receive against this order.</p>
               </div>
               <button
                 type="button"
                 onClick={closeAddItemModal}
-                className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+                className="rounded-lg p-1.5 transition-colors hover:bg-white/10"
               >
-                <X className="w-4 h-4 text-gray-500" />
+                <X className="h-4 w-4" />
               </button>
             </div>
 
@@ -643,7 +680,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
                 </label>
 
                 {selectedInventoryItem ? (
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-indigo-200 bg-indigo-50/60 px-3 py-2.5">
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50/70 px-3 py-2.5">
                     <div className="min-w-0">
                       <div className="text-sm font-semibold text-slate-800 truncate">{selectedInventoryItem.name}</div>
                       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
@@ -664,7 +701,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
                     <button
                       type="button"
                       onClick={() => setSelectedInventoryItem(null)}
-                      className="shrink-0 text-xs font-semibold text-indigo-600 hover:underline"
+                      className="shrink-0 text-xs font-semibold text-[#0D3A35] hover:underline"
                     >
                       Change
                     </button>
@@ -678,7 +715,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
                         value={inventorySearch}
                         onChange={(e) => setInventorySearch(e.target.value)}
                         placeholder="Search inventory by name, code or category…"
-                        className="w-full pl-8 pr-3 h-9 rounded-lg border border-gray-300 bg-white text-sm placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                        className="h-9 w-full rounded-lg border border-slate-300 bg-white pl-8 pr-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10"
                       />
                     </div>
                     <div className="max-h-52 overflow-y-auto rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
@@ -719,7 +756,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
                     value={newItem.unitPrice}
                     onChange={(e) => setNewItem((p) => ({ ...p, unitPrice: e.target.value }))}
                     placeholder="0"
-                    className="h-9 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 disabled:bg-gray-50 disabled:text-gray-400"
+                    className="h-9 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10 disabled:bg-slate-50 disabled:text-slate-400"
                   />
                 </div>
                 <div>
@@ -733,7 +770,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
                     value={newItem.billedQty}
                     onChange={(e) => setNewItem((p) => ({ ...p, billedQty: e.target.value }))}
                     placeholder="0"
-                    className="h-9 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 disabled:bg-gray-50 disabled:text-gray-400"
+                    className="h-9 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10 disabled:bg-slate-50 disabled:text-slate-400"
                   />
                 </div>
                 <div>
@@ -744,7 +781,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
                     disabled={!selectedInventoryItem}
                     value={newItem.gstPercent}
                     onChange={(e) => setNewItem((p) => ({ ...p, gstPercent: e.target.value }))}
-                    className="h-9 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 disabled:bg-gray-50 disabled:text-gray-400"
+                    className="h-9 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10 disabled:bg-slate-50 disabled:text-slate-400"
                   />
                 </div>
               </div>
@@ -761,7 +798,7 @@ export function GrnCreateWizard({ order, existingGrn, onDone, onCancel }: GrnCre
               <button
                 type="button"
                 onClick={handleAddItem}
-                className="px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm transition-colors"
+                className="rounded-lg bg-[#0D3A35] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#092e2a]"
               >
                 Add Item
               </button>

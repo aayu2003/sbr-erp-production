@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/dialog';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { toast } from 'sonner';
+import { formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
 
 type QuoteVendor = {
   id: string;
@@ -108,19 +109,7 @@ const toIsoNow = () => new Date().toISOString();
 const formatDateTime = (raw?: string) => {
   const v = String(raw ?? '').trim();
   if (!v) return '';
-  const d = new Date(v);
-  if (!Number.isFinite(d.getTime())) return v;
-  try {
-    return new Intl.DateTimeFormat('en-IN', {
-      year: 'numeric',
-      month: 'short',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(d);
-  } catch {
-    return d.toLocaleString();
-  }
+  return formatDateTimeDDMMYYYY(v, v);
 };
 
 type DirectoryVendor = {
