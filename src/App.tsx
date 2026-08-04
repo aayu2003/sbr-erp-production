@@ -20,6 +20,7 @@ import CultivationMaster from "./pages/CultivationMaster";
 import CultivationPlan from "./pages/CultivationPlan";
 import CreateCultivationPlan from "./pages/CreateCultivationPlan";
 import CultivationCalendar from "./pages/CultivationCalendar";
+import OperationalCalendar from "./pages/OperationalCalendar";
 import FieldVisitAnalytics from "./pages/FieldVisitAnalytics";
 import HarvestOrders from "./pages/HarvestOrders";
 import HarvestCards from "./pages/HarvestCards";
@@ -76,6 +77,7 @@ import UserManagement from "./pages/UserManagement";
 import AccountsDashboard from "./pages/AccountsDashboard";
 import AccountsLedger from "./pages/AccountsLedger";
 import AccountsPayments from "./pages/AccountsPayments";
+import PRRApprovalInbox from "./pages/PRRApprovalInbox";
 import AccountsPurchaseFlow from "./pages/AccountsPurchaseFlow";
 import Budget from "./pages/Budget";
 import BudgetDashboard from "./pages/BudgetDashboard";
@@ -106,6 +108,7 @@ const App = () => (
           
           {/* Operations */}
           <Route path="/cultivation-calendar" element={<AppLayout><CultivationCalendar /></AppLayout>} />
+          <Route path="/operational-calendar" element={<AppLayout><OperationalCalendar /></AppLayout>} />
           <Route path="/cultivation-master/*" element={<AppLayout><CultivationMaster /></AppLayout>} />
           <Route path="/cultivation-plan" element={<AppLayout><CultivationPlan /></AppLayout>} />
           <Route path="/cultivation-plan/create" element={<AppLayout><CreateCultivationPlan /></AppLayout>} />
@@ -254,6 +257,7 @@ const App = () => (
           <Route path="/accounts/dashboard"    element={<AppLayout><AccountsDashboard /></AppLayout>} />
           <Route path="/accounts/ledger"       element={<AppLayout><AccountsLedger /></AppLayout>} />
           <Route path="/accounts/payments"     element={<AppLayout><AccountsPayments /></AppLayout>} />
+          <Route path="/director/prr-approval" element={<AppLayout><PRRApprovalInbox /></AppLayout>} />
           <Route path="/accounts/purchase-flow" element={<AppLayout><AccountsPurchaseFlow /></AppLayout>} />
           <Route path="/budget"                element={<AppLayout><BudgetDashboard /></AppLayout>} />
           <Route path="/budget/:budgetId"      element={<AppLayout><Budget /></AppLayout>} />

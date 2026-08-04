@@ -1449,7 +1449,8 @@ export default function PurchaseFlow() {
 
     try {
       const orderNumber = safeTrim((flow as any)?.order_number);
-      const vendorInfo = leftPanelInfoMap[flowId]?.vendor_details;
+      const info = leftPanelInfoMap[flowId];
+      const vendorInfo = info?.vendor_details;
 
       const res = await fetch(`${baseUrl}/admin_accounts/create_invoice_payment`, {
         method: 'POST',
@@ -1458,7 +1459,7 @@ export default function PurchaseFlow() {
           doc_url: step.docLink,
           order_number: orderNumber,
           vendor_name: vendorInfo?.vendor_name || '',
-          vendor_id: vendorInfo?.approved_vendor_id || '',
+          vendor_id: info?.approved_vendor_id || '',
           flow_id: flowId,
           step: step.key,
           invoice_type: step.document,

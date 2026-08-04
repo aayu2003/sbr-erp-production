@@ -22,7 +22,6 @@ import {
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
-import activitiesData from '@/config/activities.json';
 import WccModal from '@/components/cultivation/WccModal';
 import WccCertificateReleasesModal from '@/components/cultivation/WccCertificateReleasesModal';
 
@@ -113,12 +112,14 @@ interface ActiveVendor {
   assignments: LandAssignment[];
 }
 
-// --- Constants ---
-// Sourced from the shared activity catalog (src/config/activities.json) so this list
-// stays in sync with the activity types managed in the Cultivation Master module.
-const ACTIVITY_OPTIONS = Array.from(
-  new Set((activitiesData as { name: string }[]).map((activity) => activity.name))
-);
+// Shape returned by /admin_cultivation/get_cultivation_activities
+interface ApiCultivationActivity {
+  id: string;
+  name: string;
+  category?: string;
+  icon?: string;
+  crop_type?: string[];
+}
 
 const EMPTY_ASSIGN_FORM = { farm_ids: [] as string[], activities: [] as string[], area_acres: '', start_date: '', end_date: '' };
 
@@ -196,6 +197,8 @@ const ScopeOfWork = () => {
   const [refreshKey, setRefreshKey] = useState(0);
   const [isWccOpen, setIsWccOpen] = useState(false);
   const [isCertificateReleasesOpen, setIsCertificateReleasesOpen] = useState(false);
+  const [activities, setActivities] = useState<ApiCultivationActivity[]>([]);
+  const [isLoadingActivities, setIsLoadingActivities] = useState(true);
 
   // --- Fetch active vendors (live WO/PO) ---
   useEffect(() => {
@@ -234,6 +237,37 @@ const ScopeOfWork = () => {
     })();
     return () => { mounted = false; };
   }, [refreshKey]);
+
+  // --- Fetch cultivation activities (for the assign-land popup's activity checklist) ---
+  useEffect(() => {
+    let mounted = true;
+    setIsLoadingActivities(true);
+    (async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/admin_cultivation/get_cultivation_activities`);
+        const data = await res.json().catch(() => null);
+        if (!mounted) return;
+        if (data?.success && Array.isArray(data?.activities)) {
+          setActivities(data.activities as ApiCultivationActivity[]);
+        } else {
+          setActivities([]);
+        }
+      } catch {
+        if (mounted) setActivities([]);
+      } finally {
+        if (mounted) setIsLoadingActivities(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  // Same "dedupe by name" behaviour the old static activities.json-derived list had — the API
+  // can return multiple activity records sharing one display name (different crop_type/category
+  // combos, e.g. "Bed Making" for both Rahar and the generic "Other" category).
+  const ACTIVITY_OPTIONS = useMemo(
+    () => Array.from(new Set(activities.map((activity) => activity.name))),
+    [activities]
+  );
 
   // --- Fetch all farms ---
   useEffect(() => {
@@ -1068,6 +1102,9 @@ const ScopeOfWork = () => {
                     </span>
                   )}
                 </div>
+                {isLoadingActivities ? (
+                  <p className="text-xs font-semibold text-slate-400">Loading activities…</p>
+                ) : (
                 <div className="flex flex-wrap gap-2">
                   {ACTIVITY_OPTIONS.map(opt => {
                     const isChosen = assignForm.activities.includes(opt);
@@ -1093,6 +1130,7 @@ const ScopeOfWork = () => {
                     );
                   })}
                 </div>
+                )}
               </div>
 
               {/* Area + Dates */}
