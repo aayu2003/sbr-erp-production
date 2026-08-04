@@ -134,6 +134,8 @@ type DosageControlRowLite = {
 id: string;
 cropName: string;
 activityId: string;
+activityName?: string;
+allCrops?: boolean;
 inventoryItemId: string;
 uom: string;
 dosagePerAcre: string;
@@ -191,6 +193,21 @@ inventory_items?: ApiInventoryItem[];
 };
 
 type FarmsById = Record<string, ApiFarm>;
+
+const normalizeDosageKey = (value: unknown) => String(value ?? '').trim().toLowerCase();
+
+const resolveTaskCrop = (task: CalendarActivity | undefined, farms: FarmsById) => {
+if (!task) return '';
+const direct = normalizeDosageKey(task.crop_type);
+if (direct) return direct;
+const farm = farms[task.farm_id];
+if (!farm) return '';
+const selectedPlotIds = new Set(task.assignments.flatMap((assignment) => (assignment.plot || []).map((plot) => plot.plot_id)).filter(Boolean));
+const plotCrop = (farm.land_plots || []).find((plot) => selectedPlotIds.has(plot.plot_id) && normalizeDosageKey(plot.crop_type))?.crop_type;
+if (plotCrop || farm.crop_type) return normalizeDosageKey(plotCrop || farm.crop_type);
+const farmPlotCrops = Array.from(new Set((farm.land_plots || []).map((plot) => normalizeDosageKey(plot.crop_type)).filter(Boolean)));
+return farmPlotCrops.length === 1 ? farmPlotCrops[0] : '';
+};
 type PendingByDate = Record<string, Record<string, boolean>>;
 
 // --- Helper Functions ---
@@ -1043,6 +1060,10 @@ const getInventoryItemId = (item: ApiInventoryItem): string => {
 return String(item?.id || item?.Invent_id || item?.item || '');
 };
 
+const getInventoryItemName = (item: ApiInventoryItem | undefined, fallbackId: string): string => {
+return String(item?.item_name || item?.name || item?.item || fallbackId).trim() || fallbackId;
+};
+
 // Dosage/crop-input categories belong in the "Choose Item" step (sourced from Dosage Control),
 // not here — this list is for physical equipment/machinery only.
 const DOSAGE_INPUT_CATEGORY_KEYWORDS = ['seed', 'fertilizer', 'pesticide', 'fungicide', 'herbicide', 'chemical', 'manure', 'nutrient'];
@@ -1185,16 +1206,53 @@ return () => { mounted = false; };
 // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [isAssignmentOpen]);
 
-// Load Dosage Control rows (Operations Master → Dosage Control) whenever the popup is open
+// Load locked dosage directly from the backend. Local storage remains a legacy/offline fallback.
 useEffect(() => {
 if (!isAssignmentOpen) return;
+const controller = new AbortController();
+let localRows: DosageControlRowLite[] = [];
 try {
 const raw = localStorage.getItem(DOSAGE_CONTROLS_STORAGE_KEY);
 const parsed = raw ? JSON.parse(raw) : [];
-setDosageRows(Array.isArray(parsed) ? parsed : []);
+localRows = Array.isArray(parsed) ? parsed : [];
 } catch {
-setDosageRows([]);
+localRows = [];
 }
+setDosageRows(localRows);
+
+fetch(`${BASE_URL}/admin_cultivation/get_cultivation_activities`, { signal: controller.signal })
+.then((response) => {
+if (!response.ok) throw new Error('Failed to load dosage controls');
+return response.json();
+})
+.then((data) => {
+const activities = Array.isArray(data?.activities) ? data.activities : [];
+const serverRows: DosageControlRowLite[] = activities.flatMap((activity: any) => {
+if (!activity?.dosage?.item_id) return [];
+const crops = Array.isArray(activity.crop_type) ? activity.crop_type.filter((crop: unknown) => normalizeDosageKey(crop)) : [];
+const cropNames = crops.length ? crops : ['*'];
+return cropNames.map((cropName: string) => ({
+id: `server-${activity.id}-${cropName}-${activity.dosage.item_id}`,
+cropName,
+activityId: String(activity.id || ''),
+activityName: String(activity.name || ''),
+allCrops: cropName === '*',
+inventoryItemId: String(activity.dosage.item_id),
+uom: String(activity.dosage.UOM || ''),
+dosagePerAcre: String(activity.dosage.per_acre_dosage ?? ''),
+}));
+});
+const merged = new Map<string, DosageControlRowLite>();
+localRows.forEach((row) => merged.set(`${normalizeDosageKey(row.activityId)}|${normalizeDosageKey(row.cropName)}|${normalizeDosageKey(row.inventoryItemId)}`, row));
+serverRows.forEach((row) => merged.set(`${normalizeDosageKey(row.activityId)}|${normalizeDosageKey(row.cropName)}|${normalizeDosageKey(row.inventoryItemId)}`, row));
+const rows = Array.from(merged.values());
+setDosageRows(rows);
+localStorage.setItem(DOSAGE_CONTROLS_STORAGE_KEY, JSON.stringify(rows));
+})
+.catch((error) => {
+if (!(error instanceof DOMException && error.name === 'AbortError')) console.error('[CultivationCalendar] Dosage fetch failed:', error);
+});
+return () => controller.abort();
 }, [isAssignmentOpen]);
 
 const selectedActivities = selectedDate && filteredActivitiesData[selectedDate] ? filteredActivitiesData[selectedDate] : [];
@@ -2535,14 +2593,19 @@ isSelected ? "border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]/30" : "borde
 <div className="border-t border-[#276152]/20 pt-8">
 {(() => {
 const selectedTaskForItem = selectedActivities.find((t) => selectedTaskKeys[getTaskKey(t)] && isTaskAssignable(t));
-const taskCrop = String(selectedTaskForItem?.crop_type || '').trim().toLowerCase();
-const matchingDosageRows = dosageRows.filter((row) => String(row.cropName || '').trim().toLowerCase() === taskCrop);
+const taskCrop = resolveTaskCrop(selectedTaskForItem, farmsById);
+const taskActivity = normalizeDosageKey(selectedTaskForItem?.activity);
+const matchingDosageRows = dosageRows.filter((row) => {
+const cropMatches = row.allCrops || normalizeDosageKey(row.cropName) === taskCrop;
+const configuredActivity = normalizeDosageKey(row.activityName);
+return cropMatches && (!configuredActivity || configuredActivity === taskActivity);
+});
 return (
 <div>
 <h4 className="mb-1 text-sm font-bold text-[#0D3A35] uppercase tracking-wide flex items-center gap-2">
 <ClipboardList className="w-4 h-4" /> Choose Item
 </h4>
-<p className="mb-3 text-xs text-muted-foreground">Items configured in Operations Master → Dosage Control for {selectedTaskForItem?.crop_type || 'this crop'}.</p>
+<p className="mb-3 text-xs text-muted-foreground">Items configured in Operations Master → Dosage Control for {taskCrop || 'this crop'}.</p>
 {matchingDosageRows.length === 0 ? (
 <div className="flex flex-col items-center gap-2 py-8 text-center bg-white rounded-lg border border-dashed border-gray-200">
 <ClipboardList className="w-6 h-6 text-gray-300" />
@@ -2553,6 +2616,8 @@ return (
 <div className="grid gap-2 md:grid-cols-2">
 {matchingDosageRows.map((row) => {
 const isSelected = selectedDosageItemRowId === row.id;
+const inventoryItem = inventoryItems.find((item) => normalizeDosageKey(getInventoryItemId(item)) === normalizeDosageKey(row.inventoryItemId));
+const itemName = getInventoryItemName(inventoryItem, row.inventoryItemId);
 return (
 <button
 key={row.id}
@@ -2564,9 +2629,10 @@ isSelected ? "border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]/30" : "borde
 )}
 >
 <div className="flex items-center justify-between gap-2">
-<span className="text-sm font-semibold text-slate-800">{row.inventoryItemId}</span>
+<span className="text-sm font-semibold text-slate-800">{itemName}</span>
 {isSelected && <span className="text-[10px] font-bold text-white bg-[#0D3A35] px-1.5 py-0.5 rounded">Selected</span>}
 </div>
+{normalizeDosageKey(itemName) !== normalizeDosageKey(row.inventoryItemId) && <div className="mt-0.5 font-mono text-[10px] text-slate-400">{row.inventoryItemId}</div>}
 <div className="mt-0.5 text-xs text-slate-500">{row.dosagePerAcre || '0'} {row.uom} / acre</div>
 </button>
 );
