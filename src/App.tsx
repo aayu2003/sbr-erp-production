@@ -64,6 +64,7 @@ import AdminOpsFuelRequest from "./pages/AdminOpsFuelRequest";
 import DirectorFuelRequest from "./pages/DirectorFuelRequest";
 import WorkOrder from "./pages/WorkOrder";
 import ScopeOfWork from "./pages/ScopeOfWork";
+import WccModule from "./pages/WccModule";
 import WebApp from "./pages/webapp/WebApp";
 import Inbox from "./pages/Inbox";
 import WccApprovalInbox from "./pages/WccApprovalInbox";
@@ -121,6 +122,7 @@ const App = () => (
           {/* Management */}
           <Route path="/work-order" element={<AppLayout><WorkOrder /></AppLayout>} />
           <Route path="/scope-of-work" element={<AppLayout><ScopeOfWork /></AppLayout>} />
+          <Route path="/wcc-module" element={<AppLayout><WccModule /></AppLayout>} />
           <Route path="/inventory" element={<AppLayout><Inventory /></AppLayout>} />
           <Route path="/inventory-indents" element={<AppLayout><InventoryIndent /></AppLayout>} />
           <Route path="/inventory-approvals" element={<AppLayout><InventoryApprovals /></AppLayout>} />

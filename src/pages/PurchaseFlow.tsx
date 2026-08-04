@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
 import { GenerateFromRecordPopup } from '@/components/purchase/GenerateFromRecordPopup';
+import { formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
 
 type LeftPanelInfo = {
   pr_number?: string;
@@ -156,19 +157,7 @@ const buildPurchaseFlowStage = (series: PoNextProcessId[]) => {
 const formatDateTime = (raw?: string) => {
   const v = safeTrim(raw);
   if (!v) return '';
-  const d = new Date(v);
-  if (!Number.isFinite(d.getTime())) return v;
-  try {
-    return new Intl.DateTimeFormat('en-IN', {
-      year: 'numeric',
-      month: 'short',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(d);
-  } catch {
-    return d.toLocaleString();
-  }
+  return formatDateTimeDDMMYYYY(v, v);
 };
 
 async function fetchPurchaseFlows(signal?: AbortSignal): Promise<ApiPurchaseFlow[]> {

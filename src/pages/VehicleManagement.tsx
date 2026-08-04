@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
+import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 
 // --- TYPES ---
 interface Vehicle {
@@ -669,7 +670,7 @@ const VehicleManagement = () => {
                 <div className="p-4 space-y-2">
                   {(serviceLogsVehicle?.serviceHistory ?? []).map((item, idx) => (
                     <div key={idx} className="border border-border rounded-lg p-3 bg-background">
-                      <div className="text-sm text-foreground">{item?.date || item?.created_at || `Entry ${idx + 1}`}</div>
+                      <div className="text-sm text-foreground">{formatDateDDMMYYYY(item?.date || item?.created_at, `Entry ${idx + 1}`)}</div>
                       <div className="text-xs text-muted-foreground mt-1 break-words">{typeof item === 'string' ? item : JSON.stringify(item)}</div>
                     </div>
                   ))}

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
 import {
   ArrowLeft,
   CalendarDays,
@@ -176,16 +177,7 @@ const safeStr = (v: unknown) => String(v ?? "").trim();
 const formatDate = (raw?: string) => {
   const v = safeStr(raw);
   if (!v) return "—";
-  const d = new Date(v);
-  if (!Number.isFinite(d.getTime())) return v;
-  try {
-    return new Intl.DateTimeFormat("en-IN", {
-      year: "numeric", month: "short", day: "2-digit",
-      hour: "2-digit", minute: "2-digit",
-    }).format(d);
-  } catch {
-    return d.toLocaleString();
-  }
+  return formatDateTimeDDMMYYYY(v, v);
 };
 
 const approvalBadge: Record<string, string> = {

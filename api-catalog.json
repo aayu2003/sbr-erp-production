@@ -639,11 +639,12 @@
           "id": "inv_update_issue_request_status",
           "path": "/inventory/update_issue_request_status",
           "method": "POST",
-          "purpose": "Approve or close an issue request from the Issue Items management modal. Changes status from 'pending' → 'issued' or 'returned'.",
+          "purpose": "Approve or close an issue request from the Issue Items management modal. The live backend uses 'approved' for stock that the UI presents as issued.",
           "used_in": ["src/pages/Inventory.tsx"],
           "request_body": {
-            "request_id": "string",
-            "status": "issued | returned | rejected"
+            "item_id": "string",
+            "issue_id": "string",
+            "new_status": "approved | returned | rejected"
           },
           "response_shape": {
             "success": "boolean",
@@ -651,15 +652,16 @@
           }
         },
         {
-          "id": "inv_return_issue_item",
-          "path": "/inventory/return_issue_item",
+          "id": "inv_return_issued_item",
+          "path": "/inventory/return_issued_item",
           "method": "POST",
           "purpose": "Return a previously issued item back to inventory stock. Increments the stock count and logs a return transaction in the ledger.",
           "used_in": ["src/pages/Inventory.tsx"],
           "request_body": {
-            "request_id": "string",
-            "quantity_returned": "number",
-            "return_note": "string"
+            "item_id": "string",
+            "issue_id": "string",
+            "new_status": "returned | partially_returned",
+            "quanity": "number — backend field name is intentionally misspelled"
           },
           "response_shape": {
             "success": "boolean",
@@ -712,7 +714,7 @@
           "id": "inv_inventory_item_return_ledger",
           "path": "/inventory/inventory_item_return_ledger",
           "method": "POST",
-          "purpose": "Record a formal return entry in the farm investment ledger. Called when items are physically returned from field to warehouse. Distinct from return_issue_item — this is ledger-level accounting.",
+          "purpose": "Record a formal return entry in the farm investment ledger. Called when items are physically returned from field to warehouse. Distinct from return_issued_item — this is ledger-level accounting.",
           "used_in": ["src/pages/Inventory.tsx"],
           "request_body": {
             "item_id": "string",

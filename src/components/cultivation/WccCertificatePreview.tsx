@@ -8,6 +8,7 @@ import getBaseUrl from '@/lib/config';
 import { useAuth } from '@/context/AuthContext';
 import logo3f from '@/Assets/3f-logo.png';
 import type { ApiWorkDoneEntry, ApiTaskDetails, WccScopeLand } from './WccModal';
+import { WCC_WORK_TEMPLATES, calculateWccTotals, type WccEnterpriseDraft } from '@/lib/wccEnterprise';
 
 const BASE_URL = getBaseUrl().replace(/\/$/, '');
 
@@ -49,6 +50,7 @@ export interface AnnexurePivot {
   crops: CropGroup[];
   grandByActivity: Record<string, number>;
   grandTotal: number;
+  enterprise?: WccEnterpriseDraft;
 }
 
 const EMPTY_PIVOT: AnnexurePivot = { activities: [], crops: [], grandByActivity: {}, grandTotal: 0 };
@@ -239,7 +241,7 @@ const EMPTY_META: CertificateMeta = {
   ratePerAcre: '',
 };
 
-const inputCls = 'w-full bg-transparent outline-none border-b border-dashed border-gray-300 focus:border-indigo-400 px-0.5';
+const inputCls = 'w-full bg-transparent outline-none border-b border-dashed border-gray-300 focus:border-[#0D3A35] px-0.5';
 
 // ─────────────────────────────────────────────────────────────
 // PDF export — a jsPDF + intersection type is used instead of `any` to read the finalY
@@ -283,6 +285,9 @@ export interface PdfExportParams {
 const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAutoTable> => {
   const { pivot, vendorName, fromDate, toDate, certNo, certDate, woNumber, rate, blockLabel, scopeOfWorkLabel, preparedBy, verifiedBy, approvedBy } = p;
   const doc = new jsPDF() as JsPdfWithAutoTable;
+  const enterprise = pivot.enterprise;
+  const enterpriseTotals = enterprise ? calculateWccTotals(enterprise) : null;
+  const enterpriseTemplate = enterprise ? WCC_WORK_TEMPLATES.find((item) => item.id === enterprise.header.workCategory) : undefined;
   const cropLabel = pivot.crops.map((g) => titleCase(g.crop)).join(' + ') || 'No Crop';
 
   // ── Page 1: Annexure ──
@@ -365,9 +370,11 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     styles: { fontSize: 8, cellPadding: 2 },
     columnStyles: { 0: { cellWidth: 50 } },
     body: [
-      [{ content: 'Work Order No.', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, woNumber || '—'],
-      [{ content: 'Block', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, blockLabel || '—'],
-      [{ content: 'Farm / Land Name', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, 'As per Annexure'],
+      [{ content: 'Order No.', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, woNumber || '—'],
+      [{ content: 'WCC Type', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, enterprise?.header.wccType?.replace(/_/g, ' ') || 'Partial'],
+      [{ content: 'Project / Site', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, enterprise?.header.projectSiteLabel || blockLabel || '—'],
+      [{ content: 'Work Category', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, enterpriseTemplate?.label || 'Cultivation & Agricultural Fieldwork'],
+      [{ content: 'Work Location / Land', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, enterprise?.landIds?.length ? enterprise.landIds.join(', ') : 'As per Annexure / Service Lines'],
       [{ content: 'Vendor / Contractor Name', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, vendorName],
       [{ content: 'Scope of Work', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, scopeOfWorkLabel || '—'],
     ],
@@ -377,7 +384,7 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   const activityHead = [['S.No', 'Activity', 'UoM', 'Work Done Quantity', 'Rate (₹)', 'Total (₹)']];
   const activityBody: RowInput[] = [];
   let lastCrop: string | null = null;
-  lines.forEach((line, idx) => {
+  (enterprise ? enterprise.serviceLines.filter((line) => line.selected).map((line) => ({ crop: enterpriseTemplate?.label || 'Contracted Work', activity: line.description, qty: line.currentQty, unit: line.unit, rate: line.rate })) : lines.map((line) => ({ ...line, unit: 'Acre', rate }))).forEach((line, idx) => {
     if (line.crop !== lastCrop) {
       activityBody.push([{ content: `${titleCase(line.crop)} :-`, colSpan: 6, styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }]);
       lastCrop = line.crop;
@@ -385,17 +392,17 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     activityBody.push([
       idx + 1,
       `${titleCase(line.crop)} - ${line.activity}`,
-      'Acre',
+      line.unit,
       line.qty.toFixed(2),
-      rate ? rate.toFixed(2) : '—',
-      rate ? (line.qty * rate).toFixed(2) : '—',
+      line.rate ? line.rate.toFixed(2) : '—',
+      line.rate ? (line.qty * line.rate).toFixed(2) : '—',
     ]);
   });
   activityBody.push([
     { content: 'Total Value', colSpan: 3, styles: { fontStyle: 'bold' } },
     { content: pivot.grandTotal.toFixed(2), styles: { fontStyle: 'bold' } },
     '',
-    { content: rate ? (pivot.grandTotal * rate).toFixed(2) : '—', styles: { fontStyle: 'bold' } },
+    { content: enterpriseTotals ? enterpriseTotals.gross.toFixed(2) : rate ? (pivot.grandTotal * rate).toFixed(2) : '—', styles: { fontStyle: 'bold' } },
   ]);
 
   autoTable(doc, {
@@ -409,10 +416,12 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   let y = doc.lastAutoTable.finalY + 7;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
-  const certifiedValue = rate ? formatInr(pivot.grandTotal * rate) : '—';
+  const certifiedValue = enterpriseTotals ? formatInr(enterpriseTotals.gross) : rate ? formatInr(pivot.grandTotal * rate) : '—';
   doc.text(`Total Certified Value (₹): ${certifiedValue}`, 14, y);
   y += 5;
-  doc.text(`Recommended for Payment: ${certifiedValue}`, 14, y);
+  doc.text(`Cumulative Certified Value: ${enterpriseTotals ? formatInr(enterpriseTotals.cumulative) : certifiedValue}`, 14, y);
+  y += 5;
+  doc.text(`Net Recommended for Invoice Matching: ${enterpriseTotals ? formatInr(enterpriseTotals.net) : certifiedValue}`, 14, y);
   y += 9;
 
   doc.text('CERTIFICATION', 14, y);
@@ -420,7 +429,7 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
   const certLine1 = doc.splitTextToSize(
-    `This is to certify that the work described above has been completed by ${vendorName} in accordance with the terms and conditions of the Work Order and has been physically verified by the undersigned.`,
+    `This is to certify that the work described above has been completed by ${vendorName} in accordance with the terms and conditions of the linked order and has been physically verified by the undersigned.`,
     180,
   );
   doc.text(certLine1, 14, y);
@@ -443,6 +452,58 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     styles: { fontSize: 8, minCellHeight: 25, valign: 'top' },
     headStyles: { fillColor: [30, 41, 59] },
   });
+
+  if (enterprise) {
+    doc.addPage();
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.text('MEASUREMENT, QUALITY & EVIDENCE ANNEXURES', 105, 15, { align: 'center' });
+    autoTable(doc, {
+      startY: 22,
+      head: [['Date', 'Location', 'Description', 'Calculated Qty.', 'Accepted Qty.', 'Unit', 'Source Ref.']],
+      body: enterprise.measurements.map((item) => [formatDate(item.date), item.location, item.description, (item.length * item.width * Math.max(item.height, 1) * Math.max(item.count, 1)).toFixed(3), item.manualQty.toFixed(3), item.unit, item.sourceReference]),
+      styles: { fontSize: 7 },
+      headStyles: { fillColor: [13, 58, 53] },
+    });
+    autoTable(doc, {
+      startY: doc.lastAutoTable.finalY + 5,
+      head: [['Inspection / Control', 'Result', 'Observations', 'Blocking', 'Resolved']],
+      body: enterprise.checklist.map((item) => [item.label, item.result.replace(/_/g, ' '), item.remarks, item.blocking ? 'Yes' : 'No', item.resolved ? 'Yes' : 'No']),
+      styles: { fontSize: 7 },
+      headStyles: { fillColor: [13, 58, 53] },
+    });
+    autoTable(doc, {
+      startY: doc.lastAutoTable.finalY + 5,
+      head: [['Attachment', 'Category', 'Caption', 'Uploaded By', 'Uploaded On']],
+      body: enterprise.attachments.map((item) => [item.name, item.category, item.caption, item.uploadedBy, formatDate(item.uploadedAt)]),
+      styles: { fontSize: 7 },
+      headStyles: { fillColor: [13, 58, 53] },
+    });
+    autoTable(doc, {
+      startY: doc.lastAutoTable.finalY + 5,
+      head: [['Adjustment', 'Direction', 'Mode', 'Value', 'Reason', 'Approval Required']],
+      body: enterprise.adjustments.map((item) => [item.type, item.direction, item.mode, item.value.toFixed(2), item.reason, item.approvalRequired ? 'Yes' : 'No']),
+      styles: { fontSize: 7 },
+      headStyles: { fillColor: [13, 58, 53] },
+    });
+    autoTable(doc, {
+      startY: doc.lastAutoTable.finalY + 5,
+      head: [['Date', 'User / Designation', 'Previous State', 'New State', 'Comments']],
+      body: enterprise.history.map((item) => [formatDate(item.at), `${item.userName} / ${item.designation || '—'}`, item.from || 'New', item.to.replace(/_/g, ' '), item.comments]),
+      styles: { fontSize: 7 },
+      headStyles: { fillColor: [13, 58, 53] },
+    });
+  }
+
+  const pageCount = doc.getNumberOfPages();
+  for (let page = 1; page <= pageCount; page += 1) {
+    doc.setPage(page);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(100);
+    doc.text(`${certNo || 'WCC'} · Revision ${enterprise?.revision || 0} · Verification Ref: ${enterprise?.draftId || certNo || 'WCC'}`, 14, 290);
+    doc.text(`Page ${page} of ${pageCount}`, 196, 290, { align: 'right' });
+  }
 
   return doc;
 };
@@ -579,6 +640,9 @@ const WccCertificatePreview = ({
     [isCreateMode, workDone, taskDetailsById, scopeItems],
   );
   const pivot = record ? record.annexure : livePivot;
+  const enterprise = pivot.enterprise;
+  const enterpriseTotals = enterprise ? calculateWccTotals(enterprise) : null;
+  const enterpriseTemplate = enterprise ? WCC_WORK_TEMPLATES.find((item) => item.id === enterprise.header.workCategory) : undefined;
   const certificateLines = useMemo(() => buildCertificateLines(pivot), [pivot]);
   const cropLabel = pivot.crops.map((g) => titleCase(g.crop)).join(' + ') || 'No Crop';
   const colCount = 3 + pivot.activities.length + 1;
@@ -718,7 +782,7 @@ const WccCertificatePreview = ({
     if (!user?.id || !user?.name) { toast.error('You must be logged in to submit a certificate.'); return; }
     if (!vendorId) { toast.error('Missing vendor.'); return; }
     if (!rate) { toast.error('Please enter a rate before submitting.'); return; }
-    if (!displayWoNumber.trim()) { toast.error('Please enter a Work Order No. before submitting.'); return; }
+    if (!displayWoNumber.trim()) { toast.error('Please enter an Order No. before submitting.'); return; }
 
     setSubmitting(true);
     try {
@@ -969,7 +1033,7 @@ const WccCertificatePreview = ({
                           </tr>
                         </Fragment>
                       ))}
-                      <tr className="font-bold bg-indigo-50">
+                      <tr className="bg-emerald-50 font-bold">
                         <td className="px-2 py-2" colSpan={3}>Total ({cropLabel} Crop)</td>
                         {pivot.activities.map((a) => (
                           <td key={a} className="px-2 py-2 text-right whitespace-nowrap">{acres(pivot.grandByActivity[a] || 0)}</td>
@@ -1027,10 +1091,10 @@ const WccCertificatePreview = ({
                 <table className="w-full text-xs border-collapse">
                   <tbody>
                     {locked || !isCreateMode ? (
-                      <ParticularRow label="Work Order No." staticValue={displayWoNumber || '—'} />
+                      <ParticularRow label="Order No." staticValue={displayWoNumber || '—'} />
                     ) : (
                       <ParticularRow
-                        label="Work Order No."
+                        label="Order No."
                         value={meta.woNumber}
                         onChange={setField('woNumber')}
                         placeholder="SBRPL/BIO-CG/WO/26-27/XXX"
@@ -1039,7 +1103,7 @@ const WccCertificatePreview = ({
                             type="button"
                             onClick={handleOpenOrderPreview}
                             title="Preview order document"
-                            className="wcc-no-print shrink-0 p-1 rounded hover:bg-indigo-50 text-indigo-600"
+                            className="wcc-no-print shrink-0 rounded p-1 text-[#0D3A35] hover:bg-emerald-50"
                           >
                             <ArrowUpRight className="w-3.5 h-3.5" />
                           </button>
@@ -1052,15 +1116,17 @@ const WccCertificatePreview = ({
                           <button
                             type="button"
                             onClick={handleOpenOrderPreview}
-                            className="inline-flex items-center gap-1 text-indigo-600 hover:underline"
+                            className="inline-flex items-center gap-1 text-[#0D3A35] hover:underline"
                           >
                             <ArrowUpRight className="w-3.5 h-3.5" /> Preview order document
                           </button>
                         </td>
                       </tr>
                     )}
-                    <ParticularRow label="Block" staticValue={blockLabel || '—'} />
-                    <ParticularRow label="Farm / Land Name" staticValue="As per Annexure" />
+                    <ParticularRow label="WCC Type" staticValue={enterprise?.header.wccType?.replace(/_/g, ' ') || 'Partial'} />
+                    <ParticularRow label="Project / Site" staticValue={enterprise?.header.projectSiteLabel || blockLabel || '—'} />
+                    <ParticularRow label="Work Category" staticValue={enterpriseTemplate?.label || 'Cultivation & Agricultural Fieldwork'} />
+                    <ParticularRow label="Work Location / Land" staticValue={enterprise?.landIds?.length ? enterprise.landIds.join(', ') : 'As per Annexure / Service Lines'} />
                     <ParticularRow label="Vendor / Contractor Name" staticValue={vendorName} />
                     <ParticularRow label="Scope of Work" staticValue={scopeOfWorkLabel || '—'} />
                   </tbody>
@@ -1079,8 +1145,8 @@ const WccCertificatePreview = ({
                     </tr>
                   </thead>
                   <tbody>
-                    {certificateLines.map((line, idx) => {
-                      const showCropHeader = idx === 0 || certificateLines[idx - 1].crop !== line.crop;
+                    {(enterprise ? enterprise.serviceLines.filter((line) => line.selected).map((line) => ({ crop: enterpriseTemplate?.label || 'Contracted Work', activity: line.description, qty: line.currentQty, unit: line.unit, lineRate: line.rate })) : certificateLines.map((line) => ({ ...line, unit: 'Acre', lineRate: rate }))).map((line, idx, displayLines) => {
+                      const showCropHeader = idx === 0 || displayLines[idx - 1].crop !== line.crop;
                       return (
                         <Fragment key={`${line.crop}-${line.activity}`}>
                           {showCropHeader && (
@@ -1091,10 +1157,10 @@ const WccCertificatePreview = ({
                           <tr className="border-b border-gray-100">
                             <td className="px-3 py-1.5">{idx + 1}</td>
                             <td className="px-3 py-1.5">{titleCase(line.crop)} - {line.activity}</td>
-                            <td className="px-3 py-1.5 text-center">Acre</td>
+                            <td className="px-3 py-1.5 text-center">{line.unit}</td>
                             <td className="px-3 py-1.5 text-right">{line.qty.toFixed(2)}</td>
-                            <td className="px-3 py-1.5 text-right">{rate ? rate.toFixed(2) : '—'}</td>
-                            <td className="px-3 py-1.5 text-right">{rate ? (line.qty * rate).toFixed(2) : '—'}</td>
+                            <td className="px-3 py-1.5 text-right">{line.lineRate ? line.lineRate.toFixed(2) : '—'}</td>
+                            <td className="px-3 py-1.5 text-right">{line.lineRate ? (line.qty * line.lineRate).toFixed(2) : '—'}</td>
                           </tr>
                         </Fragment>
                       );
@@ -1103,7 +1169,7 @@ const WccCertificatePreview = ({
                       <td className="px-3 py-2" colSpan={3}>Total Value</td>
                       <td className="px-3 py-2 text-right">{pivot.grandTotal.toFixed(2)}</td>
                       <td className="px-3 py-2" />
-                      <td className="px-3 py-2 text-right">{rate ? (pivot.grandTotal * rate).toFixed(2) : '—'}</td>
+                      <td className="px-3 py-2 text-right">{enterpriseTotals ? enterpriseTotals.gross.toFixed(2) : rate ? (pivot.grandTotal * rate).toFixed(2) : '—'}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -1126,10 +1192,13 @@ const WccCertificatePreview = ({
                 {/* Certified value */}
                 <div className="px-3 py-2 border-t border-gray-300 text-xs space-y-1">
                   <div className="flex justify-between font-bold text-slate-800">
-                    <span>Total Certified Value (₹):</span><span>{certifiedValue}</span>
+                    <span>Current Gross Certified Value (₹):</span><span>{enterpriseTotals ? formatInr(enterpriseTotals.gross) : certifiedValue}</span>
                   </div>
                   <div className="flex justify-between font-bold text-slate-800">
-                    <span>Recommended for Payment:</span><span>{certifiedValue}</span>
+                    <span>Cumulative Certified Value:</span><span>{enterpriseTotals ? formatInr(enterpriseTotals.cumulative) : certifiedValue}</span>
+                  </div>
+                  <div className="flex justify-between font-bold text-slate-800">
+                    <span>Net Recommended for Invoice Matching:</span><span>{enterpriseTotals ? formatInr(enterpriseTotals.net) : certifiedValue}</span>
                   </div>
                 </div>
 
@@ -1138,7 +1207,7 @@ const WccCertificatePreview = ({
                   <div className="bg-slate-100 text-center font-bold uppercase tracking-wide py-1 mb-2 -mx-3 px-3 text-slate-600">Certification</div>
                   <p>
                     This is to certify that the work described above has been completed by <b>{vendorName}</b> in
-                    accordance with the terms and conditions of the Work Order and has been physically verified by
+                    accordance with the terms and conditions of the linked order and has been physically verified by
                     the undersigned.
                   </p>
                   <p className="mt-2">
@@ -1182,7 +1251,7 @@ const WccCertificatePreview = ({
         {(isCreateMode || isReviseMode || isReviewMode) && (
           <div className="wcc-no-print px-6 py-4 border-t border-gray-100 bg-gray-50/50 flex items-center justify-between gap-3 shrink-0">
             <div className="text-xs text-slate-400 min-w-0 truncate">
-              {isCreateMode && !locked && 'Fill in the rate and Work Order No., then submit for verification.'}
+              {isCreateMode && !locked && 'Fill in the rate and Order No., then submit for verification.'}
               {isCreateMode && locked && `Submitted as ${certNoDisplay}.`}
               {isReviseMode && !locked && 'Adjust the rate and resubmit for verification.'}
               {isReviseMode && locked && `Resubmitted as ${certNoDisplay}.`}
@@ -1202,7 +1271,7 @@ const WccCertificatePreview = ({
                   type="button"
                   onClick={handleSubmitForVerification}
                   disabled={submitting}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors shadow-sm"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#0D3A35] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#092e2a] disabled:opacity-50"
                 >
                   {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />} Submit for Verification
                 </button>
@@ -1212,7 +1281,7 @@ const WccCertificatePreview = ({
                   type="button"
                   onClick={handleResubmit}
                   disabled={submitting}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors shadow-sm"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#0D3A35] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#092e2a] disabled:opacity-50"
                 >
                   {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />} Resubmit for Verification
                 </button>
@@ -1241,7 +1310,7 @@ const WccCertificatePreview = ({
                       type="button"
                       onClick={() => handleAction(existingRecord?.status === 'pending_verification' ? 'verify' : 'approve')}
                       disabled={submitting}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors shadow-sm"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-[#0D3A35] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#092e2a] disabled:opacity-50"
                     >
                       {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                       {existingRecord?.status === 'pending_verification' ? 'Verify' : 'Approve'}
@@ -1288,7 +1357,7 @@ const WccCertificatePreview = ({
                 href={orderDocUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:underline"
+                className="inline-flex items-center gap-1 text-xs font-semibold text-[#0D3A35] hover:underline"
               >
                 Open in new tab <ArrowUpRight className="w-3 h-3" />
               </a>

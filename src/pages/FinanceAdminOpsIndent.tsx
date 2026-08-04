@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/dialog';
 import { toast } from 'sonner';
 import { getBaseUrl } from '@/lib/config';
+import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 import { buildMrfSignatureEntry, getMrfSignatureEntry, readMrfSignatureCache, saveMrfSignatureEntry, extractStatusFromEntry } from '@/lib/mrfSignatureCache';
 import {
   readAdminOpsIndentConfig,
@@ -186,12 +187,7 @@ const numOr0 = (v: unknown) => {
 };
 
 const formatDateYmd = (iso?: string) => {
-  if (!iso) return '';
-  try {
-    return new Date(iso).toISOString().slice(0, 10);
-  } catch {
-    return '';
-  }
+  return formatDateDDMMYYYY(iso, '');
 };
 
 const parseMrfSignatureStamp = (value?: string) => {

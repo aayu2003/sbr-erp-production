@@ -33,6 +33,7 @@ import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { getFarmerNames } from '@/lib/farmerNameCache';
 import { toast } from 'sonner';
+import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 
 // ✅ Import the Sidebar
 import { SidebarTask } from '@/components/cultivation/TaskSidebar';
@@ -2512,8 +2513,8 @@ isSelected ? "border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]/30" : "borde
 )}
 </div>
 <div className="text-[10px] text-slate-400 text-right shrink-0">
-{scope.start_date && <div>{scope.start_date}</div>}
-{scope.end_date && <div>→ {scope.end_date}</div>}
+{scope.start_date && <div>{formatDateDDMMYYYY(scope.start_date)}</div>}
+{scope.end_date && <div>→ {formatDateDDMMYYYY(scope.end_date)}</div>}
 </div>
 </div>
 </button>
