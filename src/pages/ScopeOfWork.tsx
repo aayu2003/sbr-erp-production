@@ -1,4 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
+import { MapContainer, TileLayer, Polygon, Tooltip, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import {
   Building2,
   MapPin,
@@ -14,26 +17,41 @@ import {
   User,
   Calendar,
   RefreshCw,
+  ScrollText,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
-import activitiesData from '@/config/activities.json';
+import WccModal from '@/components/cultivation/WccModal';
+import WccCertificateReleasesModal from '@/components/cultivation/WccCertificateReleasesModal';
 
 const BASE_URL = getBaseUrl().replace(/\/$/, '');
 
+type LatLng = [number, number];
+
 // --- Types ---
+interface ApiLandPlot {
+  plot_id: string;
+  plot_name: string;
+  plot_area: number;
+  plot_coordinates: LatLng[];
+  crop_type?: string;
+}
+
 interface ApiFarm {
   farm_id: string;
   area: number;
   block_id: string;
   farmer_id: string;
+  crop_type?: string;
   land_data: {
     village: string;
     district: string;
     state: string;
     farming_option?: string;
+    land_coordinates?: LatLng[];
   };
+  land_plots?: ApiLandPlot[];
 }
 
 interface LandAssignment {
@@ -53,14 +71,29 @@ interface ApiActiveVendor {
   vendor_id: string;
   vendor_name: string;
   vendor_contact?: string;
+  order_number?: string;
+}
+
+// Shape of each plot within a land, as returned by /admin_cultivation/get_scope_of_work_for_vendor
+interface ApiPlot {
+  plot_id: string;
+  plot_name: string;
+  crop_type: string;
+  plot_area: number;
+  plot_coordinates: LatLng[];
+  created_at?: string;
 }
 
 // Shape of each item returned by /admin_cultivation/get_scope_of_work_for_vendor
 interface ScopeItem {
   land_id: string;
   farmer_id: string;
+  farmer_name?: string;
   block_id: string;
-  crop_type: string;
+  crop_type: string | null;
+  land_mapping: LatLng[];
+  total_area: number;
+  plots: ApiPlot[];
   activities: string[];
   start_date?: string;
   end_date?: string;
@@ -79,12 +112,14 @@ interface ActiveVendor {
   assignments: LandAssignment[];
 }
 
-// --- Constants ---
-// Sourced from the shared activity catalog (src/config/activities.json) so this list
-// stays in sync with the activity types managed in the Cultivation Master module.
-const ACTIVITY_OPTIONS = Array.from(
-  new Set((activitiesData as { name: string }[]).map((activity) => activity.name))
-);
+// Shape returned by /admin_cultivation/get_cultivation_activities
+interface ApiCultivationActivity {
+  id: string;
+  name: string;
+  category?: string;
+  icon?: string;
+  crop_type?: string[];
+}
 
 const EMPTY_ASSIGN_FORM = { farm_ids: [] as string[], activities: [] as string[], area_acres: '', start_date: '', end_date: '' };
 
@@ -95,8 +130,33 @@ const formatDate = (d?: string) => {
   catch { return d; }
 };
 
-const vendorTotalAcres = (v: ActiveVendor) =>
-  v.assignments.reduce((s, a) => s + (Number(a.area_acres) || 0), 0);
+// Crop-wise colors, shared between the acreage bars and the map polygons on each card
+const CROP_COLORS = ['#22c55e', '#f59e0b', '#a855f7', '#06b6d4', '#ec4899', '#6366f1', '#84cc16', '#f97316'];
+const cropColor = (crop: string, allCrops: string[]) => {
+  const idx = allCrops.indexOf(crop);
+  return CROP_COLORS[(idx < 0 ? 0 : idx) % CROP_COLORS.length];
+};
+
+// Group a land's plots by crop type, summing area per crop
+const cropWiseAcres = (item: ScopeItem): Record<string, number> => {
+  const acc: Record<string, number> = {};
+  for (const plot of item.plots) {
+    const crop = plot.crop_type || 'Unknown';
+    acc[crop] = (acc[crop] ?? 0) + (Number(plot.plot_area) || 0);
+  }
+  return acc;
+};
+
+// Fits the map viewport to the land boundary once it's known — must live inside <MapContainer>
+const FitLandBounds = ({ coords }: { coords: LatLng[] }) => {
+  const map = useMap();
+  useEffect(() => {
+    if (coords.length < 2) return;
+    const bounds = L.latLngBounds(coords.map(([lat, lng]) => L.latLng(lat, lng)));
+    map.fitBounds(bounds, { padding: [24, 24], animate: false });
+  }, [coords, map]);
+  return null;
+};
 
 // --- Status Badge ---
 const StatusBadge = ({ status, pulse = false }: { status: ActiveVendor['status']; pulse?: boolean }) => (
@@ -135,6 +195,10 @@ const ScopeOfWork = () => {
   const [isLoadingScope, setIsLoadingScope] = useState(false);
   const [scopeRefreshKey, setScopeRefreshKey] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [isWccOpen, setIsWccOpen] = useState(false);
+  const [isCertificateReleasesOpen, setIsCertificateReleasesOpen] = useState(false);
+  const [activities, setActivities] = useState<ApiCultivationActivity[]>([]);
+  const [isLoadingActivities, setIsLoadingActivities] = useState(true);
 
   // --- Fetch active vendors (live WO/PO) ---
   useEffect(() => {
@@ -156,6 +220,7 @@ const ScopeOfWork = () => {
               vendor_id: v.vendor_id,
               vendor_name: v.vendor_name ?? v.vendor_id,
               contact: v.vendor_contact,
+              wo_number: v.order_number,
               status: 'live',
               assignments: [],
             });
@@ -172,6 +237,37 @@ const ScopeOfWork = () => {
     })();
     return () => { mounted = false; };
   }, [refreshKey]);
+
+  // --- Fetch cultivation activities (for the assign-land popup's activity checklist) ---
+  useEffect(() => {
+    let mounted = true;
+    setIsLoadingActivities(true);
+    (async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/admin_cultivation/get_cultivation_activities`);
+        const data = await res.json().catch(() => null);
+        if (!mounted) return;
+        if (data?.success && Array.isArray(data?.activities)) {
+          setActivities(data.activities as ApiCultivationActivity[]);
+        } else {
+          setActivities([]);
+        }
+      } catch {
+        if (mounted) setActivities([]);
+      } finally {
+        if (mounted) setIsLoadingActivities(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  // Same "dedupe by name" behaviour the old static activities.json-derived list had — the API
+  // can return multiple activity records sharing one display name (different crop_type/category
+  // combos, e.g. "Bed Making" for both Rahar and the generic "Other" category).
+  const ACTIVITY_OPTIONS = useMemo(
+    () => Array.from(new Set(activities.map((activity) => activity.name))),
+    [activities]
+  );
 
   // --- Fetch all farms ---
   useEffect(() => {
@@ -215,12 +311,16 @@ const ScopeOfWork = () => {
         if (!mounted) return;
         if (data?.success && Array.isArray(data.scope_of_work)) {
           const items: ScopeItem[] = data.scope_of_work.map((s: any) => {
-            const vs = s.vendor_scope?.[selectedVendorId] ?? {};
+            const vs = s.vendor_scope ?? {};
             return {
               land_id: s.land_id,
               farmer_id: s.farmer_id,
+              farmer_name: s.farmer_name,
               block_id: s.block_id,
-              crop_type: s.crop_type,
+              crop_type: s.crop_type ?? null,
+              land_mapping: Array.isArray(s.land_mapping) ? s.land_mapping : [],
+              total_area: Number(s.total_area) || 0,
+              plots: Array.isArray(s.plots) ? s.plots : [],
               activities: vs.activities ?? [],
               start_date: vs.start_date,
               end_date: vs.end_date,
@@ -280,23 +380,36 @@ const ScopeOfWork = () => {
     );
   }, [vendors, vendorSearch]);
 
-  // farmer_id → farmer name, built from the farms list + already-fetched farmerNames
-  const farmerNamesByFarmerId = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const farm of farms) {
-      if (farm.farmer_id && farmerNames[farm.farm_id]) {
-        map[farm.farmer_id] = farmerNames[farm.farm_id];
-      }
-    }
-    return map;
-  }, [farms, farmerNames]);
-
   const scopeTotalAcres = useMemo(() =>
-    scopeItems.reduce((sum, item) => {
-      const farm = farms.find(f => f.farm_id === item.land_id);
-      return sum + (farm?.area ?? 0);
-    }, 0),
-  [scopeItems, farms]);
+    scopeItems.reduce((sum, item) => sum + (item.total_area || 0), 0),
+  [scopeItems]);
+
+  // Distinct activities declared across this vendor's scope (from vendor_scope.activities on each land)
+  const vendorScopeActivities = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of scopeItems) {
+      for (const act of item.activities) set.add(act);
+    }
+    return Array.from(set);
+  }, [scopeItems]);
+
+  // farm_id → full farm record, for the WCC modal's task-timeline map thumbnails
+  const farmsById = useMemo(() => {
+    const map: Record<string, ApiFarm> = {};
+    for (const f of farms) map[f.farm_id] = f;
+    return map;
+  }, [farms]);
+
+  // Earliest declared start_date / latest end_date across this vendor's scope — used to
+  // pre-fill the WCC date range with a sensible default.
+  const vendorScopeDateRange = useMemo(() => {
+    const starts = scopeItems.map(i => i.start_date).filter((d): d is string => !!d);
+    const ends = scopeItems.map(i => i.end_date).filter((d): d is string => !!d);
+    return {
+      start: starts.length ? starts.reduce((a, b) => (a < b ? a : b)) : undefined,
+      end: ends.length ? ends.reduce((a, b) => (a > b ? a : b)) : undefined,
+    };
+  }, [scopeItems]);
 
   const alreadyAssignedFarmIds = useMemo(
     () => new Set(scopeItems.map(s => s.land_id)),
@@ -433,44 +546,55 @@ const ScopeOfWork = () => {
   // RENDER
   // ============================================================
   return (
-    <div className="p-8 space-y-6 animate-in fade-in duration-300 min-h-screen bg-gray-50/50 font-sans">
+    <div className="min-h-screen space-y-6 bg-slate-50/70 p-4 font-sans animate-in fade-in duration-300 sm:p-6 lg:p-8">
 
       {/* ── Page Header ── */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div className="flex items-center gap-4">
-          <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-100 shadow-sm">
-            <Link2 className="w-7 h-7 text-indigo-600" />
+          <div className="rounded-2xl border border-[#0D3A35] bg-[#0D3A35] p-3 shadow-sm">
+            <Link2 className="h-7 w-7 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl md:text-3xl font-semibold text-slate-900">Scope of Work</h1>
+            <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-700">Cultivation Operations</p>
+            <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">Scope of Work</h1>
             <p className="mt-1 text-sm text-slate-500 max-w-lg">
               Map farm lands to active vendors with live Work Orders or Purchase Orders.
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => setRefreshKey(k => k + 1)}
-          className="self-start md:self-auto inline-flex items-center gap-2 px-3 py-2 text-sm font-medium bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
-        >
-          <RefreshCw className="w-4 h-4 text-gray-400" />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2 self-start md:self-auto">
+          <button
+            type="button"
+            onClick={() => setIsCertificateReleasesOpen(true)}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:border-emerald-200 hover:bg-emerald-50"
+          >
+            <ScrollText className="h-4 w-4 text-emerald-700" />
+            Certificate Releases
+          </button>
+          <button
+            type="button"
+            onClick={() => setRefreshKey(k => k + 1)}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:border-emerald-200 hover:bg-emerald-50"
+          >
+            <RefreshCw className="h-4 w-4 text-emerald-700" />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* ── Stats Row ── */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {[
-          { label: 'Active Vendors (Live WO / PO)', value: stats.liveCount, icon: Building2, color: 'indigo' as const },
+          { label: 'Active Vendors (Live WO / PO)', value: stats.liveCount, icon: Building2, color: 'emerald' as const },
           { label: 'Total Lands Assigned', value: stats.totalLands, icon: MapPin, color: 'green' as const },
           { label: 'Total Area Covered', value: `${stats.totalAcres.toFixed(1)} ac`, icon: Layers, color: 'orange' as const },
         ].map(s => (
-          <div key={s.label} className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm flex items-center gap-4">
+          <div key={s.label} className="flex items-center gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className={cn(
               'p-3 rounded-xl border',
-              s.color === 'indigo' && 'bg-indigo-50 border-indigo-100 text-indigo-600',
-              s.color === 'green'  && 'bg-green-50  border-green-100  text-green-600',
-              s.color === 'orange' && 'bg-orange-50 border-orange-100 text-orange-600',
+              s.color === 'emerald' && 'border-emerald-100 bg-emerald-50 text-emerald-700',
+              s.color === 'green'  && 'border-green-100 bg-green-50 text-green-700',
+              s.color === 'orange' && 'border-amber-100 bg-amber-50 text-amber-700',
             )}>
               <s.icon className="w-5 h-5" />
             </div>
@@ -486,13 +610,13 @@ const ScopeOfWork = () => {
       <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
 
         {/* ── LEFT: Vendor Panel ── */}
-        <div className="bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col" style={{ maxHeight: '75vh' }}>
+        <div className="flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '75vh' }}>
           {/* Panel Header */}
-          <div className="p-4 border-b border-gray-100 shrink-0">
+          <div className="shrink-0 border-b border-slate-200 bg-slate-50/70 p-4">
             <div className="flex items-center gap-2 mb-3">
-              <Building2 className="w-4 h-4 text-indigo-600" />
+              <Building2 className="h-4 w-4 text-emerald-700" />
               <h2 className="text-xs font-bold text-slate-700 uppercase tracking-widest">Active Vendors</h2>
-              <span className="ml-auto text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full">
+              <span className="ml-auto rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
                 {stats.liveCount} Live
               </span>
             </div>
@@ -503,7 +627,7 @@ const ScopeOfWork = () => {
                 value={vendorSearch}
                 onChange={e => setVendorSearch(e.target.value)}
                 placeholder="Search vendor, WO or PO…"
-                className="w-full pl-8 pr-3 h-8 rounded-lg border border-gray-200 bg-gray-50 text-xs placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                className="h-9 w-full rounded-xl border border-slate-200 bg-white pl-8 pr-3 text-xs placeholder:text-slate-400 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
               />
             </div>
           </div>
@@ -538,8 +662,8 @@ const ScopeOfWork = () => {
                   className={cn(
                     'w-full text-left px-4 py-3.5 transition-all group border-l-2',
                     selectedVendorId === vendor.vendor_id
-                      ? 'bg-indigo-50/80 border-indigo-500'
-                      : 'hover:bg-gray-50 border-transparent',
+                      ? 'border-emerald-700 bg-emerald-50/80'
+                      : 'border-transparent hover:bg-slate-50',
                   )}
                 >
                   <div className="flex items-start justify-between gap-2">
@@ -557,17 +681,11 @@ const ScopeOfWork = () => {
                       </div>
                       <div className="mt-2 flex items-center gap-2">
                         <StatusBadge status={vendor.status} />
-                        <span className="text-[11px] text-slate-400">
-                          {vendor.assignments.length} land{vendor.assignments.length !== 1 ? 's' : ''}
-                          {vendor.assignments.length > 0 && (
-                            <> • {vendorTotalAcres(vendor).toFixed(1)} ac</>
-                          )}
-                        </span>
                       </div>
                     </div>
                     <ChevronRight className={cn(
                       'w-4 h-4 shrink-0 mt-1 transition-colors',
-                      selectedVendorId === vendor.vendor_id ? 'text-indigo-500' : 'text-gray-200 group-hover:text-gray-400',
+                      selectedVendorId === vendor.vendor_id ? 'text-emerald-700' : 'text-slate-200 group-hover:text-slate-400',
                     )} />
                   </div>
                 </button>
@@ -577,12 +695,12 @@ const ScopeOfWork = () => {
         </div>
 
         {/* ── RIGHT: Assignment Panel ── */}
-        <div className="bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col" style={{ maxHeight: '75vh' }}>
+        <div className="flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '75vh' }}>
           {!selectedVendor ? (
             /* Empty state */
             <div className="flex-1 flex flex-col items-center justify-center p-16 gap-5 text-center">
-              <div className="p-6 bg-indigo-50 border border-indigo-100 rounded-3xl">
-                <Link2 className="w-12 h-12 text-indigo-300" />
+              <div className="rounded-3xl border border-emerald-100 bg-emerald-50 p-6">
+                <Link2 className="h-12 w-12 text-emerald-400" />
               </div>
               <div>
                 <p className="text-base font-semibold text-slate-700">Select a Vendor</p>
@@ -594,23 +712,23 @@ const ScopeOfWork = () => {
           ) : (
             <>
               {/* Vendor Detail Header */}
-              <div className="p-5 border-b border-gray-100 bg-gradient-to-r from-indigo-50/50 via-white to-white shrink-0">
+              <div className="shrink-0 border-b border-slate-200 bg-gradient-to-r from-emerald-50/80 via-white to-white p-5">
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex items-start gap-3 min-w-0">
-                    <div className="p-2.5 bg-indigo-100 border border-indigo-200 rounded-xl shrink-0 mt-0.5">
-                      <Building2 className="w-5 h-5 text-indigo-600" />
+                    <div className="mt-0.5 shrink-0 rounded-xl border border-[#0D3A35] bg-[#0D3A35] p-2.5">
+                      <Building2 className="h-5 w-5 text-white" />
                     </div>
                     <div className="min-w-0">
                       <h2 className="text-base font-bold text-slate-800 truncate">{selectedVendor.vendor_name}</h2>
                       <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-slate-500">
                         {selectedVendor.wo_number && (
                           <span className="flex items-center gap-1 font-medium">
-                            <FileCheck className="w-3 h-3 text-indigo-400" /> WO: {selectedVendor.wo_number}
+                            <FileCheck className="h-3 w-3 text-emerald-600" /> WO: {selectedVendor.wo_number}
                           </span>
                         )}
                         {selectedVendor.po_number && (
                           <span className="flex items-center gap-1 font-medium">
-                            <Hash className="w-3 h-3 text-indigo-400" /> PO: {selectedVendor.po_number}
+                            <Hash className="h-3 w-3 text-emerald-600" /> PO: {selectedVendor.po_number}
                           </span>
                         )}
                         {selectedVendor.contact && (
@@ -626,9 +744,24 @@ const ScopeOfWork = () => {
                         )}
                       </div>
                       {selectedVendor.scope && (
-                        <p className="mt-2 text-xs text-slate-600 bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-1.5 inline-block">
-                          <span className="font-semibold text-indigo-700">Scope: </span>{selectedVendor.scope}
+                        <p className="mt-2 inline-block rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-1.5 text-xs text-slate-600">
+                          <span className="font-semibold text-emerald-800">Scope: </span>{selectedVendor.scope}
                         </p>
+                      )}
+                      {vendorScopeActivities.length > 0 && (
+                        <div className="mt-2">
+                          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Activities in Scope</div>
+                          <div className="flex flex-wrap gap-1">
+                            {vendorScopeActivities.map(act => (
+                              <span
+                                key={act}
+                                className="inline-flex items-center whitespace-nowrap rounded-md border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800"
+                              >
+                                {act}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -636,8 +769,21 @@ const ScopeOfWork = () => {
                     <StatusBadge status={selectedVendor.status} pulse />
                     <button
                       type="button"
+                      onClick={() => setIsWccOpen(true)}
+                      disabled={scopeItems.length === 0}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shadow-sm border',
+                        scopeItems.length === 0
+                          ? 'bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed'
+                          : 'border-emerald-200 bg-white text-emerald-800 hover:bg-emerald-50',
+                      )}
+                    >
+                      <FileCheck className="w-3.5 h-3.5" /> Create WCC
+                    </button>
+                    <button
+                      type="button"
                       onClick={openAssignModal}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg transition-colors shadow-sm"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#0D3A35] px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-[#092e2a]"
                     >
                       <Plus className="w-3.5 h-3.5" /> Assign Land
                     </button>
@@ -693,90 +839,127 @@ const ScopeOfWork = () => {
                     <button
                       type="button"
                       onClick={openAssignModal}
-                      className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm"
+                      className="inline-flex items-center gap-2 rounded-xl bg-[#0D3A35] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#092e2a]"
                     >
                       <Plus className="w-4 h-4" /> Assign First Land
                     </button>
                   </div>
                 ) : (
-                  <div className="overflow-x-auto rounded-xl border border-gray-200">
-                    <table className="w-full min-w-[520px] text-sm">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-gray-200">
-                          <th className="text-left px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Farmer / Land</th>
-                          <th className="text-center px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Crop</th>
-                          <th className="text-left px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Activities</th>
-                          <th className="text-center px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Area</th>
-                          <th className="text-center px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Period</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100">
-                        {scopeItems.map((item, idx) => {
-                          const farm = farms.find(f => f.farm_id === item.land_id);
-                          const farmerName =
-                            farmerNames[item.land_id] ??
-                            farmerNamesByFarmerId[item.farmer_id] ??
-                            item.land_id;
-                          return (
-                            <tr
-                              key={item.land_id}
-                              className={cn(
-                                'transition-colors',
-                                idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40',
-                                'hover:bg-indigo-50/30',
-                              )}
-                            >
-                              {/* Farmer / Land */}
-                              <td className="px-4 py-3 max-w-[200px]">
-                                <div className="font-semibold text-slate-800 text-sm truncate">{farmerName}</div>
-                                <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400 flex-wrap">
-                                  <span className="font-mono">{item.land_id.slice(0, 8)}…</span>
-                                  {farm?.land_data?.village && (
-                                    <><span className="text-slate-300">·</span><span>{farm.land_data.village}</span></>
-                                  )}
-                                </div>
-                              </td>
-
-                              {/* Crop */}
-                              <td className="px-3 py-3 text-center">
-                                <span className="inline-flex items-center justify-center px-2 py-0.5 rounded-md text-xs font-semibold bg-green-50 text-green-700 border border-green-100 whitespace-nowrap capitalize">
-                                  {item.crop_type || '—'}
-                                </span>
-                              </td>
-
-                              {/* Activities */}
-                              <td className="px-3 py-3">
-                                <div className="flex flex-wrap gap-1">
-                                  {item.activities.map(act => (
-                                    <span key={act} className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100 whitespace-nowrap">
-                                      {act}
-                                    </span>
-                                  ))}
-                                </div>
-                              </td>
-
-                              {/* Area */}
-                              <td className="px-3 py-3 text-center whitespace-nowrap">
-                                <span className="text-sm font-bold text-slate-800">{(farm?.area ?? 0).toFixed(1)}</span>
-                                <span className="text-[10px] text-slate-400 ml-0.5">ac</span>
-                              </td>
-
-                              {/* Period */}
-                              <td className="px-3 py-3 text-center whitespace-nowrap">
-                                {item.start_date || item.end_date ? (
-                                  <span className="flex items-center justify-center gap-1 text-[11px] text-slate-500">
-                                    <Calendar className="w-3 h-3 shrink-0 text-gray-400" />
-                                    {formatDate(item.start_date)} – {formatDate(item.end_date)}
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {scopeItems.map(item => {
+                      const cropAcres = cropWiseAcres(item);
+                      const crops = Object.keys(cropAcres);
+                      const hasCenter = item.land_mapping.length >= 1;
+                      const hasBoundary = item.land_mapping.length >= 3;
+                      return (
+                        <div
+                          key={item.land_id}
+                          className="flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition-shadow hover:shadow-md"
+                        >
+                          {/* Card Header: Owner + Land identifiers */}
+                          <div className="px-4 py-3 bg-slate-50 border-b border-gray-100 flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 text-sm font-bold text-slate-800 truncate">
+                                <User className="h-3.5 w-3.5 shrink-0 text-emerald-700" />
+                                {item.farmer_name || item.farmer_id}
+                              </div>
+                              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400">
+                                <span className="font-mono bg-white border border-gray-200 rounded px-1.5 py-0.5">{item.land_id}</span>
+                                {item.block_id && (
+                                  <span className="font-mono bg-white border border-gray-200 rounded px-1.5 py-0.5">
+                                    Block {item.block_id.slice(0, 8)}
                                   </span>
-                                ) : (
-                                  <span className="text-slate-300">—</span>
                                 )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                              </div>
+                            </div>
+                            <div className="shrink-0 text-right">
+                              <div className="text-lg font-bold text-slate-800 leading-none">{item.total_area.toFixed(1)}</div>
+                              <div className="text-[10px] text-slate-400 mt-0.5">total acres</div>
+                            </div>
+                          </div>
+
+                          {/* Land + plot map */}
+                          <div className="h-48 relative border-b border-gray-100 bg-slate-100 shrink-0">
+                            {hasCenter ? (
+                              <MapContainer
+                                center={item.land_mapping[0]}
+                                zoom={16}
+                                style={{ height: '100%', width: '100%' }}
+                                className="z-0"
+                                scrollWheelZoom={false}
+                              >
+                                <TileLayer
+                                  attribution='&copy; <a href="https://www.esri.com/">Esri</a> — Source: Esri, Maxar, Earthstar Geographics'
+                                  url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                                  maxZoom={19}
+                                />
+                                {hasBoundary && <FitLandBounds coords={item.land_mapping} />}
+                                {hasBoundary && (
+                                  <Polygon
+                                    positions={item.land_mapping}
+                                    pathOptions={{ color: '#ffffff', fillColor: '#ffffff', fillOpacity: 0.06, weight: 2.5, dashArray: '8 5' }}
+                                  >
+                                    <Tooltip sticky>
+                                      <span className="font-semibold">Land Boundary</span>
+                                    </Tooltip>
+                                  </Polygon>
+                                )}
+                                {item.plots.filter(p => p.plot_coordinates?.length >= 3).map(plot => {
+                                  const color = cropColor(plot.crop_type || 'Unknown', crops);
+                                  return (
+                                    <Polygon
+                                      key={plot.plot_id}
+                                      positions={plot.plot_coordinates}
+                                      pathOptions={{ color, fillColor: color, fillOpacity: 0.35, weight: 2 }}
+                                    >
+                                      <Tooltip sticky>
+                                        <span className="font-semibold">{plot.plot_name}</span>
+                                        <br />
+                                        <span className="text-gray-500 text-[11px] capitalize">{plot.crop_type || 'Unknown'} · {plot.plot_area} ac</span>
+                                      </Tooltip>
+                                    </Polygon>
+                                  );
+                                })}
+                              </MapContainer>
+                            ) : (
+                              <div className="h-full flex items-center justify-center text-xs text-slate-400 gap-1.5">
+                                <MapPin className="w-3.5 h-3.5" /> No map data available
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Plot data */}
+                          <div className="px-4 py-3 flex-1">
+                            <div className="flex items-center gap-4 text-xs text-slate-500 mb-2.5">
+                              <span className="flex items-center gap-1.5">
+                                <Layers className="w-3.5 h-3.5 text-orange-500" />
+                                <b className="text-slate-700">{item.plots.length}</b> plot{item.plots.length !== 1 ? 's' : ''}
+                              </span>
+                              <span className="flex items-center gap-1.5">
+                                <b className="text-slate-700">{crops.length}</b> crop{crops.length !== 1 ? 's' : ''}
+                              </span>
+                            </div>
+                            <div className="space-y-1.5">
+                              {crops.map(crop => {
+                                const acres = cropAcres[crop];
+                                const pct = item.total_area ? (acres / item.total_area) * 100 : 0;
+                                const color = cropColor(crop, crops);
+                                return (
+                                  <div key={crop} className="flex items-center gap-2 text-[11px]">
+                                    <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                                    <span className="w-16 shrink-0 capitalize font-medium text-slate-600 truncate">{crop}</span>
+                                    <div className="flex-1 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                                      <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
+                                    </div>
+                                    <span className="w-14 shrink-0 text-right font-semibold text-slate-700">{acres.toFixed(2)} ac</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -788,22 +971,22 @@ const ScopeOfWork = () => {
       {/* ── ASSIGN LAND MODAL ── */}
       {isAssignModalOpen && selectedVendor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="bg-white border border-gray-200 w-full max-w-lg max-h-[90vh] rounded-2xl shadow-2xl animate-in zoom-in-95 duration-200 overflow-hidden flex flex-col">
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl animate-in zoom-in-95 duration-200">
             {/* Modal Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-indigo-50/60 shrink-0">
+            <div className="flex shrink-0 items-center justify-between border-b border-[#0D3A35] bg-[#0D3A35] px-6 py-4">
               <div>
-                <h3 className="text-base font-bold text-slate-800">Assign Land</h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  For <span className="font-semibold text-indigo-700">{selectedVendor.vendor_name}</span>
-                  {selectedVendor.wo_number && <span className="ml-1 text-slate-400">• {selectedVendor.wo_number}</span>}
+                <h3 className="text-base font-bold text-white">Assign Land</h3>
+                <p className="mt-0.5 text-xs text-emerald-100">
+                  For <span className="font-semibold text-white">{selectedVendor.vendor_name}</span>
+                  {selectedVendor.wo_number && <span className="ml-1 text-emerald-200">• {selectedVendor.wo_number}</span>}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setIsAssignModalOpen(false)}
-                className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+                className="rounded-lg p-1.5 transition-colors hover:bg-white/10"
               >
-                <X className="w-4 h-4 text-gray-500" />
+                <X className="h-5 w-5 text-white" />
               </button>
             </div>
 
@@ -816,7 +999,7 @@ const ScopeOfWork = () => {
                     Farm / Land <span className="text-red-500">*</span>
                   </label>
                   {assignForm.farm_ids.length > 0 && (
-                    <span className="text-[11px] font-semibold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full">
+                    <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
                       {assignForm.farm_ids.length} selected
                     </span>
                   )}
@@ -829,7 +1012,7 @@ const ScopeOfWork = () => {
                     value={farmSearch}
                     onChange={e => setFarmSearch(e.target.value)}
                     placeholder="Search by farm ID, farmer, block, village…"
-                    className="w-full pl-8 pr-3 h-8 rounded-lg border border-gray-200 bg-gray-50 text-xs placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                    className="h-9 w-full rounded-xl border border-slate-200 bg-slate-50 pl-8 pr-3 text-xs placeholder:text-slate-400 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
                   />
                 </div>
                 {/* Farm List */}
@@ -856,13 +1039,13 @@ const ScopeOfWork = () => {
                           }))}
                           className={cn(
                             'w-full text-left px-3 py-2.5 transition-colors flex items-center gap-3',
-                            isChecked ? 'bg-indigo-50' : 'hover:bg-slate-50',
+                            isChecked ? 'bg-emerald-50' : 'hover:bg-slate-50',
                           )}
                         >
                           {/* Checkbox */}
                           <div className={cn(
                             'shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors',
-                            isChecked ? 'border-indigo-600 bg-indigo-600' : 'border-gray-300 bg-white',
+                            isChecked ? 'border-emerald-700 bg-emerald-700' : 'border-slate-300 bg-white',
                           )}>
                             {isChecked && (
                               <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 10 10" fill="none">
@@ -877,7 +1060,7 @@ const ScopeOfWork = () => {
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className={cn(
                                 'text-sm font-semibold truncate',
-                                isChecked ? 'text-indigo-800' : 'text-slate-800',
+                                isChecked ? 'text-emerald-900' : 'text-slate-800',
                               )}>
                                 {displayName}
                               </span>
@@ -895,7 +1078,7 @@ const ScopeOfWork = () => {
                                 <><span className="text-slate-300">·</span><span>{farm.land_data.district}</span></>
                               )}
                               <span className="text-slate-300">·</span>
-                              <span className={cn('font-semibold', isChecked ? 'text-indigo-600' : 'text-slate-600')}>
+                              <span className={cn('font-semibold', isChecked ? 'text-emerald-700' : 'text-slate-600')}>
                                 {farm.area} ac
                               </span>
                             </div>
@@ -914,11 +1097,14 @@ const ScopeOfWork = () => {
                     Activities <span className="text-red-500">*</span>
                   </label>
                   {assignForm.activities.length > 0 && (
-                    <span className="text-[11px] font-semibold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full">
+                    <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
                       {assignForm.activities.length} selected
                     </span>
                   )}
                 </div>
+                {isLoadingActivities ? (
+                  <p className="text-xs font-semibold text-slate-400">Loading activities…</p>
+                ) : (
                 <div className="flex flex-wrap gap-2">
                   {ACTIVITY_OPTIONS.map(opt => {
                     const isChosen = assignForm.activities.includes(opt);
@@ -935,8 +1121,8 @@ const ScopeOfWork = () => {
                         className={cn(
                           'px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all',
                           isChosen
-                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
-                            : 'bg-white text-slate-600 border-gray-200 hover:border-indigo-300 hover:text-indigo-600',
+                            ? 'border-emerald-700 bg-emerald-700 text-white shadow-sm'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-300 hover:text-emerald-700',
                         )}
                       >
                         {opt}
@@ -944,6 +1130,7 @@ const ScopeOfWork = () => {
                     );
                   })}
                 </div>
+                )}
               </div>
 
               {/* Area + Dates */}
@@ -966,7 +1153,7 @@ const ScopeOfWork = () => {
                     type="date"
                     value={assignForm.start_date}
                     onChange={e => setAssignForm(prev => ({ ...prev, start_date: e.target.value }))}
-                    className="h-9 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                    className="h-9 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-700 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
                   />
                 </div>
                 <div>
@@ -975,20 +1162,20 @@ const ScopeOfWork = () => {
                     type="date"
                     value={assignForm.end_date}
                     onChange={e => setAssignForm(prev => ({ ...prev, end_date: e.target.value }))}
-                    className="h-9 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                    className="h-9 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-700 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
                   />
                 </div>
               </div>
 
               {/* Selected summary */}
               {assignForm.farm_ids.length > 0 && assignForm.activities.length > 0 && (
-                <div className="flex items-start gap-3 px-3 py-2.5 bg-indigo-50 border border-indigo-100 rounded-lg text-xs text-indigo-700">
-                  <CheckCircle2 className="w-4 h-4 shrink-0 text-indigo-500 mt-0.5" />
+                <div className="flex items-start gap-3 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2.5 text-xs text-emerald-800">
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
                   <div className="min-w-0 flex-1">
                     {/* Farm chips */}
                     <div className="flex flex-wrap gap-1 mb-1.5">
                       {assignForm.farm_ids.map(fid => (
-                        <span key={fid} className="px-2 py-0.5 rounded-md bg-white text-indigo-800 border border-indigo-200 font-semibold">
+                        <span key={fid} className="rounded-md border border-emerald-200 bg-white px-2 py-0.5 font-semibold text-emerald-900">
                           {farmerNames[fid] ?? fid}
                         </span>
                       ))}
@@ -996,13 +1183,13 @@ const ScopeOfWork = () => {
                     {/* Activity chips */}
                     <div className="flex flex-wrap gap-1">
                       {assignForm.activities.map(act => (
-                        <span key={act} className="px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800 border border-indigo-200 font-semibold">
+                        <span key={act} className="rounded-md border border-emerald-200 bg-emerald-100 px-2 py-0.5 font-semibold text-emerald-900">
                           {act}
                         </span>
                       ))}
                     </div>
                     {assignForm.area_acres && (
-                      <div className="mt-1 text-indigo-600 font-semibold">{assignForm.area_acres} ac total</div>
+                      <div className="mt-1 font-semibold text-emerald-700">{assignForm.area_acres} ac total</div>
                     )}
                   </div>
                 </div>
@@ -1010,11 +1197,11 @@ const ScopeOfWork = () => {
             </div>
 
             {/* Modal Footer */}
-            <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-gray-100 bg-gray-50/50 shrink-0">
+            <div className="flex shrink-0 items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-6 py-4">
               <button
                 type="button"
                 onClick={() => setIsAssignModalOpen(false)}
-                className="px-4 py-2 text-sm font-medium border border-gray-200 rounded-lg bg-white hover:bg-gray-50 transition-colors"
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100"
               >
                 Cancel
               </button>
@@ -1025,7 +1212,7 @@ const ScopeOfWork = () => {
                 className={cn(
                   'px-4 py-2 text-sm font-semibold rounded-lg transition-colors',
                   !isSubmitting && assignForm.farm_ids.length && assignForm.activities.length && assignForm.area_acres
-                    ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm'
+                    ? 'bg-[#0D3A35] hover:bg-[#092e2a] text-white shadow-sm'
                     : 'bg-gray-100 text-gray-400 cursor-not-allowed',
                 )}
               >
@@ -1034,6 +1221,27 @@ const ScopeOfWork = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── WORK COMPLETION CERTIFICATE (WCC) ── */}
+      {isWccOpen && selectedVendor && (
+        <WccModal
+          vendorId={selectedVendor.vendor_id}
+          vendorName={selectedVendor.vendor_name}
+          vendorWoNumber={selectedVendor.wo_number}
+          landIds={scopeItems.map(item => item.land_id)}
+          activities={vendorScopeActivities}
+          farmsById={farmsById}
+          farmerNames={farmerNames}
+          scopeItems={scopeItems}
+          defaultStartDate={vendorScopeDateRange.start}
+          defaultEndDate={vendorScopeDateRange.end}
+          onClose={() => setIsWccOpen(false)}
+        />
+      )}
+
+      {isCertificateReleasesOpen && (
+        <WccCertificateReleasesModal onClose={() => setIsCertificateReleasesOpen(false)} />
       )}
     </div>
   );

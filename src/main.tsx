@@ -3,6 +3,11 @@ import App from "./App.tsx";
 import "./index.css";
 import { AuthProvider } from '@/context/AuthContext';
 import { ThemeProvider } from '@/context/ThemeContext';
+import { applyGlobalMapColors, loadGlobalMapColors } from '@/lib/mapColorSettings';
+import { installProjectDateFormatting } from '@/lib/dateFormat';
+
+installProjectDateFormatting();
+applyGlobalMapColors(loadGlobalMapColors());
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {

@@ -125,7 +125,7 @@ const FarmMiniMap = ({
 			{landCoords.length >= 3 && (
 				<Polygon
 					positions={landCoords}
-					pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: plots.length > 0 ? 0.08 : 0.22, weight: 2.5 }}
+					pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }}
 				/>
 			)}
 			{plots.map((plot, i) =>
@@ -186,7 +186,7 @@ const FarmExpandMapFull = ({
 				maxZoom={21}
 			/>
 			{visibleLayers.has('land') && landCoords.length >= 3 && (
-				<Polygon positions={landCoords} pathOptions={{ color: '#22c55e', fillColor: '#22c55e', fillOpacity: plots.length > 0 ? 0.06 : 0.20, weight: 2.5 }} />
+				<Polygon positions={landCoords} pathOptions={{ color: 'var(--land-boundary-color, #fde047)', fillColor: 'var(--land-boundary-fill, #fef9c3)', fillOpacity: 0.28, weight: 3 }} />
 			)}
 			{visibleLayers.has('plots') && plots.map((plot, i) =>
 				plot.plot_coordinates.length >= 3
@@ -227,7 +227,7 @@ const MapExpandModal = ({ farm, onClose }: { farm: Farm; onClose: () => void }) 
 	});
 
 	const filterPills = [
-		{ key: 'land',  label: 'Land',  color: '#22c55e' },
+		{ key: 'land',  label: 'Land',  color: 'var(--land-boundary-color, #fde047)' },
 		...(plots.length > 0 ? [{ key: 'plots', label: 'Plots', color: PLOT_COLORS[0] }] : []),
 		...uniqueMappingTypes.map(t => ({
 			key: t,

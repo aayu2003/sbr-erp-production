@@ -2605,7 +2605,7 @@ const HRManagement = () => {
               <div className="min-w-0">
                 <p className="truncate text-sm font-extrabold text-slate-800">{comp.staffName}</p>
                 <p className="mt-0.5 truncate text-xs font-semibold text-slate-400">
-                  Earned {format(new Date(`${comp.earnedDate}T00:00:00`), 'MMM d, yyyy')} · {comp.reason}
+                  Earned {format(new Date(`${comp.earnedDate}T00:00:00`), 'dd-MM-yyyy')} · {comp.reason}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -2681,7 +2681,7 @@ const HRManagement = () => {
               <div className="min-w-0">
                 <p className="truncate text-sm font-extrabold text-slate-800">{req.staffName}</p>
                 <p className="mt-0.5 truncate text-xs font-semibold text-slate-400">
-                  {format(new Date(`${req.date}T00:00:00`), 'MMM d, yyyy')} · requested {format(new Date(req.requestedAt), 'MMM d, h:mm a')}
+                  {format(new Date(`${req.date}T00:00:00`), 'dd-MM-yyyy')} · requested {format(new Date(req.requestedAt), 'dd-MM-yyyy, h:mm a')}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">

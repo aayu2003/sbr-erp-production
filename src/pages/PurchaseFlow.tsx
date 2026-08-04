@@ -6,6 +6,8 @@ import * as XLSX from 'xlsx';
 import { Button } from '@/components/ui/button';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
+import { GenerateFromRecordPopup } from '@/components/purchase/GenerateFromRecordPopup';
+import { formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
 
 type LeftPanelInfo = {
   pr_number?: string;
@@ -155,19 +157,7 @@ const buildPurchaseFlowStage = (series: PoNextProcessId[]) => {
 const formatDateTime = (raw?: string) => {
   const v = safeTrim(raw);
   if (!v) return '';
-  const d = new Date(v);
-  if (!Number.isFinite(d.getTime())) return v;
-  try {
-    return new Intl.DateTimeFormat('en-IN', {
-      year: 'numeric',
-      month: 'short',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(d);
-  } catch {
-    return d.toLocaleString();
-  }
+  return formatDateTimeDDMMYYYY(v, v);
 };
 
 async function fetchPurchaseFlows(signal?: AbortSignal): Promise<ApiPurchaseFlow[]> {
@@ -1133,6 +1123,10 @@ export default function PurchaseFlow() {
     flow: ApiPurchaseFlow;
     step: PurchaseFlowStep;
   } | null>(null);
+  const [generateTarget, setGenerateTarget] = useState<{
+    flow: ApiPurchaseFlow;
+    step: PurchaseFlowStep;
+  } | null>(null);
   const [addToInventoryFor, setAddToInventoryFor] = useState<{ poNumber: string } | null>(null);
   const [createFlowOpen, setCreateFlowOpen] = useState(false);
   const [flowRefreshNonce, setFlowRefreshNonce] = useState(0);
@@ -1455,7 +1449,8 @@ export default function PurchaseFlow() {
 
     try {
       const orderNumber = safeTrim((flow as any)?.order_number);
-      const vendorInfo = leftPanelInfoMap[flowId]?.vendor_details;
+      const info = leftPanelInfoMap[flowId];
+      const vendorInfo = info?.vendor_details;
 
       const res = await fetch(`${baseUrl}/admin_accounts/create_invoice_payment`, {
         method: 'POST',
@@ -1464,7 +1459,7 @@ export default function PurchaseFlow() {
           doc_url: step.docLink,
           order_number: orderNumber,
           vendor_name: vendorInfo?.vendor_name || '',
-          vendor_id: vendorInfo?.approved_vendor_id || '',
+          vendor_id: info?.approved_vendor_id || '',
           flow_id: flowId,
           step: step.key,
           invoice_type: step.document,
@@ -1493,6 +1488,16 @@ export default function PurchaseFlow() {
           title={uploadTarget.step.document}
           onClose={() => setUploadTarget(null)}
           onUpload={(file) => handleUploadStep(uploadTarget.flow, uploadTarget.step, file)}
+        />
+      ) : null}
+
+      {generateTarget ? (
+        <GenerateFromRecordPopup
+          orderNumber={safeTrim(generateTarget.flow.order_number)}
+          orderType={safeTrim(generateTarget.flow.order_type)}
+          stepLabel={generateTarget.step.document}
+          onClose={() => setGenerateTarget(null)}
+          onGenerate={(file) => handleUploadStep(generateTarget.flow, generateTarget.step, file)}
         />
       ) : null}
 
@@ -1834,6 +1839,20 @@ export default function PurchaseFlow() {
                                     <ChevronRight className="w-3 h-3" />
                                   </button>
                                 </div>
+                              )}
+
+                              {/* GRN (PO) / Completion certificate (WO) step — offer to auto-generate
+                                  the document from an already-approved GRN or WCC certificate,
+                                  instead of only accepting a manually uploaded file. */}
+                              {!s.docLink && s.document.trim().toLowerCase() === 'grn' && (
+                                <button
+                                  type="button"
+                                  onClick={() => setGenerateTarget({ flow, step: s })}
+                                  title="Generate from an approved GRN or WCC certificate"
+                                  className="mt-1 px-2 py-1 text-[10px] font-semibold rounded-md border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors whitespace-nowrap"
+                                >
+                                  Generate from GRN/WCC
+                                </button>
                               )}
 
                               {/* Accounts status actions — only for invoice / proforma invoice steps */}

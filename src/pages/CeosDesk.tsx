@@ -154,8 +154,8 @@ const activityStatus = [
 ];
 
 const cropArea = [
-  { crop: "Paddy", acres: 260, fill: "#39b54a" },
-  { crop: "Rahar", acres: 110, fill: "#2f95e8" },
+  { crop: "Paddy", acres: 260, fill: "var(--crop-paddy-color, #22c55e)" },
+  { crop: "Rahar", acres: 110, fill: "var(--crop-rahar-color, #800000)" },
   { crop: "Napier", acres: 80, fill: "#fbbf24" },
   { crop: "Other Crops", acres: 32, fill: "#6d28d9" },
 ];
@@ -919,9 +919,9 @@ type ClusterCropSummary = {
 };
 
 const CROP_COLORS: Record<string, string> = {
-  paddy: "#f59e0b",
-  napier: "#22c55e",
-  rahar: "#f97316",
+  paddy: "var(--crop-paddy-color, #22c55e)",
+  napier: "var(--crop-napier-color, #22c55e)",
+  rahar: "var(--crop-rahar-color, #800000)",
   unspecified: "#94a3b8",
 };
 const FALLBACK_CROP_COLORS = ["#2563eb", "#6d28d9", "#0891b2", "#dc2626", "#0f766e"];
@@ -1492,7 +1492,7 @@ const CropActivitySummaryCard = ({
           {summaries.length === 0 ? (
             <div className="flex h-40 items-center justify-center text-sm font-bold text-slate-400">No activities scheduled this month</div>
           ) : (
-            <div className="mt-3 grid max-h-[420px] grid-cols-3 gap-3 overflow-y-auto pr-1">
+            <div className="mt-3 grid grid-cols-2 gap-3">
               {summaries.map((item) => {
                 const completion = item.totalAcres > 0 ? Math.round((item.completedAcres / item.totalAcres) * 100) : 0;
                 const tone = activityCompletionTone(completion);
@@ -1510,7 +1510,7 @@ const CropActivitySummaryCard = ({
                           <span className={cn("flex h-5 w-5 shrink-0 items-center justify-center rounded-full", tone.badge)}>
                             <Icon className="h-3 w-3" />
                           </span>
-                          <p className="truncate text-xs font-black text-slate-950">{item.activity}</p>
+                          <p className="break-words text-xs font-black leading-4 text-slate-950">{item.activity}</p>
                         </div>
                         <p className="mt-1 text-[11px] font-bold text-slate-500">
                           {Math.round(item.totalAcres)} ac · {item.taskCount} tasks
@@ -1519,16 +1519,16 @@ const CropActivitySummaryCard = ({
                     </div>
                     <div className="mt-3 grid grid-cols-3 gap-1.5 text-center">
                       <div className="rounded-lg bg-amber-50 px-1.5 py-1.5">
-                        <p className="text-[9px] font-black uppercase tracking-[0.04em] text-amber-700">Pending</p>
-                        <p className="text-xs font-black text-amber-800">{Math.round(item.pendingAcres)} ac</p>
+                        <p className="text-[9px] font-black uppercase tracking-[0.04em] text-amber-700">Planned</p>
+                        <p className="text-xs font-black text-amber-800">{Math.round(item.totalAcres)} ac</p>
                       </div>
                       <div className="rounded-lg bg-emerald-50 px-1.5 py-1.5">
-                        <p className="text-[9px] font-black uppercase tracking-[0.04em] text-emerald-700">Done</p>
+                        <p className="text-[9px] font-black uppercase tracking-[0.04em] text-emerald-700">Work Done</p>
                         <p className="text-xs font-black text-emerald-800">{Math.round(item.completedAcres)} ac</p>
                       </div>
                       <div className="rounded-lg bg-slate-200/70 px-1.5 py-1.5">
-                        <p className="text-[9px] font-black uppercase tracking-[0.04em] text-slate-600">Unalloc.</p>
-                        <p className="text-xs font-black text-slate-700">{Math.round(item.unallocatedAcres)} ac</p>
+                        <p className="text-[9px] font-black uppercase tracking-[0.04em] text-slate-600">Balance</p>
+                        <p className="text-xs font-black text-slate-700">{Math.round(Math.max(0, item.totalAcres - item.completedAcres))} ac</p>
                       </div>
                     </div>
                   </div>
@@ -1699,10 +1699,12 @@ const DIMMED_COLOR = "#94a3b8";
 
 const FarmPlotPreviewCard = ({
   farm,
+  ownerName,
   selectedCrop,
   cropIndex,
 }: {
   farm: Farm;
+  ownerName?: string;
   selectedCrop: string | null;
   cropIndex: Map<string, number>;
 }) => {
@@ -1721,6 +1723,7 @@ const FarmPlotPreviewCard = ({
     : normalizeCropKey(farm.crop_type) === selectedCrop
       ? 1
       : 0;
+  const cropNames = Array.from(new Set((hasPlots ? plots.map((plot) => plot.crop_type || farm.crop_type) : [farm.crop_type]).map((crop) => cropLabel(normalizeCropKey(crop))))).filter(Boolean);
 
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -1750,7 +1753,7 @@ const FarmPlotPreviewCard = ({
             {landCoords.length >= 3 && (
               <Polygon
                 positions={landCoords}
-                pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: hasPlots ? 0.06 : 0.2, weight: 2 }}
+                pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", fillOpacity: 0.28, weight: 3 }}
               />
             )}
             {hasPlots &&
@@ -1772,7 +1775,9 @@ const FarmPlotPreviewCard = ({
         )}
       </div>
       <div className="p-3">
-        <p className="truncate text-xs font-black text-slate-950">{farm.farm_id}</p>
+        <p className="truncate text-xs font-black text-slate-950">{ownerName || "Land owner not recorded"}</p>
+        <p className="mt-1 truncate font-mono text-[11px] font-bold text-slate-600">Land ID: {farm.farm_id}</p>
+        <p className="mt-0.5 truncate text-[11px] font-bold text-emerald-700">Crop: {cropNames.join(", ") || "Unspecified"}</p>
         <p className="mt-0.5 text-[11px] font-bold text-slate-500">
           {hasPlots ? `${plots.length} plots` : "No plots marked"} · {Math.round(farm.area ?? 0)} ac
           {selectedCrop && ` · ${matchingCount} matching`}
@@ -1784,12 +1789,14 @@ const FarmPlotPreviewCard = ({
 
 const PlotMapViewerCard = ({
   farms,
+  farmerNames,
   units,
   loading,
   selectedCrop,
   onClear,
 }: {
   farms: Farm[];
+  farmerNames: Record<string, string>;
   units: CropPlotUnit[];
   loading: boolean;
   selectedCrop: string | null;
@@ -1842,7 +1849,7 @@ const PlotMapViewerCard = ({
       ) : (
         <div className="grid max-h-[420px] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 xl:grid-cols-3">
           {visibleFarms.map((farm) => (
-            <FarmPlotPreviewCard key={farm.farm_id} farm={farm} selectedCrop={selectedCrop} cropIndex={cropIndex} />
+            <FarmPlotPreviewCard key={farm.farm_id} farm={farm} ownerName={farmerNames[farm.farm_id]} selectedCrop={selectedCrop} cropIndex={cropIndex} />
           ))}
         </div>
       )}
@@ -1935,7 +1942,7 @@ const LeadMapThumbnail = ({ coordinates }: { coordinates?: { lat: number; lng: n
         attributionControl={false}
       >
         <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={19} />
-        <Polygon positions={coords} pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: 0.25, weight: 2 }} />
+        <Polygon positions={coords} pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", fillOpacity: 0.28, weight: 3 }} />
         <FitBounds coords={coords} />
       </MapContainer>
     </div>
@@ -2183,7 +2190,7 @@ const LandMappingThumbnail = ({ farm }: { farm: Farm }) => {
       >
         <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={19} />
         {landCoords.length >= 3 && (
-          <Polygon positions={landCoords} pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: hasPlots ? 0.06 : 0.2, weight: 2 }} />
+          <Polygon positions={landCoords} pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", fillOpacity: 0.28, weight: 3 }} />
         )}
         {hasPlots &&
           plots.map((plot, index) => {
@@ -2465,7 +2472,7 @@ const TaskPlotMapThumbnail = ({ farm, plotIds }: { farm?: Farm; plotIds: string[
       >
         <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={19} />
         {landCoords.length >= 3 && (
-          <Polygon positions={landCoords} pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: hasPlots ? 0.06 : 0.2, weight: 2 }} />
+          <Polygon positions={landCoords} pathOptions={{ color: "var(--land-boundary-color, #fde047)", fillColor: "var(--land-boundary-fill, #fef9c3)", fillOpacity: 0.28, weight: 3 }} />
         )}
         {hasPlots &&
           plots.map((plot, index) => {
@@ -2608,6 +2615,7 @@ const TaskTimelineSection = ({
 const CultivationTrackerView = ({
   onOpenModule,
   farms,
+  farmerNames,
   farmsLoading,
   clusterSummaries = [],
   clusterLoading = false,
@@ -2617,6 +2625,7 @@ const CultivationTrackerView = ({
 }: {
   onOpenModule: (route: string) => void;
   farms: Farm[];
+  farmerNames: Record<string, string>;
   farmsLoading: boolean;
   clusterSummaries?: ClusterCropSummary[];
   clusterLoading?: boolean;
@@ -2690,7 +2699,7 @@ const CultivationTrackerView = ({
         clusterSummaries={clusterSummaries}
         clusterLoading={clusterLoading}
       />
-      <PlotMapViewerCard farms={farms} units={cropUnits} loading={farmsLoading} selectedCrop={selectedCrop} onClear={() => setSelectedCrop(null)} />
+      <PlotMapViewerCard farms={farms} farmerNames={farmerNames} units={cropUnits} loading={farmsLoading} selectedCrop={selectedCrop} onClear={() => setSelectedCrop(null)} />
     </section>
 
     <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -2937,6 +2946,7 @@ const CeosDesk = () => {
           <CultivationTrackerView
             onOpenModule={(route) => navigate(route)}
             farms={farms}
+            farmerNames={farmerNames}
             farmsLoading={farmsLoading}
             clusterSummaries={clusterSummaries}
             clusterLoading={clusterLoading}

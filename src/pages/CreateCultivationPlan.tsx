@@ -354,7 +354,7 @@ const InfoBox: React.FC<InfoBoxProps> = ({
         {selectedDate && (
           <div className="text-sm">
             <span className="text-muted-foreground">Start Date (Day 0):</span>
-            <p className="font-medium">{format(selectedDate, 'dd MMM yyyy')}</p>
+            <p className="font-medium">{format(selectedDate, 'dd-MM-yyyy')}</p>
           </div>
         )}
 
@@ -1309,7 +1309,7 @@ const CreateCultivationPlan: React.FC = () => {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-foreground">Cultivation Plan</h1>
-          {day0 && <p className="text-muted-foreground mt-1 text-sm">Start Date: {format(day0, 'PPP')}</p>}
+          {day0 && <p className="text-muted-foreground mt-1 text-sm">Start Date: {format(day0, 'dd-MM-yyyy')}</p>}
         </div>
         <div className="flex items-center gap-3">
           {(day0 || Object.keys(mappedByCard).length > 0) && (
