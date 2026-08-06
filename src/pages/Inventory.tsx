@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, Fragment } from 'react';
 import {
   Plus,
   Search,
@@ -27,7 +27,15 @@ import {
   Send,
   Info,
   Printer,
+  Split,
+  ArrowDown,
+  ArrowRight,
+  Map as MapIcon,
+  FileText,
 } from 'lucide-react';
+import { MapContainer, TileLayer, Polygon, Marker, Polyline, Tooltip as LeafletTooltip, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -46,11 +54,19 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import {
   createInventoryApproval,
+  InventoryApprovalSignature,
   InventoryTransferApproval,
   readInventoryApprovals,
   subscribeToInventoryApprovals,
   updateInventoryApproval,
 } from '@/lib/inventoryApprovalStore';
+import { SignatureBox } from '@/components/inventory/SignatureBox';
+import {
+  TransferSlipDocument,
+  transferSlipDataFromApproval,
+  transferSlipDataFromStockTransfer,
+  type StockTransfer,
+} from '@/components/inventory/TransferSlipDocument';
 import logo3f from '@/Assets/3f-logo.png';
 
 // ─────────────────────────────────────────────────────────────
@@ -104,6 +120,10 @@ type StockItem = {
   // Series number like SBR/INV/P2/
   seriesNumber: string;
   transactions: StockTransaction[];
+  // Real per-store quantity + batch breakdown, straight off the backend Inventory
+  // record — the authoritative source for where this item's stock actually sits,
+  // since logistics-approved transfers only ever update this map (not `currentStock`).
+  dissociation?: ItemDissociation;
   fifoList?: {
     stock: number;
     per_unit_cost: number;
@@ -115,6 +135,51 @@ type StockItem = {
     storage_location?: string;
   }[];
 };
+
+type RequestMapFarm = {
+  farm_id: string;
+  crop_type: string;
+  village: string;
+  district: string;
+  block_id: string;
+  land_coordinates: [number, number][];
+};
+
+// ─────────────────────────────────────────────────────────────
+// BLOCK INVENTORY REQUESTS — GET /inventory/get_a_block_inventory_requests
+// returns every pending request project-wide; each one carries a
+// land_wise_item_list mapping items to the specific farms they're needed for.
+// ─────────────────────────────────────────────────────────────
+type BlockLandItem = {
+  farm_id: string;
+  owner_name?: string;
+  product_id: string;
+  item_name: string;
+  quantity: number;
+  unit?: string;
+};
+
+type BlockPendingRequest = {
+  item_list: { equipment_id: string; quantity: number; equipment_name?: string }[];
+  task_id: string;
+  equipment_otp: string | null;
+  task_type: string;
+  land_wise_item_list: BlockLandItem[];
+};
+
+const TASK_TYPE_LABELS: Record<string, string> = {
+  on_demand: 'On-Demand Task',
+  cultivation: 'Cultivation Calendar',
+};
+
+// GET /inventory/get_inventory_item_dissociation/{item_id} — where an item's
+// stock physically sits across warehouses.
+type ItemDissociationEntry = {
+  quantity: number;
+  batches: { per_unit_cost: number; stock: number; po_number: string }[];
+};
+
+type ItemDissociation = Record<string, ItemDissociationEntry>;
 
 // ─────────────────────────────────────────────────────────────
 // MOCK DATA
@@ -225,6 +290,24 @@ const getStockIssueMethodOption = (value?: string) => {
 const getStockIssueMethodLabel = (value?: string) =>
   getStockIssueMethodOption(value)?.label || (value ? String(value) : 'Not Recorded');
 
+const formatSlipDate = (value: string) => {
+  if (!value || value === 'Unknown Date') return 'Unknown Date';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }).format(date);
+};
+
+const ISSUE_SLIP_STATUS_LABEL: Record<StockTransfer['logistics_status'], string> = {
+  pending_vehicle: 'Awaiting Vehicle',
+  pending_approval: 'Awaiting Approval',
+  approved: 'Dispatched',
+};
+const ISSUE_SLIP_STATUS_CLASS: Record<StockTransfer['logistics_status'], string> = {
+  pending_vehicle: 'border-amber-200 bg-amber-50 text-amber-700',
+  pending_approval: 'border-blue-200 bg-blue-50 text-blue-700',
+  approved: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+};
+
 const DEFAULT_CATEGORY_GROUPS: Record<string, string> = {
   Seeds: 'Seeds and Planting Material',
   Fertilizer: 'Fertilisers and Manure',
@@ -244,57 +327,34 @@ const DEFAULT_CATEGORY_GROUPS: Record<string, string> = {
   Others: 'Farm Inputs',
 };
 
+type StoreBlock = { block_id: string; block_name: string };
+
+type StoreLocation = { lat: number; lng: number };
+
+type StoreEntry = { name: string; blocks: StoreBlock[]; location: StoreLocation | null };
+
 type InventoryMasterConfig = {
   inventoryGroups: string[];
   categories: string[];
   categoryGroups: Record<string, string>;
   subCategories: { name: string; category: string }[];
   units: string[];
-  stores: string[];
+  stores: StoreEntry[];
   expenseClassifications: string[];
   inventoryClassifications: string[];
   issueClassifications: string[];
 };
 
-const INVENTORY_MASTER_CONFIG_KEY = 'farm-connect.inventory-master-config.v1';
 const DEFAULT_INVENTORY_MASTER_CONFIG: InventoryMasterConfig = {
   inventoryGroups: INVENTORY_GROUPS,
   categories: CATEGORIES.filter((category) => category !== 'All'),
   categoryGroups: DEFAULT_CATEGORY_GROUPS,
   subCategories: [],
   units: UNITS,
-  stores: INVENTORY_LOCATIONS,
+  stores: [],
   expenseClassifications: EXPENSE_CLASSIFICATIONS,
   inventoryClassifications: INVENTORY_CLASSIFICATIONS,
   issueClassifications: ISSUE_CLASSIFICATIONS,
-};
-
-const readInventoryMasterConfig = (): InventoryMasterConfig => {
-  if (typeof window === 'undefined') return DEFAULT_INVENTORY_MASTER_CONFIG;
-  try {
-    const stored = JSON.parse(window.localStorage.getItem(INVENTORY_MASTER_CONFIG_KEY) || '{}');
-    return {
-      inventoryGroups: Array.isArray(stored.inventoryGroups) ? stored.inventoryGroups : DEFAULT_INVENTORY_MASTER_CONFIG.inventoryGroups,
-      categories: Array.isArray(stored.categories) ? stored.categories : DEFAULT_INVENTORY_MASTER_CONFIG.categories,
-      categoryGroups: stored.categoryGroups && typeof stored.categoryGroups === 'object'
-        ? { ...DEFAULT_CATEGORY_GROUPS, ...stored.categoryGroups }
-        : DEFAULT_INVENTORY_MASTER_CONFIG.categoryGroups,
-      subCategories: Array.isArray(stored.subCategories) ? stored.subCategories : [],
-      units: Array.isArray(stored.units) ? stored.units : DEFAULT_INVENTORY_MASTER_CONFIG.units,
-      stores: Array.isArray(stored.stores) ? stored.stores : DEFAULT_INVENTORY_MASTER_CONFIG.stores,
-      expenseClassifications: Array.isArray(stored.expenseClassifications)
-        ? stored.expenseClassifications
-        : DEFAULT_INVENTORY_MASTER_CONFIG.expenseClassifications,
-      inventoryClassifications: Array.isArray(stored.inventoryClassifications)
-        ? stored.inventoryClassifications
-        : DEFAULT_INVENTORY_MASTER_CONFIG.inventoryClassifications,
-      issueClassifications: Array.isArray(stored.issueClassifications)
-        ? stored.issueClassifications
-        : DEFAULT_INVENTORY_MASTER_CONFIG.issueClassifications,
-    };
-  } catch {
-    return DEFAULT_INVENTORY_MASTER_CONFIG;
-  }
 };
 // Category code map with normalization helper.
 // Keys in the raw map may vary; we'll normalize lookup to handle variants (case, & vs and, plurals).
@@ -484,6 +544,10 @@ const generateTransferSlipNumber = () => {
   return `${prefix}${String(highestSequence + 1).padStart(4, '0')}`;
 };
 
+// SAI Bioresources' fixed letterhead — same as the WCC certificate header.
+const COMPANY_NAME = 'SAI BIORESOURCES PRIVATE LIMITED';
+const COMPANY_ADDRESS = 'Khasra No. 121/1, Kachandur-Dhour Road, Village Jeora (Jeora-Sirsa), Durg, Chhattisgarh – 491001';
+
 const txBadge: Record<StockTransaction['type'], { label: string; color: string }> = {
   incoming: { label: 'Incoming', color: 'bg-green-100 text-green-700' },
   outgoing: { label: 'Outgoing', color: 'bg-red-100 text-red-700' },
@@ -617,6 +681,267 @@ const MasterConfigCard = ({
   );
 };
 
+const CreateStoreDialog = ({
+  open,
+  onOpenChange,
+  onAdd,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onAdd: (name: string, blocks: StoreBlock[], location: StoreLocation) => void;
+}) => {
+  const [draftName, setDraftName] = useState('');
+  const [draftLat, setDraftLat] = useState('');
+  const [draftLng, setDraftLng] = useState('');
+  const [selectedBlocks, setSelectedBlocks] = useState<StoreBlock[]>([]);
+  const [apiBlocks, setApiBlocks] = useState<StoreBlock[]>([]);
+  const [blocksLoading, setBlocksLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    let mounted = true;
+    setBlocksLoading(true);
+    fetch(`${BASE_URL}/farmer_managment/get_blocks`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Network response was not ok');
+        return res.json();
+      })
+      .then((data) => {
+        if (mounted && data && Array.isArray(data.blocks)) {
+          setApiBlocks(data.blocks.map((block: any) => ({
+            block_id: block.block_id,
+            block_name: block.block_name,
+          })));
+        }
+      })
+      .catch(() => {
+        if (mounted) toast.error('Failed to load blocks');
+      })
+      .finally(() => {
+        if (mounted) setBlocksLoading(false);
+      });
+    return () => { mounted = false; };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      setDraftName('');
+      setDraftLat('');
+      setDraftLng('');
+      setSelectedBlocks([]);
+    }
+  }, [open]);
+
+  const toggleBlock = (block: StoreBlock) => {
+    setSelectedBlocks((previous) => (
+      previous.some((entry) => entry.block_id === block.block_id)
+        ? previous.filter((entry) => entry.block_id !== block.block_id)
+        : [...previous, block]
+    ));
+  };
+
+  const createStore = () => {
+    const name = draftName.trim();
+    const lat = Number(draftLat);
+    const lng = Number(draftLng);
+    if (!name) return toast.error('Store name is required');
+    if (!selectedBlocks.length) return toast.error('Select at least one block catering to this store');
+    if (!draftLat.trim() || Number.isNaN(lat) || lat < -90 || lat > 90) return toast.error('Enter a valid latitude (-90 to 90)');
+    if (!draftLng.trim() || Number.isNaN(lng) || lng < -180 || lng > 180) return toast.error('Enter a valid longitude (-180 to 180)');
+    onAdd(name, selectedBlocks, { lat, lng });
+    onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md rounded-2xl p-0">
+        <DialogHeader className="border-b border-slate-100 p-5">
+          <DialogTitle className="text-base font-bold text-slate-950">Create Store</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 p-5">
+          <label className="block">
+            <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+              Store Name
+            </span>
+            <Input
+              value={draftName}
+              onChange={(event) => setDraftName(event.target.value)}
+              placeholder="Enter store name"
+              className="h-10 rounded-lg border-slate-200 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+              Blocks Catering
+            </span>
+            {blocksLoading ? (
+              <div className="text-xs font-semibold text-slate-400">Loading blocks…</div>
+            ) : apiBlocks.length === 0 ? (
+              <div className="text-xs font-semibold text-slate-400">No blocks found</div>
+            ) : (
+              <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-slate-200 p-2">
+                {apiBlocks.map((block) => {
+                  const active = selectedBlocks.some((entry) => entry.block_id === block.block_id);
+                  return (
+                    <button
+                      key={block.block_id}
+                      type="button"
+                      onClick={() => toggleBlock(block)}
+                      className={cn(
+                        'whitespace-nowrap rounded-lg border px-2.5 py-1.5 text-[11px] font-bold transition-colors',
+                        active
+                          ? 'border-[#0D3A35] bg-[#0D3A35] text-white'
+                          : 'border-slate-200 bg-white text-slate-600 hover:border-[#0D3A35]/30 hover:bg-[#0D3A35]/5 hover:text-[#0D3A35]',
+                      )}
+                    >
+                      {block.block_name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                Latitude
+              </span>
+              <Input
+                type="number"
+                step="any"
+                value={draftLat}
+                onChange={(event) => setDraftLat(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    createStore();
+                  }
+                }}
+                placeholder="e.g. 21.2514"
+                className="h-10 rounded-lg border-slate-200 text-sm"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                Longitude
+              </span>
+              <Input
+                type="number"
+                step="any"
+                value={draftLng}
+                onChange={(event) => setDraftLng(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    createStore();
+                  }
+                }}
+                placeholder="e.g. 81.6296"
+                className="h-10 rounded-lg border-slate-200 text-sm"
+              />
+            </label>
+          </div>
+        </div>
+        <DialogFooter className="border-t border-slate-100 p-4">
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            className="flex h-10 items-center justify-center rounded-lg border border-slate-200 px-4 text-xs font-bold text-slate-600 transition hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={createStore}
+            className="flex h-10 items-center gap-1.5 rounded-lg bg-[#0D3A35] px-4 text-xs font-bold text-white transition hover:bg-[#092e2a]"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Create
+          </button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+const StoreConfigCard = ({
+  values,
+  onAdd,
+  onRemove,
+}: {
+  values: StoreEntry[];
+  onAdd: (name: string, blocks: StoreBlock[], location: string) => void;
+  onRemove: (name: string) => void;
+}) => {
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  return (
+    <section className="flex min-h-[320px] flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+      <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50/70 p-5">
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35]">
+            <Settings className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 className="text-base font-bold text-slate-950">Stores</h2>
+            <p className="mt-1 text-xs font-medium leading-relaxed text-slate-500">
+              Create central warehouses, sub-stores, and storage locations.
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setDialogOpen(true)}
+          className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg bg-[#0D3A35] px-3 text-xs font-bold text-white transition hover:bg-[#092e2a]"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Create Store
+        </button>
+      </div>
+
+      <div className="flex-1 p-4">
+        {values.length === 0 ? (
+          <div className="flex h-full min-h-24 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 text-center text-xs font-semibold text-slate-400">
+            No entries created yet
+          </div>
+        ) : (
+          <div className="flex max-h-56 flex-col gap-2 overflow-y-auto pr-1">
+            {values.map((store) => (
+              <div
+                key={store.name}
+                className="flex items-start justify-between gap-2 rounded-lg border border-[#0D3A35]/10 bg-[#0D3A35]/5 p-2.5"
+              >
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-[#0D3A35]">{store.name}</span>
+                  <p className="mt-0.5 flex items-center gap-1 text-[10px] font-semibold text-slate-500">
+                    <MapIcon className="h-3 w-3 shrink-0" />
+                    {store.location ? `${store.location.lat}, ${store.location.lng}` : 'No location set'}
+                  </p>
+                  <p className="mt-0.5 text-[10px] font-semibold text-slate-400">
+                    {store.blocks.length
+                      ? store.blocks.map((block) => block.block_name).join(', ')
+                      : 'No blocks assigned'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onRemove(store.name)}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-400 transition hover:bg-red-50 hover:text-red-600"
+                  aria-label={`Remove ${store.name}`}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <CreateStoreDialog open={dialogOpen} onOpenChange={setDialogOpen} onAdd={onAdd} />
+    </section>
+  );
+};
+
 const formatTransferDate = (value?: string, includeTime = false) => {
   if (!value) return '—';
   const date = new Date(value);
@@ -661,106 +986,7 @@ const TransferSlipDialog = ({
 
         <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[1.06fr_0.94fr]">
           <section className="min-h-0 overflow-y-auto bg-slate-200/70 p-5 sm:p-7">
-            <div className="mx-auto min-h-[720px] w-full max-w-[680px] border border-slate-300 bg-white p-6 text-[10px] text-slate-800 shadow-[0_18px_50px_rgba(15,23,42,0.15)] sm:p-8">
-              <div className="border-b-2 border-[#0D3A35] pb-4 text-center">
-                <img src={logo3f} alt="Sai Bioresources" className="mx-auto h-14 w-auto" />
-                <h2 className="mt-2 text-base font-black tracking-wide text-slate-950">SAI BIORESOURCES PRIVATE LIMITED</h2>
-                <p className="mx-auto mt-1 max-w-xl leading-relaxed text-slate-500">
-                  Khasra No. 121/1, Kachandur-Dhour Road, Village Jeora, Durg, Chhattisgarh – 491001
-                </p>
-              </div>
-
-              <div className="mt-3 bg-[#0D3A35] py-2 text-center text-xs font-black tracking-[0.15em] text-white">
-                STOCK TRANSFER SLIP
-              </div>
-              <div className="grid grid-cols-3 border border-t-0 border-slate-300">
-                {[
-                  ['Transfer Slip No.', transfer.transferSlipNumber],
-                  ['Transfer Date', formatTransferDate(transfer.transferDate)],
-                  ['Status', record.status.toUpperCase()],
-                ].map(([label, value]) => (
-                  <div key={label} className="border-r border-slate-300 p-2 last:border-r-0">
-                    <p className="text-[8px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
-                    <p className="mt-1 font-black text-slate-800">{value}</p>
-                  </div>
-                ))}
-              </div>
-
-              {[
-                {
-                  title: 'Store Transfer Details',
-                  rows: [
-                    ['From Store', transfer.sourceStore],
-                    ['Destination Store', transfer.destinationStore],
-                    ['Expected Arrival', formatTransferDate(transfer.expectedArrival, true)],
-                    ['Prepared By', record.preparedBy],
-                  ],
-                },
-                {
-                  title: 'Stock Particulars',
-                  rows: [
-                    ['Item Code', transfer.itemCode || '—'],
-                    ['Item', transfer.itemName],
-                    ['Category', transfer.category],
-                    ['Transfer Quantity', `${transfer.quantity.toLocaleString('en-IN')} ${transfer.unit}`],
-                    ['Available Stock', `${transfer.availableStock.toLocaleString('en-IN')} ${transfer.unit}`],
-                  ],
-                },
-                {
-                  title: 'Transport Details',
-                  rows: [
-                    ['Vehicle Number', transfer.vehicleNumber || '—'],
-                    ['Vehicle Type', transfer.vehicleType || '—'],
-                    ['Make / Model', [transfer.vehicleMake, transfer.vehicleModel].filter(Boolean).join(' ') || '—'],
-                    ['Driver', transfer.driverName || '—'],
-                    ['Driver Contact', transfer.driverContact || '—'],
-                  ],
-                },
-                {
-                  title: 'Approval Details',
-                  rows: [
-                    ['Assigned Approver', record.approverName],
-                    ['Designation', record.approverDesignation],
-                    ['Approval Date', formatTransferDate(record.approvedAt, true)],
-                    ['Approval ID', record.id],
-                  ],
-                },
-              ].map((section) => (
-                <div key={section.title} className="mt-3 overflow-hidden border border-slate-300">
-                  <div className="border-b border-slate-300 bg-slate-100 px-2 py-1.5 text-[9px] font-black uppercase tracking-wider text-slate-600">
-                    {section.title}
-                  </div>
-                  <div className="grid grid-cols-2">
-                    {section.rows.map(([label, value]) => (
-                      <div key={label} className="flex min-w-0 justify-between gap-3 border-b border-r border-slate-200 p-2">
-                        <span className="font-semibold text-slate-500">{label}</span>
-                        <strong className="break-words text-right">{value}</strong>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-
-              <div className="mt-3 overflow-hidden border border-slate-300">
-                <div className="border-b border-slate-300 bg-slate-100 px-2 py-1.5 text-[9px] font-black uppercase tracking-wider text-slate-600">
-                  Remarks / Handling Instructions
-                </div>
-                <p className="min-h-12 p-2 leading-relaxed text-slate-600">{transfer.remarks || 'No additional remarks'}</p>
-              </div>
-
-              <div className="mt-8 grid grid-cols-4 gap-2">
-                {['Prepared By', 'Store Keeper', 'Approved By', 'Received By'].map((label) => (
-                  <div key={label} className="border border-slate-300 px-2 pb-2 pt-10 text-center font-bold">
-                    {label}
-                    {label === 'Approved By' && record.digitalSignature && (
-                      <span className="mt-1 block text-[7px] font-semibold leading-tight text-emerald-700">
-                        {record.digitalSignature.signature}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
+            <TransferSlipDocument data={transferSlipDataFromApproval(record)} />
           </section>
 
           <aside className="min-h-0 overflow-y-auto border-l border-slate-200 bg-white">
@@ -890,6 +1116,93 @@ const TransferSlipDialog = ({
   );
 };
 
+// Issue Slip Directory — every stock transfer slip ever created (GET
+// /inventory/get_stock_transfers), grouped by creation date. Picking one shows
+// the read-only slip via the same TransferSlipDocument used everywhere else.
+const IssueSlipDirectoryDialog = ({
+  open,
+  onOpenChange,
+  loading,
+  groupedByDate,
+  selectedSlip,
+  onSelectSlip,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  loading: boolean;
+  groupedByDate: (readonly [string, StockTransfer[]])[];
+  selectedSlip: StockTransfer | null;
+  onSelectSlip: (transferId: string | null) => void;
+}) => (
+  <Dialog open={open} onOpenChange={(nextOpen) => { onOpenChange(nextOpen); if (!nextOpen) onSelectSlip(null); }}>
+    <DialogContent className="flex max-h-[90vh] max-w-2xl flex-col gap-0 overflow-hidden rounded-2xl border-0 bg-slate-100 p-0">
+      <DialogHeader className="border-b border-slate-200 bg-white px-6 py-4">
+        <DialogTitle className="flex items-center gap-2 text-base font-bold text-slate-950">
+          {selectedSlip && (
+            <button
+              type="button"
+              onClick={() => onSelectSlip(null)}
+              className="mr-1 rounded-full p-1 text-slate-500 hover:bg-slate-100"
+            >
+              <ArrowDown className="h-4 w-4 rotate-90" />
+            </button>
+          )}
+          <FileText className="h-4 w-4 text-[#0D3A35]" />
+          {selectedSlip ? selectedSlip.transfer_slip_number : 'Issue Slip Directory'}
+        </DialogTitle>
+      </DialogHeader>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {selectedSlip ? (
+          <div className="p-5">
+            <TransferSlipDocument data={transferSlipDataFromStockTransfer(selectedSlip)} />
+          </div>
+        ) : loading ? (
+          <div className="flex h-40 items-center justify-center text-sm font-semibold text-slate-400">
+            Loading issue slips…
+          </div>
+        ) : groupedByDate.length === 0 ? (
+          <div className="flex h-40 items-center justify-center text-sm font-semibold text-slate-400">
+            No issue slips created yet
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-200">
+            {groupedByDate.map(([date, slips]) => (
+              <div key={date} className="px-5 py-4">
+                <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-slate-400">
+                  {formatSlipDate(date)}
+                </p>
+                <div className="space-y-2">
+                  {slips.map((slip) => (
+                    <button
+                      key={slip.transfer_id}
+                      type="button"
+                      onClick={() => onSelectSlip(slip.transfer_id)}
+                      className="flex w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left shadow-[0_6px_18px_rgba(15,23,42,0.04)] transition hover:border-[#0D3A35]/30"
+                    >
+                      <div>
+                        <p className="text-sm font-bold text-slate-950">{slip.transfer_slip_number}</p>
+                        <p className="mt-0.5 text-xs font-medium text-slate-500">
+                          {slip.items.length === 1
+                            ? `${slip.items[0].item_name} · ${slip.items[0].quantity.toLocaleString('en-IN')} ${slip.items[0].unit}`
+                            : `${slip.items.length} items`} · {slip.source_store} → {slip.destination_store}
+                        </p>
+                      </div>
+                      <span className={cn('shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold', ISSUE_SLIP_STATUS_CLASS[slip.logistics_status])}>
+                        {ISSUE_SLIP_STATUS_LABEL[slip.logistics_status]}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </DialogContent>
+  </Dialog>
+);
+
 // ─────────────────────────────────────────────────────────────
 // MAIN PAGE
 // ─────────────────────────────────────────────────────────────
@@ -897,14 +1210,54 @@ const Inventory = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [items, setItems] = useState<StockItem[]>(initialItems);
-  const [masterConfig, setMasterConfig] = useState<InventoryMasterConfig>(readInventoryMasterConfig);
-  const [activeInventoryTab, setActiveInventoryTab] = useState<'dashboard' | 'central-store' | 'sub-store' | 'configure'>('dashboard');
+  const [masterConfig, setMasterConfig] = useState<InventoryMasterConfig>(DEFAULT_INVENTORY_MASTER_CONFIG);
+  const [masterConfigLoaded, setMasterConfigLoaded] = useState(false);
+  const [activeInventoryTab, setActiveInventoryTab] = useState<'dashboard' | 'central-store' | 'sub-store' | 'inventory-request' | 'configure'>('dashboard');
   const [centralStoreView, setCentralStoreView] = useState<'stock' | 'transfers'>('stock');
   const [transferApprovals, setTransferApprovals] = useState<InventoryTransferApproval[]>(readInventoryApprovals);
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
   const [activeSubStore, setActiveSubStore] = useState('All Locations');
   const [selectedTransferId, setSelectedTransferId] = useState<string | null>(null);
+
+  // inventory request (farm map + from/to warehouse stock transfer)
+  const [requestFarms, setRequestFarms] = useState<RequestMapFarm[]>([]);
+  const [farmsLoading, setFarmsLoading] = useState(false);
+  const [farmsLoaded, setFarmsLoaded] = useState(false);
+  const [selectedRequestStoreName, setSelectedRequestStoreName] = useState('');
+  const [blockRequests, setBlockRequests] = useState<BlockPendingRequest[]>([]);
+  const [blockRequestsLoading, setBlockRequestsLoading] = useState(false);
+  const [blockRequestsLoaded, setBlockRequestsLoaded] = useState(false);
+  const [issueSlips, setIssueSlips] = useState<StockTransfer[]>([]);
+  const [issueSlipsLoading, setIssueSlipsLoading] = useState(false);
+  const [issueSlipsLoaded, setIssueSlipsLoaded] = useState(false);
+  const [issueSlipDirectoryOpen, setIssueSlipDirectoryOpen] = useState(false);
+  const [selectedIssueSlipId, setSelectedIssueSlipId] = useState<string | null>(null);
+  const [fromStore, setFromStore] = useState('');
+  const [toStore, setToStore] = useState('');
+  const [transferLineItems, setTransferLineItems] = useState<{ itemId: string; quantity: string }[]>([{ itemId: '', quantity: '' }]);
+  const [transferDissociationByItem, setTransferDissociationByItem] = useState<Record<string, ItemDissociation>>({});
+  const [transferDissociationLoading, setTransferDissociationLoading] = useState(false);
+  const [transferPrefill, setTransferPrefill] = useState<{ items: { itemId: string; quantity: string }[]; source: string; destination: string } | null>(null);
+
+  const updateTransferLineItem = (index: number, patch: Partial<{ itemId: string; quantity: string }>) => {
+    setTransferLineItems((previous) => previous.map((line, i) => (i === index ? { ...line, ...patch } : line)));
+    // Changing the first (primary) item invalidates whichever From/To warehouses were
+    // already picked for the previous item's stock — later rows just add to the same slip.
+    if (index === 0 && patch.itemId !== undefined) {
+      setFromStore('');
+      setToStore('');
+    }
+  };
+  const addTransferLineItem = () => {
+    const usedIds = new Set(transferLineItems.map((line) => line.itemId));
+    const nextItem = items.find((item) => !usedIds.has(item.id));
+    if (!nextItem) return toast.error('Every available item is already added');
+    setTransferLineItems((previous) => [...previous, { itemId: nextItem.id, quantity: '' }]);
+  };
+  const removeTransferLineItem = (index: number) => {
+    setTransferLineItems((previous) => previous.filter((_, i) => i !== index));
+  };
 
   // modals
   const [addOpen, setAddOpen] = useState(false);
@@ -963,6 +1316,16 @@ const Inventory = () => {
               })
             : [];
 
+          const rawDissociation = it?.dissociation && typeof it.dissociation === 'object' ? it.dissociation : {};
+          const dissociation: ItemDissociation = {};
+          Object.entries(rawDissociation).forEach(([storeName, entry]: [string, any]) => {
+            const methodKey = Object.keys(entry || {}).find((key) => key !== 'quantity');
+            dissociation[storeName] = {
+              quantity: Number(entry?.quantity) || 0,
+              batches: methodKey && Array.isArray(entry[methodKey]) ? entry[methodKey] : [],
+            };
+          });
+
           return {
             id: String(it?.Invent_id || it?.new_item_code || `inv_${idx}`),
             name: String(it?.item_name || ''),
@@ -993,6 +1356,7 @@ const Inventory = () => {
             vendors: [],
             seriesNumber: '',
             transactions: stockHistory,
+            dissociation,
             fifoList: Array.isArray(it?.fifo_list)
               ? it.fifo_list.map((e: any) => ({
                   stock: Number(e?.stock) || 0,
@@ -1035,9 +1399,54 @@ const Inventory = () => {
     fetchOpenLedgers();
   }, []);
 
+  // Load the master config from the backend once on mount — replaces the old localStorage read.
   useEffect(() => {
-    window.localStorage.setItem(INVENTORY_MASTER_CONFIG_KEY, JSON.stringify(masterConfig));
-  }, [masterConfig]);
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/inventory/get_inventory_config`);
+        const data = await res.json().catch(() => null);
+        if (mounted && data && typeof data === 'object') {
+          setMasterConfig({
+            inventoryGroups: Array.isArray(data.inventoryGroups) ? data.inventoryGroups : DEFAULT_INVENTORY_MASTER_CONFIG.inventoryGroups,
+            categories: Array.isArray(data.categories) ? data.categories : DEFAULT_INVENTORY_MASTER_CONFIG.categories,
+            categoryGroups: data.categoryGroups && typeof data.categoryGroups === 'object' ? data.categoryGroups : DEFAULT_INVENTORY_MASTER_CONFIG.categoryGroups,
+            subCategories: Array.isArray(data.subCategories) ? data.subCategories : [],
+            units: Array.isArray(data.units) ? data.units : DEFAULT_INVENTORY_MASTER_CONFIG.units,
+            stores: Array.isArray(data.stores) && data.stores.every((entry: unknown) => typeof entry === 'object' && entry !== null)
+              ? data.stores
+              : DEFAULT_INVENTORY_MASTER_CONFIG.stores,
+            expenseClassifications: Array.isArray(data.expenseClassifications) ? data.expenseClassifications : DEFAULT_INVENTORY_MASTER_CONFIG.expenseClassifications,
+            inventoryClassifications: Array.isArray(data.inventoryClassifications) ? data.inventoryClassifications : DEFAULT_INVENTORY_MASTER_CONFIG.inventoryClassifications,
+            issueClassifications: Array.isArray(data.issueClassifications) ? data.issueClassifications : DEFAULT_INVENTORY_MASTER_CONFIG.issueClassifications,
+          });
+        }
+      } catch {
+        toast.error('Failed to load inventory configuration');
+      } finally {
+        if (mounted) setMasterConfigLoaded(true);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  // Save on every change — but only after the initial load above has completed, so we don't
+  // immediately overwrite the server's config with local defaults before the GET resolves.
+  useEffect(() => {
+    if (!masterConfigLoaded) return;
+    (async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/inventory/save_inventory_config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(masterConfig),
+        });
+        if (!res.ok) throw new Error('Failed to save');
+      } catch {
+        toast.error('Failed to save inventory configuration');
+      }
+    })();
+  }, [masterConfig, masterConfigLoaded]);
 
   useEffect(() => {
     const refreshTransfers = () => setTransferApprovals(readInventoryApprovals());
@@ -1050,23 +1459,19 @@ const Inventory = () => {
   );
 
   const centralStoreItems = useMemo(() => items.map((item) => {
-    const postedTransfers = approvedTransfers.filter((approval) => (
-      approval.transfer.itemId === item.id
-      || (approval.transfer.itemCode && approval.transfer.itemCode === item.sku)
-    ));
-    const transferredQuantity = postedTransfers.reduce(
-      (total, approval) => total + approval.transfer.quantity,
-      0,
-    );
+    const matchingLines = approvedTransfers.flatMap((approval) => approval.transfer.items
+      .filter((line) => line.itemId === item.id || (line.itemCode && line.itemCode === item.sku))
+      .map((line) => ({ approval, line })));
+    const transferredQuantity = matchingLines.reduce((total, { line }) => total + line.quantity, 0);
     if (transferredQuantity === 0) return item;
     return {
       ...item,
       currentStock: Math.max(0, item.currentStock - transferredQuantity),
       transactions: [
-        ...postedTransfers.map((approval): StockTransaction => ({
-          id: `transfer-out-${approval.id}`,
+        ...matchingLines.map(({ approval, line }): StockTransaction => ({
+          id: `transfer-out-${approval.id}-${line.itemId}`,
           type: 'outgoing',
-          qty: approval.transfer.quantity,
+          qty: line.quantity,
           date: approval.approvedAt?.slice(0, 10) || approval.transfer.transferDate,
           note: `${approval.transfer.transferSlipNumber} · Transfer to ${approval.transfer.destinationStore}`,
           by: approval.digitalSignature?.signerName || approval.approverName,
@@ -1076,62 +1481,29 @@ const Inventory = () => {
     };
   }), [approvedTransfers, items]);
 
+  // Store-wise breakdown straight from each item's real `dissociation` map — the
+  // only place that's actually updated once a Logistics-approved transfer physically
+  // moves stock (see LogisticsRequest.tsx's approveLogistics). One row per store the
+  // item currently has stock in, other than its own home/central location.
   const subStoreItems = useMemo(() => {
-    const grouped = new Map<string, StockItem>();
-    approvedTransfers.forEach((approval) => {
-      const transfer = approval.transfer;
-      const sourceItem = items.find((item) => (
-        item.id === transfer.itemId
-        || (transfer.itemCode && item.sku === transfer.itemCode)
-      ));
-      const key = `${transfer.destinationStore}::${transfer.itemId || transfer.itemCode}`;
-      const incomingTransaction: StockTransaction = {
-        id: `transfer-in-${approval.id}`,
-        type: 'incoming',
-        qty: transfer.quantity,
-        date: approval.approvedAt?.slice(0, 10) || transfer.transferDate,
-        note: `${transfer.transferSlipNumber} · Received from ${transfer.sourceStore}`,
-        by: approval.digitalSignature?.signerName || approval.approverName,
-      };
-      const existing = grouped.get(key);
-      if (existing) {
-        grouped.set(key, {
-          ...existing,
-          currentStock: existing.currentStock + transfer.quantity,
-          transactions: [incomingTransaction, ...existing.transactions],
+    const rows: StockItem[] = [];
+    items.forEach((item) => {
+      Object.entries(item.dissociation || {}).forEach(([storeName, entry]) => {
+        if (!storeName || storeName === item.location || entry.quantity <= 0) return;
+        rows.push({
+          ...item,
+          id: `sub-store-${storeName}::${item.id}`,
+          currentStock: entry.quantity,
+          location: storeName,
+          fifoList: entry.batches,
+          transactions: [],
         });
-        return;
-      }
-      grouped.set(key, {
-        id: `sub-store-${key}`,
-        name: transfer.itemName,
-        category: transfer.category || sourceItem?.category || 'Others',
-        sku: transfer.itemCode || sourceItem?.sku || '',
-        unit: transfer.unit || sourceItem?.unit || '',
-        currentStock: transfer.quantity,
-        stockInPipeline: 0,
-        minStock: 0,
-        inventoryGroup: sourceItem?.inventoryGroup || '',
-        subCategory: sourceItem?.subCategory || '',
-        expenseClassification: sourceItem?.expenseClassification || '',
-        inventoryClassification: sourceItem?.inventoryClassification || '',
-        issueClassification: sourceItem?.issueClassification || '',
-        stockIssueMethod: sourceItem?.stockIssueMethod || '',
-        packingSize: sourceItem?.packingSize || '',
-        shelf: sourceItem?.shelf || '',
-        imageUrl: sourceItem?.imageUrl || '',
-        location: transfer.destinationStore,
-        description: sourceItem?.description || `Stock received through ${transfer.transferSlipNumber}`,
-        vendors: sourceItem?.vendors || [],
-        seriesNumber: sourceItem?.seriesNumber || '',
-        transactions: [incomingTransaction],
-        fifoList: [],
       });
     });
-    return Array.from(grouped.values()).sort((a, b) => (
+    return rows.sort((a, b) => (
       a.location.localeCompare(b.location) || a.name.localeCompare(b.name)
     ));
-  }, [approvedTransfers, items]);
+  }, [items]);
 
   // ── Low stock derived list ───────────────────────────────
   const lowStockItems = useMemo(
@@ -1193,7 +1565,7 @@ const Inventory = () => {
 
   const subStoreLocations = useMemo(
     () => Array.from(new Set([
-      ...masterConfig.stores,
+      ...masterConfig.stores.map((store) => store.name),
       ...subStoreItems.map((item) => item.location.trim()).filter(Boolean),
     ])).sort((a, b) => a.localeCompare(b)),
     [masterConfig.stores, subStoreItems],
@@ -1206,7 +1578,7 @@ const Inventory = () => {
 
   const availableStores = useMemo(
     () => Array.from(new Set([
-      ...masterConfig.stores,
+      ...masterConfig.stores.map((store) => store.name),
       ...items.map((item) => item.location.trim()).filter(Boolean),
       ...subStoreLocations,
     ])),
@@ -1226,8 +1598,8 @@ const Inventory = () => {
       if (!query) return true;
       return [
         approval.transfer.transferSlipNumber,
-        approval.transfer.itemName,
-        approval.transfer.itemCode,
+        ...approval.transfer.items.map((line) => line.itemName),
+        ...approval.transfer.items.map((line) => line.itemCode),
         approval.transfer.destinationStore,
         approval.approverName,
         approval.status,
@@ -1240,6 +1612,161 @@ const Inventory = () => {
     [transferApprovals],
   );
 
+  // ── Inventory Request (farm map + from/to warehouse transfer) ──
+  useEffect(() => {
+    if (activeInventoryTab !== 'inventory-request' || farmsLoaded) return;
+    setFarmsLoading(true);
+    fetch(`${BASE_URL}/farmer_managment/get_farms`)
+      .then((res) => res.json())
+      .then((data: any) => {
+        if (!Array.isArray(data?.farms)) throw new Error('Unexpected response');
+        setRequestFarms(data.farms.map((farm: any) => ({
+          farm_id: String(farm?.farm_id ?? ''),
+          crop_type: String(farm?.crop_type ?? ''),
+          village: String(farm?.land_data?.village ?? ''),
+          district: String(farm?.land_data?.district ?? ''),
+          block_id: String(farm?.block_id ?? ''),
+          land_coordinates: Array.isArray(farm?.land_data?.land_coordinates) ? farm.land_data.land_coordinates : [],
+        })));
+      })
+      .catch(() => toast.error('Failed to load farms for map view'))
+      .finally(() => {
+        setFarmsLoading(false);
+        setFarmsLoaded(true);
+      });
+  }, [activeInventoryTab, farmsLoaded]);
+
+  useEffect(() => {
+    if (activeInventoryTab !== 'inventory-request' || blockRequestsLoaded) return;
+    setBlockRequestsLoading(true);
+    fetch(`${BASE_URL}/inventory/get_a_block_inventory_requests`)
+      .then((res) => res.json())
+      .then((data: any) => {
+        if (!Array.isArray(data?.pending_requests)) throw new Error('Unexpected response');
+        setBlockRequests(data.pending_requests);
+      })
+      .catch(() => toast.error('Failed to load block inventory requests'))
+      .finally(() => {
+        setBlockRequestsLoading(false);
+        setBlockRequestsLoaded(true);
+      });
+  }, [activeInventoryTab, blockRequestsLoaded]);
+
+  // Issue Slip Directory — every stock transfer slip ever created, fetched lazily
+  // the first time the directory is opened.
+  useEffect(() => {
+    if (!issueSlipDirectoryOpen || issueSlipsLoaded) return;
+    setIssueSlipsLoading(true);
+    fetch(`${BASE_URL}/inventory/get_stock_transfers`)
+      .then((res) => res.json())
+      .then((data: any) => {
+        if (!data?.success || !Array.isArray(data?.transfers)) throw new Error('Unexpected response');
+        setIssueSlips(data.transfers);
+      })
+      .catch(() => toast.error('Failed to load issue slips'))
+      .finally(() => {
+        setIssueSlipsLoading(false);
+        setIssueSlipsLoaded(true);
+      });
+  }, [issueSlipDirectoryOpen, issueSlipsLoaded]);
+
+  const issueSlipsByDate = useMemo(() => {
+    const groups = new Map<string, StockTransfer[]>();
+    issueSlips.forEach((slip) => {
+      const dateKey = (slip.creation_date || '').slice(0, 10) || 'Unknown Date';
+      const list = groups.get(dateKey);
+      if (list) list.push(slip);
+      else groups.set(dateKey, [slip]);
+    });
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([date, slips]) => [
+        date,
+        [...slips].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')),
+      ] as const);
+  }, [issueSlips]);
+
+  const selectedIssueSlip = useMemo(
+    () => issueSlips.find((slip) => slip.transfer_id === selectedIssueSlipId) ?? null,
+    [issueSlips, selectedIssueSlipId],
+  );
+
+  // Shared item-stock-location lookup for the From/To warehouse panels — one fetch per
+  // selected item, checked against whichever store each panel has selected.
+  useEffect(() => {
+    const itemIds = Array.from(new Set(transferLineItems.map((line) => line.itemId).filter(Boolean)));
+    if (itemIds.length === 0) {
+      setTransferDissociationByItem({});
+      return;
+    }
+    let mounted = true;
+    setTransferDissociationLoading(true);
+    Promise.all(itemIds.map((itemId) =>
+      fetch(`${BASE_URL}/inventory/get_inventory_item_dissociation/${itemId}`)
+        .then((res) => res.json())
+        .then((data: any) => {
+          const raw = data?.success && data?.dissociation && typeof data.dissociation === 'object' ? data.dissociation : {};
+          const parsed: ItemDissociation = {};
+          Object.entries(raw).forEach(([storeName, entry]: [string, any]) => {
+            const methodKey = Object.keys(entry || {}).find((key) => key !== 'quantity');
+            parsed[storeName] = {
+              quantity: Number(entry?.quantity) || 0,
+              batches: methodKey && Array.isArray(entry[methodKey]) ? entry[methodKey] : [],
+            };
+          });
+          return [itemId, parsed] as const;
+        })
+        .catch(() => [itemId, {}] as const),
+    )).then((results) => {
+      if (!mounted) return;
+      setTransferDissociationByItem(Object.fromEntries(results));
+    }).finally(() => {
+      if (mounted) setTransferDissociationLoading(false);
+    });
+    return () => { mounted = false; };
+  }, [transferLineItems.map((line) => line.itemId).join('|')]);
+
+  const requestWarehouseOptions = useMemo(
+    () => ['Central Store', ...availableStores.filter((store) => store.toLowerCase() !== 'central store')],
+    [availableStores],
+  );
+
+  const transferLineItemsResolved = useMemo(
+    () => transferLineItems.map((line) => ({ item: items.find((item) => item.id === line.itemId) || null })),
+    [transferLineItems, items],
+  );
+
+  const handleOpenTransferFromPanels = () => {
+    if (!fromStore || !toStore) return toast.error('Select both a From and To warehouse');
+    if (fromStore === toStore) return toast.error('From and To warehouse must be different');
+    if (transferLineItems.length === 0) return toast.error('Add at least one item to transfer');
+
+    const seenIds = new Set<string>();
+    const resolvedItems: { itemId: string; quantity: string }[] = [];
+    for (const line of transferLineItems) {
+      const lineItem = items.find((item) => item.id === line.itemId);
+      if (!lineItem) return toast.error('Select an item for every row');
+      if (seenIds.has(lineItem.id)) return toast.error(`${lineItem.name} is added more than once`);
+      seenIds.add(lineItem.id);
+      const numericQuantity = Number(line.quantity);
+      if (!Number.isFinite(numericQuantity) || numericQuantity <= 0) {
+        return toast.error(`Enter a valid quantity for ${lineItem.name}`);
+      }
+      const available = transferDissociationByItem[lineItem.id]?.[fromStore]?.quantity ?? 0;
+      if (numericQuantity > available) {
+        return toast.error(`Only ${available.toLocaleString()} ${lineItem.unit} of ${lineItem.name} available at ${fromStore}`);
+      }
+      resolvedItems.push({ itemId: lineItem.id, quantity: line.quantity });
+    }
+
+    setTransferPrefill({
+      items: resolvedItems,
+      source: fromStore,
+      destination: toStore,
+    });
+    setTransferStockOpen(true);
+  };
+
   const selectedTransfer = useMemo(
     () => transferApprovals.find((approval) => approval.id === selectedTransferId) ?? null,
     [selectedTransferId, transferApprovals],
@@ -1248,7 +1775,6 @@ const Inventory = () => {
   type StringMasterSection =
     | 'inventoryGroups'
     | 'units'
-    | 'stores'
     | 'expenseClassifications'
     | 'inventoryClassifications'
     | 'issueClassifications';
@@ -1273,6 +1799,25 @@ const Inventory = () => {
           ),
         }
         : {}),
+    }));
+  };
+
+  const addStore = (name: string, blocks: StoreBlock[], location: StoreLocation) => {
+    if (masterConfig.stores.some((entry) => entry.name.toLowerCase() === name.toLowerCase())) {
+      toast.error(`"${name}" already exists`);
+      return;
+    }
+    setMasterConfig((previous) => ({
+      ...previous,
+      stores: [...previous.stores, { name, blocks, location }],
+    }));
+    toast.success(`"${name}" created`);
+  };
+
+  const removeStore = (name: string) => {
+    setMasterConfig((previous) => ({
+      ...previous,
+      stores: previous.stores.filter((entry) => entry.name !== name),
     }));
   };
 
@@ -1385,6 +1930,7 @@ const Inventory = () => {
             { key: 'dashboard', label: 'Dashboard', icon: Boxes },
             { key: 'central-store', label: 'Central Store', icon: PackageCheck },
             { key: 'sub-store', label: 'Sub-Store', icon: Layers },
+            { key: 'inventory-request', label: 'Inventory Request', icon: Split },
             { key: 'configure', label: 'Configure', icon: Settings },
           ].map((tab) => {
             const isActive = activeInventoryTab === tab.key;
@@ -1393,7 +1939,7 @@ const Inventory = () => {
               <button
                 key={tab.key}
                 type="button"
-                onClick={() => setActiveInventoryTab(tab.key as 'dashboard' | 'central-store' | 'sub-store' | 'configure')}
+                onClick={() => setActiveInventoryTab(tab.key as 'dashboard' | 'central-store' | 'sub-store' | 'inventory-request' | 'configure')}
                 className={cn(
                   'relative flex h-14 items-center gap-2 px-1 text-sm font-bold transition-colors',
                   isActive ? 'text-slate-950' : 'text-slate-500 hover:text-[#0D3A35]',
@@ -1712,8 +2258,12 @@ const Inventory = () => {
 
                   <div className="grid grid-cols-2 gap-px bg-slate-100">
                     {[
-                      ['Item', approval.transfer.itemName],
-                      ['Quantity', `${approval.transfer.quantity.toLocaleString('en-IN')} ${approval.transfer.unit}`],
+                      ['Item(s)', approval.transfer.items.length === 1
+                        ? approval.transfer.items[0].itemName
+                        : `${approval.transfer.items.length} items`],
+                      ['Quantity', approval.transfer.items.length === 1
+                        ? `${approval.transfer.items[0].quantity.toLocaleString('en-IN')} ${approval.transfer.items[0].unit}`
+                        : `${approval.transfer.items.length} line items`],
                       ['Destination', approval.transfer.destinationStore],
                       ['Vehicle', approval.transfer.vehicleNumber || 'N/A'],
                     ].map(([label, value]) => (
@@ -1909,14 +2459,10 @@ const Inventory = () => {
               onAdd={(value) => addMasterValue('units', value)}
               onRemove={(value) => removeMasterValue('units', value)}
             />
-            <MasterConfigCard
-              title="Stores"
-              description="Create central warehouses, sub-stores, and storage locations."
-              placeholder="Enter store name"
-              icon={Settings}
-              values={masterConfig.stores.map((value) => ({ id: value, label: value }))}
-              onAdd={(value) => addMasterValue('stores', value)}
-              onRemove={(value) => removeMasterValue('stores', value)}
+            <StoreConfigCard
+              values={masterConfig.stores}
+              onAdd={addStore}
+              onRemove={removeStore}
             />
           </div>
 
@@ -1954,6 +2500,191 @@ const Inventory = () => {
               onAdd={(value) => addMasterValue('issueClassifications', value)}
               onRemove={(value) => removeMasterValue('issueClassifications', value)}
             />
+          </div>
+        </div>
+      )}
+
+      {activeInventoryTab === 'inventory-request' && (
+        <div className="space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-bold text-slate-950">Inventory Request</h2>
+              <p className="mt-1 text-sm font-medium text-slate-500">
+                View all farms on the map, then move stock from one warehouse to another.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              className="gap-2 border-slate-200 text-slate-700 hover:bg-slate-50"
+              onClick={() => setIssueSlipDirectoryOpen(true)}
+            >
+              <FileText className="h-4 w-4" />
+              Issue Slip Directory
+            </Button>
+          </div>
+
+          {/* ROW 1: Inventory Requests (25%) + Farm Map (75%) */}
+          <div className="flex flex-col gap-5 lg:h-[640px] lg:flex-row lg:items-stretch">
+            <div className="lg:h-full lg:w-1/4">
+              <InventoryRequestPanel
+                stores={masterConfig.stores}
+                farms={requestFarms}
+                items={items}
+                requests={blockRequests}
+                requestsLoading={blockRequestsLoading}
+                selectedStoreName={selectedRequestStoreName}
+                onSelectStore={setSelectedRequestStoreName}
+              />
+            </div>
+
+            <div className="isolate flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)] lg:h-full lg:w-3/4">
+              <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35]">
+                  <MapIcon className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-950">Farm Map</h3>
+                  <p className="text-xs font-medium text-slate-500">
+                    {selectedRequestStoreName
+                      ? `Lands in ${selectedRequestStoreName}'s blocks`
+                      : 'All active farms and their land boundaries'}
+                  </p>
+                </div>
+              </div>
+              <div className="h-[560px] w-full lg:h-auto lg:min-h-0 lg:flex-1">
+                {farmsLoading ? (
+                  <div className="flex h-full items-center justify-center text-sm font-semibold text-slate-400">
+                    Loading farms…
+                  </div>
+                ) : (
+                  <FarmsOverviewMap
+                    farms={requestFarms}
+                    stores={masterConfig.stores}
+                    selectedStoreName={selectedRequestStoreName}
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* ROW 2: Item Transfer — Item to Transfer, From Warehouse, To Warehouse side by side */}
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-stretch">
+            <div className="lg:w-1/3">
+              <section className="h-full overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+                <div className="flex items-center gap-2.5 border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35]">
+                    <Boxes className="h-4 w-4" />
+                  </div>
+                  <h3 className="text-sm font-bold text-slate-950">
+                    {transferLineItems.length > 1 ? 'Items to Transfer' : 'Item to Transfer'}
+                  </h3>
+                </div>
+                <div className="p-4">
+                  <div className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto pr-0.5">
+                    {transferLineItems.map((line, index) => {
+                      const lineItem = items.find((item) => item.id === line.itemId) || null;
+                      const available = fromStore && lineItem ? transferDissociationByItem[lineItem.id]?.[fromStore]?.quantity ?? 0 : 0;
+                      return (
+                        <div key={index} className="relative overflow-hidden rounded-xl border border-slate-100 bg-slate-50/40">
+                          {transferLineItems.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => removeTransferLineItem(index)}
+                              className="absolute right-1 top-1 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-white/90 text-slate-400 shadow hover:text-red-600"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          )}
+                          <img
+                            src={lineItem?.imageUrl || PLACEHOLDER_IMG}
+                            alt={lineItem?.name || 'Select item'}
+                            className="h-20 w-full object-cover"
+                          />
+                          <div className="space-y-1.5 p-2">
+                            <div className="relative">
+                              <select
+                                value={line.itemId}
+                                onChange={(event) => updateTransferLineItem(index, { itemId: event.target.value, quantity: '' })}
+                                className="h-7 w-full appearance-none rounded-md border border-slate-200 bg-white px-1.5 pr-5 text-[10px] font-semibold text-slate-700 outline-none focus:border-[#0D3A35]"
+                              >
+                                <option value="">Select item</option>
+                                {items.map((item) => (
+                                  <option
+                                    key={item.id}
+                                    value={item.id}
+                                    disabled={transferLineItems.some((other, i) => i !== index && other.itemId === item.id)}
+                                  >
+                                    {item.name}
+                                  </option>
+                                ))}
+                              </select>
+                              <ChevronDown className="pointer-events-none absolute right-1 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-400" />
+                            </div>
+                            <Input
+                              type="number"
+                              min={0}
+                              max={fromStore ? available : undefined}
+                              value={line.quantity}
+                              onChange={(event) => updateTransferLineItem(index, { quantity: event.target.value })}
+                              disabled={!line.itemId}
+                              placeholder="Qty"
+                              className="h-7 text-[10px]"
+                            />
+                            {fromStore && lineItem && (
+                              <p className="text-[8px] font-semibold text-slate-400">Max {available.toLocaleString()}</p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={addTransferLineItem}
+                    className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-slate-300 py-2 text-[10px] font-bold uppercase tracking-wide text-[#0D3A35] hover:bg-slate-50"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> Add Item
+                  </button>
+                </div>
+              </section>
+            </div>
+
+            <div className="lg:w-1/3">
+              <WarehouseStockPanel
+                label="From Warehouse"
+                icon={ArrowUpFromLine}
+                stores={requestWarehouseOptions}
+                store={fromStore}
+                onStoreChange={setFromStore}
+                lineItems={transferLineItemsResolved}
+                dissociationByItem={transferDissociationByItem}
+                dissociationLoading={transferDissociationLoading}
+              />
+            </div>
+
+            <div className="flex items-center justify-center">
+              <button
+                type="button"
+                onClick={handleOpenTransferFromPanels}
+                title="Transfer stock"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#0D3A35] text-white shadow-md transition hover:bg-[#092e2a]"
+              >
+                <ArrowRight className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="lg:w-1/3">
+              <WarehouseStockPanel
+                label="To Warehouse"
+                icon={ArrowDownToLine}
+                stores={requestWarehouseOptions}
+                store={toStore}
+                onStoreChange={setToStore}
+                lineItems={transferLineItemsResolved}
+                dissociationByItem={transferDissociationByItem}
+                dissociationLoading={transferDissociationLoading}
+              />
+            </div>
           </div>
         </div>
       )}
@@ -2048,10 +2779,27 @@ const Inventory = () => {
         open={transferStockOpen}
         items={centralStoreItems}
         stores={availableStores}
-        onClose={() => setTransferStockOpen(false)}
+        initialItems={transferPrefill?.items}
+        initialSource={transferPrefill?.source}
+        initialDestination={transferPrefill?.destination}
+        onClose={() => {
+          setTransferStockOpen(false);
+          setTransferPrefill(null);
+        }}
         onTransfer={(transfer) => {
-          const item = centralStoreItems.find((entry) => entry.id === transfer.itemId);
-          if (!item) return toast.error('Selected inventory item is unavailable');
+          const resolvedItems = transfer.items.map((line) => {
+            const item = centralStoreItems.find((entry) => entry.id === line.itemId);
+            return item ? {
+              itemId: item.id,
+              itemName: item.name,
+              itemCode: item.sku,
+              category: item.category,
+              unit: item.unit,
+              quantity: line.quantity,
+              availableStock: line.availableStock,
+            } : null;
+          });
+          if (resolvedItems.some((line) => !line)) return toast.error('Selected inventory item is unavailable');
           createInventoryApproval({
             approvalType: 'stock-transfer',
             title: `Stock Transfer · ${transfer.transferSlipNumber}`,
@@ -2063,16 +2811,10 @@ const Inventory = () => {
             transfer: {
               transferSlipNumber: transfer.transferSlipNumber,
               transferDate: transfer.transferDate,
-              sourceStore: 'Central Store',
+              sourceStore: transfer.source,
               destinationStore: transfer.destination,
               expectedArrival: transfer.expectedArrival,
-              itemId: item.id,
-              itemName: item.name,
-              itemCode: item.sku,
-              category: item.category,
-              unit: item.unit,
-              quantity: transfer.quantity,
-              availableStock: item.currentStock,
+              items: resolvedItems.filter((line): line is NonNullable<typeof line> => !!line),
               vehicleId: transfer.vehicleId,
               vehicleNumber: transfer.vehicleNumber,
               vehicleType: transfer.vehicleType,
@@ -2081,9 +2823,12 @@ const Inventory = () => {
               driverName: transfer.driverName,
               driverContact: transfer.driverContact,
               remarks: transfer.remarks,
+              creationDate: transfer.creationDate,
+              storeManagerSignature: transfer.storeManagerSignature,
             },
           });
           setTransferStockOpen(false);
+          setTransferPrefill(null);
           setCentralStoreView('transfers');
           setSearch('');
           toast.success(`${transfer.transferSlipNumber} submitted to ${transfer.approvedBy} for approval`);
@@ -2109,6 +2854,15 @@ const Inventory = () => {
           });
           toast.success('Reply sent to the approver');
         }}
+      />
+
+      <IssueSlipDirectoryDialog
+        open={issueSlipDirectoryOpen}
+        onOpenChange={setIssueSlipDirectoryOpen}
+        loading={issueSlipsLoading}
+        groupedByDate={issueSlipsByDate}
+        selectedSlip={selectedIssueSlip}
+        onSelectSlip={setSelectedIssueSlipId}
       />
 
       <ItemInformationDialog
@@ -3851,18 +4605,25 @@ const TransferStockModal = ({
   open,
   items,
   stores,
+  initialItems,
+  initialSource,
+  initialDestination,
   onClose,
   onTransfer,
 }: {
   open: boolean;
   items: StockItem[];
   stores: string[];
+  initialItems?: { itemId: string; quantity: string }[];
+  initialSource?: string;
+  initialDestination?: string;
   onClose: () => void;
   onTransfer: (transfer: {
-    itemId: string;
+    items: { itemId: string; quantity: number; availableStock: number }[];
+    source: string;
     destination: string;
-    quantity: number;
     transferDate: string;
+    creationDate: string;
     vehicleId: string;
     vehicleNumber: string;
     vehicleType: string;
@@ -3877,123 +4638,109 @@ const TransferStockModal = ({
     approverId: string;
     approvedBy: string;
     approverDesignation: string;
+    storeManagerSignature: InventoryApprovalSignature;
     remarks: string;
   }) => void;
 }) => {
   const { user } = useAuth();
-  const [itemId, setItemId] = useState('');
+  const [lineItems, setLineItems] = useState<{ itemId: string; quantity: string }[]>([{ itemId: '', quantity: '' }]);
   const [destination, setDestination] = useState('');
-  const [quantity, setQuantity] = useState('');
   const [transferDate, setTransferDate] = useState(today());
-  const [vehicleSelection, setVehicleSelection] = useState('');
-  const [vehicleOptions, setVehicleOptions] = useState<Array<{
-    id: string;
-    registrationNo: string;
-    type: string;
-    make: string;
-    model: string;
-    driverName: string;
-    driverContact: string;
-  }>>([]);
-  const [vehiclesLoading, setVehiclesLoading] = useState(false);
-  const [vehicleNumber, setVehicleNumber] = useState('');
-  const [vehicleType, setVehicleType] = useState('');
-  const [vehicleMake, setVehicleMake] = useState('');
-  const [vehicleModel, setVehicleModel] = useState('');
+  const [creationDate] = useState(today());
   const [transferSlipNumber, setTransferSlipNumber] = useState('');
-  const [driverName, setDriverName] = useState('');
-  const [driverContact, setDriverContact] = useState('');
-  const [expectedArrival, setExpectedArrival] = useState('');
-  const [approverId, setApproverId] = useState('');
+  const [headOfOperationsId, setHeadOfOperationsId] = useState('');
   const [approverOptions, setApproverOptions] = useState<Array<{ id: string; name: string; designation: string }>>([]);
   const [approversLoading, setApproversLoading] = useState(false);
   const [remarks, setRemarks] = useState('');
-  const selectedItem = items.find((item) => item.id === itemId);
-  const selectedVehicle = vehicleOptions.find((vehicle) => vehicle.id === vehicleSelection);
-  const isOtherVehicle = vehicleSelection === 'other';
-  const resolvedVehicleNumber = isOtherVehicle ? vehicleNumber.trim().toUpperCase() : selectedVehicle?.registrationNo ?? '';
-  const resolvedVehicleType = isOtherVehicle ? vehicleType.trim() : selectedVehicle?.type ?? '';
-  const resolvedVehicleMake = isOtherVehicle ? vehicleMake.trim() : selectedVehicle?.make ?? '';
-  const resolvedVehicleModel = isOtherVehicle ? vehicleModel.trim() : selectedVehicle?.model ?? '';
-  const resolvedDriverName = isOtherVehicle ? driverName.trim() : selectedVehicle?.driverName ?? '';
-  const resolvedDriverContact = isOtherVehicle ? driverContact.trim() : selectedVehicle?.driverContact ?? '';
-  const selectedApprover = approverOptions.find((employee) => employee.id === approverId);
+  const [dissociationByItem, setDissociationByItem] = useState<Record<string, ItemDissociation>>({});
+  const [dissociationLoading, setDissociationLoading] = useState(false);
+  // Rows seeded from the From/To warehouse panel are "locked" — their quantities were
+  // already validated against a specific store's dissociation stock before this modal
+  // opened; any rows added afterwards via "Add Item" are always free entry.
+  const lockedCount = initialItems?.length ?? 0;
+  // The store this slip actually ships from — whatever the From/To warehouse panel had
+  // selected, or "Central Store" when opened via the plain "Transfer Stock" button.
+  const sourceStore = initialSource || 'Central Store';
+
+  const updateLineItem = (index: number, patch: Partial<{ itemId: string; quantity: string }>) => {
+    setLineItems((previous) => previous.map((line, i) => (i === index ? { ...line, ...patch } : line)));
+  };
+  const addLineItem = () => {
+    const usedIds = new Set(lineItems.map((line) => line.itemId));
+    const nextItem = items.find((item) => !usedIds.has(item.id));
+    if (!nextItem) return toast.error('Every available item is already on this slip');
+    setLineItems((previous) => [...previous, { itemId: nextItem.id, quantity: '' }]);
+  };
+  const removeLineItem = (index: number) => {
+    setLineItems((previous) => previous.filter((_, i) => i !== index));
+  };
+  const selectedHeadOfOperations = approverOptions.find((employee) => employee.id === headOfOperationsId);
   const preparedBy = user?.name || user?.username || 'Logged-in user';
   const preparedById = user?.id || user?.username || '';
-  const approvedBy = selectedApprover?.name ?? '';
-  const approverDesignation = selectedApprover?.designation ?? '';
-  const destinationStores = stores.filter((store) => store.toLowerCase() !== 'central store');
+  // Head of Operations is the actual approval-workflow routing signer; Store Manager is
+  // the slip creator, auto-signed the moment "Send for Approval" is clicked.
+  const approvedBy = selectedHeadOfOperations?.name ?? '';
+  const approverDesignation = selectedHeadOfOperations?.designation ?? '';
+  const destinationStores = stores.filter((store) => store.toLowerCase() !== sourceStore.toLowerCase());
 
   useEffect(() => {
     if (!open) return;
-    setItemId((previous) => items.some((item) => item.id === previous) ? previous : items[0]?.id ?? '');
-    setDestination((previous) => destinationStores.includes(previous) ? previous : destinationStores[0] ?? '');
-    setQuantity('');
+    setLineItems(
+      initialItems && initialItems.length > 0
+        ? initialItems.map((line) => ({ ...line }))
+        : (previous) => {
+          const firstId = previous[0]?.itemId;
+          const stillValid = firstId && items.some((item) => item.id === firstId);
+          return [{ itemId: stillValid ? firstId : items[0]?.id ?? '', quantity: stillValid ? previous[0].quantity : '' }];
+        },
+    );
+    setDestination(
+      initialDestination && destinationStores.includes(initialDestination)
+        ? initialDestination
+        : (previous) => destinationStores.includes(previous) ? previous : destinationStores[0] ?? '',
+    );
     setTransferDate(today());
-    setVehicleSelection('');
-    setVehicleNumber('');
-    setVehicleType('');
-    setVehicleMake('');
-    setVehicleModel('');
     setTransferSlipNumber(generateTransferSlipNumber());
-    setDriverName('');
-    setDriverContact('');
-    setExpectedArrival('');
-    setApproverId('');
+    setHeadOfOperationsId('');
     setRemarks('');
-  }, [destinationStores.join('|'), items, open]);
+  }, [destinationStores.join('|'), items, open, initialItems, initialDestination]);
 
+  // "Available Stock" must reflect what's actually sitting in the source store —
+  // not the item's project-wide `stock` total — so fetch each selected item's
+  // real per-store dissociation, one fetch per unique item.
   useEffect(() => {
     if (!open) return;
-    const fetchVehicles = async () => {
-      setVehiclesLoading(true);
-      try {
-        const response = await fetch(`${BASE_URL}/admin_vehicles/get_all_vehicles`);
-        const data: any = await response.json().catch(() => null);
-        if (!response.ok || !Array.isArray(data)) throw new Error('Failed to load vehicles');
-        setVehicleOptions(
-          data
-            .map((vehicle: any) => {
-              const information = vehicle?.vehicle_information ?? {};
-              const assigned = Array.isArray(vehicle?.assigned_staff)
-                ? vehicle.assigned_staff[0]
-                : vehicle?.assigned_staff;
-              const staffInformation = assigned?.staff_information ?? assigned ?? {};
-              return {
-                id: String(vehicle?.vehicle_id ?? ''),
-                registrationNo: String(information?.vehicle_number ?? '').trim(),
-                type: String(information?.type ?? '').trim(),
-                make: String(information?.company ?? '').trim(),
-                model: String(information?.model ?? '').trim(),
-                driverName: String(
-                  staffInformation?.staff_name ??
-                  staffInformation?.name ??
-                  staffInformation?.full_name ??
-                  assigned?.staff_name ??
-                  '',
-                ).trim(),
-                driverContact: String(
-                  staffInformation?.staff_phone ??
-                  staffInformation?.phone ??
-                  staffInformation?.contact ??
-                  assigned?.staff_phone ??
-                  '',
-                ).trim(),
-              };
-            })
-            .filter((vehicle: { id: string; registrationNo: string }) => vehicle.id && vehicle.registrationNo)
-            .sort((first: { registrationNo: string }, second: { registrationNo: string }) =>
-              first.registrationNo.localeCompare(second.registrationNo)),
-        );
-      } catch (error: any) {
-        setVehicleOptions([]);
-        toast.error(error?.message || 'Failed to load fleet vehicles');
-      } finally {
-        setVehiclesLoading(false);
-      }
-    };
-    fetchVehicles();
-  }, [open]);
+    const itemIds = Array.from(new Set(lineItems.map((line) => line.itemId).filter(Boolean)));
+    if (itemIds.length === 0) {
+      setDissociationByItem({});
+      return;
+    }
+    let mounted = true;
+    setDissociationLoading(true);
+    Promise.all(itemIds.map((itemId) =>
+      fetch(`${BASE_URL}/inventory/get_inventory_item_dissociation/${itemId}`)
+        .then((res) => res.json())
+        .then((data: any) => {
+          const raw = data?.success && data?.dissociation && typeof data.dissociation === 'object' ? data.dissociation : {};
+          const parsed: ItemDissociation = {};
+          Object.entries(raw).forEach(([storeName, entry]: [string, any]) => {
+            const methodKey = Object.keys(entry || {}).find((key) => key !== 'quantity');
+            parsed[storeName] = {
+              quantity: Number(entry?.quantity) || 0,
+              batches: methodKey && Array.isArray(entry[methodKey]) ? entry[methodKey] : [],
+            };
+          });
+          return [itemId, parsed] as const;
+        })
+        .catch(() => [itemId, {}] as const),
+    )).then((results) => {
+      if (!mounted) return;
+      setDissociationByItem(Object.fromEntries(results));
+    }).finally(() => {
+      if (mounted) setDissociationLoading(false);
+    });
+    return () => { mounted = false; };
+  }, [open, lineItems.map((line) => line.itemId).join('|')]);
 
   useEffect(() => {
     if (!open) return;
@@ -4024,312 +4771,261 @@ const TransferStockModal = ({
   }, [open]);
 
   const submitTransfer = () => {
-    const numericQuantity = Number(quantity);
-    if (!selectedItem) return toast.error('Select an inventory item');
     if (!destination) return toast.error('Select a destination store');
-    if (!Number.isFinite(numericQuantity) || numericQuantity <= 0) return toast.error('Enter a valid transfer quantity');
-    if (numericQuantity > selectedItem.currentStock) {
-      return toast.error(`Only ${selectedItem.currentStock.toLocaleString()} ${selectedItem.unit} is available`);
-    }
+    if (lineItems.length === 0) return toast.error('Add at least one item to transfer');
     if (!transferSlipNumber.trim()) return toast.error('Transfer slip number is required');
-    if (!vehicleSelection) return toast.error('Select a vehicle');
-    if (!resolvedVehicleNumber) return toast.error('Vehicle number is required');
-    if (isOtherVehicle && (!resolvedVehicleType || !resolvedVehicleMake || !resolvedVehicleModel)) {
-      return toast.error('Complete all manual vehicle details');
+    if (!user?.id || !(user?.name || user?.username)) return toast.error('You must be logged in to sign as Store Manager');
+    if (!selectedHeadOfOperations) return toast.error('Select a Head of Operations for approval');
+
+    const seenIds = new Set<string>();
+    const resolvedItems: { itemId: string; quantity: number; availableStock: number }[] = [];
+    for (const line of lineItems) {
+      const lineItem = items.find((item) => item.id === line.itemId);
+      if (!lineItem) return toast.error('Select an inventory item for every row');
+      if (seenIds.has(lineItem.id)) return toast.error(`${lineItem.name} is added more than once`);
+      seenIds.add(lineItem.id);
+      const numericQuantity = Number(line.quantity);
+      if (!Number.isFinite(numericQuantity) || numericQuantity <= 0) {
+        return toast.error(`Enter a valid quantity for ${lineItem.name}`);
+      }
+      // Validate against what's actually sitting in the source store per its
+      // dissociation record — the item's project-wide `stock` total isn't relevant here.
+      const availableAtSource = dissociationByItem[lineItem.id]?.[sourceStore]?.quantity ?? 0;
+      if (numericQuantity > availableAtSource) {
+        return toast.error(`Only ${availableAtSource.toLocaleString()} ${lineItem.unit} of ${lineItem.name} is available at ${sourceStore}`);
+      }
+      resolvedItems.push({ itemId: lineItem.id, quantity: numericQuantity, availableStock: availableAtSource });
     }
-    if (isOtherVehicle && (!resolvedDriverName || !resolvedDriverContact)) {
-      return toast.error('Driver name and contact are required for an Other vehicle');
-    }
-    if (!approvedBy) return toast.error('Select an approving employee');
-    if (!approverDesignation) return toast.error('The selected employee has no designation');
+
+    // Store Manager is the slip creator — signed the instant "Send for Approval" is clicked.
+    const storeManagerSignature: InventoryApprovalSignature = {
+      staffId: preparedById,
+      staffName: preparedBy,
+      staffDesignation: user.designation || '—',
+      signedAt: new Date().toISOString(),
+    };
     onTransfer({
-      itemId: selectedItem.id,
+      items: resolvedItems,
+      source: sourceStore,
       destination,
-      quantity: numericQuantity,
       transferDate,
-      vehicleId: isOtherVehicle ? '' : selectedVehicle?.id ?? '',
-      vehicleNumber: resolvedVehicleNumber,
-      vehicleType: resolvedVehicleType,
-      vehicleMake: resolvedVehicleMake,
-      vehicleModel: resolvedVehicleModel,
+      creationDate,
+      // Vehicle/driver details are filled in later by logistics, not at slip creation.
+      vehicleId: '',
+      vehicleNumber: '',
+      vehicleType: '',
+      vehicleMake: '',
+      vehicleModel: '',
       transferSlipNumber: transferSlipNumber.trim(),
-      driverName: resolvedDriverName,
-      driverContact: resolvedDriverContact,
-      expectedArrival,
+      driverName: '',
+      driverContact: '',
+      expectedArrival: '',
       preparedBy,
       preparedById,
-      approverId,
+      approverId: headOfOperationsId,
       approvedBy,
       approverDesignation,
+      storeManagerSignature,
       remarks: remarks.trim(),
     });
   };
 
+  const docLabelCls = 'text-[8px] font-bold uppercase tracking-wide text-slate-400';
+  const docInputCls = 'w-full bg-transparent outline-none border-b border-dashed border-slate-300 focus:border-[#0D3A35] text-[10px] font-bold text-slate-800 py-0.5';
+
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
-      <DialogContent className="max-h-[90vh] max-w-xl overflow-y-auto rounded-2xl border-0 p-0">
-        <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
-          <DialogTitle className="flex items-center gap-2 text-lg font-bold text-white">
-            <ArrowRightLeft className="h-5 w-5" />
-            Transfer Stock
-          </DialogTitle>
-          <p className="text-xs font-medium text-white/70">Move available stock from the Central Store to a configured sub-store.</p>
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto rounded-2xl border-0 bg-slate-100 p-0">
+        <DialogHeader className="sr-only">
+          <DialogTitle>Stock Transfer Slip</DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4 px-6 py-5">
-          <Field label="Inventory Item">
-            <select
-              value={itemId}
-              onChange={(event) => {
-                setItemId(event.target.value);
-                setQuantity('');
-              }}
-              className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35]"
-            >
-              {items.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name} ({item.sku || 'No SKU'})
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          {selectedItem && (
-            <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-slate-200">
-              <div className="border-r border-slate-200 bg-slate-50/70 px-4 py-3">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Available Stock</p>
-                <p className="mt-1 text-base font-bold text-[#0D3A35]">
-                  {selectedItem.currentStock.toLocaleString()} <span className="text-xs text-slate-400">{selectedItem.unit}</span>
-                </p>
-              </div>
-              <div className="px-4 py-3">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">From Store</p>
-                <p className="mt-1 text-sm font-bold text-slate-700">Central Store</p>
-              </div>
+        <div className="p-5">
+          <div className="overflow-hidden rounded-lg border-2 border-gray-800 bg-white text-[10px] text-slate-800">
+            {/* Letterhead — same header treatment as the WCC certificate */}
+            <div className="border-b-2 border-gray-800 px-4 py-3 text-center">
+              <img src={logo3f} alt="3F Logo" className="mx-auto mb-1 h-10 w-auto" />
+              <h1 className="text-sm font-bold tracking-wide text-slate-900">{COMPANY_NAME}</h1>
+              <p className="mt-0.5 text-[9px] text-slate-600">{COMPANY_ADDRESS}</p>
+              <h2 className="mt-1.5 text-[11px] font-bold uppercase tracking-wide text-slate-900">Stock Transfer Slip</h2>
             </div>
-          )}
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Destination Store">
-              <select
-                value={destination}
-                onChange={(event) => setDestination(event.target.value)}
-                className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35]"
-              >
-                {destinationStores.length === 0
-                  ? <option value="">No sub-store configured</option>
-                  : destinationStores.map((store) => <option key={store} value={store}>{store}</option>)}
-              </select>
-            </Field>
-            <Field label={`Transfer Quantity${selectedItem?.unit ? ` (${selectedItem.unit})` : ''}`}>
-              <Input
-                type="number"
-                min={0}
-                max={selectedItem?.currentStock}
-                value={quantity}
-                onChange={(event) => setQuantity(event.target.value)}
-                placeholder="Enter quantity"
-                className="h-11"
-              />
-            </Field>
-          </div>
-
-          <Field label="Transfer Date">
-            <Input
-              type="date"
-              value={transferDate}
-              onChange={(event) => setTransferDate(event.target.value)}
-              className="h-11"
-            />
-          </Field>
-
-          <div className="overflow-hidden rounded-xl border border-slate-200">
-            <div className="border-b border-slate-100 bg-slate-50/70 px-4 py-3">
-              <h3 className="text-xs font-bold text-slate-800">Transport &amp; Slip Details</h3>
-              <p className="mt-0.5 text-[11px] font-medium text-slate-400">Record dispatch and vehicle information for this transfer.</p>
-            </div>
-            <div className="grid gap-4 p-4 sm:grid-cols-2">
-              <Field label="Transfer Slip No.">
-                <Input
-                  value={transferSlipNumber}
-                  readOnly
-                  className="h-11 bg-slate-50 font-semibold text-[#0D3A35]"
+            {/* Slip No. / Date of Creation / Date of Transfer */}
+            <div className="grid grid-cols-3 border-b border-gray-300">
+              <div className="border-r border-gray-300 p-2">
+                <p className={docLabelCls}>Slip No.</p>
+                <p className="mt-1 font-bold text-[#0D3A35]">{transferSlipNumber}</p>
+              </div>
+              <div className="border-r border-gray-300 p-2">
+                <p className={docLabelCls}>Date of Creation</p>
+                <p className="mt-1 font-bold text-slate-800">{formatTransferDate(creationDate)}</p>
+              </div>
+              <div className="p-2">
+                <p className={docLabelCls}>Date of Transfer</p>
+                <input
+                  type="date"
+                  value={transferDate}
+                  onChange={(event) => setTransferDate(event.target.value)}
+                  className={cn(docInputCls, 'mt-1')}
                 />
-              </Field>
-              <Field label="Choose Vehicle">
+              </div>
+            </div>
+
+            {/* From / To / Prepared By */}
+            <div className="grid grid-cols-3 border-b border-gray-300">
+              <div className="border-r border-gray-300 p-2">
+                <p className={docLabelCls}>From</p>
+                <p className="mt-1 font-bold text-slate-800">{sourceStore}</p>
+              </div>
+              <div className="border-r border-gray-300 p-2">
+                <p className={docLabelCls}>To</p>
                 <select
-                  value={vehicleSelection}
-                  onChange={(event) => {
-                    setVehicleSelection(event.target.value);
-                  }}
-                  disabled={vehiclesLoading}
-                  className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35] disabled:bg-slate-50"
+                  value={destination}
+                  onChange={(event) => setDestination(event.target.value)}
+                  className={cn(docInputCls, 'mt-1')}
                 >
-                  <option value="">{vehiclesLoading ? 'Loading vehicles…' : 'Select vehicle'}</option>
-                  {vehicleOptions.map((vehicle) => (
-                    <option key={vehicle.id} value={vehicle.id}>
-                      {vehicle.registrationNo} · {[vehicle.type, vehicle.make, vehicle.model].filter(Boolean).join(' ')}
-                    </option>
-                  ))}
-                  <option value="other">Other — Enter manually</option>
+                  {destinationStores.length === 0
+                    ? <option value="">No sub-store configured</option>
+                    : destinationStores.map((store) => <option key={store} value={store}>{store}</option>)}
                 </select>
-              </Field>
-
-              {selectedVehicle && (
-                <div className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl border border-[#0D3A35]/10 bg-[#0D3A35]/5 p-4 sm:col-span-2">
-                  {[
-                    ['Vehicle Number', selectedVehicle.registrationNo],
-                    ['Vehicle Type', selectedVehicle.type || 'N/A'],
-                    ['Make / Company', selectedVehicle.make || 'N/A'],
-                    ['Model', selectedVehicle.model || 'N/A'],
-                    ['Assigned Driver', selectedVehicle.driverName || 'Not assigned'],
-                    ['Driver Contact', selectedVehicle.driverContact || 'N/A'],
-                  ].map(([label, value]) => (
-                    <div key={label}>
-                      <p className="text-[9px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
-                      <p className="mt-1 text-xs font-bold text-slate-700">{value}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {isOtherVehicle && (
-                <>
-                  <Field label="Vehicle Number">
-                    <Input
-                      value={vehicleNumber}
-                      onChange={(event) => setVehicleNumber(event.target.value.toUpperCase())}
-                      placeholder="e.g. CG 07 AB 1234"
-                      className="h-11 uppercase"
-                    />
-                  </Field>
-                  <Field label="Vehicle Type">
-                    <Input
-                      value={vehicleType}
-                      onChange={(event) => setVehicleType(event.target.value)}
-                      placeholder="e.g. Truck, Pickup"
-                      className="h-11"
-                    />
-                  </Field>
-                  <Field label="Make / Company">
-                    <Input
-                      value={vehicleMake}
-                      onChange={(event) => setVehicleMake(event.target.value)}
-                      placeholder="Enter vehicle make"
-                      className="h-11"
-                    />
-                  </Field>
-                  <Field label="Model">
-                    <Input
-                      value={vehicleModel}
-                      onChange={(event) => setVehicleModel(event.target.value)}
-                      placeholder="Enter vehicle model"
-                      className="h-11"
-                    />
-                  </Field>
-                  <Field label="Driver Name">
-                    <Input
-                      value={driverName}
-                      onChange={(event) => setDriverName(event.target.value)}
-                      placeholder="Enter driver name"
-                      className="h-11"
-                    />
-                  </Field>
-                  <Field label="Driver Contact No.">
-                    <Input
-                      type="tel"
-                      value={driverContact}
-                      onChange={(event) => setDriverContact(event.target.value.replace(/[^\d+ -]/g, ''))}
-                      placeholder="Enter contact number"
-                      className="h-11"
-                    />
-                  </Field>
-                </>
-              )}
-              <div className="sm:col-span-2">
-                <Field label="Expected Arrival">
-                  <Input
-                    type="datetime-local"
-                    value={expectedArrival}
-                    onChange={(event) => setExpectedArrival(event.target.value)}
-                    className="h-11"
-                  />
-                </Field>
+              </div>
+              <div className="p-2">
+                <p className={docLabelCls}>Prepared By</p>
+                <p className="mt-1 font-bold text-slate-800">{preparedBy}</p>
               </div>
             </div>
-          </div>
 
-          <Field label="Remarks">
-            <textarea
-              value={remarks}
-              onChange={(event) => setRemarks(event.target.value)}
-              rows={3}
-              placeholder="Add transfer purpose or handling instructions"
-              className="w-full resize-none rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-[#0D3A35]"
-            />
-          </Field>
-
-          <div className="overflow-hidden rounded-xl border border-slate-200">
-            <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/70 px-4 py-3">
-              <div>
-                <h3 className="flex items-center gap-2 text-xs font-bold text-slate-800">
-                  <ShieldCheck className="h-4 w-4 text-[#0D3A35]" />
-                  Transfer Approval
-                </h3>
-                <p className="mt-0.5 text-[11px] font-medium text-slate-400">Approval is mandatory before dispatch or printing.</p>
-              </div>
-              <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-700">Pending</span>
+            {/* Items table */}
+            <div className="border-b border-gray-300 bg-slate-100 px-2.5 py-1 text-center text-[9px] font-bold uppercase tracking-wide text-slate-600">
+              {lineItems.length > 1 ? 'Items Being Transferred' : 'Item Being Transferred'}
             </div>
-            <div className="grid gap-4 p-4 sm:grid-cols-2">
-              <Field label="Prepared By">
-                <Input
-                  value={preparedBy}
-                  readOnly
-                  className="h-11 bg-slate-50 font-semibold text-slate-700"
-                />
-              </Field>
-              <Field label="Approval Employee">
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="bg-slate-800 text-white">
+                  <th className="px-2.5 py-1.5 text-left font-semibold">S.No</th>
+                  <th className="px-2.5 py-1.5 text-left font-semibold">Item</th>
+                  <th className="px-2.5 py-1.5 text-left font-semibold">Item Code</th>
+                  <th className="px-2.5 py-1.5 text-center font-semibold">UOM</th>
+                  <th className="px-2.5 py-1.5 text-right font-semibold">Quantity</th>
+                  <th className="px-2.5 py-1.5 text-right font-semibold">Available</th>
+                  <th className="w-6 px-1 py-1.5" />
+                </tr>
+              </thead>
+              <tbody>
+                {lineItems.map((line, index) => {
+                  const lineItem = items.find((item) => item.id === line.itemId);
+                  const lineLocked = index < lockedCount;
+                  const availableAtSource = lineItem ? dissociationByItem[lineItem.id]?.[sourceStore]?.quantity ?? 0 : 0;
+                  return (
+                    <tr key={index} className="border-b border-gray-200 last:border-b-0">
+                      <td className="px-2.5 py-1.5">{index + 1}</td>
+                      <td className="px-2.5 py-1.5">
+                        <select
+                          value={line.itemId}
+                          onChange={(event) => updateLineItem(index, { itemId: event.target.value, quantity: '' })}
+                          className={docInputCls}
+                        >
+                          <option value="">Select item</option>
+                          {items.map((item) => (
+                            <option
+                              key={item.id}
+                              value={item.id}
+                              disabled={lineItems.some((other, i) => i !== index && other.itemId === item.id)}
+                            >
+                              {item.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-2.5 py-1.5">{lineItem?.sku || '—'}</td>
+                      <td className="px-2.5 py-1.5 text-center">{lineItem?.unit || '—'}</td>
+                      <td className="px-2.5 py-1.5 text-right">
+                        {lineLocked ? (
+                          <span className="font-bold text-slate-800">{line.quantity || '0'}</span>
+                        ) : (
+                          <input
+                            type="number"
+                            min={0}
+                            max={availableAtSource}
+                            value={line.quantity}
+                            onChange={(event) => updateLineItem(index, { quantity: event.target.value })}
+                            placeholder="0"
+                            className={cn(docInputCls, 'text-right')}
+                          />
+                        )}
+                      </td>
+                      <td className="px-2.5 py-1.5 text-right text-slate-500">
+                        {!lineItem ? '—' : dissociationLoading ? '…' : availableAtSource.toLocaleString()}
+                      </td>
+                      <td className="px-1 py-1.5 text-center">
+                        {!lineLocked && lineItems.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => removeLineItem(index)}
+                            className="text-slate-400 hover:text-red-600"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <button
+              type="button"
+              onClick={addLineItem}
+              className="flex w-full items-center justify-center gap-1.5 border-b border-gray-300 bg-slate-50 py-2 text-[9px] font-bold uppercase tracking-wide text-[#0D3A35] hover:bg-slate-100"
+            >
+              <Plus className="h-3 w-3" /> Add Item
+            </button>
+
+            {/* Approval */}
+            <div className="border-y border-gray-300 bg-slate-100 px-2.5 py-1 text-center text-[9px] font-bold uppercase tracking-wide text-slate-600">
+              Approval
+            </div>
+            <div className="grid grid-cols-3 gap-2 p-2">
+              <div className="rounded-md border border-gray-300 p-2 text-center">
+                <p className={docLabelCls}>Store Manager</p>
+                <p className="mt-1.5 text-[9px] font-semibold text-slate-700">{preparedBy}</p>
+                <p className="text-[8px] font-semibold text-slate-400">{user?.designation || '—'}</p>
+                <p className="mt-1 text-[7px] font-semibold text-slate-400">Signed automatically on submit</p>
+              </div>
+              <div className="rounded-md border border-gray-300 p-2 text-center">
+                <p className={docLabelCls}>Head of Operations</p>
                 <select
-                  value={approverId}
-                  onChange={(event) => setApproverId(event.target.value)}
+                  value={headOfOperationsId}
+                  onChange={(event) => setHeadOfOperationsId(event.target.value)}
                   disabled={approversLoading}
-                  className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35] disabled:bg-slate-50"
+                  className={cn(docInputCls, 'mt-1.5 text-center')}
                 >
-                  <option value="">{approversLoading ? 'Loading employees…' : 'Select employee'}</option>
+                  <option value="">{approversLoading ? 'Loading…' : 'Select employee'}</option>
                   {approverOptions.map((employee) => (
                     <option key={employee.id} value={employee.id}>{employee.name}</option>
                   ))}
                 </select>
-              </Field>
-              <Field label="Approver Designation">
-                <Input
-                  value={approverDesignation}
-                  readOnly
-                  placeholder="Filled from employee profile"
-                  className="h-11 bg-slate-50 font-semibold text-slate-700"
-                />
-              </Field>
-              <Field label="Approval Status">
-                <Input
-                  value={selectedApprover ? `Pending with ${approvedBy}` : 'Select an employee'}
-                  readOnly
-                  className="h-11 bg-slate-50 font-semibold text-slate-700"
-                />
-              </Field>
-              <div className="flex items-start gap-3 rounded-lg border border-[#0D3A35]/15 bg-[#0D3A35]/5 p-3 sm:col-span-2">
-                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#0D3A35]" />
-                <span>
-                  <span className="block text-xs font-bold text-[#0D3A35]">Approval will be completed in Inventory Approvals</span>
-                  <span className="mt-1 block text-[11px] font-medium leading-relaxed text-slate-500">
-                    The selected employee will review this request. Approval date is recorded automatically when they approve it.
-                  </span>
-                </span>
+                <p className="mt-1 text-[8px] font-semibold text-slate-400">{selectedHeadOfOperations?.designation || 'Designation'}</p>
+                <p className="mt-1 text-[7px] font-semibold text-slate-400">Signs on approval in Inventory Approvals</p>
               </div>
+              <SignatureBox role="Logistics Manager" signature={null} className="border-dashed" />
+            </div>
+
+            {/* Remarks */}
+            <div className="border-t border-gray-300 p-2">
+              <p className={docLabelCls}>Remarks / Handling Instructions</p>
+              <textarea
+                value={remarks}
+                onChange={(event) => setRemarks(event.target.value)}
+                rows={2}
+                placeholder="Add transfer purpose or handling instructions"
+                className={cn(docInputCls, 'mt-1 resize-none')}
+              />
             </div>
           </div>
         </div>
 
-        <DialogFooter className="border-t border-slate-100 bg-slate-50/70 px-6 py-4">
+        <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
           <Button variant="outline" onClick={onClose} className="font-bold">Cancel</Button>
           <Button
             onClick={submitTransfer}
@@ -6748,5 +7444,425 @@ const SelectField = ({
     <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
   </div>
 );
+
+// ─────────────────────────────────────────────────────────────
+// FARMS OVERVIEW MAP — all farm boundaries on one satellite map
+// ─────────────────────────────────────────────────────────────
+const FARM_MAP_COLORS = ['#0D3A35', '#f59e0b', '#2563eb', '#dc2626', '#7c3aed', '#059669', '#db2777', '#0ea5e9'];
+
+const FitAllBounds = ({ coords }: { coords: [number, number][] }) => {
+  const map = useMap();
+  useEffect(() => {
+    if (coords.length > 0) {
+      map.fitBounds(L.latLngBounds(coords as L.LatLngTuple[]), { padding: [24, 24] });
+    }
+  }, [map, coords]);
+  return null;
+};
+
+// Leaflet measures its container once on mount and caches that size — if the
+// container later resizes (e.g. a layout change widens its column) without this,
+// the map keeps rendering at the old size, leaving a blank gray strip.
+const MapResizeHandler = () => {
+  const map = useMap();
+  useEffect(() => {
+    const container = map.getContainer();
+    map.invalidateSize();
+    const observer = new ResizeObserver(() => map.invalidateSize());
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [map]);
+  return null;
+};
+
+const farmCentroid = (coords: [number, number][]): [number, number] => [
+  coords.reduce((sum, c) => sum + c[0], 0) / coords.length,
+  coords.reduce((sum, c) => sum + c[1], 0) / coords.length,
+];
+
+const farmDotIcon = (color: string) => L.divIcon({
+  className: 'farm-marker-icon',
+  html: `<div style="width:12px;height:12px;border-radius:9999px;background-color:${color};border:2px solid #ffffff;box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>`,
+  iconSize: [12, 12],
+  iconAnchor: [6, 6],
+});
+
+const STORE_MARKER_COLOR = '#0D3A35';
+const STORE_LINK_COLOR = '#facc15';
+
+const storePinIcon = L.divIcon({
+  className: 'store-marker-icon',
+  html: `<div style="width:22px;height:22px;border-radius:9999px 9999px 9999px 0;transform:rotate(-45deg);background-color:${STORE_MARKER_COLOR};border:2px solid #ffffff;box-shadow:0 2px 6px rgba(0,0,0,0.45);"></div>`,
+  iconSize: [22, 22],
+  iconAnchor: [11, 22],
+});
+
+const FarmsOverviewMap = ({
+  farms,
+  stores,
+  selectedStoreName,
+}: {
+  farms: RequestMapFarm[];
+  stores: StoreEntry[];
+  selectedStoreName?: string;
+}) => {
+  const allStoresWithLocation = stores.filter((store): store is StoreEntry & { location: StoreLocation } => !!store.location);
+  const selectedStore = selectedStoreName
+    ? allStoresWithLocation.find((store) => store.name === selectedStoreName)
+    : undefined;
+  const storesWithLocation = selectedStore ? [selectedStore] : allStoresWithLocation;
+
+  const allFarmsWithCoords = farms.filter((farm) => farm.land_coordinates.length >= 3);
+  const cateredBlockIds = selectedStore
+    ? new Set(selectedStore.blocks.map((block) => block.block_id.trim()))
+    : null;
+  const farmsWithCoords = cateredBlockIds
+    ? allFarmsWithCoords.filter((farm) => farm.block_id && cateredBlockIds.has(farm.block_id.trim()))
+    : allFarmsWithCoords;
+
+  const storeCoords = storesWithLocation.map((store) => [store.location.lat, store.location.lng] as [number, number]);
+  const allCoords = [...farmsWithCoords.flatMap((farm) => farm.land_coordinates), ...storeCoords];
+  const center: [number, number] = allCoords.length > 0
+    ? [
+      allCoords.reduce((sum, c) => sum + c[0], 0) / allCoords.length,
+      allCoords.reduce((sum, c) => sum + c[1], 0) / allCoords.length,
+    ]
+    : [20.5937, 78.9629];
+
+  if (farmsWithCoords.length === 0) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-slate-900">
+        <MapIcon className="h-8 w-8 text-slate-600" />
+        <span className="text-xs font-semibold text-slate-500">
+          {selectedStore ? `No lands found in ${selectedStore.name}'s blocks` : 'No farm boundaries to display'}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <MapContainer center={center} zoom={12} style={{ height: '100%', width: '100%' }} attributionControl={false}>
+      <TileLayer
+        url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        maxZoom={19}
+      />
+      {farmsWithCoords.map((farm, index) => {
+        const color = FARM_MAP_COLORS[index % FARM_MAP_COLORS.length];
+        const centroid = farmCentroid(farm.land_coordinates);
+        const tooltipContent = (
+          <span>
+            <strong>{farm.farm_id}</strong>
+            {farm.crop_type ? ` · ${farm.crop_type}` : ''}
+            {(farm.village || farm.district) && <br />}
+            {[farm.village, farm.district].filter(Boolean).join(', ')}
+          </span>
+        );
+        return (
+          <Fragment key={farm.farm_id || index}>
+            <Polygon
+              positions={farm.land_coordinates}
+              pathOptions={{ color, fillColor: color, fillOpacity: 0.3, weight: 2 }}
+            >
+              <LeafletTooltip sticky>{tooltipContent}</LeafletTooltip>
+            </Polygon>
+            <Marker position={centroid} icon={farmDotIcon(color)}>
+              <LeafletTooltip sticky>{tooltipContent}</LeafletTooltip>
+            </Marker>
+          </Fragment>
+        );
+      })}
+
+      {storesWithLocation.map((store) => {
+        const storePosition: [number, number] = [store.location.lat, store.location.lng];
+        const cateredBlockIds = new Set(store.blocks.map((block) => block.block_id.trim()));
+        const cateredFarms = farmsWithCoords.filter((farm) => farm.block_id && cateredBlockIds.has(farm.block_id.trim()));
+        return (
+          <Fragment key={store.name}>
+            {cateredFarms.map((farm, farmIndex) => (
+              <Polyline
+                key={`${store.name}-${farm.farm_id || farmIndex}`}
+                positions={[storePosition, farmCentroid(farm.land_coordinates)]}
+                pathOptions={{ color: STORE_LINK_COLOR, weight: 3, opacity: 0.95 }}
+              />
+            ))}
+            <Marker position={storePosition} icon={storePinIcon}>
+              <LeafletTooltip sticky>
+                <span>
+                  <strong>{store.name}</strong>
+                  <br />
+                  {store.blocks.map((block) => block.block_name).join(', ') || 'No blocks assigned'}
+                </span>
+              </LeafletTooltip>
+            </Marker>
+          </Fragment>
+        );
+      })}
+
+      <FitAllBounds coords={allCoords} />
+      <MapResizeHandler />
+    </MapContainer>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// INVENTORY REQUEST PANEL — pick a store, see requests from lands in its blocks
+// ─────────────────────────────────────────────────────────────
+// product_id on a request is the inventory item's Invent_id, so it's looked up
+// against the already-loaded `items` list for real name/unit/image details.
+type LandRequestLineItem = {
+  productId: string;
+  itemName: string;
+  unit: string;
+  imageUrl: string;
+  quantity: number;
+  sources: string[];
+};
+
+type LandRequestGroup = {
+  farmId: string;
+  landLabel: string;
+  items: LandRequestLineItem[];
+};
+
+const InventoryRequestPanel = ({
+  stores,
+  farms,
+  items,
+  requests,
+  requestsLoading,
+  selectedStoreName,
+  onSelectStore,
+}: {
+  stores: StoreEntry[];
+  farms: RequestMapFarm[];
+  items: StockItem[];
+  requests: BlockPendingRequest[];
+  requestsLoading: boolean;
+  selectedStoreName: string;
+  onSelectStore: (name: string) => void;
+}) => {
+  const selectedStore = stores.find((store) => store.name === selectedStoreName) || null;
+
+  const cateredGroups = useMemo((): LandRequestGroup[] => {
+    if (!selectedStore) return [];
+    const blockIds = new Set(selectedStore.blocks.map((block) => block.block_id.trim()));
+    const farmById = new Map(farms.map((farm) => [farm.farm_id, farm]));
+    const cateredFarmIds = new Set(
+      farms.filter((farm) => farm.block_id && blockIds.has(farm.block_id.trim())).map((farm) => farm.farm_id),
+    );
+    const itemById = new Map(items.map((item) => [item.id, item]));
+
+    const itemsByFarm = new Map<string, Map<string, LandRequestLineItem>>();
+    const landLabelByFarm = new Map<string, string>();
+
+    requests.forEach((request) => {
+      const sourceLabel = TASK_TYPE_LABELS[request.task_type] || request.task_type;
+      request.land_wise_item_list.forEach((landItem) => {
+        if (!cateredFarmIds.has(landItem.farm_id)) return;
+
+        if (!landLabelByFarm.has(landItem.farm_id)) {
+          const farm = farmById.get(landItem.farm_id);
+          landLabelByFarm.set(
+            landItem.farm_id,
+            farm && (farm.village || farm.district)
+              ? [farm.village, farm.district].filter(Boolean).join(', ')
+              : (landItem.owner_name || landItem.farm_id),
+          );
+        }
+
+        const productDetails = itemById.get(landItem.product_id);
+        const itemMap = itemsByFarm.get(landItem.farm_id) ?? new Map<string, LandRequestLineItem>();
+        const existing = itemMap.get(landItem.product_id);
+        if (existing) {
+          existing.quantity += landItem.quantity;
+          if (!existing.sources.includes(sourceLabel)) existing.sources.push(sourceLabel);
+        } else {
+          itemMap.set(landItem.product_id, {
+            productId: landItem.product_id,
+            itemName: productDetails?.name || landItem.item_name,
+            unit: productDetails?.unit || landItem.unit || '',
+            imageUrl: productDetails?.imageUrl || '',
+            quantity: landItem.quantity,
+            sources: [sourceLabel],
+          });
+        }
+        itemsByFarm.set(landItem.farm_id, itemMap);
+      });
+    });
+
+    return Array.from(itemsByFarm.entries()).map(([farmId, itemMap]) => ({
+      farmId,
+      landLabel: landLabelByFarm.get(farmId) || farmId,
+      items: Array.from(itemMap.values()),
+    }));
+  }, [selectedStore, farms, items, requests]);
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+      <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-4">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35]">
+          <ClipboardList className="h-5 w-5" />
+        </div>
+        <div>
+          <h3 className="text-base font-bold text-slate-950">Inventory Requests</h3>
+          <p className="text-xs font-medium text-slate-500">Requests from lands in the store's blocks</p>
+        </div>
+      </div>
+
+      <div className="border-b border-slate-100 p-4">
+        <select
+          value={selectedStoreName}
+          onChange={(event) => onSelectStore(event.target.value)}
+          className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 outline-none focus:border-[#0D3A35]"
+        >
+          <option value="">Select a store</option>
+          {stores.map((store) => (
+            <option key={store.name} value={store.name}>{store.name}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+        {!selectedStore ? (
+          <div className="flex h-full min-h-[200px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 text-center text-xs font-semibold text-slate-400">
+            Select a store to view requests from its blocks
+          </div>
+        ) : requestsLoading ? (
+          <div className="flex h-full min-h-[200px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 text-center text-xs font-semibold text-slate-400">
+            Loading requests…
+          </div>
+        ) : cateredGroups.length === 0 ? (
+          <div className="flex h-full min-h-[200px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 text-center text-xs font-semibold text-slate-400">
+            No pending requests from this store's blocks
+          </div>
+        ) : (
+          cateredGroups.map((group) => (
+            <div key={group.farmId} className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="flex items-center gap-1 text-xs font-bold text-slate-900">
+                  <MapIcon className="h-3 w-3 shrink-0 text-slate-400" />
+                  {group.landLabel}
+                </p>
+                <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-700">
+                  Pending
+                </span>
+              </div>
+              <div className="mt-2 space-y-1.5">
+                {group.items.map((item) => (
+                  <div
+                    key={item.productId}
+                    className="flex items-center gap-2 rounded-md border border-slate-200/80 bg-white p-2"
+                  >
+                    <img
+                      src={item.imageUrl || PLACEHOLDER_IMG}
+                      alt={item.itemName}
+                      className="h-9 w-9 shrink-0 rounded-md border border-slate-200 object-cover"
+                      onError={(event) => { event.currentTarget.src = PLACEHOLDER_IMG; }}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[11px] font-bold text-slate-900">{item.itemName}</p>
+                      <p className="text-[10px] font-semibold text-slate-500">
+                        {item.quantity}{item.unit ? ` ${item.unit}` : ''} · {item.sources.join(', ')}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// WAREHOUSE STOCK PANEL — one item (shared across From/To), warehouse picked
+// per panel; stock comes from the shared dissociation lookup (0 if the
+// selected warehouse isn't one of the item's stock locations).
+// ─────────────────────────────────────────────────────────────
+const WarehouseStockPanel = ({
+  label,
+  icon: Icon,
+  stores,
+  store,
+  onStoreChange,
+  lineItems,
+  dissociationByItem,
+  dissociationLoading,
+}: {
+  label: string;
+  icon: React.ElementType;
+  stores: string[];
+  store: string;
+  onStoreChange: (value: string) => void;
+  lineItems: { item: StockItem | null }[];
+  dissociationByItem: Record<string, ItemDissociation>;
+  dissociationLoading: boolean;
+}) => {
+  const resolvedItems = lineItems
+    .map((line) => line.item)
+    .filter((item): item is StockItem => !!item);
+
+  return (
+    <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+      <div className="flex items-center gap-2.5 border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35]">
+          <Icon className="h-4 w-4" />
+        </div>
+        <h3 className="text-sm font-bold text-slate-950">{label}</h3>
+      </div>
+
+      <div className="space-y-3 p-4">
+        <div className="relative">
+          <select
+            value={store}
+            onChange={(event) => onStoreChange(event.target.value)}
+            disabled={resolvedItems.length === 0}
+            className="h-9 w-full appearance-none rounded-lg border border-slate-200 bg-white px-2.5 pr-7 text-xs font-semibold text-slate-700 outline-none focus:border-[#0D3A35] disabled:bg-slate-50 disabled:text-slate-400"
+          >
+            <option value="">{resolvedItems.length ? 'Select store' : 'Pick an item first'}</option>
+            {stores.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+        </div>
+
+        {resolvedItems.length === 0 ? (
+          <div className="flex h-28 items-center justify-center rounded-xl border border-dashed border-slate-200 text-center text-xs font-semibold text-slate-400">
+            Select an item above to view stock
+          </div>
+        ) : (
+          <div className="grid max-h-64 grid-cols-2 gap-2 overflow-y-auto pr-0.5">
+            {resolvedItems.map((item) => {
+              const storeStock = store ? dissociationByItem[item.id]?.[store]?.quantity ?? 0 : 0;
+              return (
+                <div key={item.id} className="flex h-16 overflow-hidden rounded-xl border border-slate-100 bg-slate-50/60">
+                  <img
+                    src={item.imageUrl || PLACEHOLDER_IMG}
+                    alt={item.name}
+                    className="h-full w-16 shrink-0 border-r border-slate-100 object-cover"
+                  />
+                  <div className="min-w-0 flex-1 p-2">
+                    <p className="truncate text-[10px] font-bold text-slate-900">{item.name}</p>
+                    {!store ? (
+                      <p className="mt-1 text-[9px] font-semibold text-slate-400">Pick a store</p>
+                    ) : dissociationLoading ? (
+                      <p className="mt-1 text-[9px] font-semibold text-slate-400">Loading…</p>
+                    ) : (
+                      <>
+                        <p className="mt-1 text-xs font-black leading-none text-[#0D3A35]">{storeStock.toLocaleString()}</p>
+                        <p className="mt-0.5 text-[9px] font-semibold text-slate-400">{item.unit} in stock</p>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+};
 
 export default Inventory;
