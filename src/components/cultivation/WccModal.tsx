@@ -114,7 +114,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
   // Fetch the vendor's completed/in-progress work for the selected period whenever the
   // period (or the underlying scope) changes.
   useEffect(() => {
-    if (landIds.length === 0 || activities.length === 0) {
+    if (activities.length === 0) {
       setWorkDone([]);
       setLoading(false);
       return;
@@ -213,18 +213,18 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
   return (
     <>
       <div className="fixed inset-0 z-[90] bg-black/40 backdrop-blur-sm animate-in fade-in duration-200" />
-      <div className="fixed inset-y-0 right-0 z-[91] w-full max-w-3xl bg-white shadow-2xl flex flex-col animate-in slide-in-from-right duration-300">
+      <div className="fixed inset-y-0 right-0 z-[91] flex w-full max-w-4xl flex-col bg-white shadow-2xl animate-in slide-in-from-right duration-300">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-100 flex items-start justify-between gap-4 bg-gradient-to-r from-indigo-50/60 to-white shrink-0">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#0D3A35] bg-[#0D3A35] px-6 py-4 text-white">
           <div className="min-w-0">
-            <p className="text-[11px] font-semibold text-indigo-400 uppercase tracking-widest mb-0.5">Work Completion Certificate</p>
-            <h2 className="text-lg font-bold text-slate-900 truncate">{vendorName}</h2>
-            <p className="mt-0.5 text-xs text-slate-500">{landIds.length} land{landIds.length !== 1 ? 's' : ''} in scope</p>
+            <p className="mb-0.5 text-[11px] font-semibold uppercase tracking-widest text-emerald-200">Work Completion Certificate</p>
+            <h2 className="truncate text-lg font-bold text-white">{vendorName}</h2>
+            <p className="mt-0.5 text-xs text-emerald-100">{landIds.length} land{landIds.length !== 1 ? 's' : ''} in scope</p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-300 transition-colors shrink-0"
+            className="shrink-0 rounded-lg border border-white/20 p-1.5 text-white transition-colors hover:bg-white/10"
           >
             <X className="w-4 h-4" />
           </button>
@@ -233,7 +233,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
         {/* Date range */}
         <div className="px-6 py-4 border-b border-gray-100 bg-white shrink-0">
           <div className="flex items-center gap-2 mb-2">
-            <CalendarRange className="w-3.5 h-3.5 text-indigo-500" />
+            <CalendarRange className="h-3.5 w-3.5 text-emerald-700" />
             <span className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">Certificate Period</span>
           </div>
           <div className="flex items-end gap-3">
@@ -244,7 +244,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
                 value={fromDate}
                 max={toDate}
                 onChange={(e) => setFromDate(e.target.value)}
-                className="h-9 w-full rounded-lg border border-gray-200 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                className="h-9 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 focus:border-[#0D3A35] focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/10"
               />
             </div>
             <ChevronRight className="w-4 h-4 text-gray-300 mb-2.5 shrink-0" />
@@ -255,7 +255,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
                 value={toDate}
                 min={fromDate}
                 onChange={(e) => setToDate(e.target.value)}
-                className="h-9 w-full rounded-lg border border-gray-200 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                className="h-9 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 focus:border-[#0D3A35] focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/10"
               />
             </div>
             <div className="text-right shrink-0 pl-2">
@@ -300,7 +300,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
             <button
               type="button"
               onClick={() => setShowCertificatePreview(true)}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg transition-colors shadow-sm"
+              className="inline-flex items-center gap-2 rounded-xl bg-[#0D3A35] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#092e2a]"
             >
               <FileCheck className="w-4 h-4" /> Generate Certificate
             </button>

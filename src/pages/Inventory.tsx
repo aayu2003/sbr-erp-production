@@ -50,6 +50,7 @@ import {
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
+import { formatDateDDMMYYYY, formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import {
@@ -345,6 +346,50 @@ type InventoryMasterConfig = {
   issueClassifications: string[];
 };
 
+const INVENTORY_MASTER_CONFIG_KEY = 'farm-connect.inventory-master-config.v1';
+const INVENTORY_ITEM_METADATA_KEY = 'farm-connect.inventory-item-metadata.v1';
+const LEGACY_INVENTORY_ITEM_METADATA: Record<string, Partial<InventoryItemMetadata>> = {
+  'SBR/TNC/001': { issueClassification: 'Returnable' },
+};
+
+type InventoryItemMetadata = Pick<StockItem,
+  | 'inventoryGroup'
+  | 'subCategory'
+  | 'expenseClassification'
+  | 'inventoryClassification'
+  | 'issueClassification'
+  | 'stockIssueMethod'
+  | 'packingSize'
+  | 'shelf'
+>;
+
+const readInventoryItemMetadata = (): Record<string, Partial<InventoryItemMetadata>> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(INVENTORY_ITEM_METADATA_KEY) || '{}');
+    return stored && typeof stored === 'object' ? stored : {};
+  } catch {
+    return {};
+  }
+};
+
+const saveInventoryItemMetadata = (item: StockItem) => {
+  if (typeof window === 'undefined') return;
+  const stored = readInventoryItemMetadata();
+  const metadata: Partial<InventoryItemMetadata> = {
+    inventoryGroup: item.inventoryGroup,
+    subCategory: item.subCategory,
+    expenseClassification: item.expenseClassification,
+    inventoryClassification: item.inventoryClassification,
+    issueClassification: item.issueClassification,
+    stockIssueMethod: item.stockIssueMethod,
+    packingSize: item.packingSize,
+    shelf: item.shelf,
+  };
+  if (item.id) stored[item.id] = metadata;
+  if (item.sku) stored[item.sku] = metadata;
+  window.localStorage.setItem(INVENTORY_ITEM_METADATA_KEY, JSON.stringify(stored));
+};
 const DEFAULT_INVENTORY_MASTER_CONFIG: InventoryMasterConfig = {
   inventoryGroups: INVENTORY_GROUPS,
   categories: CATEGORIES.filter((category) => category !== 'All'),
@@ -944,14 +989,7 @@ const StoreConfigCard = ({
 
 const formatTransferDate = (value?: string, includeTime = false) => {
   if (!value) return '—';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    ...(includeTime ? { hour: '2-digit', minute: '2-digit' } : {}),
-  }).format(date);
+  return includeTime ? formatDateTimeDDMMYYYY(value, value) : formatDateDDMMYYYY(value, value);
 };
 
 const TransferSlipDialog = ({
@@ -1213,7 +1251,7 @@ const Inventory = () => {
   const [masterConfig, setMasterConfig] = useState<InventoryMasterConfig>(DEFAULT_INVENTORY_MASTER_CONFIG);
   const [masterConfigLoaded, setMasterConfigLoaded] = useState(false);
   const [activeInventoryTab, setActiveInventoryTab] = useState<'dashboard' | 'central-store' | 'sub-store' | 'inventory-request' | 'configure'>('dashboard');
-  const [centralStoreView, setCentralStoreView] = useState<'stock' | 'transfers'>('stock');
+  const [centralStoreView, setCentralStoreView] = useState<'stock' | 'transfers' | 'issued'>('stock');
   const [transferApprovals, setTransferApprovals] = useState<InventoryTransferApproval[]>(readInventoryApprovals);
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
@@ -1294,7 +1332,12 @@ const Inventory = () => {
           throw new Error(data?.message || 'Failed to fetch inventory items');
         }
 
+        const savedMetadata = readInventoryItemMetadata();
         const mapped: StockItem[] = data.items.map((it: any, idx: number) => {
+          const itemId = String(it?.Invent_id || it?.new_item_code || `inv_${idx}`);
+          const itemCode = String(it?.new_item_code || '');
+          const metadata = savedMetadata[itemId] || savedMetadata[itemCode] || {};
+          const legacyMetadata = LEGACY_INVENTORY_ITEM_METADATA[itemCode] || {};
           const stockHistory: StockTransaction[] = Array.isArray(it?.stock_history)
             ? it.stock_history.map((entry: any) => {
                 const ts = String(entry?.timestamp ?? '');
@@ -1327,22 +1370,34 @@ const Inventory = () => {
           });
 
           return {
-            id: String(it?.Invent_id || it?.new_item_code || `inv_${idx}`),
+            id: itemId,
             name: String(it?.item_name || ''),
             category: String(it?.category || 'Others'),
             sku: String(it?.new_item_code || ''),
             unit: String(it?.unit || ''),
-            currentStock: Number(it?.stock) || 0,
+            currentStock: (() => {
+              const apiStock = Number(it?.stock) || 0;
+              const fifoStock = Array.isArray(it?.fifo_list)
+                ? it.fifo_list.reduce((sum: number, entry: any) => sum + (Number(entry?.stock) || 0), 0)
+                : 0;
+              return apiStock === 0 && fifoStock > 0 ? fifoStock : apiStock;
+            })(),
             stockInPipeline: Number(it?.stock_in_pipeline || it?.pipeline_stock || 0),
             minStock: Number(it?.threshold) || 0,
-            inventoryGroup: String(it?.inventory_group || it?.inventoryGroup || ''),
-            subCategory: String(it?.sub_category || it?.subcategory || it?.subCategory || ''),
-            expenseClassification: String(it?.expense_classification || it?.expenseClassification || ''),
-            inventoryClassification: String(it?.inventory_classification || it?.inventoryClassification || ''),
-            issueClassification: String(it?.issue_classification || it?.issueClassification || ''),
-            stockIssueMethod: String(it?.stock_issue_method || it?.stockIssueMethod || ''),
-            packingSize: String(it?.packing_size || it?.pack_size || it?.packingSize || ''),
-            shelf: String(it?.shelf || it?.shelf_number || it?.rack || ''),
+            inventoryGroup: String(metadata.inventoryGroup || it?.inventory_group || it?.inventoryGroup || ''),
+            subCategory: String(metadata.subCategory || it?.sub_category || it?.subcategory || it?.subCategory || ''),
+            expenseClassification: String(metadata.expenseClassification || it?.expense_classification || it?.expenseClassification || ''),
+            inventoryClassification: String(metadata.inventoryClassification || it?.inventory_classification || it?.inventoryClassification || ''),
+            issueClassification: String(
+              metadata.issueClassification
+              || it?.issue_classification
+              || it?.issueClassification
+              || legacyMetadata.issueClassification
+              || '',
+            ),
+            stockIssueMethod: String(metadata.stockIssueMethod || it?.stock_issue_method || it?.stockIssueMethod || ''),
+            packingSize: String(metadata.packingSize || it?.packing_size || it?.pack_size || it?.packingSize || ''),
+            shelf: String(metadata.shelf || it?.shelf || it?.shelf_number || it?.rack || ''),
             batchTracking: typeof it?.batch_tracking === 'boolean' ? it.batch_tracking : undefined,
             expiryTracking: typeof it?.expiry_tracking === 'boolean' ? it.expiry_tracking : undefined,
             batchNumber: String(it?.batch_number || it?.batch_no || ''),
@@ -1447,6 +1502,10 @@ const Inventory = () => {
       }
     })();
   }, [masterConfig, masterConfigLoaded]);
+
+  useEffect(() => {
+    items.forEach(saveInventoryItemMetadata);
+  }, [items]);
 
   useEffect(() => {
     const refreshTransfers = () => setTransferApprovals(readInventoryApprovals());
@@ -2120,6 +2179,17 @@ const Inventory = () => {
                     <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] text-amber-700">{pendingTransferCount}</span>
                   )}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => { setCentralStoreView('issued'); setSearch(''); }}
+                  className={cn(
+                    'flex h-8 items-center gap-2 rounded-md px-3 text-xs font-bold transition',
+                    centralStoreView === 'issued' ? 'bg-white text-[#0D3A35] shadow-sm' : 'text-slate-500',
+                  )}
+                >
+                  <ArrowUpFromLine className="h-3.5 w-3.5" />
+                  Allocated Items
+                </button>
               </div>
               <button
                 type="button"
@@ -2138,7 +2208,9 @@ const Inventory = () => {
             <Input
               placeholder={activeInventoryTab === 'central-store' && centralStoreView === 'transfers'
                 ? 'Search transfer slip, item, store, or approver…'
-                : 'Search by name, SKU or category…'}
+                : activeInventoryTab === 'central-store' && centralStoreView === 'issued'
+                  ? 'Search allocated item, recipient, reference, or status…'
+                  : 'Search by name, SKU or category…'}
               className="h-12 rounded-xl border-slate-200 bg-slate-50/70 pl-11 text-sm font-semibold shadow-none focus-visible:ring-emerald-100"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -2191,6 +2263,8 @@ const Inventory = () => {
           <p className="text-xs font-semibold text-slate-500">
             {activeInventoryTab === 'central-store' && centralStoreView === 'transfers' ? (
               <>Showing <span className="text-[#0D3A35]">{visibleTransferApprovals.length}</span> of {transferApprovals.length} transfer slips</>
+            ) : activeInventoryTab === 'central-store' && centralStoreView === 'issued' ? (
+              <>Issued stock records and return entries</>
             ) : (
               <>Showing <span className="text-[#0D3A35]">{displayedItems.length}</span> of {inventoryItemsForActiveStore.length} inventory items</>
             )}
@@ -2323,6 +2397,38 @@ const Inventory = () => {
             })}
           </div>
         )
+      )}
+
+      {activeInventoryTab === 'central-store' && centralStoreView === 'issued' && (
+        <IssuedStockTab
+          items={items}
+          search={search}
+          onStockReturned={(itemId, quantity) => {
+            setItems((previous) => previous.map((stockItem) => (
+              stockItem.id === itemId
+                ? { ...stockItem, currentStock: stockItem.currentStock + quantity }
+                : stockItem
+            )));
+          }}
+          onStockHandedOver={(itemId, quantity, issueId) => {
+            setItems((previous) => previous.map((stockItem) => (
+              stockItem.id === itemId
+                ? {
+                  ...stockItem,
+                  currentStock: Math.max(0, stockItem.currentStock - quantity),
+                  transactions: [{
+                    id: `allocation-handover-${issueId}`,
+                    type: 'issued' as const,
+                    qty: quantity,
+                    date: today(),
+                    note: `OTP-verified allocation handover · ${issueId}`,
+                    by: user?.name || user?.username || 'System User',
+                  }, ...stockItem.transactions],
+                }
+                : stockItem
+            )));
+          }}
+        />
       )}
 
       {(activeInventoryTab === 'sub-store' || centralStoreView === 'stock') && (
@@ -2724,6 +2830,12 @@ const Inventory = () => {
             }
 
             const validEntries = openingStocks.filter((e) => Number(e.quantity) > 0);
+            const fifoList = validEntries.map((e) => ({
+              stock: Number(e.quantity),
+              per_unit_cost: Number(e.costPerUnit) || 0,
+              po_number: e.poNumber || '',
+            }));
+            const totalOpeningStock = fifoList.reduce((sum, entry) => sum + entry.stock, 0);
 
             const createPayload: Record<string, unknown> = {
               item_name: data.name,
@@ -2735,15 +2847,17 @@ const Inventory = () => {
               item_image_url: itemImageUrl,
               description: data.description || '',
               stock_issue_method: data.stockIssueMethod,
+              inventory_group: data.inventoryGroup || '',
+              sub_category: data.subCategory || '',
+              expense_classification: data.expenseClassification || '',
+              inventory_classification: data.inventoryClassification || '',
+              issue_classification: data.issueClassification || '',
+              packing_size: data.packingSize || '',
+              shelf: data.shelf || '',
             };
 
             if (validEntries.length > 0) {
-              const fifoList = validEntries.map((e) => ({
-                stock: Number(e.quantity),
-                per_unit_cost: Number(e.costPerUnit) || 0,
-                po_number: e.poNumber || '',
-              }));
-              createPayload.total_opening_stock = fifoList.reduce((sum, e) => sum + e.stock, 0);
+              createPayload.total_opening_stock = totalOpeningStock;
               createPayload.fifo_list = fifoList;
             }
 
@@ -2757,15 +2871,27 @@ const Inventory = () => {
               throw new Error(createData?.message || 'Failed to create item');
             }
 
-            setItems((prev) => [
-              {
-                ...data,
-                imageUrl: itemImageUrl || data.imageUrl,
+            const createdItem: StockItem = {
+              ...data,
+              imageUrl: itemImageUrl || data.imageUrl,
+              id: String(createData?.Invent_id || createData?.item_id || genId()),
+              currentStock: totalOpeningStock,
+              fifoList,
+              transactions: validEntries.map((entry) => ({
                 id: genId(),
-                transactions: [],
-              },
-              ...prev,
-            ]);
+                type: 'incoming' as const,
+                qty: Number(entry.quantity),
+                date: today(),
+                note: [
+                  'Opening stock',
+                  entry.poNumber ? `PO: ${entry.poNumber}` : '',
+                ].filter(Boolean).join(' · '),
+                by: user?.name || user?.username || 'System User',
+                costPerUnit: Number(entry.costPerUnit) || 0,
+              })),
+            };
+            saveInventoryItemMetadata(createdItem);
+            setItems((prev) => [createdItem, ...prev]);
             setAddOpen(false);
             toast.success(createData?.message || `"${data.name}" added to inventory`);
           } catch (e: any) {
@@ -2890,6 +3016,7 @@ const Inventory = () => {
           locations={availableStores}
           onClose={() => setEditItem(null)}
           onSave={(updated) => {
+            saveInventoryItemMetadata(updated);
             setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
             setEditItem(null);
             toast.success('Item updated');
@@ -2965,14 +3092,7 @@ const Inventory = () => {
         <IssueStockModal
           item={issueStockItem}
           onClose={() => setIssueStockItem(null)}
-          onIssued={({ quantity, issueDate, issuedBy, note }) => {
-            addTransaction(issueStockItem.id, {
-              type: 'issued',
-              qty: quantity,
-              date: issueDate,
-              note,
-              by: issuedBy,
-            });
+          onAllocated={() => {
             setIssueStockItem(null);
           }}
         />
@@ -4021,7 +4141,7 @@ const ItemInformationDialog = ({
                     <p className="text-sm font-black text-slate-800">
                       {transaction.qty.toLocaleString('en-IN')} {item.unit}
                     </p>
-                    <p className="text-xs font-semibold text-slate-500">{transaction.date || 'No date'}</p>
+                    <p className="text-xs font-semibold text-slate-500">{formatDateDDMMYYYY(transaction.date, 'No date')}</p>
                     <p className="min-w-[180px] flex-1 text-xs font-medium text-slate-500">
                       {transaction.note || 'No note'}
                     </p>
@@ -4159,7 +4279,7 @@ const InventoryCard = ({
             className="flex items-center justify-center gap-1.5 rounded-lg border border-[#0D3A35]/15 bg-[#0D3A35]/5 py-2.5 text-xs font-bold text-[#0D3A35] transition-colors hover:bg-[#0D3A35]/10"
           >
             <ArrowUpFromLine className="w-3.5 h-3.5" />
-            Issue Stock
+            Allocate Item
           </button>
           <button
             onClick={onUpdateStock}
@@ -5090,107 +5210,99 @@ const EditItemModal = ({
   };
 
   return (
-    <Dialog open onOpenChange={onClose}>
-      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Edit3 className="w-5 h-5 text-blue-600" />
-            Edit Item – {item.name}
-          </DialogTitle>
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-h-[92vh] max-w-4xl overflow-y-auto rounded-2xl border-0 bg-slate-50 p-0 shadow-[0_28px_80px_rgba(13,58,53,0.28)]">
+        <DialogHeader className="sticky top-0 z-20 bg-[#0D3A35] px-6 py-5 text-white">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close edit item"
+            className="absolute right-5 top-5 flex h-9 w-9 items-center justify-center rounded-full border border-white/25 bg-white/10 text-white transition hover:bg-white/20"
+          >
+            <X className="h-5 w-5" />
+          </button>
+          <div className="flex items-center gap-3 pr-12">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white/10">
+              <Edit3 className="h-5 w-5" />
+            </div>
+            <div>
+              <DialogTitle className="text-xl font-black text-white">Edit Item</DialogTitle>
+              <p className="mt-1 text-xs font-medium text-white/65">Update item identity, classification, storage, and issue controls.</p>
+            </div>
+          </div>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
-          <Field label="Item Name">
-            <Input value={form.name} onChange={(e) => set('name', e.target.value)} />
-          </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Inventory Group">
-              <SelectField
-                value={form.inventoryGroup || ''}
-                options={inventoryGroups}
-                onChange={(value) => {
+        <div className="space-y-5 px-6 py-5">
+          <section className="grid gap-3 rounded-xl border border-[#0D3A35]/10 bg-white p-4 shadow-sm sm:grid-cols-[1fr_auto]">
+            <div className="min-w-0">
+              <p className="text-[10px] font-black uppercase tracking-wide text-slate-400">Editing Item</p>
+              <p className="mt-1 truncate text-lg font-black text-slate-900">{item.name}</p>
+              <p className="mt-1 text-xs font-semibold text-slate-500">{item.sku || item.id} · {item.category} · {item.location || 'No store'}</p>
+            </div>
+            <div className="rounded-xl bg-[#0D3A35]/5 px-5 py-3 text-right">
+              <p className="text-[9px] font-black uppercase tracking-wide text-slate-400">Current Stock</p>
+              <p className="mt-1 text-xl font-black text-[#0D3A35]">{item.currentStock.toLocaleString('en-IN')} {item.unit}</p>
+              <p className="mt-1 text-[10px] font-semibold text-slate-400">Use stock transactions to adjust quantity</p>
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <p className="mb-4 text-xs font-black uppercase tracking-[0.08em] text-slate-500">Basic Information</p>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="sm:col-span-2"><Field label="Item Name *"><Input value={form.name} onChange={(e) => set('name', e.target.value)} /></Field></div>
+              <Field label="Item Code"><Input value={form.sku} onChange={(e) => set('sku', e.target.value)} /></Field>
+              <Field label="Inventory Group">
+                <SelectField value={form.inventoryGroup || ''} options={inventoryGroups} onChange={(value) => {
                   const nextCategories = categories.filter((category) => categoryGroups[category] === value);
-                  setForm((previous) => ({
-                    ...previous,
-                    inventoryGroup: value,
-                    category: nextCategories[0] || categories[0] || '',
-                    subCategory: '',
-                  }));
-                }}
+                  setForm((previous) => ({ ...previous, inventoryGroup: value, category: nextCategories[0] || categories[0] || '', subCategory: '' }));
+                }} />
+              </Field>
+              <Field label="Category"><SelectField value={form.category} options={categoryOptions} onChange={(value) => setForm((previous) => ({ ...previous, category: value, subCategory: '' }))} /></Field>
+              <Field label="Subcategory"><SelectField value={form.subCategory || ''} options={subCategoryOptions.length ? subCategoryOptions : ['Not Configured']} onChange={(value) => set('subCategory', value === 'Not Configured' ? '' : value)} /></Field>
+              <Field label="Unit of Measure"><SelectField value={form.unit} options={units} onChange={(value) => set('unit', value)} /></Field>
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <p className="mb-4 text-xs font-black uppercase tracking-[0.08em] text-slate-500">Classification &amp; Issue Control</p>
+            <div className="grid gap-4 md:grid-cols-3">
+              <Field label="Expense Classification"><SelectField value={form.expenseClassification || ''} options={expenseClassifications} onChange={(value) => set('expenseClassification', value)} /></Field>
+              <Field label="Inventory Classification"><SelectField value={form.inventoryClassification || ''} options={inventoryClassifications} onChange={(value) => set('inventoryClassification', value)} /></Field>
+              <Field label="Issue Classification"><SelectField value={form.issueClassification || ''} options={issueClassifications} onChange={(value) => set('issueClassification', value)} /></Field>
+            </div>
+            <div className="mt-4">
+              <StockIssueMethodField value={form.stockIssueMethod || ''} onChange={(value) => set('stockIssueMethod', value)} />
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <p className="mb-4 text-xs font-black uppercase tracking-[0.08em] text-slate-500">Storage &amp; Stock Planning</p>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <Field label="Store / Location"><SelectField value={form.location} options={locations} onChange={(value) => set('location', value)} /></Field>
+              <Field label="Shelf"><Input value={form.shelf || ''} onChange={(e) => set('shelf', e.target.value)} placeholder="e.g. Shelf A-03" /></Field>
+              <Field label="Packing Size"><Input value={form.packingSize || ''} onChange={(e) => set('packingSize', e.target.value)} placeholder="e.g. 50 kg bag" /></Field>
+              <Field label="Minimum Stock Level"><Input type="number" min={0} value={form.minStock} onChange={(e) => set('minStock', Number(e.target.value))} /></Field>
+              <div className="sm:col-span-2"><Field label="Image URL"><Input value={form.imageUrl} onChange={(e) => set('imageUrl', e.target.value)} placeholder="https://..." /></Field></div>
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <Field label="Description">
+              <textarea
+                className="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/15"
+                rows={3}
+                value={form.description}
+                onChange={(e) => set('description', e.target.value)}
+                placeholder="Item description, handling notes, or specifications"
               />
             </Field>
-            <Field label="Category">
-              <SelectField
-                value={form.category}
-                options={categoryOptions}
-                onChange={(value) => setForm((previous) => ({ ...previous, category: value, subCategory: '' }))}
-              />
-            </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Subcategory">
-              <SelectField
-                value={form.subCategory || ''}
-                options={subCategoryOptions.length ? subCategoryOptions : ['Not Configured']}
-                onChange={(value) => set('subCategory', value === 'Not Configured' ? '' : value)}
-              />
-            </Field>
-            <Field label="SKU">
-              <Input value={form.sku} onChange={(e) => set('sku', e.target.value)} />
-            </Field>
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <Field label="Expense Classification">
-              <SelectField value={form.expenseClassification || ''} options={expenseClassifications} onChange={(value) => set('expenseClassification', value)} />
-            </Field>
-            <Field label="Inventory Classification">
-              <SelectField value={form.inventoryClassification || ''} options={inventoryClassifications} onChange={(value) => set('inventoryClassification', value)} />
-            </Field>
-            <Field label="Issue Classification">
-              <SelectField value={form.issueClassification || ''} options={issueClassifications} onChange={(value) => set('issueClassification', value)} />
-            </Field>
-          </div>
-          <StockIssueMethodField
-            value={form.stockIssueMethod || ''}
-            onChange={(value) => set('stockIssueMethod', value)}
-          />
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Unit">
-              <SelectField value={form.unit} options={units} onChange={(v) => set('unit', v)} />
-            </Field>
-            <Field label="Location">
-              <SelectField value={form.location} options={locations} onChange={(v) => set('location', v)} />
-            </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Packing Size">
-              <Input value={form.packingSize || ''} onChange={(e) => set('packingSize', e.target.value)} placeholder="e.g. 50 kg bag" />
-            </Field>
-            <Field label="Shelf">
-              <Input value={form.shelf || ''} onChange={(e) => set('shelf', e.target.value)} placeholder="e.g. Shelf A-03" />
-            </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Min Stock Level">
-              <Input type="number" min={0} value={form.minStock} onChange={(e) => set('minStock', Number(e.target.value))} />
-            </Field>
-            <Field label="Image URL">
-              <Input value={form.imageUrl} onChange={(e) => set('imageUrl', e.target.value)} />
-            </Field>
-          </div>
-          <Field label="Description">
-            <textarea
-              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-              rows={3}
-              value={form.description}
-              onChange={(e) => set('description', e.target.value)}
-            />
-          </Field>
+          </section>
         </div>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button className="bg-blue-600 hover:bg-blue-700 text-white" onClick={handleSave}>
+        <DialogFooter className="sticky bottom-0 z-20 border-t border-slate-200 bg-white px-6 py-4">
+          <Button variant="outline" onClick={onClose} className="font-bold">Cancel</Button>
+          <Button className="gap-2 bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]" onClick={handleSave}>
+            <Edit3 className="h-4 w-4" />
             Save Changes
           </Button>
         </DialogFooter>
@@ -5300,7 +5412,7 @@ const TransactionModal = ({
       if (!issueFarm) return toast.error('Please select a farm');
       if (!issueStartDate || !issueEndDate) return toast.error('Please fill both issue dates');
       if (issueEndDate < issueStartDate) return toast.error('End date must be after start date');
-      onSave({ type: txType, qty, date: issueStartDate, note: `${issueStartDate} → ${issueEndDate} | Farm: ${issueFarm}`, by: issueTo });
+      onSave({ type: txType, qty, date: issueStartDate, note: `${formatDateDDMMYYYY(issueStartDate)} → ${formatDateDDMMYYYY(issueEndDate)} | Farm: ${issueFarm}`, by: issueTo });
     } else {
       onSave({ type: txType, qty, date: today(), note, by });
     }
@@ -5576,12 +5688,25 @@ const RequestStockModal = ({
   );
 };
 
-type IssueDestinationType = 'land' | 'vendor';
+type IssueDestinationType = 'land' | 'vendor' | 'person';
 
 type IssueDestinationOption = {
   id: string;
   label: string;
   detail: string;
+  representatives?: IssueRepresentativeOption[];
+};
+
+type IssueRepresentativeOption = {
+  id: string;
+  name: string;
+  detail: string;
+};
+
+type IssueEmployeeOption = {
+  id: string;
+  name: string;
+  designation: string;
 };
 
 type IssueStockResult = {
@@ -5589,37 +5714,71 @@ type IssueStockResult = {
   issueDate: string;
   issuedBy: string;
   note: string;
+  allocationId: string;
+  otp: string;
 };
+
+const OTHER_ISSUE_RECIPIENT_ID = '__other_issue_recipient__';
 
 const IssueStockModal = ({
   item,
   onClose,
-  onIssued,
+  onAllocated,
 }: {
   item: StockItem;
   onClose: () => void;
-  onIssued: (result: IssueStockResult) => void;
+  onAllocated: (result: IssueStockResult) => void;
 }) => {
   const { user } = useAuth();
   const [destinationType, setDestinationType] = useState<IssueDestinationType>('land');
   const [destinationId, setDestinationId] = useState('');
   const [lands, setLands] = useState<IssueDestinationOption[]>([]);
   const [vendors, setVendors] = useState<IssueDestinationOption[]>([]);
+  const [employees, setEmployees] = useState<IssueEmployeeOption[]>([]);
   const [loadingDestinations, setLoadingDestinations] = useState(false);
+  const [loadingVendors, setLoadingVendors] = useState(false);
   const [quantity, setQuantity] = useState('');
   const [issueDate, setIssueDate] = useState(today());
   const [expectedReturnDate, setExpectedReturnDate] = useState('');
   const [purpose, setPurpose] = useState('');
   const [reference, setReference] = useState('');
   const [batchNumber, setBatchNumber] = useState(item.batchNumber || '');
-  const [receivedBy, setReceivedBy] = useState('');
+  const [receivedById, setReceivedById] = useState('');
+  const [manualRepresentativeName, setManualRepresentativeName] = useState('');
+  const [manualRepresentativeMobile, setManualRepresentativeMobile] = useState('');
   const [remarks, setRemarks] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const issuedBy = user?.name || user?.username || 'System User';
   const isReturnable = String(item.issueClassification || '').toLowerCase() === 'returnable';
-  const destinationOptions = destinationType === 'land' ? lands : vendors;
+  const destinationOptions = destinationType === 'land' ? lands : destinationType === 'vendor' ? vendors : [];
+  const loadingSelectedDestination = destinationType === 'vendor' ? loadingVendors : loadingDestinations;
   const selectedDestination = destinationOptions.find((option) => option.id === destinationId);
+  const selectedEmployee = employees.find((employee) => employee.id === receivedById);
+  const selectedVendorRepresentative = selectedDestination?.representatives?.find(
+    (representative) => representative.id === receivedById,
+  );
+  const selectedReceiver = receivedById === OTHER_ISSUE_RECIPIENT_ID
+      ? {
+        id: OTHER_ISSUE_RECIPIENT_ID,
+        name: manualRepresentativeName.trim(),
+        detail: manualRepresentativeMobile.trim(),
+      }
+    : destinationType === 'vendor'
+      ? selectedVendorRepresentative
+      ? {
+        id: selectedVendorRepresentative.id,
+        name: selectedVendorRepresentative.name,
+        detail: selectedVendorRepresentative.detail,
+      }
+      : null
+    : selectedEmployee
+      ? {
+        id: selectedEmployee.id,
+        name: selectedEmployee.name,
+        detail: selectedEmployee.designation,
+      }
+      : null;
   const numericQuantity = Number(quantity) || 0;
   const remainingStock = Math.max(0, item.currentStock - numericQuantity);
 
@@ -5635,11 +5794,23 @@ const IssueStockModal = ({
     const loadDestinations = async () => {
       setLoadingDestinations(true);
       try {
-        const [landResponse, vendorResponse] = await Promise.allSettled([
+        const [landResponse, staffResponse, ownerResponse] = await Promise.allSettled([
           fetch(`${BASE_URL}/farmer_managment/get_farms`),
-          fetch(`${BASE_URL}/purchase_flow/get_vendors`),
+          fetch(`${BASE_URL}/admin_staff/get_all_staff`),
+          fetch(`${BASE_URL}/admin_ops_requests/get_farm_and_farmer`),
         ]);
         if (cancelled) return;
+
+        const ownerByLandId = new Map<string, string>();
+        if (ownerResponse.status === 'fulfilled') {
+          const ownerData: any = await ownerResponse.value.json().catch(() => null);
+          const ownerRows = getFirstArray(ownerData, ['farm_farmer_mapping', 'farms', 'data', 'items']);
+          ownerRows.forEach((mapping: any) => {
+            const landId = String(mapping?.farm_id || mapping?.land_id || mapping?.id || '');
+            const ownerName = String(mapping?.owner_name || mapping?.farmer_name || mapping?.name || '');
+            if (landId && ownerName) ownerByLandId.set(landId, ownerName);
+          });
+        }
 
         if (landResponse.status === 'fulfilled') {
           const data: any = await landResponse.value.json().catch(() => null);
@@ -5648,33 +5819,36 @@ const IssueStockModal = ({
             const basic = land?.basic_details || {};
             const id = String(land?.farm_id || land?.land_id || land?.lead_id || land?.id || `land-${index + 1}`);
             const village = String(land?.land_data?.village || basic?.village || land?.village || '');
-            const owner = String(land?.owner_name || land?.farmer_name || basic?.owner_name || '');
+            const owner = String(
+              ownerByLandId.get(id)
+              || land?.owner_name
+              || land?.farmer_name
+              || basic?.owner_name
+              || '',
+            );
             const area = Number(land?.area || land?.total_area || basic?.total_area || 0);
             return {
               id,
-              label: [id, village].filter(Boolean).join(' — '),
-              detail: [owner, area > 0 ? `${area.toLocaleString('en-IN')} acres` : ''].filter(Boolean).join(' · '),
+              label: `${id} — ${owner || 'Owner not recorded'}`,
+              detail: [village, area > 0 ? `${area.toLocaleString('en-IN')} acres` : ''].filter(Boolean).join(' · '),
             };
           }).filter((land: IssueDestinationOption) => land.id));
         }
 
-        if (vendorResponse.status === 'fulfilled') {
-          const data: any = await vendorResponse.value.json().catch(() => null);
-          const rows = getFirstArray(data, ['vendors', 'data', 'items']);
-          setVendors(rows.map((vendor: any) => {
-            const id = String(vendor?.vendor_id || vendor?.id || '');
-            const name = String(vendor?.firm_name || vendor?.vendor_name || id);
-            const contact = String(vendor?.vendor_contact || vendor?.contact || '');
-            const gst = String(vendor?.gst_number || vendor?.gstin || '');
+        if (staffResponse.status === 'fulfilled') {
+          const data: any = await staffResponse.value.json().catch(() => null);
+          const rows = getFirstArray(data, ['staff', 'employees', 'data', 'items']);
+          setEmployees(rows.map((staff: any) => {
+            const information = staff?.staff_information || {};
             return {
-              id,
-              label: name,
-              detail: [id, contact, gst ? `GSTIN ${gst}` : ''].filter(Boolean).join(' · '),
+              id: String(staff?.staff_id || staff?.employee_id || staff?.id || ''),
+              name: String(information?.staff_name || staff?.staff_name || staff?.employee_name || staff?.name || ''),
+              designation: String(information?.staff_designation || staff?.staff_designation || staff?.designation || ''),
             };
-          }).filter((vendor: IssueDestinationOption) => vendor.id));
+          }).filter((employee: IssueEmployeeOption) => employee.id && employee.name));
         }
       } catch {
-        toast.error('Unable to load land and vendor lists');
+        toast.error('Unable to load issue destination details');
       } finally {
         if (!cancelled) setLoadingDestinations(false);
       }
@@ -5687,12 +5861,92 @@ const IssueStockModal = ({
   }, []);
 
   useEffect(() => {
-    setDestinationId('');
+    if (destinationType !== 'vendor') return;
+    let cancelled = false;
+
+    const loadVendors = async () => {
+      setLoadingVendors(true);
+      try {
+        const response = await fetch(`${BASE_URL}/purchase_flow/get_vendors`);
+        const data: any = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(data?.message || 'Failed to load vendors');
+        const rows = Array.isArray(data?.vendors)
+          ? data.vendors
+          : Array.isArray(data?.data)
+            ? data.data
+            : Array.isArray(data)
+              ? data
+              : [];
+        if (cancelled) return;
+        setVendors(rows.map((vendor: any) => {
+          const vendorDetails = vendor?.vendor_details || vendor;
+          const bankDetails = vendor?.bank_details || {};
+          const id = String(vendor?.vendor_id || vendor?.id || '');
+          const primaryName = String(vendorDetails?.vendor_name || vendor?.vendor_name || vendor?.name || '');
+          const name = String(vendor?.firm_name || vendorDetails?.firm_name || primaryName || id);
+          const contact = String(vendorDetails?.vendor_contact || vendor?.vendor_contact || vendor?.contact || vendor?.phone || '');
+          const gst = String(vendorDetails?.gst_number || vendor?.gst_number || vendor?.gstin || '');
+          const salesContact = bankDetails?.sales_service_contract_authorised_person || {};
+          const commercialContact = bankDetails?.commercial_authorised_person || {};
+          const representatives = [
+            {
+              id: `${id}:primary`,
+              name: primaryName || name,
+              detail: contact,
+            },
+            {
+              id: `${id}:sales`,
+              name: String(salesContact?.name || ''),
+              detail: [salesContact?.mobile_number, 'Sales / Service Contact'].filter(Boolean).join(' · '),
+            },
+            {
+              id: `${id}:commercial`,
+              name: String(commercialContact?.name || ''),
+              detail: [commercialContact?.mobile_number, 'Commercial Contact'].filter(Boolean).join(' · '),
+            },
+          ].filter((representative) => representative.name)
+            .filter((representative, index, list) => (
+              list.findIndex((entry) => entry.name === representative.name && entry.detail === representative.detail) === index
+            ));
+          return {
+            id,
+            label: name,
+            detail: [id, contact, gst ? `GSTIN ${gst}` : ''].filter(Boolean).join(' · '),
+            representatives,
+          };
+        }).filter((vendor: IssueDestinationOption) => vendor.id));
+      } catch (error: any) {
+        if (!cancelled) {
+          setVendors([]);
+          toast.error(error?.message || 'Unable to load vendor list');
+        }
+      } finally {
+        if (!cancelled) setLoadingVendors(false);
+      }
+    };
+
+    loadVendors();
+    return () => {
+      cancelled = true;
+    };
   }, [destinationType]);
+
+  useEffect(() => {
+    setDestinationId('');
+    setReceivedById('');
+    setManualRepresentativeName('');
+    setManualRepresentativeMobile('');
+  }, [destinationType]);
+
+  useEffect(() => {
+    setReceivedById('');
+    setManualRepresentativeName('');
+    setManualRepresentativeMobile('');
+  }, [destinationId]);
 
   const handleIssue = async () => {
     if (submitting) return;
-    if (!destinationId || !selectedDestination) {
+    if (destinationType !== 'person' && (!destinationId || !selectedDestination)) {
       toast.error(`Select the ${destinationType === 'land' ? 'land parcel' : 'vendor'} receiving this stock`);
       return;
     }
@@ -5712,6 +5966,29 @@ const IssueStockModal = ({
       toast.error('Enter the purpose of issue');
       return;
     }
+    if (!receivedById || !selectedReceiver) {
+      toast.error(destinationType === 'vendor'
+        ? 'Select the vendor representative receiving the stock'
+        : destinationType === 'person'
+          ? 'Select the person receiving the stock'
+          : 'Select the employee receiving the stock');
+      return;
+    }
+    if (receivedById === OTHER_ISSUE_RECIPIENT_ID) {
+      if (!manualRepresentativeName.trim()) {
+        toast.error(destinationType === 'vendor'
+          ? 'Enter the vendor representative name'
+          : 'Enter the recipient name');
+        return;
+      }
+      const normalizedMobile = manualRepresentativeMobile.replace(/\D/g, '');
+      if (normalizedMobile.length < 10 || normalizedMobile.length > 15) {
+        toast.error(destinationType === 'vendor'
+          ? 'Enter a valid vendor representative mobile number'
+          : 'Enter a valid recipient mobile number');
+        return;
+      }
+    }
     if (isReturnable && !expectedReturnDate) {
       toast.error('Select the expected return date for this returnable item');
       return;
@@ -5723,52 +6000,113 @@ const IssueStockModal = ({
 
     setSubmitting(true);
     try {
-      const payload = {
+      const issueRequestPayload = {
         item_id: item.id,
-        quantity_allocated: numericQuantity,
         quantity: numericQuantity,
-        stock_issue_method: item.stockIssueMethod || '',
+        issue_start_date: issueDate,
+        issue_end_date: expectedReturnDate || issueDate,
+        staff_id: selectedReceiver.id,
         recipient_type: destinationType,
-        recipient_id: selectedDestination.id,
-        recipient_name: selectedDestination.label,
-        farm_id: destinationType === 'land' ? selectedDestination.id : '',
-        land_id: destinationType === 'land' ? selectedDestination.id : '',
-        vendor_id: destinationType === 'vendor' ? selectedDestination.id : '',
+        recipient_id: destinationType === 'person' ? selectedReceiver.id : selectedDestination!.id,
+        recipient_name: destinationType === 'person' ? selectedReceiver.name : selectedDestination!.label,
+        farm_id: destinationType === 'land' ? selectedDestination!.id : '',
+        land_id: destinationType === 'land' ? selectedDestination!.id : '',
+        vendor_id: destinationType === 'vendor' ? selectedDestination!.id : '',
+        person_id: destinationType === 'person' ? selectedReceiver.id : '',
         issue_date: issueDate,
         expected_return_date: expectedReturnDate || null,
         purpose: purpose.trim(),
         reference: reference.trim(),
         batch_number: batchNumber.trim(),
         issued_by: issuedBy,
-        received_by: receivedBy.trim(),
+        received_by_id: selectedReceiver.id,
+        received_by: selectedReceiver.name,
+        received_by_mobile: receivedById === OTHER_ISSUE_RECIPIENT_ID || destinationType === 'vendor'
+          ? selectedReceiver.detail
+          : '',
         remarks: remarks.trim(),
+        stock_issue_method: item.stockIssueMethod || '',
+        issue_classification: item.issueClassification || '',
+        is_returnable: isReturnable,
       };
-      const response = await fetch(`${BASE_URL}/inventory/update_item_stock_on_allocation`, {
+
+      const requestResponse = await fetch(`${BASE_URL}/inventory/make_issue_request`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(issueRequestPayload),
       });
-      const data: any = await response.json().catch(() => null);
-      if (!response.ok || !data?.success) {
-        throw new Error(data?.message || 'Failed to issue stock');
+      const requestText = await requestResponse.text();
+      const requestData: any = (() => {
+        try { return requestText ? JSON.parse(requestText) : null; } catch { return null; }
+      })();
+      if (!requestResponse.ok || !requestData?.success) {
+        throw new Error(requestData?.message || requestText || 'Failed to create stock issue request');
+      }
+
+      let issueId = String(
+        requestData?.issue_id
+        || requestData?.request_id
+        || requestData?.data?.issue_id
+        || requestData?.data?.request_id
+        || '',
+      );
+
+      if (!issueId) {
+        const listResponse = await fetch(`${BASE_URL}/inventory/get_issue_requests`);
+        const listData: any = await listResponse.json().catch(() => null);
+        const matchingRequest = Array.isArray(listData?.issue_requests)
+          ? [...listData.issue_requests]
+            .filter((request: any) => (
+              String(request?.item_id || '') === item.id
+              && Number(request?.quantity) === numericQuantity
+              && String(request?.status || '').toLowerCase() === 'pending'
+            ))
+            .sort((first: any, second: any) => (
+              new Date(second?.created_at || 0).getTime() - new Date(first?.created_at || 0).getTime()
+            ))[0]
+          : null;
+        issueId = String(matchingRequest?.issue_id || matchingRequest?.request_id || '');
+      }
+
+      if (!issueId) {
+        throw new Error('Issue request was created, but its issue ID was not returned');
       }
 
       const note = [
-        `Issued to ${destinationType === 'land' ? 'land' : 'vendor'}: ${selectedDestination.label}`,
+        destinationType === 'person'
+          ? `Issued to person: ${selectedReceiver.name}`
+          : `Issued to ${destinationType}: ${selectedDestination!.label}`,
         `Purpose: ${purpose.trim()}`,
         reference.trim() ? `Reference: ${reference.trim()}` : '',
         batchNumber.trim() ? `Batch: ${batchNumber.trim()}` : '',
-        receivedBy.trim() ? `Received by: ${receivedBy.trim()}` : '',
-        expectedReturnDate ? `Expected return: ${expectedReturnDate}` : '',
+        `Received by: ${selectedReceiver.name}${selectedReceiver.detail ? ` (${selectedReceiver.detail})` : ''}`,
+        expectedReturnDate ? `Expected return: ${formatDateDDMMYYYY(expectedReturnDate)}` : '',
         remarks.trim(),
       ].filter(Boolean).join(' · ');
-      onIssued({
+      const handoverOtp = String(Math.floor(1000 + Math.random() * 9000));
+      saveIssuedRecordOverride(issueId, {
+        workflow_status: 'allocated',
+        allocation_otp: handoverOtp,
+        allocation_date: issueDate,
+        recipient_type: destinationType,
+        recipient_name: destinationType === 'person' ? selectedReceiver.name : selectedDestination!.label,
+        received_by: selectedReceiver.name,
+        received_by_mobile: selectedReceiver.detail || '',
+        purpose: purpose.trim(),
+        reference: reference.trim(),
+        remarks: remarks.trim(),
+        issue_classification: item.issueClassification || '',
+        is_returnable: isReturnable,
+      });
+      onAllocated({
         quantity: numericQuantity,
         issueDate,
         issuedBy,
         note,
+        allocationId: issueId,
+        otp: handoverOtp,
       });
-      toast.success(`${numericQuantity.toLocaleString('en-IN')} ${item.unit} issued successfully`);
+      toast.success(`Item allocated. Handover OTP: ${handoverOtp}`, { duration: 10000 });
     } catch (error: any) {
       toast.error(error?.message || 'Failed to issue stock');
     } finally {
@@ -5794,8 +6132,8 @@ const IssueStockModal = ({
               <ArrowUpFromLine className="h-5 w-5" />
             </div>
             <div>
-              <DialogTitle className="text-xl font-black text-white">Issue Stock</DialogTitle>
-              <p className="mt-1 text-xs font-medium text-white/65">Issue inventory to a land parcel or an approved vendor.</p>
+              <DialogTitle className="text-xl font-black text-white">Allocate Item</DialogTitle>
+              <p className="mt-1 text-xs font-medium text-white/65">Allocate inventory to a land parcel, vendor, or person for OTP-verified handover.</p>
             </div>
           </div>
         </DialogHeader>
@@ -5825,10 +6163,11 @@ const IssueStockModal = ({
 
           <section className="rounded-xl border border-slate-200 bg-white p-4">
             <p className="mb-3 text-xs font-black uppercase tracking-[0.08em] text-slate-500">Issue Destination</p>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid gap-2 sm:grid-cols-3">
               {([
                 ['land', 'Issue to Land', 'Farm or land parcel'],
                 ['vendor', 'Issue to Vendor', 'Approved external vendor'],
+                ['person', 'Issue to Person', 'Employee or another person'],
               ] as const).map(([value, label, description]) => (
                 <button
                   key={value}
@@ -5846,30 +6185,32 @@ const IssueStockModal = ({
                 </button>
               ))}
             </div>
-            <div className="mt-4">
-              <Field label={destinationType === 'land' ? 'Land / Farm *' : 'Vendor *'}>
-                <div className="relative">
-                  <select
-                    value={destinationId}
-                    disabled={loadingDestinations}
-                    onChange={(event) => setDestinationId(event.target.value)}
-                    className="h-10 w-full appearance-none rounded-lg border border-slate-200 bg-white px-3 pr-9 text-sm outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/15 disabled:bg-slate-50"
-                  >
-                    <option value="">
-                      {loadingDestinations
-                        ? 'Loading destinations…'
-                        : `Select ${destinationType === 'land' ? 'land or farm' : 'vendor'}`}
-                    </option>
-                    {destinationOptions.map((option) => (
-                      <option key={option.id} value={option.id}>
-                        {option.label}{option.detail ? ` — ${option.detail}` : ''}
+            {destinationType !== 'person' && (
+              <div className="mt-4">
+                <Field label={destinationType === 'land' ? 'Land / Farm *' : 'Vendor *'}>
+                  <div className="relative">
+                    <select
+                      value={destinationId}
+                      disabled={loadingSelectedDestination}
+                      onChange={(event) => setDestinationId(event.target.value)}
+                      className="h-10 w-full appearance-none rounded-lg border border-slate-200 bg-white px-3 pr-9 text-sm outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/15 disabled:bg-slate-50"
+                    >
+                      <option value="">
+                        {loadingSelectedDestination
+                          ? 'Loading destinations…'
+                          : `Select ${destinationType === 'land' ? 'land or farm' : 'vendor'}`}
                       </option>
-                    ))}
-                  </select>
-                  <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                </div>
-              </Field>
-            </div>
+                      {destinationOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}{option.detail ? ` — ${option.detail}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  </div>
+                </Field>
+              </div>
+            )}
           </section>
 
           <section className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 md:grid-cols-2">
@@ -5884,7 +6225,7 @@ const IssueStockModal = ({
                 placeholder="Enter quantity"
               />
             </Field>
-            <Field label="Issue Date *">
+            <Field label="Allocation Date *">
               <Input type="date" value={issueDate} onChange={(event) => setIssueDate(event.target.value)} />
             </Field>
             {isReturnable && (
@@ -5921,13 +6262,63 @@ const IssueStockModal = ({
             <Field label="Issued By">
               <Input value={issuedBy} readOnly className="bg-slate-50 text-slate-600" />
             </Field>
-            <Field label="Received By / Contact Person">
-              <Input
-                value={receivedBy}
-                onChange={(event) => setReceivedBy(event.target.value)}
-                placeholder="Name of recipient"
-              />
+            <Field label={destinationType === 'vendor'
+              ? 'Vendor Representative *'
+              : destinationType === 'person'
+                ? 'Issue To Person *'
+                : 'Received By / Contact Person *'}>
+              <div className="relative">
+                <select
+                  value={receivedById}
+                  onChange={(event) => setReceivedById(event.target.value)}
+                  disabled={destinationType === 'vendor' ? !selectedDestination : loadingDestinations}
+                  className="h-10 w-full appearance-none rounded-lg border border-slate-200 bg-white px-3 pr-9 text-sm outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/15 disabled:bg-slate-50"
+                >
+                  {destinationType === 'vendor' ? (
+                    <>
+                      <option value="">{selectedDestination ? 'Select vendor representative' : 'Select a vendor first'}</option>
+                      {(selectedDestination?.representatives || []).map((representative) => (
+                        <option key={representative.id} value={representative.id}>
+                          {representative.name}{representative.detail ? ` — ${representative.detail}` : ''}
+                        </option>
+                      ))}
+                      <option value={OTHER_ISSUE_RECIPIENT_ID}>Other — Enter manually</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="">{loadingDestinations ? 'Loading employees…' : 'Select employee'}</option>
+                      {employees.map((employee) => (
+                        <option key={employee.id} value={employee.id}>
+                          {employee.name}{employee.designation ? ` — ${employee.designation}` : ''} · {employee.id}
+                        </option>
+                      ))}
+                      <option value={OTHER_ISSUE_RECIPIENT_ID}>Other — Enter manually</option>
+                    </>
+                  )}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              </div>
             </Field>
+            {receivedById === OTHER_ISSUE_RECIPIENT_ID && (
+              <>
+                <Field label={destinationType === 'vendor' ? 'Representative Name *' : 'Person Name *'}>
+                  <Input
+                    value={manualRepresentativeName}
+                    onChange={(event) => setManualRepresentativeName(event.target.value)}
+                    placeholder="Enter representative name"
+                  />
+                </Field>
+                <Field label={destinationType === 'vendor' ? 'Representative Mobile No. *' : 'Person Mobile No. *'}>
+                  <Input
+                    type="tel"
+                    inputMode="numeric"
+                    value={manualRepresentativeMobile}
+                    onChange={(event) => setManualRepresentativeMobile(event.target.value)}
+                    placeholder="Enter mobile number"
+                  />
+                </Field>
+              </>
+            )}
             <div className="md:col-span-2">
               <Field label="Remarks">
                 <textarea
@@ -5953,12 +6344,12 @@ const IssueStockModal = ({
             {submitting ? (
               <>
                 <span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                Issuing…
+                Allocating…
               </>
             ) : (
               <>
                 <ArrowUpFromLine className="mr-2 h-4 w-4" />
-                Confirm Issue
+                Confirm Allocation
               </>
             )}
           </Button>
@@ -6497,7 +6888,7 @@ const HistoryModal = ({
                 {tx.note && <p className="text-xs text-gray-500 truncate">{tx.note}</p>}
                 {tx.by && <p className="text-xs text-gray-400">By: {tx.by}</p>}
               </div>
-              <span className="text-xs text-gray-400 shrink-0">{tx.date}</span>
+              <span className="text-xs text-gray-400 shrink-0">{formatDateDDMMYYYY(tx.date, tx.date)}</span>
             </div>
           ))}
         </div>
@@ -6554,9 +6945,126 @@ type IssueRequest = {
   quantity: number;
   issue_start_date: string;
   issue_end_date: string;
-  status: 'pending' | 'issued' | 'returned' | 'partially_returned' | 'rejected';
+  status: 'pending' | 'allocated' | 'issued' | 'returned' | 'partially_returned' | 'rejected';
   created_at: string;
   staff_id: string;
+  recipient_type?: string;
+  recipient_id?: string;
+  recipient_name?: string;
+  received_by?: string;
+  received_by_mobile?: string;
+  farm_id?: string;
+  land_id?: string;
+  vendor_id?: string;
+  person_id?: string;
+  purpose?: string;
+  reference?: string;
+  batch_number?: string;
+  issued_by?: string;
+  remarks?: string;
+  quantity_returned?: number;
+  returned_quantity?: number;
+  return_date?: string;
+  returned_at?: string;
+  return_note?: string;
+  issue_classification?: string;
+  is_returnable?: boolean;
+  backend_status?: string;
+  workflow_status?: 'allocated' | 'handed_over';
+  allocation_otp?: string;
+  allocation_date?: string;
+  handover_date?: string;
+  utilized_quantity?: number;
+  utilization_date?: string;
+  utilization_note?: string;
+};
+
+type IssueRecordOverride = Partial<Pick<IssueRequest,
+  | 'issue_start_date'
+  | 'issue_end_date'
+  | 'purpose'
+  | 'reference'
+  | 'received_by'
+  | 'received_by_mobile'
+  | 'remarks'
+  | 'return_date'
+  | 'return_note'
+  | 'quantity_returned'
+  | 'recipient_type'
+  | 'recipient_name'
+  | 'issue_classification'
+  | 'is_returnable'
+  | 'workflow_status'
+  | 'allocation_otp'
+  | 'allocation_date'
+  | 'handover_date'
+  | 'utilized_quantity'
+  | 'utilization_date'
+  | 'utilization_note'
+>>;
+
+const ISSUED_RECORD_OVERRIDES_KEY = 'farm-connect.issued-record-overrides.v1';
+
+const readIssuedRecordOverrides = (): Record<string, IssueRecordOverride> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(ISSUED_RECORD_OVERRIDES_KEY) || '{}');
+    return stored && typeof stored === 'object' ? stored : {};
+  } catch {
+    return {};
+  }
+};
+
+const saveIssuedRecordOverride = (issueId: string, override: IssueRecordOverride) => {
+  if (typeof window === 'undefined' || !issueId) return;
+  const stored = readIssuedRecordOverrides();
+  stored[issueId] = { ...(stored[issueId] || {}), ...override };
+  window.localStorage.setItem(ISSUED_RECORD_OVERRIDES_KEY, JSON.stringify(stored));
+};
+
+const normalizeIssueRequest = (record: any): IssueRequest => {
+  const backendStatus = String(record?.status || 'pending').toLowerCase();
+  const issueId = String(record?.issue_id || record?.request_id || '');
+  const override = readIssuedRecordOverrides()[issueId] || {};
+  return {
+    ...record,
+    ...override,
+    issue_id: issueId,
+    item_id: String(record?.item_id || ''),
+    item_name: String(record?.item_name || ''),
+    quantity: Number(record?.quantity) || 0,
+    status: (
+      override.workflow_status === 'allocated'
+        ? 'allocated'
+        : backendStatus === 'approved' || override.workflow_status === 'handed_over'
+          ? 'issued'
+          : backendStatus
+    ) as IssueRequest['status'],
+    backend_status: backendStatus,
+  };
+};
+
+const findIssuedInventoryItem = (items: StockItem[], record: Pick<IssueRequest, 'item_id' | 'item_name'>) => {
+  const recordId = String(record.item_id || '').trim().toLowerCase();
+  const recordName = String(record.item_name || '').trim().toLowerCase();
+  return items.find((item) => (
+    (recordId && (
+      String(item.id || '').trim().toLowerCase() === recordId
+      || String(item.sku || '').trim().toLowerCase() === recordId
+    ))
+    || (recordName && String(item.name || '').trim().toLowerCase() === recordName)
+  ));
+};
+
+const isIssuedItemReturnable = (item?: StockItem) => (
+  String(item?.issueClassification || '').trim().toLowerCase() === 'returnable'
+);
+
+const isIssueRequestReturnable = (record: IssueRequest, item?: StockItem) => {
+  if (typeof record.is_returnable === 'boolean') return record.is_returnable;
+  const recordedClassification = String(record.issue_classification || '').trim().toLowerCase();
+  if (recordedClassification) return recordedClassification === 'returnable';
+  return isIssuedItemReturnable(item);
 };
 
 type IssueStatusTab = 'all' | IssueRequest['status'];
@@ -6564,6 +7072,7 @@ type IssueStatusTab = 'all' | IssueRequest['status'];
 const STATUS_TABS: { key: IssueStatusTab; label: string; active: string; badge: string }[] = [
   { key: 'all',               label: 'All',               active: 'bg-gray-800 text-white border-gray-800',         badge: 'bg-white/20 text-white' },
   { key: 'pending',           label: 'Pending',           active: 'bg-amber-500 text-white border-amber-500',       badge: 'bg-white/20 text-white' },
+  { key: 'allocated',         label: 'Allocated',         active: 'bg-cyan-600 text-white border-cyan-600',         badge: 'bg-white/20 text-white' },
   { key: 'issued',            label: 'Issued',            active: 'bg-blue-600 text-white border-blue-600',         badge: 'bg-white/20 text-white' },
   { key: 'returned',          label: 'Returned',          active: 'bg-emerald-600 text-white border-emerald-600',   badge: 'bg-white/20 text-white' },
   { key: 'partially_returned', label: 'Partial Return',  active: 'bg-violet-600 text-white border-violet-600',     badge: 'bg-white/20 text-white' },
@@ -6572,6 +7081,7 @@ const STATUS_TABS: { key: IssueStatusTab; label: string; active: string; badge: 
 
 const STATUS_PILL: Record<IssueRequest['status'], string> = {
   pending:            'bg-amber-50 text-amber-700 ring-amber-100',
+  allocated:          'bg-cyan-50 text-cyan-700 ring-cyan-100',
   issued:             'bg-blue-50 text-blue-700 ring-blue-100',
   returned:           'bg-emerald-50 text-emerald-700 ring-emerald-100',
   partially_returned: 'bg-violet-50 text-violet-700 ring-violet-100',
@@ -6584,6 +7094,791 @@ const calcProgress = (start: string, end: string) => {
   const n = Date.now();
   if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return 0;
   return Math.max(0, Math.min(100, ((n - s) / (e - s)) * 100));
+};
+
+const IssuedStockTab = ({
+  items,
+  search,
+  onStockReturned,
+  onStockHandedOver,
+}: {
+  items: StockItem[];
+  search: string;
+  onStockReturned: (itemId: string, quantity: number) => void;
+  onStockHandedOver: (itemId: string, quantity: number, issueId: string) => void;
+}) => {
+  const [records, setRecords] = useState<IssueRequest[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [returnRecord, setReturnRecord] = useState<IssueRequest | null>(null);
+  const [returnQuantity, setReturnQuantity] = useState('');
+  const [returnDate, setReturnDate] = useState(today());
+  const [returnNote, setReturnNote] = useState('');
+  const [returning, setReturning] = useState(false);
+  const [infoRecord, setInfoRecord] = useState<IssueRequest | null>(null);
+  const [editRecord, setEditRecord] = useState<IssueRequest | null>(null);
+  const [deleteRecord, setDeleteRecord] = useState<IssueRequest | null>(null);
+  const [recordActionLoading, setRecordActionLoading] = useState(false);
+  const [handoverRecord, setHandoverRecord] = useState<IssueRequest | null>(null);
+  const [handoverOtp, setHandoverOtp] = useState('');
+  const [utilizationRecord, setUtilizationRecord] = useState<IssueRequest | null>(null);
+  const [utilizedQuantity, setUtilizedQuantity] = useState('');
+  const [utilizationDate, setUtilizationDate] = useState(today());
+  const [utilizationNote, setUtilizationNote] = useState('');
+
+  const fetchRecords = async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const response = await fetch(`${BASE_URL}/inventory/get_issue_requests`);
+      const data: any = await response.json().catch(() => null);
+      if (!response.ok || !data?.success || !Array.isArray(data?.issue_requests)) {
+        throw new Error(data?.message || 'Failed to load allocated items');
+      }
+      setRecords(data.issue_requests.map(normalizeIssueRequest));
+    } catch (error: any) {
+      if (!silent) {
+        toast.error(error?.message || 'Failed to load allocated items');
+        setRecords([]);
+      }
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchRecords();
+    const refreshSilently = () => { void fetchRecords(true); };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refreshSilently();
+    };
+    const intervalId = window.setInterval(refreshSilently, 15000);
+    window.addEventListener('focus', refreshSilently);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', refreshSilently);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, []);
+
+  const issuedRecords = useMemo(() => records.filter((record) => (
+    ['allocated', 'issued', 'returned', 'partially_returned'].includes(record.status)
+  )), [records]);
+  const filteredRecords = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return issuedRecords;
+    return issuedRecords.filter((record) => {
+      const item = findIssuedInventoryItem(items, record);
+      return [
+        record.item_name,
+        item?.sku,
+        record.issue_id,
+        record.status,
+        record.recipient_type,
+        record.recipient_name,
+        record.received_by,
+        record.staff_id,
+        record.farm_id,
+        record.vendor_id,
+        record.reference,
+        record.purpose,
+      ].some((value) => String(value || '').toLowerCase().includes(query));
+    });
+  }, [issuedRecords, items, search]);
+
+  const activeCount = issuedRecords.filter((record) => (
+    record.status === 'allocated' || record.status === 'issued' || record.status === 'partially_returned'
+  )).length;
+  const returnedCount = issuedRecords.filter((record) => record.status === 'returned').length;
+  const totalIssuedQuantity = issuedRecords.reduce((sum, record) => sum + record.quantity, 0);
+
+  const openReturnDialog = (record: IssueRequest) => {
+    const returned = Number(record.quantity_returned ?? record.returned_quantity ?? 0);
+    const remaining = Math.max(0, record.quantity - returned);
+    setReturnRecord(record);
+    setReturnQuantity(String(remaining || record.quantity));
+    setReturnDate(today());
+    setReturnNote('');
+  };
+
+  const closeReturnDialog = () => {
+    if (returning) return;
+    setReturnRecord(null);
+    setReturnQuantity('');
+    setReturnNote('');
+  };
+
+  const submitReturn = async () => {
+    if (!returnRecord || returning) return;
+    const quantity = Number(returnQuantity) || 0;
+    const previouslyReturned = Number(returnRecord.quantity_returned ?? returnRecord.returned_quantity ?? 0);
+    const remaining = Math.max(0, returnRecord.quantity - previouslyReturned);
+    if (quantity <= 0) return toast.error('Enter a return quantity greater than zero');
+    if (quantity > remaining) return toast.error(`Maximum returnable quantity is ${remaining.toLocaleString('en-IN')}`);
+    if (!returnDate) return toast.error('Select the return date');
+    if (!returnNote.trim()) return toast.error('Enter a return note');
+
+    setReturning(true);
+    try {
+      const inventoryItem = findIssuedInventoryItem(items, returnRecord);
+      const newStatus = quantity >= remaining ? 'returned' : 'partially_returned';
+      if (returnRecord.backend_status !== 'approved') {
+        const approvalResponse = await fetch(`${BASE_URL}/inventory/update_issue_request_status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_id: inventoryItem?.id || returnRecord.item_id,
+            issue_id: returnRecord.issue_id,
+            new_status: 'approved',
+          }),
+        });
+        const approvalText = await approvalResponse.text();
+        const approvalData: any = (() => {
+          try { return approvalText ? JSON.parse(approvalText) : null; } catch { return null; }
+        })();
+        if (!approvalResponse.ok || !approvalData?.success) {
+          throw new Error(approvalData?.message || approvalData?.detail || approvalText || 'Failed to approve the issue before return');
+        }
+      }
+      const response = await fetch(`${BASE_URL}/inventory/return_issued_item`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          item_id: inventoryItem?.id || returnRecord.item_id,
+          issue_id: returnRecord.issue_id,
+          new_status: newStatus,
+          quanity: quantity,
+          return_date: returnDate,
+          return_note: returnNote.trim(),
+        }),
+      });
+      const responseText = await response.text();
+      const data: any = (() => {
+        try { return responseText ? JSON.parse(responseText) : null; } catch { return null; }
+      })();
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.message || data?.detail || responseText || 'Failed to record return entry');
+      }
+      onStockReturned(inventoryItem?.id || returnRecord.item_id, quantity);
+      saveIssuedRecordOverride(returnRecord.issue_id, {
+        return_date: returnDate,
+        return_note: returnNote.trim(),
+        quantity_returned: previouslyReturned + quantity,
+      });
+      toast.success(`${quantity.toLocaleString('en-IN')} returned to inventory`);
+      setReturnRecord(null);
+      setReturnQuantity('');
+      setReturnNote('');
+      await fetchRecords();
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to record return entry');
+    } finally {
+      setReturning(false);
+    }
+  };
+
+  const verifyAllocationHandover = async () => {
+    if (!handoverRecord || recordActionLoading) return;
+    if (handoverOtp.trim().length !== 4) return toast.error('Enter the four-digit handover OTP');
+    if (!handoverRecord.allocation_otp || handoverOtp.trim() !== handoverRecord.allocation_otp) {
+      return toast.error('The handover OTP is incorrect');
+    }
+    const inventoryItem = findIssuedInventoryItem(items, handoverRecord);
+    if (!inventoryItem) return toast.error('The allocated inventory item could not be found');
+    setRecordActionLoading(true);
+    try {
+      const response = await fetch(`${BASE_URL}/inventory/update_issue_request_status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          item_id: inventoryItem.id,
+          issue_id: handoverRecord.issue_id,
+          new_status: 'approved',
+        }),
+      });
+      const responseText = await response.text();
+      const data: any = (() => {
+        try { return responseText ? JSON.parse(responseText) : null; } catch { return null; }
+      })();
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.message || data?.detail || responseText || 'Failed to verify allocation handover');
+      }
+      const handoverDate = today();
+      saveIssuedRecordOverride(handoverRecord.issue_id, {
+        workflow_status: 'handed_over',
+        handover_date: handoverDate,
+      });
+      setRecords((current) => current.map((record) => (
+        record.issue_id === handoverRecord.issue_id
+          ? { ...record, status: 'issued', backend_status: 'approved', workflow_status: 'handed_over', handover_date: handoverDate }
+          : record
+      )));
+      onStockHandedOver(inventoryItem.id, handoverRecord.quantity, handoverRecord.issue_id);
+      setHandoverRecord(null);
+      setHandoverOtp('');
+      toast.success('OTP verified. Item handover completed');
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to verify allocation handover');
+    } finally {
+      setRecordActionLoading(false);
+    }
+  };
+
+  const saveUtilization = () => {
+    if (!utilizationRecord) return;
+    const quantity = Number(utilizedQuantity) || 0;
+    if (quantity < 0) return toast.error('Utilized quantity cannot be negative');
+    if (quantity > utilizationRecord.quantity) {
+      return toast.error(`Utilization cannot exceed ${utilizationRecord.quantity.toLocaleString('en-IN')}`);
+    }
+    if (!utilizationDate) return toast.error('Select the utilization date');
+    if (!utilizationNote.trim()) return toast.error('Enter utilization details');
+    const override: IssueRecordOverride = {
+      utilized_quantity: quantity,
+      utilization_date: utilizationDate,
+      utilization_note: utilizationNote.trim(),
+    };
+    saveIssuedRecordOverride(utilizationRecord.issue_id, override);
+    setRecords((current) => current.map((record) => (
+      record.issue_id === utilizationRecord.issue_id ? { ...record, ...override } : record
+    )));
+    setUtilizationRecord(null);
+    setUtilizedQuantity('');
+    setUtilizationNote('');
+    toast.success('Actual utilization recorded');
+  };
+
+  const saveEditedRecord = () => {
+    if (!editRecord) return;
+    const editableItem = findIssuedInventoryItem(items, editRecord);
+    const editableItemIsReturnable = isIssueRequestReturnable(editRecord, editableItem);
+    if (!editRecord.issue_start_date) return toast.error('Select the issue date');
+    if (editableItemIsReturnable && editRecord.issue_end_date && editRecord.issue_end_date < editRecord.issue_start_date) {
+      return toast.error('Return due date cannot be before the issue date');
+    }
+    if (editableItemIsReturnable && editRecord.return_date && editRecord.return_date < editRecord.issue_start_date) {
+      return toast.error('Return date cannot be before the issue date');
+    }
+    const override: IssueRecordOverride = {
+      issue_start_date: editRecord.issue_start_date,
+      issue_end_date: editableItemIsReturnable ? editRecord.issue_end_date : '',
+      purpose: editRecord.purpose || '',
+      reference: editRecord.reference || '',
+      received_by: editRecord.received_by || '',
+      received_by_mobile: editRecord.received_by_mobile || '',
+      remarks: editRecord.remarks || '',
+      return_date: editableItemIsReturnable ? (editRecord.return_date || '') : '',
+    };
+    saveIssuedRecordOverride(editRecord.issue_id, override);
+    setRecords((current) => current.map((record) => (
+      record.issue_id === editRecord.issue_id ? { ...record, ...override } : record
+    )));
+    setEditRecord(null);
+    toast.success('Issued record updated');
+  };
+
+  const deleteIssuedRecord = async () => {
+    if (!deleteRecord || recordActionLoading) return;
+    setRecordActionLoading(true);
+    try {
+      const inventoryItem = findIssuedInventoryItem(items, deleteRecord);
+      const response = await fetch(`${BASE_URL}/inventory/update_issue_request_status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          item_id: inventoryItem?.id || deleteRecord.item_id,
+          issue_id: deleteRecord.issue_id,
+          new_status: 'rejected',
+        }),
+      });
+      const responseText = await response.text();
+      const data: any = (() => {
+        try { return responseText ? JSON.parse(responseText) : null; } catch { return null; }
+      })();
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.message || data?.detail || responseText || 'Failed to delete issued record');
+      }
+      setRecords((current) => current.filter((record) => record.issue_id !== deleteRecord.issue_id));
+      setDeleteRecord(null);
+      toast.success('Issued record removed');
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to delete issued record');
+    } finally {
+      setRecordActionLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="space-y-5">
+        <div className="grid gap-4 sm:grid-cols-3">
+          {[
+            ['Allocation Records', issuedRecords.length.toLocaleString('en-IN')],
+            ['Active Allocations', activeCount.toLocaleString('en-IN')],
+            ['Fully Returned', returnedCount.toLocaleString('en-IN')],
+          ].map(([label, value]) => (
+            <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.04)]">
+              <p className="text-[10px] font-black uppercase tracking-wide text-slate-400">{label}</p>
+              <p className="mt-2 text-2xl font-black text-[#0D3A35]">{value}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <div>
+              <h3 className="text-sm font-black text-slate-900">Allocated Item Register</h3>
+              <p className="mt-1 text-xs font-medium text-slate-500">
+                {filteredRecords.length} record{filteredRecords.length === 1 ? '' : 's'} · {totalIssuedQuantity.toLocaleString('en-IN')} total units issued
+              </p>
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-20 text-sm font-semibold text-slate-400">
+              <span className="h-5 w-5 animate-spin rounded-full border-2 border-[#0D3A35] border-t-transparent" />
+              Loading allocated items…
+            </div>
+          ) : filteredRecords.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-20 text-slate-400">
+              <ArrowUpFromLine className="mb-3 h-10 w-10 opacity-30" />
+              <p className="text-sm font-bold">No allocation records found</p>
+            </div>
+          ) : (
+            <div className="w-full overflow-hidden">
+              <table className="w-full table-fixed border-collapse text-xs">
+                <colgroup>
+                  <col className="w-[9%]" />
+                  <col className="w-[13%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[6%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[12%]" />
+                </colgroup>
+                <thead>
+                  <tr className="bg-[#0D3A35] text-white">
+                    {['Allocation ID', 'Item', 'Assigned To', 'Destination', 'Allocation Date', 'Return Due', 'Return Date', 'Allocated Qty.', 'Status', 'Returnability', 'Action'].map((heading) => (
+                      <th key={heading} className="px-2 py-3 text-center text-[10px] font-normal uppercase leading-tight tracking-wide text-white/75">{heading}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRecords.map((record) => {
+                    const item = findIssuedInventoryItem(items, record);
+                    const returned = Number(record.quantity_returned ?? record.returned_quantity ?? 0);
+                    const remaining = Math.max(0, record.quantity - returned);
+                    const returnable = isIssueRequestReturnable(record, item);
+                    const canReturn = returnable
+                      && remaining > 0
+                      && (record.status === 'issued' || record.status === 'partially_returned');
+                    const canVerifyHandover = record.status === 'allocated';
+                    const canRecordUtilization = record.status === 'issued'
+                      || record.status === 'partially_returned'
+                      || record.status === 'returned';
+                    const destination = record.recipient_name
+                      || record.farm_id
+                      || record.land_id
+                      || record.vendor_id
+                      || record.person_id
+                      || '—';
+                    return (
+                      <tr key={record.issue_id} className="border-b border-slate-100 align-middle transition hover:bg-[#0D3A35]/[0.025]">
+                        <td className="px-2 py-3 text-[11px] font-bold text-slate-500">
+                          <p className="truncate" title={record.issue_id}>{record.issue_id || '—'}</p>
+                        </td>
+                        <td className="break-words px-2 py-3">
+                          <p className="font-bold text-slate-800">{record.item_name || item?.name || record.item_id}</p>
+                          <p className="mt-0.5 text-[11px] text-slate-400">{item?.sku || record.item_id} · {item?.unit || 'Unit not recorded'}</p>
+                          {(record.purpose || record.reference) && (
+                            <p className="mt-1 max-w-[240px] truncate text-[10px] text-slate-400" title={[record.purpose, record.reference].filter(Boolean).join(' · ')}>
+                              {[record.purpose, record.reference].filter(Boolean).join(' · ')}
+                            </p>
+                          )}
+                        </td>
+                        <td className="break-words px-2 py-3 text-[11px] font-semibold text-slate-600">
+                          {record.received_by || record.staff_id || '—'}
+                          {record.received_by_mobile && <span className="mt-0.5 block text-[10px] text-slate-400">{record.received_by_mobile}</span>}
+                        </td>
+                        <td className="break-words px-2 py-3 text-[11px] font-semibold text-slate-600">
+                          <span className="capitalize">{record.recipient_type || 'Person'}</span>
+                          <span className="mt-0.5 block max-w-[180px] truncate text-[10px] text-slate-400" title={destination}>{destination}</span>
+                        </td>
+                        <td className="px-2 py-3 text-center text-[11px] text-slate-600">{formatDateDDMMYYYY(record.issue_start_date)}</td>
+                        <td className="px-2 py-3 text-center text-[11px] text-slate-600">{formatDateDDMMYYYY(record.issue_end_date)}</td>
+                        <td className="px-2 py-3 text-center text-[11px] text-slate-600">{formatDateDDMMYYYY(record.return_date || record.returned_at, '—')}</td>
+                        <td className="px-2 py-3 text-center font-bold text-slate-800">
+                          {record.quantity.toLocaleString('en-IN')} {item?.unit || ''}
+                          {returned > 0 && <span className="mt-0.5 block text-[10px] font-semibold text-emerald-600">Returned: {returned.toLocaleString('en-IN')}</span>}
+                        </td>
+                        <td className="px-2 py-3 text-center">
+                          <span className={cn('inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold capitalize ring-1', STATUS_PILL[record.status])}>
+                            {record.status === 'issued' ? 'Handed Over' : record.status.replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3 text-center">
+                          <span className={cn(
+                            'inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold',
+                            returnable ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500',
+                          )}>
+                            {returnable ? 'Returnable' : 'Non-returnable'}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3">
+                          <div className="flex flex-wrap items-center justify-center gap-1">
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              onClick={() => setInfoRecord(record)}
+                              title="View issued record"
+                              aria-label={`View ${record.issue_id}`}
+                              className="h-8 w-8 border-slate-200 text-slate-600 hover:border-[#0D3A35]/30 hover:bg-[#0D3A35]/5 hover:text-[#0D3A35]"
+                            >
+                              <Info className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              onClick={() => setEditRecord({ ...record })}
+                              title="Edit issued record"
+                              aria-label={`Edit ${record.issue_id}`}
+                              className="h-8 w-8 border-slate-200 text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                            >
+                              <Edit3 className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              onClick={() => setDeleteRecord(record)}
+                              title="Delete issued record"
+                              aria-label={`Delete ${record.issue_id}`}
+                              className="h-8 w-8 border-red-100 text-red-500 hover:border-red-200 hover:bg-red-50 hover:text-red-700"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                            {canVerifyHandover && (
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                onClick={() => { setHandoverRecord(record); setHandoverOtp(''); }}
+                                title="Verify OTP and hand over item"
+                                aria-label={`Verify handover for ${record.issue_id}`}
+                                className="h-8 w-8 border-cyan-200 text-cyan-700 hover:bg-cyan-50"
+                              >
+                                <PackageCheck className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {canRecordUtilization && (
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                onClick={() => {
+                                  setUtilizationRecord(record);
+                                  setUtilizedQuantity(String(record.utilized_quantity ?? ''));
+                                  setUtilizationDate(record.utilization_date || today());
+                                  setUtilizationNote(record.utilization_note || '');
+                                }}
+                                title="Record actual utilization"
+                                aria-label={`Record utilization for ${record.issue_id}`}
+                                className="h-8 w-8 border-violet-200 text-violet-700 hover:bg-violet-50"
+                              >
+                                <FileCheck className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {canReturn && (
+                              <Button size="sm" variant="outline" onClick={() => openReturnDialog(record)} title="Record Return" aria-label={`Record return for ${record.issue_id}`} className="h-8 w-8 gap-1.5 border-emerald-200 px-0 font-bold text-emerald-700 hover:bg-emerald-50 2xl:w-auto 2xl:px-2.5">
+                                <Undo2 className="h-3.5 w-3.5" /><span className="hidden 2xl:inline">Return</span>
+                              </Button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <Dialog open={Boolean(handoverRecord)} onOpenChange={(open) => { if (!open && !recordActionLoading) { setHandoverRecord(null); setHandoverOtp(''); } }}>
+        <DialogContent className="max-w-md overflow-hidden rounded-2xl border-0 bg-slate-50 p-0 shadow-[0_28px_80px_rgba(13,58,53,0.28)]">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="flex items-center gap-2 text-lg font-black text-white"><PackageCheck className="h-5 w-5" />Verify Item Handover</DialogTitle>
+            <p className="mt-1 text-xs font-medium text-white/65">Enter the OTP shared with the assigned receiver.</p>
+          </DialogHeader>
+          {handoverRecord && (
+            <div className="space-y-5 px-6 py-5">
+              <div className="rounded-xl border border-[#0D3A35]/10 bg-white p-4">
+                <p className="text-sm font-black text-slate-900">{handoverRecord.item_name}</p>
+                <p className="mt-1 text-xs font-semibold text-slate-500">{handoverRecord.quantity.toLocaleString('en-IN')} allocated · {handoverRecord.recipient_name || handoverRecord.received_by || 'Receiver not recorded'}</p>
+              </div>
+              <Field label="Four-digit Handover OTP *">
+                <InputOTP maxLength={4} value={handoverOtp} onChange={setHandoverOtp} containerClassName="justify-center">
+                  <InputOTPGroup>
+                    <InputOTPSlot index={0} />
+                    <InputOTPSlot index={1} />
+                    <InputOTPSlot index={2} />
+                    <InputOTPSlot index={3} />
+                  </InputOTPGroup>
+                </InputOTP>
+              </Field>
+            </div>
+          )}
+          <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+            <Button variant="outline" onClick={() => { setHandoverRecord(null); setHandoverOtp(''); }} disabled={recordActionLoading}>Cancel</Button>
+            <Button onClick={verifyAllocationHandover} disabled={recordActionLoading} className="gap-2 bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]"><ShieldCheck className="h-4 w-4" />{recordActionLoading ? 'Verifying…' : 'Verify & Hand Over'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(utilizationRecord)} onOpenChange={(open) => { if (!open) setUtilizationRecord(null); }}>
+        <DialogContent className="max-w-lg overflow-hidden rounded-2xl border-0 bg-slate-50 p-0 shadow-[0_28px_80px_rgba(13,58,53,0.28)]">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="flex items-center gap-2 text-lg font-black text-white"><FileCheck className="h-5 w-5" />Record Actual Utilization</DialogTitle>
+            <p className="mt-1 text-xs font-medium text-white/65">Record how much of the handed-over allocation was actually utilized.</p>
+          </DialogHeader>
+          {utilizationRecord && (
+            <div className="space-y-4 px-6 py-5">
+              <div className="rounded-xl border border-[#0D3A35]/10 bg-white p-4">
+                <p className="text-sm font-black text-slate-900">{utilizationRecord.item_name}</p>
+                <p className="mt-1 text-xs font-semibold text-slate-500">Allocated quantity: {utilizationRecord.quantity.toLocaleString('en-IN')}</p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Actually Utilized Quantity *">
+                  <Input type="number" min={0} max={utilizationRecord.quantity} step="any" value={utilizedQuantity} onChange={(event) => setUtilizedQuantity(event.target.value)} />
+                </Field>
+                <Field label="Utilization Date *">
+                  <Input type="date" value={utilizationDate} onChange={(event) => setUtilizationDate(event.target.value)} />
+                </Field>
+              </div>
+              <Field label="Utilization Details *">
+                <textarea rows={4} value={utilizationNote} onChange={(event) => setUtilizationNote(event.target.value)} placeholder="Where and how the item was utilized" className="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/15" />
+              </Field>
+            </div>
+          )}
+          <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+            <Button variant="outline" onClick={() => setUtilizationRecord(null)}>Cancel</Button>
+            <Button onClick={saveUtilization} className="gap-2 bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]"><FileCheck className="h-4 w-4" />Save Utilization</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(infoRecord)} onOpenChange={(open) => { if (!open) setInfoRecord(null); }}>
+        <DialogContent className="max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-4xl overflow-y-auto rounded-2xl border-0 bg-slate-50 p-0 shadow-[0_28px_80px_rgba(13,58,53,0.28)]">
+          <DialogHeader className="sticky top-0 z-20 bg-[#0D3A35] px-6 py-4 text-white">
+            <button type="button" onClick={() => setInfoRecord(null)} aria-label="Close issued record details" className="absolute right-5 top-5 flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-white/10 hover:bg-white/20">
+              <X className="h-4 w-4" />
+            </button>
+            <DialogTitle className="flex items-center gap-2 pr-10 text-lg font-black text-white">
+              <Info className="h-5 w-5" />Allocation Details
+            </DialogTitle>
+            <p className="mt-1 text-xs font-medium text-white/65">Complete information recorded against this stock issue.</p>
+          </DialogHeader>
+          {infoRecord && (() => {
+            const item = findIssuedInventoryItem(items, infoRecord);
+            const destination = infoRecord.recipient_name || infoRecord.farm_id || infoRecord.land_id || infoRecord.vendor_id || infoRecord.person_id || 'Not Recorded';
+            const returnable = isIssueRequestReturnable(infoRecord, item);
+            const recordedReturnedQuantity = Number(infoRecord.quantity_returned ?? infoRecord.returned_quantity ?? 0);
+            const returnedQuantity = recordedReturnedQuantity || (infoRecord.status === 'returned' ? infoRecord.quantity : 0);
+            const remainingQuantity = Math.max(0, infoRecord.quantity - returnedQuantity);
+            const utilized = Number(infoRecord.utilized_quantity || 0);
+            const allocationDetails = [
+              ['Allocation ID', infoRecord.issue_id],
+              ['Item', infoRecord.item_name || item?.name || infoRecord.item_id],
+              ['Item Code', item?.sku || infoRecord.item_id],
+              ['Allocated Quantity', `${infoRecord.quantity.toLocaleString('en-IN')} ${item?.unit || ''}`],
+              ['Allocation Date', formatDateDDMMYYYY(infoRecord.allocation_date || infoRecord.issue_start_date, 'Not Recorded')],
+              ['Allocation Status', infoRecord.status === 'issued' ? 'Handed Over' : infoRecord.status.replace(/_/g, ' ')],
+              ['Handover OTP', infoRecord.status === 'allocated' ? (infoRecord.allocation_otp || 'Not Recorded') : 'Verified'],
+              ['Handover Date', formatDateDDMMYYYY(infoRecord.handover_date, 'Not Recorded')],
+              ['Returnability', returnable ? 'Returnable' : 'Non-returnable'],
+              ['Destination Type', infoRecord.recipient_type || 'Person'],
+              ['Destination', destination],
+              ['Received By', infoRecord.received_by || infoRecord.staff_id || 'Not Recorded'],
+              ['Mobile Number', infoRecord.received_by_mobile || 'Not Recorded'],
+              ['Purpose / Usage', infoRecord.purpose || 'Not Recorded'],
+              ['Reference', infoRecord.reference || 'Not Recorded'],
+              ['Batch Number', infoRecord.batch_number || 'Not Recorded'],
+              ['Issued By', infoRecord.issued_by || 'Not Recorded'],
+            ];
+            const returnDetails = [
+              ['Return Due', returnable ? formatDateDDMMYYYY(infoRecord.issue_end_date, 'Not Recorded') : 'Not Applicable'],
+              ['Return Date', formatDateDDMMYYYY(infoRecord.return_date || infoRecord.returned_at, 'Not Recorded')],
+              ['Returned Quantity', `${returnedQuantity.toLocaleString('en-IN')} ${item?.unit || ''}`],
+              ['Pending Quantity', `${remainingQuantity.toLocaleString('en-IN')} ${item?.unit || ''}`],
+              ['Return Status', !returnable
+                ? 'Not Applicable'
+                : infoRecord.status === 'returned'
+                  ? 'Fully Returned'
+                  : infoRecord.status === 'partially_returned'
+                    ? 'Partially Returned'
+                    : 'Awaiting Return'],
+              ['Return Note', infoRecord.return_note || 'Not Recorded'],
+            ];
+            const utilizationDetails = [
+              ['Actual Utilized Quantity', `${utilized.toLocaleString('en-IN')} ${item?.unit || ''}`],
+              ['Unutilized Quantity', `${Math.max(0, infoRecord.quantity - utilized).toLocaleString('en-IN')} ${item?.unit || ''}`],
+              ['Utilization Date', formatDateDDMMYYYY(infoRecord.utilization_date, 'Not Recorded')],
+              ['Utilization Status', utilized <= 0 ? 'Not Recorded' : utilized >= infoRecord.quantity ? 'Fully Utilized' : 'Partially Utilized'],
+              ['Utilization Details', infoRecord.utilization_note || 'Not Recorded'],
+            ];
+            const DetailSection = ({ title, rows }: { title: string; rows: string[][] }) => (
+              <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                <div className="border-b border-slate-200 bg-slate-100 px-4 py-2.5">
+                  <h3 className="text-[11px] font-black uppercase tracking-[0.08em] text-[#0D3A35]">{title}</h3>
+                </div>
+                <div className="grid gap-px bg-slate-200 sm:grid-cols-2 lg:grid-cols-3">
+                  {rows.map(([label, value]) => (
+                    <div key={label} className="bg-white px-4 py-3">
+                      <p className="text-[9px] font-black uppercase tracking-wide text-slate-400">{label}</p>
+                      <p className="mt-1 text-sm font-semibold capitalize text-slate-800">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            );
+            return (
+              <div className="space-y-4 px-6 py-4">
+                <DetailSection title="Allocation & Handover Details" rows={allocationDetails} />
+                <DetailSection title="Actual Utilization" rows={utilizationDetails} />
+                <DetailSection title="Return Details" rows={returnDetails} />
+                {infoRecord.remarks && (
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-[9px] font-black uppercase tracking-wide text-slate-400">Remarks</p>
+                    <p className="mt-1 text-sm text-slate-700">{infoRecord.remarks}</p>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          <DialogFooter className="sticky bottom-0 z-20 border-t border-slate-200 bg-white px-6 py-3">
+            <Button variant="outline" onClick={() => setInfoRecord(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(editRecord)} onOpenChange={(open) => { if (!open) setEditRecord(null); }}>
+        <DialogContent className="max-w-2xl overflow-hidden rounded-2xl border-0 bg-slate-50 p-0 shadow-[0_28px_80px_rgba(13,58,53,0.28)]">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="flex items-center gap-2 text-lg font-black text-white">
+              <Edit3 className="h-5 w-5" />Edit Issued Record
+            </DialogTitle>
+            <p className="mt-1 text-xs font-medium text-white/65">Update the operational details for this issue entry.</p>
+          </DialogHeader>
+          {editRecord && (
+            <div className="space-y-4 px-6 py-5">
+              <div className="rounded-xl border border-[#0D3A35]/10 bg-white p-4">
+                <p className="text-sm font-black text-slate-900">{editRecord.item_name}</p>
+                <p className="mt-1 text-xs font-semibold text-slate-500">{editRecord.issue_id} · Quantity {editRecord.quantity.toLocaleString('en-IN')}</p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Allocation Date *">
+                  <Input type="date" value={editRecord.issue_start_date || ''} onChange={(event) => setEditRecord((current) => current ? { ...current, issue_start_date: event.target.value } : current)} />
+                </Field>
+                {isIssueRequestReturnable(editRecord, findIssuedInventoryItem(items, editRecord)) && (
+                  <>
+                    <Field label="Return Due">
+                      <Input type="date" min={editRecord.issue_start_date || undefined} value={editRecord.issue_end_date || ''} onChange={(event) => setEditRecord((current) => current ? { ...current, issue_end_date: event.target.value } : current)} />
+                    </Field>
+                    <Field label="Return Date">
+                      <Input type="date" min={editRecord.issue_start_date || undefined} value={editRecord.return_date || ''} onChange={(event) => setEditRecord((current) => current ? { ...current, return_date: event.target.value } : current)} />
+                    </Field>
+                  </>
+                )}
+                <Field label="Received By">
+                  <Input value={editRecord.received_by || ''} onChange={(event) => setEditRecord((current) => current ? { ...current, received_by: event.target.value } : current)} placeholder="Receiver name" />
+                </Field>
+                <Field label="Mobile Number">
+                  <Input value={editRecord.received_by_mobile || ''} onChange={(event) => setEditRecord((current) => current ? { ...current, received_by_mobile: event.target.value } : current)} placeholder="Contact number" />
+                </Field>
+                <Field label="Purpose / Usage">
+                  <Input value={editRecord.purpose || ''} onChange={(event) => setEditRecord((current) => current ? { ...current, purpose: event.target.value } : current)} placeholder="Purpose of issue" />
+                </Field>
+                <Field label="Reference">
+                  <Input value={editRecord.reference || ''} onChange={(event) => setEditRecord((current) => current ? { ...current, reference: event.target.value } : current)} placeholder="Task or work order" />
+                </Field>
+              </div>
+              <Field label="Remarks">
+                <textarea rows={3} value={editRecord.remarks || ''} onChange={(event) => setEditRecord((current) => current ? { ...current, remarks: event.target.value } : current)} placeholder="Additional notes" className="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/15" />
+              </Field>
+            </div>
+          )}
+          <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+            <Button variant="outline" onClick={() => setEditRecord(null)}>Cancel</Button>
+            <Button onClick={saveEditedRecord} className="gap-2 bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]"><Edit3 className="h-4 w-4" />Save Changes</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(deleteRecord)} onOpenChange={(open) => { if (!open && !recordActionLoading) setDeleteRecord(null); }}>
+        <DialogContent className="max-w-md overflow-hidden rounded-2xl border-0 bg-white p-0 shadow-[0_28px_80px_rgba(15,23,42,0.25)]">
+          <DialogHeader className="bg-red-600 px-6 py-5 text-white">
+            <DialogTitle className="flex items-center gap-2 text-lg font-black text-white"><Trash2 className="h-5 w-5" />Delete Issued Record</DialogTitle>
+          </DialogHeader>
+          <div className="px-6 py-5">
+            <p className="text-sm leading-6 text-slate-600">Remove issue <strong className="text-slate-900">{deleteRecord?.issue_id}</strong> for <strong className="text-slate-900">{deleteRecord?.item_name}</strong> from the issued register?</p>
+            <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">The transaction will be retained as rejected for audit history.</p>
+          </div>
+          <DialogFooter className="border-t border-slate-200 px-6 py-4">
+            <Button variant="outline" onClick={() => setDeleteRecord(null)} disabled={recordActionLoading}>Cancel</Button>
+            <Button onClick={deleteIssuedRecord} disabled={recordActionLoading} className="gap-2 bg-red-600 font-bold text-white hover:bg-red-700"><Trash2 className="h-4 w-4" />{recordActionLoading ? 'Deleting…' : 'Delete'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(returnRecord)} onOpenChange={(open) => { if (!open) closeReturnDialog(); }}>
+        <DialogContent className="max-w-lg overflow-hidden rounded-2xl border-0 bg-slate-50 p-0 shadow-[0_28px_80px_rgba(13,58,53,0.28)]">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="flex items-center gap-2 text-lg font-black text-white">
+              <Undo2 className="h-5 w-5" />Record Return Entry
+            </DialogTitle>
+            <p className="mt-1 text-xs font-medium text-white/65">Return issued stock to inventory and update its ledger.</p>
+          </DialogHeader>
+          {returnRecord && (() => {
+            const item = findIssuedInventoryItem(items, returnRecord);
+            const returned = Number(returnRecord.quantity_returned ?? returnRecord.returned_quantity ?? 0);
+            const remaining = Math.max(0, returnRecord.quantity - returned);
+            return (
+              <div className="space-y-4 px-6 py-5">
+                <div className="rounded-xl border border-[#0D3A35]/10 bg-white p-4">
+                  <p className="text-sm font-black text-slate-900">{returnRecord.item_name || item?.name}</p>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">Issue {returnRecord.issue_id} · {remaining.toLocaleString('en-IN')} {item?.unit || ''} remaining</p>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <Field label={`Return Quantity (${item?.unit || 'units'}) *`}>
+                    <Input type="number" min={0} max={remaining} step="any" value={returnQuantity} onChange={(event) => setReturnQuantity(event.target.value)} />
+                  </Field>
+                  <Field label="Return Date *">
+                    <Input type="date" value={returnDate} onChange={(event) => setReturnDate(event.target.value)} />
+                  </Field>
+                </div>
+                <Field label="Return Note *">
+                  <textarea
+                    rows={3}
+                    value={returnNote}
+                    onChange={(event) => setReturnNote(event.target.value)}
+                    placeholder="Condition, reason, and return remarks"
+                    className="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/15"
+                  />
+                </Field>
+              </div>
+            );
+          })()}
+          <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+            <Button variant="outline" onClick={closeReturnDialog} disabled={returning}>Cancel</Button>
+            <Button onClick={submitReturn} disabled={returning} className="gap-2 bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]">
+              <Undo2 className="h-4 w-4" />{returning ? 'Recording…' : 'Record Return'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
 };
 
 const IssuedItemsModal = ({
@@ -6607,9 +7902,10 @@ const IssuedItemsModal = ({
       const res = await fetch(`${BASE_URL}/inventory/get_issue_requests`);
       const data: any = await res.json().catch(() => null);
       if (res.ok && data?.success && Array.isArray(data?.issue_requests)) {
-        setRequests(data.issue_requests);
+        const normalizedRequests = data.issue_requests.map(normalizeIssueRequest);
+        setRequests(normalizedRequests);
         const qtys: Record<string, number> = {};
-        data.issue_requests.forEach((r: IssueRequest) => { qtys[r.issue_id] = r.quantity; });
+        normalizedRequests.forEach((r: IssueRequest) => { qtys[r.issue_id] = r.quantity; });
         setReturnQtys(qtys);
       } else {
         toast.error(data?.message || 'Failed to fetch issue requests');
@@ -6629,8 +7925,8 @@ const IssuedItemsModal = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const getItemImage = (itemId: string) =>
-    items.find((i) => i.id === itemId)?.imageUrl || PLACEHOLDER_IMG;
+  const getItemImage = (record: IssueRequest) =>
+    findIssuedInventoryItem(items, record)?.imageUrl || PLACEHOLDER_IMG;
 
   const filtered = activeTab === 'all' ? requests : requests.filter((r) => r.status === activeTab);
   const countFor = (key: IssueStatusTab) =>
@@ -6639,14 +7935,14 @@ const IssuedItemsModal = ({
   const handleIssue = async (req: IssueRequest) => {
     setActionLoading(req.issue_id);
     try {
-      const inventoryItem = items.find((item) => item.id === req.item_id);
+      const inventoryItem = findIssuedInventoryItem(items, req);
       const res = await fetch(`${BASE_URL}/inventory/update_issue_request_status`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           item_id: req.item_id,
           issue_id: req.issue_id,
-          new_status: 'issued',
+          new_status: 'approved',
           stock_issue_method: inventoryItem?.stockIssueMethod || '',
         }),
       });
@@ -6662,17 +7958,54 @@ const IssuedItemsModal = ({
   };
 
   const handleReturn = async (req: IssueRequest) => {
+    const inventoryItem = findIssuedInventoryItem(items, req);
+    if (!isIssueRequestReturnable(req, inventoryItem)) {
+      toast.error('This item is classified as non-returnable');
+      return;
+    }
     const qtyReturned = returnQtys[req.issue_id] ?? req.quantity;
     if (!qtyReturned || qtyReturned <= 0) return toast.error('Enter a valid return quantity');
     setActionLoading(req.issue_id);
     try {
-      const res = await fetch(`${BASE_URL}/inventory/return_issue_item`, {
+      if (req.backend_status !== 'approved') {
+        const approvalResponse = await fetch(`${BASE_URL}/inventory/update_issue_request_status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_id: inventoryItem?.id || req.item_id,
+            issue_id: req.issue_id,
+            new_status: 'approved',
+          }),
+        });
+        const approvalText = await approvalResponse.text();
+        const approvalData: any = (() => {
+          try { return approvalText ? JSON.parse(approvalText) : null; } catch { return null; }
+        })();
+        if (!approvalResponse.ok || !approvalData?.success) {
+          throw new Error(approvalData?.message || approvalData?.detail || approvalText || 'Failed to approve the issue before return');
+        }
+      }
+      const res = await fetch(`${BASE_URL}/inventory/return_issued_item`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ issue_id: req.issue_id, quantity_returned: qtyReturned }),
+        body: JSON.stringify({
+          item_id: inventoryItem?.id || req.item_id,
+          issue_id: req.issue_id,
+          new_status: qtyReturned >= req.quantity ? 'returned' : 'partially_returned',
+          quanity: qtyReturned,
+        }),
       });
-      const data: any = await res.json().catch(() => null);
-      if (!res.ok || !data?.success) throw new Error(data?.message || 'Failed to return item');
+      const responseText = await res.text();
+      const data: any = (() => {
+        try { return responseText ? JSON.parse(responseText) : null; } catch { return null; }
+      })();
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.message || data?.detail || responseText || 'Failed to return item');
+      }
+      saveIssuedRecordOverride(req.issue_id, {
+        return_date: today(),
+        quantity_returned: qtyReturned,
+      });
       toast.success(`"${req.item_name}" marked as returned`);
       await fetchRequests();
     } catch (e: any) {
@@ -6749,6 +8082,8 @@ const IssuedItemsModal = ({
                     const progress = calcProgress(req.issue_start_date, req.issue_end_date);
                     const isOverdue = new Date(req.issue_end_date).getTime() < Date.now();
                     const isActing = actionLoading === req.issue_id;
+                    const inventoryItem = findIssuedInventoryItem(items, req);
+                    const isReturnable = isIssueRequestReturnable(req, inventoryItem);
 
                     return (
                       <tr key={req.issue_id} className="hover:bg-gray-50 transition-colors">
@@ -6756,7 +8091,7 @@ const IssuedItemsModal = ({
                         {/* Image */}
                         <td className="px-4 py-3">
                           <img
-                            src={getItemImage(req.item_id)}
+                            src={getItemImage(req)}
                             alt={req.item_name}
                             onError={(e) => { (e.currentTarget as HTMLImageElement).src = PLACEHOLDER_IMG; }}
                             className="w-10 h-10 rounded-lg object-cover border border-gray-200"
@@ -6783,11 +8118,11 @@ const IssuedItemsModal = ({
                         <td className="px-4 py-3">
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between text-[11px] text-gray-500">
-                              <span>{req.issue_start_date}</span>
+                              <span>{formatDateDDMMYYYY(req.issue_start_date)}</span>
                               <span className={cn('font-semibold', req.status === 'issued' && isOverdue ? 'text-red-600' : 'text-gray-500')}>
                                 {req.status === 'issued' && isOverdue ? 'Overdue' : `${Math.round(progress)}%`}
                               </span>
-                              <span>{req.issue_end_date}</span>
+                              <span>{formatDateDDMMYYYY(req.issue_end_date)}</span>
                             </div>
                             <div className="h-2 w-full rounded-full bg-gray-100 overflow-hidden">
                               <div
@@ -6831,7 +8166,7 @@ const IssuedItemsModal = ({
                             </Button>
                           )}
 
-                          {req.status === 'issued' && (
+                          {req.status === 'issued' && isReturnable && (
                             <div className="flex items-center gap-1.5">
                               <Input
                                 type="number"
@@ -6854,6 +8189,10 @@ const IssuedItemsModal = ({
                                 {isActing ? 'Returning…' : 'Return'}
                               </Button>
                             </div>
+                          )}
+
+                          {req.status === 'issued' && !isReturnable && (
+                            <span className="text-xs font-medium text-slate-400">Non-returnable</span>
                           )}
 
                           {(req.status === 'returned' || req.status === 'partially_returned' || req.status === 'rejected') && (

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { formatDateDDMMYYYY, formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
 import {
   Dialog,
   DialogContent,
@@ -49,14 +50,7 @@ const escapeHtml = (value: unknown) => String(value ?? '')
 
 const formatDate = (value?: string, withTime = false) => {
   if (!value) return '—';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    ...(withTime ? { hour: '2-digit', minute: '2-digit' } : {}),
-  }).format(date);
+  return withTime ? formatDateTimeDDMMYYYY(value, value) : formatDateDDMMYYYY(value, value);
 };
 
 const statusStyles: Record<InventoryApprovalStatus, string> = {

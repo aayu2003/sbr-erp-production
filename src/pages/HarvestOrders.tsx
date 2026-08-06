@@ -120,7 +120,7 @@ const HarvestOrders = () => {
     if (!createdAt) return '—';
     const dt = new Date(createdAt);
     if (Number.isNaN(dt.getTime())) return createdAt;
-    return format(dt, 'dd MMM yyyy, hh:mm a');
+    return format(dt, 'dd-MM-yyyy, hh:mm a');
   };
 
   return (

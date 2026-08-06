@@ -1,5 +1,5 @@
 ﻿import { useMemo, useState, useEffect, useRef } from 'react';
-import { Search, Filter, Users, MapPin, Phone, Mail, FileText, ShieldCheck, NotebookText, Wallet, Check, Flag, Leaf, Wheat, Sprout, Image as ImageIcon, Map, Pencil, Trash2, KeyRound, IdCard, BookOpen, FileBadge2, Landmark, Info, Navigation, Loader2, UploadCloud, X, Camera, Save, UserRound, Home, Banknote, Eye, FileUp, ArrowRight, ChevronDown, Droplets, Zap, Ruler, Layers3, IndianRupee, CalendarDays, Timer } from 'lucide-react';
+import { Search, Filter, Users, MapPin, Phone, Mail, FileText, ShieldCheck, NotebookText, Wallet, Check, Flag, Leaf, Wheat, Sprout, Image as ImageIcon, Map, Pencil, Trash2, KeyRound, IdCard, BookOpen, FileBadge2, Landmark, Info, Navigation, Loader2, UploadCloud, X, Camera, Save, UserRound, Home, Banknote, Eye, FileUp, ArrowRight, ChevronDown, Droplets, Zap, Ruler, Layers3, IndianRupee, CalendarDays, Timer, Plus } from 'lucide-react';
 import { Fragment } from 'react';
 import { MapContainer, TileLayer, Polygon, Marker, Popup, Tooltip, FeatureGroup, useMap } from 'react-leaflet';
 import { EditControl } from 'react-leaflet-draw';
@@ -86,9 +86,69 @@ type FarmCardData = {
   leaseStart?: string | null;
   leaseEnd?: string | null;
   leaseRate?: number | string | null;
+  lockInStart?: string | null;
+  lockInEnd?: string | null;
   cluster?: string | null;
   zone?: string | null;
   block?: string | null;
+};
+
+type LandCoOwner = {
+  fullName: string;
+  relationship: string;
+  phoneNumber: string;
+  aadhaarNumber: string;
+  panNumber: string;
+  ownershipShare: string;
+};
+
+const createEmptyLandCoOwner = (): LandCoOwner => ({
+  fullName: '',
+  relationship: '',
+  phoneNumber: '',
+  aadhaarNumber: '',
+  panNumber: '',
+  ownershipShare: '',
+});
+
+const normalizeLandCoOwners = (farm: any): LandCoOwner[] => {
+  const source = farm?.co_owners ?? farm?.co_owner_details ?? farm?.land_co_owners ?? [];
+  const entries = Array.isArray(source) ? source : source && typeof source === 'object' ? [source] : [];
+  return entries.map((coOwner: any) => ({
+    fullName: String(coOwner?.full_name ?? coOwner?.name ?? coOwner?.owner_name ?? ''),
+    relationship: String(coOwner?.relationship ?? coOwner?.relation ?? ''),
+    phoneNumber: String(coOwner?.phone_number ?? coOwner?.contact_number ?? coOwner?.mobile_number ?? ''),
+    aadhaarNumber: String(coOwner?.adhar_number ?? coOwner?.aadhaar_number ?? ''),
+    panNumber: String(coOwner?.pan_number ?? ''),
+    ownershipShare: String(coOwner?.ownership_share ?? coOwner?.share_percentage ?? coOwner?.share ?? ''),
+  }));
+};
+
+const serializeLandCoOwners = (coOwners: LandCoOwner[]) => coOwners
+  .filter((coOwner) => Object.values(coOwner).some((value) => String(value).trim()))
+  .map((coOwner) => ({
+    full_name: coOwner.fullName.trim(),
+    relationship: coOwner.relationship.trim(),
+    phone_number: coOwner.phoneNumber.trim(),
+    aadhaar_number: coOwner.aadhaarNumber.trim(),
+    pan_number: coOwner.panNumber.trim().toUpperCase(),
+    ownership_share: coOwner.ownershipShare === '' ? null : Number(coOwner.ownershipShare),
+  }));
+
+const formatLandDate = (value?: string | null) => {
+  if (!value) return 'N/A';
+  const raw = String(value).slice(0, 10);
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : raw;
+};
+
+const validateLockInPeriod = (leaseStart: string, leaseEnd: string, lockInStart: string, lockInEnd: string) => {
+  if (!lockInStart && !lockInEnd) return null;
+  if (!lockInStart || !lockInEnd) return 'Enter both lock-in start and end dates.';
+  if (lockInStart > lockInEnd) return 'Lock-in end date must be on or after its start date.';
+  if (leaseStart && lockInStart < leaseStart) return 'Lock-in period cannot start before the lease tenure.';
+  if (leaseEnd && lockInEnd > leaseEnd) return 'Lock-in period cannot end after the lease tenure.';
+  return null;
 };
 
 const cropOptions: Array<{ value: Exclude<CropValue, ''>; label: string; Icon: React.ComponentType<{ className?: string }> }> = [
@@ -187,6 +247,81 @@ const EditField = ({
   </div>
 );
 
+const LandCoOwnerEditor = ({
+  coOwners,
+  onChange,
+}: {
+  coOwners: LandCoOwner[];
+  onChange: (coOwners: LandCoOwner[]) => void;
+}) => {
+  const updateCoOwner = (index: number, patch: Partial<LandCoOwner>) => {
+    onChange(coOwners.map((coOwner, coOwnerIndex) => (
+      coOwnerIndex === index ? { ...coOwner, ...patch } : coOwner
+    )));
+  };
+
+  return (
+    <section className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50/50">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
+        <div>
+          <h4 className="text-sm font-bold text-slate-900">Land Co-owners</h4>
+          <p className="mt-0.5 text-xs font-medium text-slate-500">These co-owners will be linked only to this land parcel.</p>
+        </div>
+        <Button
+          type="button"
+          onClick={() => onChange([...coOwners, createEmptyLandCoOwner()])}
+          className="h-9 gap-1.5 rounded-lg bg-[#0D3A35] px-3 text-xs font-bold text-white hover:bg-[#092b27]"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add Co-owner
+        </Button>
+      </div>
+      <div className="space-y-3 p-4">
+        {coOwners.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-200 bg-white px-4 py-6 text-center text-xs font-semibold text-slate-400">
+            No co-owners added for this land.
+          </div>
+        ) : coOwners.map((coOwner, coOwnerIndex) => (
+          <div key={coOwnerIndex} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <p className="text-xs font-bold uppercase tracking-wide text-emerald-700">Co-owner {coOwnerIndex + 1}</p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onChange(coOwners.filter((_, index) => index !== coOwnerIndex))}
+                className="h-8 w-8 border-red-100 p-0 text-red-500 hover:bg-red-50 hover:text-red-600"
+                title={`Remove co-owner ${coOwnerIndex + 1}`}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <EditField label="Full Name">
+                <Input value={coOwner.fullName} onChange={(event) => updateCoOwner(coOwnerIndex, { fullName: event.target.value })} placeholder="Enter full name" />
+              </EditField>
+              <EditField label="Relationship">
+                <Input value={coOwner.relationship} onChange={(event) => updateCoOwner(coOwnerIndex, { relationship: event.target.value })} placeholder="e.g. Spouse, sibling" />
+              </EditField>
+              <EditField label="Phone Number">
+                <Input value={coOwner.phoneNumber} onChange={(event) => updateCoOwner(coOwnerIndex, { phoneNumber: event.target.value })} placeholder="Enter mobile number" />
+              </EditField>
+              <EditField label="Aadhaar Number" hint="Optional">
+                <Input value={coOwner.aadhaarNumber} onChange={(event) => updateCoOwner(coOwnerIndex, { aadhaarNumber: event.target.value.replace(/\D/g, '').slice(0, 12) })} placeholder="12-digit Aadhaar" inputMode="numeric" />
+              </EditField>
+              <EditField label="PAN Number" hint="Optional">
+                <Input value={coOwner.panNumber} onChange={(event) => updateCoOwner(coOwnerIndex, { panNumber: event.target.value.toUpperCase().slice(0, 10) })} placeholder="e.g. ABCDE1234F" />
+              </EditField>
+              <EditField label="Ownership Share" hint="% Optional">
+                <Input type="number" min="0" max="100" step="0.01" value={coOwner.ownershipShare} onChange={(event) => updateCoOwner(coOwnerIndex, { ownershipShare: event.target.value })} placeholder="e.g. 50" />
+              </EditField>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+};
+
 const Farmers = () => {
   // --- Existing State & Logic ---
   const [farmers, setFarmers] = useState<FarmerRow[]>([]);
@@ -235,11 +370,14 @@ const Farmers = () => {
     leaseStart: '',
     leaseEnd: '',
     leaseAmount: '',
+    lockInStart: '',
+    lockInEnd: '',
     agreementPdf: null as File | null,
     b1Pdf: null as File | null,
     kisanBookPdf: null as File | null,
     landImages: [] as File[],
     landVideo: null as File | null,
+    coOwners: [] as LandCoOwner[],
   });
   const { toast } = useToast();
 
@@ -295,6 +433,12 @@ const Farmers = () => {
     landCoordinates: [number, number][];
     kmlCoordinates: { lat: number; lng: number }[] | null;
     isParsingKml: boolean;
+    coOwners: LandCoOwner[];
+    leaseStart: string;
+    leaseEnd: string;
+    leaseRate: string;
+    lockInStart: string;
+    lockInEnd: string;
   }>>([]);
   const [editFarmIndex, setEditFarmIndex] = useState(0);
 
@@ -688,9 +832,11 @@ const Farmers = () => {
           totalArea: Number(farm?.total_area ?? 0),
           coordinates: farm?.land_coordinates || [],
         },
-        leaseStart,
-        leaseEnd,
+        leaseStart: farm?.lease_start_date ?? farm?.lease_start ?? leaseStart,
+        leaseEnd: farm?.lease_end_date ?? farm?.lease_end ?? leaseEnd,
         leaseRate: farm?.lease_rate ?? farm?.lease_rent ?? leaseRate,
+        lockInStart: farm?.lock_in_start_date ?? farm?.lock_in_start ?? null,
+        lockInEnd: farm?.lock_in_end_date ?? farm?.lock_in_end ?? null,
         cluster: farm?.cluster_assigned ?? farm?.cluster ?? farm?.cluster_name ?? farmer.clusterAssigned ?? null,
         zone: farm?.zone_assigned ?? farm?.zone ?? farm?.zone_name ?? farmer.zoneAssigned ?? null,
         block: farm?.block_assigned ?? farm?.block ?? farm?.block_name ?? farmer.blockAssigned ?? null,
@@ -768,7 +914,19 @@ const Farmers = () => {
       passbookPdfName: 'N/A',
     }] : [];
     const local = localBankDetails[farmer.id] ?? [];
-    return [...backend, ...fallback, ...local];
+    return [...backend, ...fallback, ...local].filter((account, index, accounts) => {
+      const accountNumber = String(account.accountNumber ?? '').replace(/\s+/g, '').toLowerCase();
+      const key = accountNumber && accountNumber !== 'n/a'
+        ? accountNumber
+        : `${String(account.bankName ?? '').toLowerCase()}-${String(account.ifsc ?? '').toLowerCase()}-${index}`;
+      return accounts.findIndex((candidate, candidateIndex) => {
+        const candidateNumber = String(candidate.accountNumber ?? '').replace(/\s+/g, '').toLowerCase();
+        const candidateKey = candidateNumber && candidateNumber !== 'n/a'
+          ? candidateNumber
+          : `${String(candidate.bankName ?? '').toLowerCase()}-${String(candidate.ifsc ?? '').toLowerCase()}-${candidateIndex}`;
+        return candidateKey === key;
+      }) === index;
+    });
   };
 
   type FarmerDocumentKey = 'adhar_card' | 'pand_card' | 'kisan_book' | 'B1_record' | 'agreement' | 'bank_passbook' | 'profile_photo';
@@ -1182,11 +1340,14 @@ const Farmers = () => {
       leaseStart: '',
       leaseEnd: '',
       leaseAmount: '',
+      lockInStart: '',
+      lockInEnd: '',
       agreementPdf: null,
       b1Pdf: null,
       kisanBookPdf: null,
       landImages: [],
       landVideo: null,
+      coOwners: [],
     });
     setNewLandLocation(null);
     setNewLandImagePreviews([null, null, null]);
@@ -1271,8 +1432,35 @@ const Farmers = () => {
       toast({ title: 'Missing fields', description: 'Please fill lease dates and amount in Step 4.', variant: 'destructive' });
       return;
     }
+    const lockInError = validateLockInPeriod(
+      newLandForm.leaseStart,
+      newLandForm.leaseEnd,
+      newLandForm.lockInStart,
+      newLandForm.lockInEnd
+    );
+    if (lockInError) {
+      toast({ title: 'Invalid lock-in period', description: lockInError, variant: 'destructive' });
+      return;
+    }
     if (!newLandModal.farmerId) {
       toast({ title: 'Error', description: 'Farmer ID missing.', variant: 'destructive' });
+      return;
+    }
+    const incompleteCoOwner = newLandForm.coOwners.find((coOwner) => (
+      Object.values(coOwner).some((value) => String(value).trim()) &&
+      (!coOwner.fullName.trim() || !coOwner.phoneNumber.trim())
+    ));
+    if (incompleteCoOwner) {
+      toast({ title: 'Incomplete co-owner', description: 'Full name and phone number are required for every co-owner.', variant: 'destructive' });
+      return;
+    }
+    const invalidShare = newLandForm.coOwners.find((coOwner) => {
+      if (coOwner.ownershipShare === '') return false;
+      const share = Number(coOwner.ownershipShare);
+      return !Number.isFinite(share) || share < 0 || share > 100;
+    });
+    if (invalidShare) {
+      toast({ title: 'Invalid ownership share', description: 'Ownership share must be between 0 and 100.', variant: 'destructive' });
       return;
     }
 
@@ -1327,6 +1515,12 @@ const Farmers = () => {
         farming_option: farmer?.farmingOption || 'Lease Farming',
         land_photos_urls: imageUrls,
         land_video_url: videoUrl,
+        co_owner_details: serializeLandCoOwners(newLandForm.coOwners),
+        lease_start_date: newLandForm.leaseStart,
+        lease_end_date: newLandForm.leaseEnd,
+        lease_rate: Number(newLandForm.leaseAmount),
+        lock_in_start_date: newLandForm.lockInStart || null,
+        lock_in_end_date: newLandForm.lockInEnd || null,
       };
       const addLandResp = await fetch(`${base}/farmer_managment/add_new_land_to_existing_farmer`, {
         method: 'POST',
@@ -1476,6 +1670,12 @@ const Farmers = () => {
           landCoordinates,
           kmlCoordinates: null,
           isParsingKml: false,
+          coOwners: normalizeLandCoOwners(farm),
+          leaseStart: String(farm.lease_start_date ?? farm.lease_start ?? agreement?.agreement_start_date ?? agreement?.agreementStart ?? ''),
+          leaseEnd: String(farm.lease_end_date ?? farm.lease_end ?? agreement?.agreement_end_date ?? agreement?.agreementEnd ?? ''),
+          leaseRate: String(farm.lease_rate ?? farm.lease_rent ?? agreement?.lease_rate ?? agreement?.lease_rent ?? agreement?.leaseRent ?? ''),
+          lockInStart: String(farm.lock_in_start_date ?? farm.lock_in_start ?? ''),
+          lockInEnd: String(farm.lock_in_end_date ?? farm.lock_in_end ?? ''),
         };
       })
     );
@@ -1483,6 +1683,19 @@ const Farmers = () => {
     setEditFarmerTab('personal');
     setEditFarmerModal({ open: openInSeparateDialog, farmerId: farmer.id });
     setInlineProfileEditing(!openInSeparateDialog);
+  };
+
+  const openLandEditModal = (farmer: FarmerRow, farmIndex: number, addCoOwner = false) => {
+    openEditModal(farmer);
+    setEditFarmerTab('farms');
+    setEditFarmIndex(farmIndex);
+    if (addCoOwner) {
+      setEditFarmerFarms((previous) => previous.map((farm, index) => (
+        index === farmIndex
+          ? { ...farm, coOwners: [...farm.coOwners, createEmptyLandCoOwner()] }
+          : farm
+      )));
+    }
   };
 
   const closeEditModal = () => {
@@ -1640,6 +1853,30 @@ const Farmers = () => {
 
       for (const [index, farm] of editFarmerFarms.entries()) {
         const originalFarm = Array.isArray(activeEditFarmer.farms) ? activeEditFarmer.farms[index] ?? {} : {};
+        const lockInError = validateLockInPeriod(
+          farm.leaseStart,
+          farm.leaseEnd,
+          farm.lockInStart,
+          farm.lockInEnd
+        );
+        if (lockInError) {
+          throw new Error(`${lockInError} (Farm ${index + 1})`);
+        }
+        const incompleteCoOwner = farm.coOwners.find((coOwner) => (
+          Object.values(coOwner).some((value) => String(value).trim()) &&
+          (!coOwner.fullName.trim() || !coOwner.phoneNumber.trim())
+        ));
+        if (incompleteCoOwner) {
+          throw new Error(`Full name and phone number are required for every co-owner in Farm ${index + 1}`);
+        }
+        const invalidShare = farm.coOwners.find((coOwner) => {
+          if (coOwner.ownershipShare === '') return false;
+          const share = Number(coOwner.ownershipShare);
+          return !Number.isFinite(share) || share < 0 || share > 100;
+        });
+        if (invalidShare) {
+          throw new Error(`Ownership share must be between 0 and 100 for Farm ${index + 1}`);
+        }
         const farmId = await resolveFarmId(farm, originalFarm, index);
         if (!farmId) {
           throw new Error(`Farm ID missing for Farm ${index + 1}`);
@@ -1654,6 +1891,8 @@ const Farmers = () => {
           ? farm.kmlCoordinates.map((coord) => [coord.lat, coord.lng])
           : farm.landCoordinates;
         const originalCoordinates = Array.isArray(originalFarm.land_coordinates) ? originalFarm.land_coordinates : [];
+        const coOwnerPayload = serializeLandCoOwners(farm.coOwners);
+        const originalCoOwnerPayload = serializeLandCoOwners(normalizeLandCoOwners(originalFarm));
         const normalizeCoordinates = (coords: any[]) =>
           coords.map((coord) => Array.isArray(coord) ? [Number(coord[0]), Number(coord[1])] : [Number(coord?.lat), Number(coord?.lng)]);
         const hasFarmMediaChanges =
@@ -1670,7 +1909,14 @@ const Farmers = () => {
           farm.state !== (originalFarm.state ?? '') ||
           farm.district !== (originalFarm.district ?? '') ||
           farm.village !== (originalFarm.village ?? '') ||
+          farm.cropType !== String(originalFarm.crop_type ?? '') ||
+          farm.leaseStart !== String(originalFarm.lease_start_date ?? originalFarm.lease_start ?? currentAgreement?.agreement_start_date ?? currentAgreement?.agreementStart ?? '') ||
+          farm.leaseEnd !== String(originalFarm.lease_end_date ?? originalFarm.lease_end ?? currentAgreement?.agreement_end_date ?? currentAgreement?.agreementEnd ?? '') ||
+          Number(farm.leaseRate || 0) !== Number(originalFarm.lease_rate ?? originalFarm.lease_rent ?? currentAgreement?.lease_rate ?? currentAgreement?.lease_rent ?? currentAgreement?.leaseRent ?? 0) ||
+          farm.lockInStart !== String(originalFarm.lock_in_start_date ?? originalFarm.lock_in_start ?? '') ||
+          farm.lockInEnd !== String(originalFarm.lock_in_end_date ?? originalFarm.lock_in_end ?? '') ||
           Number(farm.totalArea || 0) !== Number(originalFarm.total_area ?? 0) ||
+          JSON.stringify(coOwnerPayload) !== JSON.stringify(originalCoOwnerPayload) ||
           JSON.stringify(normalizeCoordinates(effectiveCoordinates as any[])) !== JSON.stringify(normalizeCoordinates(originalCoordinates));
         const hasFarmChanges = hasFarmDetailsChanges || hasFarmMediaChanges;
 
@@ -1706,6 +1952,13 @@ const Farmers = () => {
           farmer_id: farmerId,
           land_coordinates: effectiveCoordinates,
           total_area: farm.totalArea === '' ? 0 : Number(farm.totalArea),
+          crop_type: farm.cropType,
+          co_owner_details: coOwnerPayload,
+          lease_start_date: farm.leaseStart || null,
+          lease_end_date: farm.leaseEnd || null,
+          lease_rate: farm.leaseRate === '' ? null : Number(farm.leaseRate),
+          lock_in_start_date: farm.lockInStart || null,
+          lock_in_end_date: farm.lockInEnd || null,
           land_media: {
             ...originalMedia,
             images: finalImages.filter((url) => typeof url === 'string' && url.length > 0),
@@ -1743,6 +1996,12 @@ const Farmers = () => {
               district: updatedFarmPayload?.district ?? farm.district,
               state: updatedFarmPayload?.state ?? farm.state,
               crop_type: farm.cropType,
+              co_owner_details: updatedFarmPayload?.co_owner_details ?? serializeLandCoOwners(farm.coOwners),
+              lease_start_date: updatedFarmPayload?.lease_start_date ?? farm.leaseStart,
+              lease_end_date: updatedFarmPayload?.lease_end_date ?? farm.leaseEnd,
+              lease_rate: updatedFarmPayload?.lease_rate ?? (farm.leaseRate === '' ? null : Number(farm.leaseRate)),
+              lock_in_start_date: updatedFarmPayload?.lock_in_start_date ?? farm.lockInStart,
+              lock_in_end_date: updatedFarmPayload?.lock_in_end_date ?? farm.lockInEnd,
               total_area: updatedFarmPayload?.total_area ?? (farm.totalArea === '' ? '' : Number(farm.totalArea)),
               land_coordinates: updatedFarmPayload?.land_coordinates ?? effectiveCoordinates,
               land_media: updatedFarmPayload?.land_media ?? originalFarm.land_media ?? {},
@@ -2559,11 +2818,23 @@ const Farmers = () => {
 
                 return (
                   <section className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
-                    <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-3">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50">
-                        <Landmark className="h-4 w-4 text-emerald-700" />
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-3">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50">
+                          <Landmark className="h-4 w-4 text-emerald-700" />
+                        </div>
+                        <h4 className="text-sm font-bold text-slate-900">Bank Details</h4>
                       </div>
-                      <h4 className="text-sm font-bold text-slate-900">Bank Details</h4>
+                      {!inlineProfileEditing && (
+                        <Button
+                          type="button"
+                          onClick={() => setBankAddModal({ open: true, farmerId: viewProfileFarmer.id })}
+                          className="h-9 gap-1.5 rounded-lg bg-[#0D3A35] px-3 text-xs font-bold text-white hover:bg-[#092b27]"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          Add Bank Account
+                        </Button>
+                      )}
                     </div>
                     <div className="grid grid-cols-1 gap-x-6 gap-y-4 p-5 sm:grid-cols-2 xl:grid-cols-3">
                       {items.map((item) => {
@@ -2591,6 +2862,36 @@ const Farmers = () => {
                         );
                       })}
                     </div>
+                    {!inlineProfileEditing && bankAccounts.length > 0 && (
+                      <div className="border-t border-slate-100 bg-slate-50/40 p-5">
+                        <p className="mb-3 text-xs font-bold uppercase tracking-wide text-slate-500">Linked Bank Accounts</p>
+                        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                          {bankAccounts.map((account, accountIndex) => (
+                            <div key={`${account.accountNumber}-${accountIndex}`} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="text-sm font-bold text-slate-900">{account.bankName || 'Bank not recorded'}</p>
+                                  <p className="mt-1 truncate text-xs font-semibold text-slate-500">{account.holderName || 'Holder not recorded'}</p>
+                                </div>
+                                <span className="shrink-0 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700">
+                                  {accountIndex === 0 ? 'Primary' : `Account ${accountIndex + 1}`}
+                                </span>
+                              </div>
+                              <div className="mt-3 grid grid-cols-2 gap-3 border-t border-slate-100 pt-3">
+                                <div>
+                                  <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Account Number</p>
+                                  <p className="mt-1 break-all text-xs font-bold text-slate-700">{account.accountNumber || 'N/A'}</p>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">IFSC Code</p>
+                                  <p className="mt-1 break-all text-xs font-bold uppercase text-slate-700">{account.ifsc || 'N/A'}</p>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </section>
                 );
               })()}
@@ -2642,6 +2943,23 @@ const Farmers = () => {
 
               {profilePopupTab === 'parcels' && (
                 <>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Land Parcels</h3>
+                  <p className="mt-0.5 text-xs font-medium text-slate-500">
+                    {getFarmCards(viewProfileFarmer).length} parcel{getFarmCards(viewProfileFarmer).length === 1 ? '' : 's'} linked to {viewProfileFarmer.fullName}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  onClick={() => openNewLandPopup(viewProfileFarmer.id)}
+                  disabled={inlineProfileEditing}
+                  className="h-10 gap-2 rounded-lg bg-[#0D3A35] px-4 text-sm font-bold text-white shadow-sm hover:bg-[#092b27]"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add Land
+                </Button>
+              </div>
               <div className="grid grid-cols-1 gap-5">
                 {getFarmCards(viewProfileFarmer).map((farm, farmIndex) => {
                   const rawFarm = Array.isArray(viewProfileFarmer.farms) ? viewProfileFarmer.farms[farmIndex] : null;
@@ -2656,6 +2974,7 @@ const Farmers = () => {
                   const fallbackImage = farm.mediaUrl && farm.mediaUrl !== '/placeholder.svg' ? farm.mediaUrl : '';
                   const parcelImages = images.length > 0 ? images : (fallbackImage ? [fallbackImage] : []);
                   const videoUrl = rawFarm?.land_media?.video || '';
+                  const landCoOwners = normalizeLandCoOwners(rawFarm);
                   const parcelId = rawFarm?.farm_id ?? rawFarm?.id ?? farm.id;
                   const cropLabel = cropOptions.find((option) => option.value === farm.cropType)?.label || farm.cropType || 'Not assigned';
                   const farmCoords: [number, number][] = (Array.isArray(farm.landMapping?.coordinates) ? farm.landMapping.coordinates : [])
@@ -3043,11 +3362,24 @@ const Farmers = () => {
                             <span className="line-clamp-2">{farm.location || 'N/A'}</span>
                           </div>
                         </div>
-                        <div className="shrink-0 rounded-lg bg-emerald-50 px-3 py-2 text-right ring-1 ring-inset ring-emerald-100">
-                          <p className="text-[10px] font-bold uppercase tracking-wide text-emerald-700">Total Area</p>
-                          <p className="mt-0.5 text-sm font-bold text-emerald-900">
-                            {Number(farm.acres || 0).toLocaleString('en-IN')} acres
-                          </p>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {!inlineProfileEditing && (
+                            <Button
+                              type="button"
+                              onClick={() => openLandEditModal(viewProfileFarmer, farmIndex)}
+                              className="h-9 gap-1.5 rounded-lg border border-[#0D3A35]/20 bg-white px-3 text-xs font-bold text-[#0D3A35] shadow-sm hover:bg-emerald-50"
+                              title={`Edit parcel ${farmIndex + 1}`}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                              Edit Land
+                            </Button>
+                          )}
+                          <div className="rounded-lg bg-emerald-50 px-3 py-2 text-right ring-1 ring-inset ring-emerald-100">
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-emerald-700">Total Area</p>
+                            <p className="mt-0.5 text-sm font-bold text-emerald-900">
+                              {Number(farm.acres || 0).toLocaleString('en-IN')} acres
+                            </p>
+                          </div>
                         </div>
                       </div>
 
@@ -3067,12 +3399,56 @@ const Farmers = () => {
                         ))}
                       </div>
 
+                      <section className="border-b border-slate-100 bg-white px-4 py-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-bold text-slate-700">Land Co-owners</p>
+                            <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
+                              {landCoOwners.length > 0
+                                ? `${landCoOwners.length} co-owner${landCoOwners.length === 1 ? '' : 's'} linked to this parcel`
+                                : 'No co-owners linked to this parcel'}
+                            </p>
+                          </div>
+                          {!inlineProfileEditing && (
+                            <Button
+                              type="button"
+                              onClick={() => openLandEditModal(viewProfileFarmer, farmIndex, true)}
+                              className="h-8 gap-1.5 rounded-lg border border-[#0D3A35]/20 bg-white px-3 text-[11px] font-bold text-[#0D3A35] shadow-sm hover:bg-emerald-50"
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              Add Co-owner
+                            </Button>
+                          )}
+                        </div>
+                        {landCoOwners.length > 0 && (
+                          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            {landCoOwners.map((coOwner, coOwnerIndex) => (
+                              <div key={`${coOwner.fullName}-${coOwnerIndex}`} className="rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2.5">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-xs font-bold text-slate-800">{coOwner.fullName || 'Name not recorded'}</p>
+                                    <p className="mt-0.5 truncate text-[10px] font-semibold text-slate-500">
+                                      {[coOwner.relationship, coOwner.phoneNumber].filter(Boolean).join(' · ') || 'Details not recorded'}
+                                    </p>
+                                  </div>
+                                  {coOwner.ownershipShare && (
+                                    <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
+                                      {coOwner.ownershipShare}%
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </section>
+
                       <div className="border-b border-slate-100 bg-slate-50/60 px-4 py-3">
                         <div className="flex items-center justify-between gap-3">
                           <div>
                             <p className="text-xs font-bold text-slate-700">Lease Agreement</p>
                             <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
-                              {farm.leaseStart || 'N/A'} to {farm.leaseEnd || 'N/A'}
+                              {formatLandDate(farm.leaseStart)} to {formatLandDate(farm.leaseEnd)}
                             </p>
                           </div>
                           <div className="text-right">
@@ -3089,6 +3465,17 @@ const Farmers = () => {
                             className="h-full rounded-full bg-[#0D3A35] transition-all duration-500"
                             style={{ width: `${leaseRemainingPct}%` }}
                           />
+                        </div>
+                        <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Lock-in Period</p>
+                            <p className="mt-1 text-xs font-bold text-slate-700">
+                              {farm.lockInStart && farm.lockInEnd
+                                ? `${formatLandDate(farm.lockInStart)} to ${formatLandDate(farm.lockInEnd)}`
+                                : 'Not configured'}
+                            </p>
+                          </div>
+                          <Timer className="h-4 w-4 shrink-0 text-emerald-700" />
                         </div>
                       </div>
 
@@ -3279,12 +3666,12 @@ const Farmers = () => {
       </AlertDialogContent>
     </AlertDialog>
     <Dialog open={newLandModal.open} onOpenChange={(open) => setNewLandModal({ open, farmerId: open ? newLandModal.farmerId : null })}>
-      <DialogContent>
+      <DialogContent className="flex max-h-[92vh] max-w-4xl flex-col overflow-hidden rounded-2xl">
         <DialogHeader>
           <DialogTitle>Add Land Details</DialogTitle>
-          <DialogDescription>Complete all 3 steps to add new land.</DialogDescription>
+          <DialogDescription>Complete all 4 steps to add new land.</DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
+        <div className="space-y-4 overflow-y-auto pr-1">
           <div className="grid grid-cols-4 gap-2">
             {[1, 2, 3, 4].map((s) => (
               <div key={s} className={`rounded-md border px-3 py-2 text-xs font-medium text-center ${newLandStep === s ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'text-muted-foreground'}`}>
@@ -3579,6 +3966,32 @@ const Farmers = () => {
                 <label className="text-xs font-medium text-muted-foreground">Lease Amount (Per Acre Per Annum)</label>
                 <Input type="number" placeholder="Enter lease amount" value={newLandForm.leaseAmount} onChange={(e) => setNewLandForm((p) => ({ ...p, leaseAmount: e.target.value }))} />
               </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                <div className="mb-3">
+                  <p className="text-sm font-bold text-slate-900">Lock-in Period</p>
+                  <p className="mt-0.5 text-xs font-medium text-slate-500">Optional period during which this land lease cannot be ended early.</p>
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <EditField label="Lock-in Start Date">
+                    <Input
+                      type="date"
+                      min={newLandForm.leaseStart || undefined}
+                      max={newLandForm.lockInEnd || newLandForm.leaseEnd || undefined}
+                      value={newLandForm.lockInStart}
+                      onChange={(event) => setNewLandForm((previous) => ({ ...previous, lockInStart: event.target.value }))}
+                    />
+                  </EditField>
+                  <EditField label="Lock-in End Date">
+                    <Input
+                      type="date"
+                      min={newLandForm.lockInStart || newLandForm.leaseStart || undefined}
+                      max={newLandForm.leaseEnd || undefined}
+                      value={newLandForm.lockInEnd}
+                      onChange={(event) => setNewLandForm((previous) => ({ ...previous, lockInEnd: event.target.value }))}
+                    />
+                  </EditField>
+                </div>
+              </div>
               <div className="grid grid-cols-3 gap-3">
                 {[
                   { key: 'agreementPdf', label: 'New Agreement' },
@@ -3595,6 +4008,10 @@ const Farmers = () => {
                   </div>
                 ))}
               </div>
+              <LandCoOwnerEditor
+                coOwners={newLandForm.coOwners}
+                onChange={(coOwners) => setNewLandForm((previous) => ({ ...previous, coOwners }))}
+              />
             </div>
           )}
 
@@ -3737,9 +4154,17 @@ const Farmers = () => {
                       <div className="h-full bg-green-600 transition-all" style={{ width: `${leaseProgressPct}%` }} />
                     </div>
                     <div className="flex items-center justify-between text-[11px] mt-1">
-                      <span className="text-muted-foreground">{farm.leaseStart ?? 'N/A'}</span>
+                      <span className="text-muted-foreground">{formatLandDate(farm.leaseStart)}</span>
                       <span className="text-muted-foreground">{Math.round(leaseProgressPct)}%</span>
-                      <span className="text-muted-foreground">{farm.leaseEnd ?? 'N/A'}</span>
+                      <span className="text-muted-foreground">{formatLandDate(farm.leaseEnd)}</span>
+                    </div>
+                    <div className="mt-2 rounded-md border bg-muted/20 px-2.5 py-2">
+                      <p className="text-[10px] font-semibold text-muted-foreground">Lock-in Period</p>
+                      <p className="mt-0.5 text-[11px] font-semibold text-foreground">
+                        {farm.lockInStart && farm.lockInEnd
+                          ? `${formatLandDate(farm.lockInStart)} to ${formatLandDate(farm.lockInEnd)}`
+                          : 'Not configured'}
+                      </p>
                     </div>
                   </div>
                   <div className="pt-2 border-t">
@@ -4024,7 +4449,19 @@ const Farmers = () => {
           {/* â”€â”€ Bank Details â”€â”€ */}
           {editFarmerTab === 'bank' && (
             <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <EditSectionHeader icon={Banknote} title="Bank Details" description="Maintain the payout account and preview the current passbook document." />
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <EditSectionHeader icon={Banknote} title="Bank Details" description="Maintain the primary payout account and add other linked bank accounts." />
+                {activeEditFarmer && (
+                  <Button
+                    type="button"
+                    onClick={() => setBankAddModal({ open: true, farmerId: activeEditFarmer.id })}
+                    className="h-9 shrink-0 gap-1.5 rounded-lg bg-[#0D3A35] px-3 text-xs font-bold text-white hover:bg-[#092b27]"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Add Bank Account
+                  </Button>
+                )}
+              </div>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <EditField label="Account Holder Name">
                   <Input value={editFarmerForm.bankHolderName} onChange={(e) => setEditFarmerForm((p) => ({ ...p, bankHolderName: e.target.value }))} placeholder="Holder name" />
@@ -4047,6 +4484,29 @@ const Farmers = () => {
                 accept="application/pdf"
                 onFileChange={(file) => setEditFarmerForm((p) => ({ ...p, passbookFile: file }))}
               />
+              {activeEditFarmer && getAllBankDetails(activeEditFarmer).length > 1 && (
+                <div className="border-t border-slate-100 pt-4">
+                  <p className="mb-3 text-xs font-bold uppercase tracking-wide text-slate-500">Other Linked Accounts</p>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    {getAllBankDetails(activeEditFarmer).slice(1).map((account, accountIndex) => (
+                      <div key={`${account.accountNumber}-${accountIndex}`} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                        <p className="text-sm font-bold text-slate-900">{account.bankName || 'Bank not recorded'}</p>
+                        <p className="mt-1 text-xs font-semibold text-slate-500">{account.holderName || 'Holder not recorded'}</p>
+                        <div className="mt-3 grid grid-cols-2 gap-3">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Account Number</p>
+                            <p className="mt-1 break-all text-xs font-bold text-slate-700">{account.accountNumber || 'N/A'}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">IFSC</p>
+                            <p className="mt-1 break-all text-xs font-bold uppercase text-slate-700">{account.ifsc || 'N/A'}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -4116,6 +4576,45 @@ const Farmers = () => {
                             </Select>
                           </div>
                         </div>
+                        <section className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50/50">
+                          <div className="border-b border-slate-200 bg-white px-4 py-3">
+                            <h4 className="text-sm font-bold text-slate-900">Lease Tenure & Lock-in Period</h4>
+                            <p className="mt-0.5 text-xs font-medium text-slate-500">Maintain lease dates, rate, and the parcel-specific lock-in period.</p>
+                          </div>
+                          <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 lg:grid-cols-3">
+                            <EditField label="Lease Start Date">
+                              <Input type="date" value={farm.leaseStart} onChange={(event) => updateFarm({ leaseStart: event.target.value })} />
+                            </EditField>
+                            <EditField label="Lease End Date">
+                              <Input type="date" min={farm.leaseStart || undefined} value={farm.leaseEnd} onChange={(event) => updateFarm({ leaseEnd: event.target.value })} />
+                            </EditField>
+                            <EditField label="Lease Rate" hint="Per acre/year">
+                              <Input type="number" min="0" value={farm.leaseRate} onChange={(event) => updateFarm({ leaseRate: event.target.value })} placeholder="Enter rate" />
+                            </EditField>
+                            <EditField label="Lock-in Start Date" hint="Optional">
+                              <Input
+                                type="date"
+                                min={farm.leaseStart || undefined}
+                                max={farm.lockInEnd || farm.leaseEnd || undefined}
+                                value={farm.lockInStart}
+                                onChange={(event) => updateFarm({ lockInStart: event.target.value })}
+                              />
+                            </EditField>
+                            <EditField label="Lock-in End Date" hint="Optional">
+                              <Input
+                                type="date"
+                                min={farm.lockInStart || farm.leaseStart || undefined}
+                                max={farm.leaseEnd || undefined}
+                                value={farm.lockInEnd}
+                                onChange={(event) => updateFarm({ lockInEnd: event.target.value })}
+                              />
+                            </EditField>
+                          </div>
+                        </section>
+                        <LandCoOwnerEditor
+                          coOwners={farm.coOwners}
+                          onChange={(coOwners) => updateFarm({ coOwners })}
+                        />
                         <div className="space-y-2">
                           <label className="text-xs font-medium text-muted-foreground">Land Images <span className="text-muted-foreground/60">(up to 3 â€” click to replace)</span></label>
                           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -4329,8 +4828,8 @@ const Farmers = () => {
     <Dialog open={bankAddModal.open} onOpenChange={(open) => setBankAddModal({ open, farmerId: open ? bankAddModal.farmerId : null })}>
       <DialogContent className="max-w-lg rounded-2xl">
         <DialogHeader>
-          <DialogTitle>Add Bank Details</DialogTitle>
-          <DialogDescription>Provide account details and passbook front page PDF.</DialogDescription>
+          <DialogTitle>Add Bank Account</DialogTitle>
+          <DialogDescription>Add another account for this land owner and upload its passbook front page.</DialogDescription>
         </DialogHeader>
         {(() => {
           const farmer = farmers.find((f) => f.id === bankAddModal.farmerId) ?? null;
@@ -4423,7 +4922,7 @@ const Farmers = () => {
               <div className="flex justify-end">
                 <Button
                   type="button"
-                  className="h-9 px-4 text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
+                  className="h-9 bg-[#0D3A35] px-4 text-xs text-white hover:bg-[#092b27]"
                   onClick={async () => {
                     const success = await handleAddBankDetail(farmer);
                     if (success) {
@@ -4432,7 +4931,7 @@ const Farmers = () => {
                   }}
                   disabled={!!bankSaving[farmer.id]}
                 >
-                  {bankSaving[farmer.id] ? 'Saving...' : 'Add Bank Detail'}
+                  {bankSaving[farmer.id] ? 'Saving...' : 'Add Bank Account'}
                 </Button>
               </div>
             </div>
