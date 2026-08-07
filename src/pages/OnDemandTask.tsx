@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { X, Plus, ChevronDown, UserCheck, Save, Lock } from 'lucide-react';
+﻿import { useEffect, useMemo, useState } from 'react';
+import { X, Plus, UserCheck, Save, Lock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
@@ -22,6 +22,9 @@ interface TaskFlowStep {
     notes: string;
     inventoryItems: Record<string, number>;
     allocationNeeded: boolean;
+    // Add-ons attached to an inventory step, managed inline in the same popup rather than as separate steps
+    includeLogistics: boolean;
+    includeOnField: boolean;
     vehicleIds: string[];
     inspectionInputType: string;
     inspectionFields: Array<{ id: string; fieldName: string; inputType: string; mandatory: boolean; options: string[] }>;
@@ -546,6 +549,11 @@ const OnDemandTask = () => {
   const [taskAssignment, setTaskAssignment] = useState<{ designation: string; staffId: string; staffName: string }>({ designation: '', staffId: '', staffName: '' });
   const [taskFlowSteps, setTaskFlowSteps] = useState<TaskFlowStep[]>([]);
   const [resourcePopup, setResourcePopup] = useState<{ stepId: string; type: 'inventory' | 'logistics' } | null>(null);
+  const [stepFieldsPopupId, setStepFieldsPopupId] = useState<string | null>(null);
+  // Per-step farm distribution — only used when an inventory step's "Allocation needed?" is Yes.
+  // Distributes the items already picked on the left across farms, right there in the same popup;
+  // submitted as a paired create_new_allocation_schema + allocate_inventory_to_farm call (see handleAssignTask).
+  const [stepAllocation, setStepAllocation] = useState<Record<string, { farms: string[]; distribution: Record<string, Record<string, string>>; farmSelector: string }>>({});
   const [isCreatingTask, setIsCreatingTask] = useState(false);
   const [activeTab, setActiveTab] = useState<'task' | 'allocation'>('task');
 
@@ -668,7 +676,7 @@ const OnDemandTask = () => {
     type: '',
     expanded: true,
     details: {
-      assignee: '', assigneeDesignation: '', title: `Step ${stepNumber}`, notes: '', inventoryItems: {}, allocationNeeded: false, vehicleIds: [], inspectionInputType: 'text', inspectionFields: [], landId: '', otherDescription: '',
+      assignee: '', assigneeDesignation: '', title: `Step ${stepNumber}`, notes: '', inventoryItems: {}, allocationNeeded: false, includeLogistics: false, includeOnField: false, vehicleIds: [], inspectionInputType: 'text', inspectionFields: [], landId: '', otherDescription: '',
       onFieldMode: 'cultivation', onFieldCalendarId: '', vendorId: '', vendorName: '', onFieldActivity: '', onFieldStartDate: '', onFieldWorkQuantity: '', onFieldFromDate: '', onFieldToDate: '', onFieldQty: '', onFieldUnit: '', onFieldSpecValue: '', onFieldSpecUnit: '',
     },
   });
@@ -678,6 +686,8 @@ const OnDemandTask = () => {
     setTaskAssignment({ designation: '', staffId: '', staffName: '' });
     setTaskFlowSteps([]);
     setResourcePopup(null);
+    setStepFieldsPopupId(null);
+    setStepAllocation({});
     try {
       const response = await fetch(`${BASE_URL}/admin_staff/get_all_staff`);
       if (!response.ok) throw new Error(`Request failed (${response.status})`);
@@ -701,53 +711,70 @@ const OnDemandTask = () => {
     setTaskAssignment({ designation: '', staffId: '', staffName: '' });
     setTaskFlowSteps([]);
     setResourcePopup(null);
+    setStepFieldsPopupId(null);
+    setStepAllocation({});
   };
 
-  const buildStepsDict = (steps: TaskFlowStep[]) =>
-    steps.reduce<Record<string, any>>((acc, step, index) => {
-      if (!step.type) return acc;
-      const key = `step_${index + 1}`;
+  const buildLogisticsEntry = (step: TaskFlowStep) => ({
+    type: 'logistics', status: 'pending',
+    data: step.details.vehicleIds.map(vid => {
+      const v = vehicles.find(e => getVehicleId(e) === vid);
+      if (!v) return null;
+      return { vehicle_id: getVehicleId(v), vehicle_number: String(v?.vehicle_information?.vehicle_number || getVehicleName(v)) };
+    }).filter(Boolean),
+  });
+
+  const buildOnFieldEntry = (step: TaskFlowStep) => {
+    const d = step.details;
+    const land = farms.find(f => String(f?.farm_id || f?.id || '') === d.landId);
+    const base = { farm_id: String(land?.farm_id || ''), vendor_id: d.vendorId, vendor_name: d.vendorName, activity: d.onFieldActivity };
+    const data = d.onFieldMode === 'cultivation'
+      ? [{
+          ...base,
+          calander_id: d.onFieldCalendarId,
+          start_date: d.onFieldStartDate,
+          work_quantity_per_day: Number(d.onFieldWorkQuantity) || 0,
+          plot_distribution: computePlotSchedule(
+            (plotsByStep[step.id] || []).filter(p => !(excludedPlotsByStep[step.id] || []).includes(p.plot_id)),
+            d.onFieldStartDate, Number(d.onFieldWorkQuantity) || 0
+          ).map(({ plot, assignedDate }) => ({ plot_id: plot.plot_id, plot_name: plot.plot_name, crop_type: plot.crop_type, quantity: Number(plot.plot_area) || 0, assigned_date: assignedDate })),
+        }]
+      : [{
+          ...base,
+          from_date: d.onFieldFromDate,
+          to_date: d.onFieldToDate,
+          quantity: Number(d.onFieldQty) || 0,
+          unit: d.onFieldUnit,
+          ...(d.onFieldSpecValue && d.onFieldSpecUnit ? { spec_value: Number(d.onFieldSpecValue) || 0, spec_unit: d.onFieldSpecUnit } : {}),
+        }];
+    return { type: 'on_field', status: 'pending', task_mode: d.onFieldMode, data };
+  };
+
+  // A single inventory step can carry logistics/on-field add-ons (configured inline in the same
+  // popup rather than as separate steps), so it can expand into more than one dict entry.
+  const buildStepsDict = (steps: TaskFlowStep[]) => {
+    const acc: Record<string, any> = {};
+    let stepCounter = 0;
+    const nextKey = () => `step_${++stepCounter}`;
+
+    for (const step of steps) {
+      if (!step.type) continue;
       if (step.type === 'inventory') {
-        acc[key] = { type: 'inventory', status: 'pending', allocation_needed: step.details.allocationNeeded, data: Object.entries(step.details.inventoryItems).filter(([, qty]) => Number(qty) > 0).map(([itemId, qty]) => { const item = inventoryItems.find(e => getInventoryItemId(e) === itemId); return { item_name: String(item ? getInventoryItemName(item) : itemId), quantity: Number(qty) || 0, unit: String(item?.unit || '—'), equipment_id: String(getInventoryItemId(item) || itemId) }; }) };
-        return acc;
+        acc[nextKey()] = { type: 'inventory', status: 'pending', allocation_needed: step.details.allocationNeeded, data: Object.entries(step.details.inventoryItems).filter(([, qty]) => Number(qty) > 0).map(([itemId, qty]) => { const item = inventoryItems.find(e => getInventoryItemId(e) === itemId); return { item_name: String(item ? getInventoryItemName(item) : itemId), quantity: Number(qty) || 0, unit: String(item?.unit || '—'), equipment_id: String(getInventoryItemId(item) || itemId) }; }) };
+        if (step.details.includeLogistics) acc[nextKey()] = buildLogisticsEntry(step);
+        if (step.details.includeOnField) acc[nextKey()] = buildOnFieldEntry(step);
+        continue;
       }
-      if (step.type === 'logistics') {
-        acc[key] = { type: 'logistics', status: 'pending', data: step.details.vehicleIds.map(vid => { const v = vehicles.find(e => getVehicleId(e) === vid); if (!v) return null; return { vehicle_id: getVehicleId(v), vehicle_number: String(v?.vehicle_information?.vehicle_number || getVehicleName(v)) }; }).filter(Boolean) };
-        return acc;
-      }
-      if (step.type === 'on_field') {
-        const d = step.details;
-        const land = farms.find(f => String(f?.farm_id || f?.id || '') === d.landId);
-        const base = { farm_id: String(land?.farm_id || ''), vendor_id: d.vendorId, vendor_name: d.vendorName, activity: d.onFieldActivity };
-        const data = d.onFieldMode === 'cultivation'
-          ? [{
-              ...base,
-              calander_id: d.onFieldCalendarId,
-              start_date: d.onFieldStartDate,
-              work_quantity_per_day: Number(d.onFieldWorkQuantity) || 0,
-              plot_distribution: computePlotSchedule(
-                (plotsByStep[step.id] || []).filter(p => !(excludedPlotsByStep[step.id] || []).includes(p.plot_id)),
-                d.onFieldStartDate, Number(d.onFieldWorkQuantity) || 0
-              ).map(({ plot, assignedDate }) => ({ plot_id: plot.plot_id, plot_name: plot.plot_name, crop_type: plot.crop_type, quantity: Number(plot.plot_area) || 0, assigned_date: assignedDate })),
-            }]
-          : [{
-              ...base,
-              from_date: d.onFieldFromDate,
-              to_date: d.onFieldToDate,
-              quantity: Number(d.onFieldQty) || 0,
-              unit: d.onFieldUnit,
-              ...(d.onFieldSpecValue && d.onFieldSpecUnit ? { spec_value: Number(d.onFieldSpecValue) || 0, spec_unit: d.onFieldSpecUnit } : {}),
-            }];
-        acc[key] = { type: 'on_field', status: 'pending', task_mode: d.onFieldMode, data };
-        return acc;
-      }
+      if (step.type === 'logistics') { acc[nextKey()] = buildLogisticsEntry(step); continue; }
+      if (step.type === 'on_field') { acc[nextKey()] = buildOnFieldEntry(step); continue; }
       if (step.type === 'inspection') {
-        acc[key] = { type: 'inspection', status: 'pending', data: step.details.inspectionFields.map(f => { const inputType = f.inputType === 'mcq' ? 'MCQ' : f.inputType === 'image' ? 'image_upload' : f.inputType; return { field_name: String(f.fieldName || ''), input_type: inputType, mandetory: Boolean(f.mandatory), ...(f.inputType === 'mcq' && { options: f.options }) }; }) };
-        return acc;
+        acc[nextKey()] = { type: 'inspection', status: 'pending', data: step.details.inspectionFields.map(f => { const inputType = f.inputType === 'mcq' ? 'MCQ' : f.inputType === 'image' ? 'image_upload' : f.inputType; return { field_name: String(f.fieldName || ''), input_type: inputType, mandetory: Boolean(f.mandatory), ...(f.inputType === 'mcq' && { options: f.options }) }; }) };
+        continue;
       }
-      acc[key] = { type: 'others', status: 'pending', data: [{ description: String(step.details.otherDescription || '') }] };
-      return acc;
-    }, {});
+      acc[nextKey()] = { type: 'others', status: 'pending', data: [{ description: String(step.details.otherDescription || '') }] };
+    }
+    return acc;
+  };
 
   const updateStep = (stepId: string, patch: Partial<TaskFlowStep>) =>
     setTaskFlowSteps(prev => prev.map(s => s.id === stepId ? { ...s, ...patch } : s));
@@ -840,10 +867,43 @@ const OnDemandTask = () => {
       return next;
     });
 
-  const removeStep = (stepId: string) =>
+  const removeStep = (stepId: string) => {
     setTaskFlowSteps(prev => {
       const next = prev.filter(s => s.id !== stepId).map((s, i) => ({ ...s, stepNumber: i + 1 }));
       return next.length > 0 ? next : [createTaskStep(1)];
+    });
+    setStepAllocation(prev => {
+      if (!(stepId in prev)) return prev;
+      const { [stepId]: _removed, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  const emptyStepAllocation = () => ({ farms: [] as string[], distribution: {} as Record<string, Record<string, string>>, farmSelector: '' });
+
+  const setAllocationFarmSelector = (stepId: string, farmId: string) =>
+    setStepAllocation(prev => ({ ...prev, [stepId]: { ...(prev[stepId] || emptyStepAllocation()), farmSelector: farmId } }));
+
+  const addAllocationFarm = (stepId: string) =>
+    setStepAllocation(prev => {
+      const current = prev[stepId] || emptyStepAllocation();
+      if (!current.farmSelector || current.farms.includes(current.farmSelector)) return prev;
+      return { ...prev, [stepId]: { ...current, farms: [...current.farms, current.farmSelector], farmSelector: '' } };
+    });
+
+  const removeAllocationFarm = (stepId: string, farmId: string) =>
+    setStepAllocation(prev => {
+      const current = prev[stepId] || emptyStepAllocation();
+      return { ...prev, [stepId]: { ...current, farms: current.farms.filter(f => f !== farmId) } };
+    });
+
+  const updateAllocationQty = (stepId: string, itemId: string, farmId: string, qty: string) =>
+    setStepAllocation(prev => {
+      const current = prev[stepId] || emptyStepAllocation();
+      return {
+        ...prev,
+        [stepId]: { ...current, distribution: { ...current.distribution, [itemId]: { ...(current.distribution[itemId] || {}), [farmId]: qty } } },
+      };
     });
 
   const addInspectionField = (stepId: string) =>
@@ -876,6 +936,17 @@ const OnDemandTask = () => {
     if (assignedSteps.length === 0) { toast.error('Please add at least one task step'); return; }
     if (!staffId) { toast.error('Please choose an assignee first'); return; }
 
+    // Steps whose selected items need distributing to farms — each becomes its own
+    // create_new_allocation_schema + allocate_inventory_to_farm pair after the task is created.
+    const allocationSteps = assignedSteps.filter(s => s.type === 'inventory' && s.details.allocationNeeded);
+    for (const step of allocationSteps) {
+      const items = Object.entries(step.details.inventoryItems).filter(([, qty]) => Number(qty) > 0);
+      if (items.length === 0) { toast.error(`Step ${step.stepNumber}: select at least one item before allocating it to farms`); return; }
+      const alloc = stepAllocation[step.id];
+      const hasDistribution = alloc?.farms.length && items.some(([itemId]) => alloc.farms.some(fid => Number(alloc.distribution[itemId]?.[fid]) > 0));
+      if (!hasDistribution) { toast.error(`Step ${step.stepNumber}: distribute at least one item to a farm`); return; }
+    }
+
     setIsCreatingTask(true);
     try {
       const stepsDict = buildStepsDict(assignedSteps);
@@ -893,6 +964,54 @@ const OnDemandTask = () => {
       } else {
         toast.success('Task created successfully');
       }
+
+      for (const step of allocationSteps) {
+        const items = Object.entries(step.details.inventoryItems).filter(([, qty]) => Number(qty) > 0);
+        const alloc = stepAllocation[step.id] || { farms: [], distribution: {}, farmSelector: '' };
+        try {
+          const itemAllocationList = items.map(([itemId, qty]) => {
+            const inv = inventoryItems.find(it => getInventoryItemId(it) === itemId);
+            return { equipment_id: itemId, quantity: Number(qty), unit: String(inv?.unit || ''), item_name: inv ? getInventoryItemName(inv) : itemId };
+          });
+          const schemaResponse = await fetch(`${BASE_URL}/admin_ops_requests/create_new_allocation_schema`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ staff_id: staffId, item_allocation_list: itemAllocationList }),
+          });
+          const schemaPayload = await schemaResponse.json().catch(() => null);
+          if (!schemaResponse.ok || !schemaPayload?.task_id) {
+            toast.error(schemaPayload?.message || `Step ${step.stepNumber}: allocation schema failed to submit`);
+            continue;
+          }
+          const allocationTaskId = String(schemaPayload.task_id);
+
+          const distributeResponses = await Promise.all(items.map(([itemId]) => {
+            const farmAllocation: Record<string, { owner_name: string; quantity: number }> = {};
+            for (const farmId of alloc.farms) {
+              const qty = Number(alloc.distribution[itemId]?.[farmId]) || 0;
+              if (qty <= 0) continue;
+              const farmData = farms.find((f: any) => String(f?.farm_id || '') === farmId);
+              farmAllocation[farmId] = { owner_name: String((farmData as any)?.owner_name || farmId), quantity: qty };
+            }
+            if (Object.keys(farmAllocation).length === 0) return Promise.resolve(null);
+            return fetch(`${BASE_URL}/admin_ops_requests/allocate_inventory_to_farm`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ task_id: allocationTaskId, equipment_id: itemId, farm_allocation: farmAllocation }),
+            });
+          }));
+          const failed = distributeResponses.filter(r => r && !r.ok);
+          if (failed.length > 0) {
+            toast.error(`Step ${step.stepNumber}: ${failed.length} item(s) failed to allocate to farms`);
+          } else {
+            toast.success(`Step ${step.stepNumber}: allocated to farms`);
+          }
+        } catch {
+          toast.error(`Step ${step.stepNumber}: allocation to farms failed. Please check your connection.`);
+        }
+      }
+      if (allocationSteps.length > 0) fetchAllocations();
+
       closeModal();
       fetchOnDemandTasks();
     } catch (e) {
@@ -1100,11 +1219,6 @@ const OnDemandTask = () => {
           <h1 className="text-2xl font-semibold">On Demand</h1>
           <p className="text-sm text-muted-foreground">Create and track step-wise on-demand tasks and allocations.</p>
         </div>
-        {activeTab === 'task' && (
-          <button onClick={openModal} className="px-4 py-2 bg-green-800 text-white rounded-md text-sm font-medium hover:bg-green-900 transition-colors">
-            Create New Task
-          </button>
-        )}
         {activeTab === 'allocation' && (
           <button onClick={openAllocationModal} className="px-4 py-2 bg-green-800 text-white rounded-md text-sm font-medium hover:bg-green-900 transition-colors">
             + Create New Allocation
@@ -1137,6 +1251,631 @@ const OnDemandTask = () => {
       {activeTab === 'task' && (
       <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
         <h2 className="text-sm font-semibold text-slate-900">On demand tasks</h2>
+
+        {/* ── Inline task creator row ── */}
+        {!isModalOpen ? (
+          <button
+            type="button"
+            onClick={openModal}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/60 px-5 py-4 text-sm font-medium text-slate-500 transition-colors hover:border-emerald-400 hover:bg-emerald-50/40 hover:text-emerald-700"
+          >
+            <Plus className="h-4 w-4" /> Create a new task
+          </button>
+        ) : (
+          <div className="rounded-xl border-2 border-emerald-300 bg-white shadow-md overflow-hidden">
+            {/* Creator header — title + compact designation/assignee selects + close */}
+            <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-b border-slate-200">
+              <div>
+                <h3 className="text-base font-semibold text-slate-900">Create On Demand Task</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">Build a step-wise task and allocate resources.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={taskAssignment.designation}
+                  onChange={e => {
+                    setTaskAssignment({ designation: e.target.value, staffId: '', staffName: '' });
+                    setTaskFlowSteps([]);
+                  }}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs focus:border-slate-900 focus:outline-none"
+                >
+                  <option value="">Designation</option>
+                  {designationOptions.length > 0
+                    ? designationOptions.map(d => <option key={d} value={d}>{formatDesignationLabel(d)}</option>)
+                    : <option value="" disabled>Loading...</option>}
+                </select>
+                <select
+                  value={taskAssignment.staffId}
+                  disabled={!taskAssignment.designation}
+                  onChange={e => {
+                    const staffId = e.target.value;
+                    const matched = assigneeOptions.find(s => String(s?.staff_id || '') === staffId);
+                    const staffName = String(matched?.staff_information?.staff_name || '');
+                    setTaskAssignment(prev => ({ ...prev, staffId, staffName }));
+                    setTaskFlowSteps([]);
+                  }}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs focus:border-slate-900 focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100"
+                >
+                  <option value="">{taskAssignment.designation ? 'Assign to' : 'Select designation first'}</option>
+                  {assigneeOptions.length > 0
+                    ? assigneeOptions.map(s => <option key={String(s?.staff_id || '')} value={String(s?.staff_id || '')}>{String(s?.staff_information?.staff_name || 'Unknown')}</option>)
+                    : <option value="" disabled>No staff for this designation</option>}
+                </select>
+                <button onClick={closeModal} className="p-1.5 rounded-md hover:bg-gray-100"><X className="w-4 h-4 text-gray-500" /></button>
+              </div>
+            </div>
+
+            <div className="px-5 py-4 space-y-4">
+              {/* Steps rail — one by one: click the dashed "+" card to add the next step,
+                  pick its type, and only that type's fields appear inside the card. */}
+              <div className="overflow-x-auto pb-1">
+                <div className="flex items-stretch gap-3 min-w-max">
+                  {taskFlowSteps.length === 0 && (
+                      <button
+                        type="button"
+                        onClick={addStep}
+                        disabled={!canAddSteps}
+                        title={canAddSteps ? 'Add a task' : 'Select a designation and assignee first'}
+                        className={cn('flex w-[160px] shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed py-8 transition-colors', canAddSteps ? 'border-emerald-300 bg-emerald-50/50 text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700' : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-300')}
+                      >
+                        <Plus className="h-5 w-5" />
+                        <span className="text-[11px] font-semibold">Add a task</span>
+                      </button>
+                    )}
+                    {taskFlowSteps.map((step, index) => {
+                      const meta = step.type ? taskStepTypeMeta[step.type] : null;
+                      const selectedInventoryRows = Object.entries(step.details.inventoryItems).filter(([, qty]) => Number(qty) > 0).map(([itemId, qty]) => ({ itemId, qty: Number(qty), item: inventoryItems.find(it => getInventoryItemId(it) === itemId) }));
+                      const selectedVehicles = step.details.vehicleIds.map(vid => vehicles.find(v => getVehicleId(v) === vid)).filter(Boolean);
+                      const selectedLand = farms.find(f => String(f?.farm_id || f?.id || '') === step.details.landId);
+
+                      return (
+                        <div key={step.id} className="flex items-stretch gap-3">
+                          <div className="flex w-[300px] shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                            {/* Step card header — mirrors the read-only step card style */}
+                            <div className={cn('flex items-center justify-between gap-2 border-b px-3 py-2', meta ? `${meta.badge.split(' ')[2] || 'border-slate-200'}` : 'border-slate-100')}>
+                              <div className="flex min-w-0 items-center gap-2">
+                                <select
+                                  value={step.type}
+                                  onChange={e => {
+                                    const nextType = e.target.value as TaskStepType;
+                                    updateStep(step.id, { type: nextType });
+                                    if (nextType) setStepFieldsPopupId(step.id);
+                                  }}
+                                  className={cn('min-w-0 shrink rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide focus:outline-none', meta?.badge || 'border-slate-200 bg-slate-100 text-slate-500')}
+                                >
+                                  <option value="">Select type</option>
+                                  <option value="inventory">Inventory</option>
+                                  <option value="logistics">Logistics</option>
+                                  <option value="inspection">Inspection</option>
+                                  <option value="on_field">On Field Task</option>
+                                  <option value="other">Others</option>
+                                </select>
+                                <span className="shrink-0 text-[10px] font-semibold text-slate-400">#{step.stepNumber}</span>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                {step.type && (
+                                  <span className="inline-flex items-center rounded border border-slate-200 bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">Draft</span>
+                                )}
+                                {taskFlowSteps.length > 1 && (
+                                  <button type="button" onClick={() => removeStep(step.id)} title="Remove step" className="rounded-md p-0.5 text-red-400 hover:bg-red-50 hover:text-red-600">
+                                    <X className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Step card body — compact summary; clicking it reopens the popup to edit this step's fields */}
+                            <div className="flex-1 p-3">
+                              {step.type ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setStepFieldsPopupId(step.id)}
+                                  className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-left text-[11px] text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-100"
+                                >
+                                  {step.type === 'inventory' && (selectedInventoryRows.length > 0
+                                    ? `${selectedInventoryRows.length} item${selectedInventoryRows.length !== 1 ? 's' : ''} selected · Allocation: ${step.details.allocationNeeded ? 'Yes' : 'No'}`
+                                    : 'No items selected yet — click to configure')}
+                                  {step.type === 'logistics' && (selectedVehicles.length > 0
+                                    ? `${selectedVehicles.length} vehicle${selectedVehicles.length !== 1 ? 's' : ''} selected`
+                                    : 'No vehicles selected yet — click to configure')}
+                                  {step.type === 'inspection' && (step.details.inspectionFields.length > 0
+                                    ? `${step.details.inspectionFields.length} field${step.details.inspectionFields.length !== 1 ? 's' : ''} defined`
+                                    : 'No fields yet — click to configure')}
+                                  {step.type === 'on_field' && (step.details.vendorId
+                                    ? `${selectedLand?.land_data?.village || 'Farm'} · ${step.details.vendorName || 'Vendor'}${step.details.onFieldActivity ? ` · ${step.details.onFieldActivity}` : ''}`
+                                    : step.details.landId ? 'Choose a vendor — click to configure' : 'Not configured yet — click to configure')}
+                                  {step.type === 'other' && (step.details.otherDescription ? step.details.otherDescription : 'No description yet — click to configure')}
+                                </button>
+                              ) : (
+                                <p className="text-xs italic text-slate-400">Choose a type above to configure this step.</p>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Field popup — opens on type selection or when the summary above is clicked */}
+                              {step.type && stepFieldsPopupId === step.id && (
+                                <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4" onClick={() => setStepFieldsPopupId(null)}>
+                                <div className={cn('flex max-h-[85vh] w-full flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_24px_64px_rgba(15,23,42,0.22)]', step.type === 'inventory' && step.details.allocationNeeded ? 'max-w-4xl' : 'max-w-2xl')} onClick={e => e.stopPropagation()}>
+                                <div className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-3.5">
+                                  <div>
+                                    <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Step {step.stepNumber}</p>
+                                    <h4 className="text-base font-semibold text-slate-900">{meta?.label || 'Task'} details</h4>
+                                  </div>
+                                  <button type="button" onClick={() => setStepFieldsPopupId(null)} className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-50"><X className="h-4 w-4" /></button>
+                                </div>
+                                <div className="flex-1 space-y-3 overflow-y-auto p-4">
+                                  {/* Inventory */}
+                                  {step.type === 'inventory' && (
+                                    <div className="space-y-3">
+                                      <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                        <span className="text-xs font-semibold text-slate-700">Allocation needed?</span>
+                                        <div className="flex items-center gap-1">
+                                          <button
+                                            type="button"
+                                            onClick={() => updateStepDetails(step.id, { allocationNeeded: true })}
+                                            className={cn('px-3 py-1 rounded-md text-xs font-semibold border transition-colors', step.details.allocationNeeded ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')}
+                                          >Yes</button>
+                                          <button
+                                            type="button"
+                                            onClick={() => updateStepDetails(step.id, { allocationNeeded: false })}
+                                            className={cn('px-3 py-1 rounded-md text-xs font-semibold border transition-colors', !step.details.allocationNeeded ? 'bg-slate-700 text-white border-slate-700' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')}
+                                          >No</button>
+                                        </div>
+                                      </div>
+
+                                      <div className={cn(step.details.allocationNeeded && 'grid grid-cols-2 gap-4')}>
+                                        {/* Left — item selection for the task itself */}
+                                        <div className="space-y-2">
+                                          <div className="flex items-center justify-between">
+                                            <p className="text-xs font-semibold text-slate-900">Selected items</p>
+                                            <button type="button" onClick={() => setResourcePopup({ stepId: step.id, type: 'inventory' })} className="rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-700">
+                                              Open inventory
+                                            </button>
+                                          </div>
+                                          <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                                            <div className="grid grid-cols-[2fr_1fr_1fr] gap-2 border-b border-slate-200 bg-slate-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                              <div>Item</div><div>Unit</div><div className="text-right">Qty</div>
+                                            </div>
+                                            <div className="divide-y divide-slate-100">
+                                              {selectedInventoryRows.length > 0 ? selectedInventoryRows.map(({ itemId, qty, item }) => (
+                                                <div key={itemId} className="grid grid-cols-[2fr_1fr_1fr] items-center gap-2 px-3 py-2 text-xs">
+                                                  <div className="truncate font-medium text-slate-900">{item ? getInventoryItemName(item) : itemId}</div>
+                                                  <div className="text-slate-600">{String(item?.unit || '—')}</div>
+                                                  <div className="text-right font-semibold text-slate-900">{qty}</div>
+                                                </div>
+                                              )) : <div className="px-3 py-3 text-xs text-slate-500">No items selected yet.</div>}
+                                            </div>
+                                          </div>
+                                        </div>
+
+                                        {/* Right — allocate the items above to farms/lands, only when allocation is needed */}
+                                        {step.details.allocationNeeded && (() => {
+                                          const alloc = stepAllocation[step.id] || { farms: [], distribution: {}, farmSelector: '' };
+                                          const availableFarms = farms.filter((f: any) => !alloc.farms.includes(String(f?.farm_id || '')));
+                                          return (
+                                            <div className="space-y-2 border-l border-slate-200 pl-4">
+                                              <p className="text-xs font-semibold text-slate-900">Allocate to lands</p>
+                                              <p className="text-[11px] text-slate-500">Add the lands receiving these items, then split each item's quantity across them.</p>
+                                              {selectedInventoryRows.length === 0 ? (
+                                                <p className="text-[11px] italic text-slate-400">Select items on the left first.</p>
+                                              ) : (
+                                                <>
+                                                  <div className="flex items-center gap-1.5">
+                                                    <select
+                                                      value={alloc.farmSelector}
+                                                      onChange={e => setAllocationFarmSelector(step.id, e.target.value)}
+                                                      className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none"
+                                                    >
+                                                      <option value="">+ Add land</option>
+                                                      {availableFarms.map((f: any) => (
+                                                        <option key={f.farm_id} value={f.farm_id}>{f?.owner_name || f?.farm_id}</option>
+                                                      ))}
+                                                    </select>
+                                                    <button type="button" disabled={!alloc.farmSelector} onClick={() => addAllocationFarm(step.id)} className="shrink-0 rounded-md bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
+                                                      Add
+                                                    </button>
+                                                  </div>
+
+                                                  {alloc.farms.length === 0 ? (
+                                                    <p className="text-[11px] italic text-slate-400">Add a land above to start distributing.</p>
+                                                  ) : (
+                                                    <div className="overflow-x-auto rounded-lg border border-slate-200">
+                                                      <table className="w-full text-[11px]">
+                                                        <thead>
+                                                          <tr className="bg-slate-50">
+                                                            <th className="px-2 py-1.5 text-left font-semibold text-slate-500">Land</th>
+                                                            {selectedInventoryRows.map(({ itemId, qty, item }) => {
+                                                              const allocated = alloc.farms.reduce((sum, fid) => sum + (Number(alloc.distribution[itemId]?.[fid]) || 0), 0);
+                                                              return (
+                                                                <th key={itemId} className="px-2 py-1.5 text-right font-semibold text-slate-500">
+                                                                  <div className="max-w-[80px] truncate" title={item ? getInventoryItemName(item) : itemId}>{item ? getInventoryItemName(item) : itemId}</div>
+                                                                  <div className={cn('text-[10px] font-normal', allocated > qty ? 'text-red-500' : 'text-slate-400')}>{allocated}/{qty}</div>
+                                                                </th>
+                                                              );
+                                                            })}
+                                                          </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                          {alloc.farms.map(farmId => {
+                                                            const farm = farms.find((f: any) => String(f?.farm_id || '') === farmId);
+                                                            return (
+                                                              <tr key={farmId} className="border-t border-slate-100">
+                                                                <td className="px-2 py-1.5">
+                                                                  <div className="flex items-center gap-1">
+                                                                    <span className="max-w-[90px] truncate font-medium text-slate-900" title={farm?.owner_name || farmId}>{farm?.owner_name || farmId}</span>
+                                                                    <button type="button" onClick={() => removeAllocationFarm(step.id, farmId)} title="Remove land" className="shrink-0 text-slate-300 hover:text-red-500">×</button>
+                                                                  </div>
+                                                                </td>
+                                                                {selectedInventoryRows.map(({ itemId }) => (
+                                                                  <td key={itemId} className="px-2 py-1.5 text-right">
+                                                                    <input
+                                                                      type="number"
+                                                                      min="0"
+                                                                      value={alloc.distribution[itemId]?.[farmId] || ''}
+                                                                      onChange={e => updateAllocationQty(step.id, itemId, farmId, e.target.value)}
+                                                                      className="w-14 rounded border border-slate-200 px-1 py-1 text-right text-[11px] focus:border-slate-900 focus:outline-none"
+                                                                    />
+                                                                  </td>
+                                                                ))}
+                                                              </tr>
+                                                            );
+                                                          })}
+                                                        </tbody>
+                                                      </table>
+                                                    </div>
+                                                  )}
+                                                </>
+                                              )}
+                                            </div>
+                                          );
+                                        })()}
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Logistics — its own step, or an add-on attached to an inventory step */}
+                                  {(step.type === 'logistics' || (step.type === 'inventory' && step.details.includeLogistics)) && (
+                                    <div className={cn('space-y-2', step.type === 'inventory' && 'border-t border-slate-100 pt-3')}>
+                                      {step.type === 'inventory' && (
+                                        <div className="flex items-center justify-between">
+                                          <p className="text-xs font-semibold text-slate-900">Logistics — transport these items</p>
+                                          <button type="button" onClick={() => updateStepDetails(step.id, { includeLogistics: false })} className="text-[11px] font-medium text-red-500 hover:underline">Remove</button>
+                                        </div>
+                                      )}
+                                      <div className="flex items-center justify-between">
+                                        <p className="text-xs font-semibold text-slate-900">Selected vehicles</p>
+                                        <button type="button" onClick={() => setResourcePopup({ stepId: step.id, type: 'logistics' })} className="rounded-lg bg-amber-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-amber-700">
+                                          Open vehicles
+                                        </button>
+                                      </div>
+                                      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                                        <div className="grid grid-cols-[2fr_1fr_1fr] gap-2 border-b border-slate-200 bg-slate-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                          <div>Vehicle</div><div>Company</div><div className="text-right">Status</div>
+                                        </div>
+                                        <div className="divide-y divide-slate-100">
+                                          {selectedVehicles.length > 0 ? selectedVehicles.map((v: any) => (
+                                            <div key={getVehicleId(v)} className="grid grid-cols-[2fr_1fr_1fr] items-center gap-2 px-3 py-2 text-xs">
+                                              <div className="truncate font-medium text-slate-900">{getVehicleName(v)}</div>
+                                              <div className="text-slate-600">{String(v?.vehicle_information?.company || '—')}</div>
+                                              <div className="text-right text-emerald-700">Selected</div>
+                                            </div>
+                                          )) : <div className="px-3 py-3 text-xs text-slate-500">No vehicles selected yet.</div>}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Inspection */}
+                                  {step.type === 'inspection' && (
+                                    <div className="space-y-2">
+                                      <div className="flex items-center justify-between">
+                                        <p className="text-xs font-semibold text-slate-900">Inspection fields</p>
+                                        <button type="button" onClick={() => addInspectionField(step.id)} className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-slate-800">
+                                          <Plus className="h-3 w-3" /> Add field
+                                        </button>
+                                      </div>
+                                      {step.details.inspectionFields.length > 0 ? step.details.inspectionFields.map((field, fi) => (
+                                        <div key={field.id} className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
+                                          <div className="flex items-center justify-between">
+                                            <span className="text-xs font-medium text-slate-600">Field {fi + 1}</span>
+                                            <button type="button" onClick={() => removeInspectionField(step.id, field.id)} className="text-xs text-red-500 hover:underline">Remove</button>
+                                          </div>
+                                          <input value={field.fieldName} onChange={e => updateInspectionField(step.id, field.id, { fieldName: e.target.value })} placeholder="Field name" className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                          <div className="flex items-center gap-2">
+                                            <select value={field.inputType} onChange={e => updateInspectionField(step.id, field.id, { inputType: e.target.value, options: [] })} className="flex-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
+                                              <option value="number">Number</option>
+                                              <option value="text">Text</option>
+                                              <option value="mcq">MCQ</option>
+                                              <option value="image">Image upload</option>
+                                            </select>
+                                            <label className="inline-flex items-center gap-1.5 text-xs text-slate-700 shrink-0">
+                                              <input type="checkbox" checked={field.mandatory} onChange={e => updateInspectionField(step.id, field.id, { mandatory: e.target.checked })} className="h-3.5 w-3.5 rounded border-slate-300" />
+                                              Mandatory
+                                            </label>
+                                          </div>
+                                          {field.inputType === 'mcq' && (
+                                            <div className="space-y-1.5">
+                                              <div className="flex items-center justify-between">
+                                                <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Options</span>
+                                                <button type="button" onClick={() => updateInspectionField(step.id, field.id, { options: [...(field.options || []), ''] })} className="inline-flex items-center gap-1 text-[10px] font-medium text-sky-600 hover:underline">
+                                                  <Plus className="h-3 w-3" /> Add option
+                                                </button>
+                                              </div>
+                                              {(field.options || []).length === 0 ? (
+                                                <p className="text-[10px] text-slate-400 italic">No options yet — click Add option.</p>
+                                              ) : (field.options || []).map((opt, oi) => (
+                                                <div key={oi} className="flex items-center gap-1.5">
+                                                  <span className="text-[10px] text-slate-400 w-4 shrink-0">{oi + 1}.</span>
+                                                  <input value={opt} onChange={e => { const next = [...(field.options || [])]; next[oi] = e.target.value; updateInspectionField(step.id, field.id, { options: next }); }} placeholder={`Option ${oi + 1}`} className="flex-1 rounded-md border border-slate-200 px-2 py-1 text-xs focus:border-slate-900 focus:outline-none" />
+                                                  <button type="button" onClick={() => { const next = (field.options || []).filter((_, i) => i !== oi); updateInspectionField(step.id, field.id, { options: next }); }} className="text-red-400 hover:text-red-600"><X className="h-3 w-3" /></button>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      )) : (
+                                        <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-xs text-slate-500">No fields yet. Use Add field above.</div>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {/* On Field Task — its own step, or an add-on attached to an inventory step */}
+                                  {(step.type === 'on_field' || (step.type === 'inventory' && step.details.includeOnField)) && (() => {
+                                    const scope = scopeByStep[step.id] || {};
+                                    const scopeVendorIds = Object.keys(scope);
+                                    const selectedScope = step.details.vendorId ? scope[step.details.vendorId] : undefined;
+                                    const plots = plotsByStep[step.id] || [];
+                                    const excludedPlotIds = excludedPlotsByStep[step.id] || [];
+                                    const activePlots = plots.filter(p => !excludedPlotIds.includes(p.plot_id));
+                                    const excludedPlots = plots.filter(p => excludedPlotIds.includes(p.plot_id));
+                                    const calendars = calendarsByStep[step.id] || [];
+                                    const schedule = computePlotSchedule(activePlots, step.details.onFieldStartDate, Number(step.details.onFieldWorkQuantity) || 0);
+                                    const scheduleRows = schedule.reduce<Array<{ kind: 'plot'; plot: OnFieldPlot; assignedDate: string } | { kind: 'subtotal'; date: string; total: number; count: number }>>((rows, { plot, assignedDate }, i) => {
+                                      rows.push({ kind: 'plot', plot, assignedDate });
+                                      const isLastOfDay = i === schedule.length - 1 || schedule[i + 1].assignedDate !== assignedDate;
+                                      if (isLastOfDay) {
+                                        const dayRows = schedule.filter(r => r.assignedDate === assignedDate);
+                                        rows.push({ kind: 'subtotal', date: assignedDate, total: dayRows.reduce((s, r) => s + (Number(r.plot.plot_area) || 0), 0), count: dayRows.length });
+                                      }
+                                      return rows;
+                                    }, []);
+                                    return (
+                                      <div className={cn('space-y-2', step.type === 'inventory' && 'border-t border-slate-100 pt-3')}>
+                                        {step.type === 'inventory' && (
+                                          <div className="flex items-center justify-between">
+                                            <p className="text-xs font-semibold text-slate-900">On field task — what these items are for</p>
+                                            <button type="button" onClick={() => updateStepDetails(step.id, { includeOnField: false })} className="text-[11px] font-medium text-red-500 hover:underline">Remove</button>
+                                          </div>
+                                        )}
+                                        <div className="flex items-center gap-2">
+                                          <div className="flex items-center gap-0.5 rounded-md border border-slate-200 bg-slate-50 p-0.5 shrink-0">
+                                            <button type="button" onClick={() => handleOnFieldModeChange(step.id, 'cultivation')} className={cn('px-2 py-1 rounded text-[11px] font-semibold transition-colors', step.details.onFieldMode === 'cultivation' ? 'bg-lime-700 text-white' : 'text-slate-600 hover:bg-white')}>Cultivation</button>
+                                            <button type="button" onClick={() => handleOnFieldModeChange(step.id, 'non_cultivation')} className={cn('px-2 py-1 rounded text-[11px] font-semibold transition-colors', step.details.onFieldMode === 'non_cultivation' ? 'bg-slate-700 text-white' : 'text-slate-600 hover:bg-white')}>Non-Cult.</button>
+                                          </div>
+                                          <select value={step.details.landId} onChange={e => handleOnFieldFarmChange(step.id, e.target.value)} className="flex-1 min-w-0 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
+                                            <option value="">Choose farm</option>
+                                            {farms.map((f: any) => <option key={f.farm_id} value={f.farm_id}>{f?.owner_name || f?.farm_id}{f?.crop_type ? ` · ${f.crop_type}` : ''}{f?.area ? ` (${f.area}ac)` : ''}</option>)}
+                                          </select>
+                                        </div>
+                                        {selectedLand && (
+                                          <p className="text-[10px] text-slate-400">{Number(selectedLand?.area || 0).toFixed(2)} acres · {selectedLand?.land_data?.village || '—'}</p>
+                                        )}
+
+                                        {step.details.landId && step.details.onFieldMode === 'cultivation' && (
+                                          <div>
+                                            <select
+                                              value={step.details.onFieldCalendarId}
+                                              onChange={e => updateStepDetails(step.id, { onFieldCalendarId: e.target.value })}
+                                              disabled={calendarsLoadingByStep[step.id] || calendars.length === 0}
+                                              className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100"
+                                            >
+                                              <option value="">
+                                                {calendarsLoadingByStep[step.id] ? 'Loading calendars…' : calendars.length === 0 ? 'No calendar found for this farm' : 'Select calendar'}
+                                              </option>
+                                              {calendars.map(c => (
+                                                <option key={c.calander_id} value={c.calander_id}>{formatShortDate(c.start_date)} - {formatShortDate(c.end_date)}</option>
+                                              ))}
+                                            </select>
+                                            {calendars.length > 1 && (
+                                              <p className="mt-0.5 text-[10px] text-amber-600">This farm has {calendars.length} calendars — pick the one this task belongs to, or it may get created in the wrong one.</p>
+                                            )}
+                                          </div>
+                                        )}
+
+                                        {step.details.landId && (
+                                          <div className="space-y-1">
+                                            {scopeLoadingByStep[step.id] ? (
+                                              <p className="text-[11px] text-slate-400 italic">Loading vendors…</p>
+                                            ) : scopeVendorIds.length === 0 ? (
+                                              <p className="text-[11px] text-slate-400 italic">No vendor scope for this land — assign one in Scope of Work.</p>
+                                            ) : (
+                                              <div className="flex flex-wrap gap-1">
+                                                {scopeVendorIds.map(vendorId => {
+                                                  const v = scope[vendorId];
+                                                  const isSelected = step.details.vendorId === vendorId;
+                                                  return (
+                                                    <button
+                                                      key={vendorId}
+                                                      type="button"
+                                                      onClick={() => handleOnFieldVendorChange(step.id, step.details.landId, vendorId, v.vendor_details?.vendor_name || vendorId, step.details.onFieldMode)}
+                                                      className={cn('rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-colors', isSelected ? 'border-lime-600 bg-lime-600 text-white' : 'border-slate-200 bg-white text-slate-700 hover:border-lime-300 hover:bg-lime-50/60')}
+                                                    >
+                                                      {v.vendor_details?.vendor_name || vendorId}
+                                                    </button>
+                                                  );
+                                                })}
+                                              </div>
+                                            )}
+                                            {selectedScope && selectedScope.activities?.length > 0 && step.details.onFieldMode === 'cultivation' && (
+                                              <div className="flex flex-wrap gap-1">
+                                                {selectedScope.activities.map(a => <span key={a} className="text-[10px] px-1.5 py-0.5 bg-lime-100 text-lime-800 border border-lime-200 rounded font-medium">{a}</span>)}
+                                              </div>
+                                            )}
+                                          </div>
+                                        )}
+
+                                        {step.details.vendorId && step.details.onFieldMode === 'cultivation' && (
+                                          <div className="grid grid-cols-3 gap-1.5">
+                                            <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
+                                              <option value="">Activity</option>
+                                              {cultivationActivityOptions.map(a => <option key={a} value={a}>{a}</option>)}
+                                            </select>
+                                            <input type="date" value={step.details.onFieldStartDate} onChange={e => updateStepDetails(step.id, { onFieldStartDate: e.target.value })} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                            <input type="number" min="0" value={step.details.onFieldWorkQuantity} onChange={e => updateStepDetails(step.id, { onFieldWorkQuantity: e.target.value })} placeholder="Qty/day (acres)" className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                          </div>
+                                        )}
+
+                                        {step.details.vendorId && step.details.onFieldMode === 'cultivation' && (
+                                          <div>
+                                            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Auto-scheduled by plot</p>
+                                            {plotsLoadingByStep[step.id] ? (
+                                              <p className="mt-1 text-[11px] text-slate-400 italic">Loading plots…</p>
+                                            ) : plots.length === 0 ? (
+                                              <p className="mt-1 text-[11px] text-slate-400 italic">No plots found for this vendor's scope on this land.</p>
+                                            ) : activePlots.length === 0 ? (
+                                              <p className="mt-1 text-[11px] text-slate-400 italic">All plots removed — add one back below.</p>
+                                            ) : !step.details.onFieldStartDate || !step.details.onFieldWorkQuantity ? (
+                                              <p className="mt-1 text-[11px] text-slate-400 italic">Set a start date and work quantity to auto-schedule plots.</p>
+                                            ) : (
+                                              <div className="mt-1 overflow-hidden rounded-md border border-slate-200 bg-white">
+                                                <div className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] gap-2 border-b border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                                  <div>Plot</div><div>Crop</div><div className="text-right">Acres</div><div className="text-right">Date</div><div />
+                                                </div>
+                                                <div className="divide-y divide-slate-100">
+                                                  {scheduleRows.map((row, ri) => row.kind === 'plot' ? (
+                                                    <div key={`plot-${row.plot.plot_id}`} className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] items-center gap-2 px-2 py-1 text-[11px]">
+                                                      <span className="truncate font-medium text-slate-900">{row.plot.plot_name || row.plot.plot_id}</span>
+                                                      <span className="truncate text-slate-600">{row.plot.crop_type || '—'}</span>
+                                                      <span className="text-right text-slate-600">{Number(row.plot.plot_area || 0).toFixed(2)}</span>
+                                                      <span className="text-right font-medium text-slate-900">{formatShortDate(row.assignedDate)}</span>
+                                                      <button type="button" onClick={() => excludePlotFromStep(step.id, row.plot.plot_id)} title="Remove plot" className="text-slate-300 hover:text-red-500 shrink-0"><X className="h-3.5 w-3.5" /></button>
+                                                    </div>
+                                                  ) : (
+                                                    <div key={`total-${row.date}-${ri}`} className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] items-center gap-2 bg-lime-50 px-2 py-1 text-[11px]">
+                                                      <span className="col-span-2 font-semibold text-lime-800">Total ({row.count} plot{row.count !== 1 ? 's' : ''})</span>
+                                                      <span className="text-right font-bold text-lime-800">{row.total.toFixed(2)}</span>
+                                                      <span className="text-right font-semibold text-lime-800">{formatShortDate(row.date)}</span>
+                                                      <span />
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              </div>
+                                            )}
+                                            {excludedPlots.length > 0 && (
+                                              <div className="mt-1 flex flex-wrap items-center gap-1">
+                                                <span className="text-[10px] text-slate-400">Removed:</span>
+                                                {excludedPlots.map(p => (
+                                                  <button key={p.plot_id} type="button" onClick={() => restorePlotToStep(step.id, p.plot_id)} title="Add back" className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] text-slate-500 hover:border-lime-300 hover:text-lime-700">
+                                                    {p.plot_name || p.plot_id} <Plus className="h-2.5 w-2.5" />
+                                                  </button>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+                                        )}
+
+                                        {step.details.vendorId && step.details.onFieldMode === 'non_cultivation' && (
+                                          <div className="space-y-2">
+                                            <div>
+                                              <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Task / activity</label>
+                                              <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
+                                                <option value="">Choose task</option>
+                                                {cultivationActivityOptions.map(a => <option key={a} value={a}>{a}</option>)}
+                                              </select>
+                                            </div>
+
+                                            <div className="grid grid-cols-2 gap-1.5">
+                                              <div>
+                                                <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">From date</label>
+                                                <input type="date" value={step.details.onFieldFromDate} onChange={e => updateStepDetails(step.id, { onFieldFromDate: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                              </div>
+                                              <div>
+                                                <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">To date</label>
+                                                <input type="date" value={step.details.onFieldToDate} onChange={e => updateStepDetails(step.id, { onFieldToDate: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                              </div>
+                                            </div>
+
+                                            <div className="rounded-md border border-slate-200 bg-slate-50 p-2 space-y-1.5">
+                                              <div className="flex items-center gap-1.5 text-xs text-slate-700">
+                                                <span className="shrink-0 font-medium">Do</span>
+                                                <input type="number" min="0" value={step.details.onFieldQty} onChange={e => updateStepDetails(step.id, { onFieldQty: e.target.value })} placeholder="2" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
+                                                <input value={step.details.onFieldUnit} onChange={e => updateStepDetails(step.id, { onFieldUnit: e.target.value })} placeholder="Borewells" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                              </div>
+                                              <div className="flex items-center gap-1.5 text-xs text-slate-700">
+                                                <span className="shrink-0 font-medium">Up to</span>
+                                                <input type="number" min="0" value={step.details.onFieldSpecValue} onChange={e => updateStepDetails(step.id, { onFieldSpecValue: e.target.value })} placeholder="250" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
+                                                <input value={step.details.onFieldSpecUnit} onChange={e => updateStepDetails(step.id, { onFieldSpecUnit: e.target.value })} placeholder="feet deep" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                                <span className="shrink-0 text-[10px] text-slate-400">(optional)</span>
+                                              </div>
+                                              <p className="text-[10px] text-slate-400">Reads as: "Do {step.details.onFieldQty || '2'} {step.details.onFieldUnit || 'Borewells'}{step.details.onFieldSpecValue && step.details.onFieldSpecUnit ? `, up to ${step.details.onFieldSpecValue} ${step.details.onFieldSpecUnit}` : ''}".</p>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
+
+                                  {/* Other */}
+                                  {step.type === 'other' && (
+                                    <div>
+                                      <p className="text-xs font-semibold text-slate-900 mb-1.5">Description</p>
+                                      <textarea value={step.details.otherDescription} onChange={e => updateStepDetails(step.id, { otherDescription: e.target.value })} rows={3} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-slate-900 focus:outline-none" placeholder="Add task description" />
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex shrink-0 items-center justify-between border-t border-slate-200 bg-white px-5 py-3">
+                                  <div className="flex items-center gap-2">
+                                    {step.type === 'inventory' && (
+                                      <>
+                                        {!step.details.includeLogistics && (
+                                          <button type="button" onClick={() => updateStepDetails(step.id, { includeLogistics: true })} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-100">
+                                            + Add logistics
+                                          </button>
+                                        )}
+                                        {!step.details.includeOnField && (
+                                          <button type="button" onClick={() => updateStepDetails(step.id, { includeOnField: true })} className="rounded-lg border border-lime-200 bg-lime-50 px-3 py-2 text-xs font-medium text-lime-700 hover:bg-lime-100">
+                                            + Add on field task
+                                          </button>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+                                  <button type="button" onClick={() => setStepFieldsPopupId(null)} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800">Done</button>
+                                </div>
+                                </div>
+                                </div>
+                              )}
+                          {index === taskFlowSteps.length - 1 && (
+                            <button
+                              type="button"
+                              onClick={addStep}
+                              disabled={!canAddSteps}
+                              title="Add another step"
+                              className={cn('flex w-[120px] shrink-0 flex-col items-center justify-center gap-1.5 self-stretch rounded-xl border-2 border-dashed transition-colors', canAddSteps ? 'border-emerald-300 bg-emerald-50/50 text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700' : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-300')}
+                            >
+                              <Plus className="h-5 w-5" />
+                              <span className="text-[11px] font-semibold">Add step</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+            </div>
+
+            {/* Creator footer */}
+            <div className="flex items-center gap-2 px-5 py-3 border-t border-slate-200">
+              <button type="button" onClick={handleAssignTask} disabled={isCreatingTask} className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
+                <UserCheck className="h-4 w-4" />
+                {isCreatingTask ? 'Creating...' : 'Assign Task'}
+              </button>
+              <button type="button" onClick={closeModal} className="ml-auto rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         {ondemandTasksLoading ? (
           <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-muted-foreground">Loading on demand tasks...</div>
         ) : ondemandTasksError ? (
@@ -1800,478 +2539,6 @@ const OnDemandTask = () => {
                   Create Allocation
                 </button>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Create Task Modal ─────────────────────────────────────────────────── */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px] p-4">
-          <div className="w-full max-w-3xl bg-white border border-slate-200 rounded-2xl shadow-[0_24px_64px_rgba(15,23,42,0.18)] flex flex-col max-h-[92vh]">
-
-            {/* Modal header */}
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 shrink-0">
-              <div>
-                <h2 className="text-base font-semibold text-slate-900">Create On Demand Task</h2>
-                <p className="text-xs text-muted-foreground mt-0.5">Build a step-wise task and allocate resources.</p>
-              </div>
-              <button onClick={closeModal} className="p-1.5 rounded-md hover:bg-gray-100"><X className="w-4 h-4 text-gray-500" /></button>
-            </div>
-
-            {/* Modal body */}
-            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-
-              {/* Designation + Assignee */}
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Assignee</p>
-                {!taskAssignment.designation && (
-                  <p className="mb-3 rounded-md border border-dashed border-slate-200 bg-white px-3 py-2 text-xs text-slate-500">
-                    Select a designation and assignee to unlock steps.
-                  </p>
-                )}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Designation</label>
-                    <select
-                      value={taskAssignment.designation}
-                      onChange={e => {
-                        setTaskAssignment({ designation: e.target.value, staffId: '', staffName: '' });
-                        setTaskFlowSteps([]);
-                      }}
-                      className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:border-slate-900 focus:outline-none"
-                    >
-                      <option value="">Select designation</option>
-                      {designationOptions.length > 0
-                        ? designationOptions.map(d => <option key={d} value={d}>{formatDesignationLabel(d)}</option>)
-                        : <option value="" disabled>Loading...</option>}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Assign to</label>
-                    <select
-                      value={taskAssignment.staffId}
-                      disabled={!taskAssignment.designation}
-                      onChange={e => {
-                        const staffId = e.target.value;
-                        const matched = assigneeOptions.find(s => String(s?.staff_id || '') === staffId);
-                        const staffName = String(matched?.staff_information?.staff_name || '');
-                        setTaskAssignment(prev => ({ ...prev, staffId, staffName }));
-                        if (staffId) setTaskFlowSteps([{ ...createTaskStep(1), details: { ...createTaskStep(1).details, assignee: staffName, assigneeDesignation: taskAssignment.designation } }]);
-                        else setTaskFlowSteps([]);
-                      }}
-                      className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:border-slate-900 focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100"
-                    >
-                      <option value="">{taskAssignment.designation ? 'Select assignee' : 'Select designation first'}</option>
-                      {assigneeOptions.length > 0
-                        ? assigneeOptions.map(s => <option key={String(s?.staff_id || '')} value={String(s?.staff_id || '')}>{String(s?.staff_information?.staff_name || 'Unknown')}</option>)
-                        : <option value="" disabled>No staff for this designation</option>}
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              {/* Steps */}
-              <div className="space-y-3">
-                {taskFlowSteps.length > 0 ? taskFlowSteps.map((step, index) => {
-                  const meta = step.type ? taskStepTypeMeta[step.type] : null;
-                  const selectedInventoryRows = Object.entries(step.details.inventoryItems).filter(([, qty]) => Number(qty) > 0).map(([itemId, qty]) => ({ itemId, qty: Number(qty), item: inventoryItems.find(it => getInventoryItemId(it) === itemId) }));
-                  const selectedVehicles = step.details.vehicleIds.map(vid => vehicles.find(v => getVehicleId(v) === vid)).filter(Boolean);
-                  const selectedLand = farms.find(f => String(f?.farm_id || f?.id || '') === step.details.landId);
-
-                  return (
-                    <div key={step.id} className={cn('relative rounded-xl border p-3 shadow-sm', meta?.shell || 'border-slate-200 bg-white')}>
-                      <div className="absolute left-3 top-3 flex flex-col items-center">
-                        <div className={cn('flex h-9 w-9 items-center justify-center rounded-full border text-sm font-semibold', meta?.badge || 'border-slate-200 bg-slate-100 text-slate-700')}>
-                          {step.stepNumber}
-                        </div>
-                        {index < taskFlowSteps.length - 1 && <div className="mt-1.5 h-full min-h-8 w-px bg-slate-200" />}
-                      </div>
-
-                      <div className="space-y-3 pt-12">
-                        <div className={cn('rounded-xl border p-3', meta?.panel || 'border-slate-200 bg-white')}>
-                          {/* Step header row */}
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="min-w-0 flex-1">
-                              <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Type</label>
-                              <select
-                                value={step.type}
-                                onChange={e => updateStep(step.id, { type: e.target.value as TaskStepType, expanded: true })}
-                                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm focus:border-slate-900 focus:outline-none"
-                              >
-                                <option value="">Select type</option>
-                                <option value="inventory">Inventory</option>
-                                <option value="logistics">Logistics</option>
-                                <option value="inspection">Inspection</option>
-                                <option value="on_field">On Field Task</option>
-                                <option value="other">Others</option>
-                              </select>
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0 mt-4">
-                              {taskFlowSteps.length > 1 && (
-                                <button type="button" onClick={() => removeStep(step.id)} className="rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50">
-                                  Remove
-                                </button>
-                              )}
-                              <button type="button" onClick={() => updateStep(step.id, { expanded: !step.expanded })} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">
-                                <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', step.expanded ? 'rotate-180' : '')} />
-                              </button>
-                            </div>
-                          </div>
-
-                          {/* Step content */}
-                          {step.type && step.expanded && (
-                            <div className="mt-3 space-y-3 border-t border-slate-100 pt-3">
-                              {/* Inventory */}
-                              {step.type === 'inventory' && (
-                                <div className="space-y-2">
-                                  <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                    <span className="text-xs font-semibold text-slate-700">Allocation needed?</span>
-                                    <div className="flex items-center gap-1">
-                                      <button
-                                        type="button"
-                                        onClick={() => updateStepDetails(step.id, { allocationNeeded: true })}
-                                        className={cn('px-3 py-1 rounded-md text-xs font-semibold border transition-colors', step.details.allocationNeeded ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')}
-                                      >Yes</button>
-                                      <button
-                                        type="button"
-                                        onClick={() => updateStepDetails(step.id, { allocationNeeded: false })}
-                                        className={cn('px-3 py-1 rounded-md text-xs font-semibold border transition-colors', !step.details.allocationNeeded ? 'bg-slate-700 text-white border-slate-700' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')}
-                                      >No</button>
-                                    </div>
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <p className="text-xs font-semibold text-slate-900">Selected items</p>
-                                    <button type="button" onClick={() => setResourcePopup({ stepId: step.id, type: 'inventory' })} className="rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-700">
-                                      Open inventory
-                                    </button>
-                                  </div>
-                                  <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                                    <div className="grid grid-cols-[2fr_1fr_1fr] gap-2 border-b border-slate-200 bg-slate-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                                      <div>Item</div><div>Unit</div><div className="text-right">Qty</div>
-                                    </div>
-                                    <div className="divide-y divide-slate-100">
-                                      {selectedInventoryRows.length > 0 ? selectedInventoryRows.map(({ itemId, qty, item }) => (
-                                        <div key={itemId} className="grid grid-cols-[2fr_1fr_1fr] items-center gap-2 px-3 py-2 text-xs">
-                                          <div className="truncate font-medium text-slate-900">{item ? getInventoryItemName(item) : itemId}</div>
-                                          <div className="text-slate-600">{String(item?.unit || '—')}</div>
-                                          <div className="text-right font-semibold text-slate-900">{qty}</div>
-                                        </div>
-                                      )) : <div className="px-3 py-3 text-xs text-slate-500">No items selected yet.</div>}
-                                    </div>
-                                  </div>
-                                </div>
-                              )}
-
-                              {/* Logistics */}
-                              {step.type === 'logistics' && (
-                                <div className="space-y-2">
-                                  <div className="flex items-center justify-between">
-                                    <p className="text-xs font-semibold text-slate-900">Selected vehicles</p>
-                                    <button type="button" onClick={() => setResourcePopup({ stepId: step.id, type: 'logistics' })} className="rounded-lg bg-amber-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-amber-700">
-                                      Open vehicles
-                                    </button>
-                                  </div>
-                                  <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                                    <div className="grid grid-cols-[2fr_1fr_1fr] gap-2 border-b border-slate-200 bg-slate-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                                      <div>Vehicle</div><div>Company</div><div className="text-right">Status</div>
-                                    </div>
-                                    <div className="divide-y divide-slate-100">
-                                      {selectedVehicles.length > 0 ? selectedVehicles.map((v: any) => (
-                                        <div key={getVehicleId(v)} className="grid grid-cols-[2fr_1fr_1fr] items-center gap-2 px-3 py-2 text-xs">
-                                          <div className="truncate font-medium text-slate-900">{getVehicleName(v)}</div>
-                                          <div className="text-slate-600">{String(v?.vehicle_information?.company || '—')}</div>
-                                          <div className="text-right text-emerald-700">Selected</div>
-                                        </div>
-                                      )) : <div className="px-3 py-3 text-xs text-slate-500">No vehicles selected yet.</div>}
-                                    </div>
-                                  </div>
-                                </div>
-                              )}
-
-                              {/* Inspection */}
-                              {step.type === 'inspection' && (
-                                <div className="space-y-2">
-                                  <div className="flex items-center justify-between">
-                                    <p className="text-xs font-semibold text-slate-900">Inspection fields</p>
-                                    <button type="button" onClick={() => addInspectionField(step.id)} className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-slate-800">
-                                      <Plus className="h-3 w-3" /> Add field
-                                    </button>
-                                  </div>
-                                  {step.details.inspectionFields.length > 0 ? step.details.inspectionFields.map((field, fi) => (
-                                    <div key={field.id} className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
-                                      <div className="flex items-center justify-between">
-                                        <span className="text-xs font-medium text-slate-600">Field {fi + 1}</span>
-                                        <button type="button" onClick={() => removeInspectionField(step.id, field.id)} className="text-xs text-red-500 hover:underline">Remove</button>
-                                      </div>
-                                      <input value={field.fieldName} onChange={e => updateInspectionField(step.id, field.id, { fieldName: e.target.value })} placeholder="Field name" className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
-                                      <div className="flex items-center gap-2">
-                                        <select value={field.inputType} onChange={e => updateInspectionField(step.id, field.id, { inputType: e.target.value, options: [] })} className="flex-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
-                                          <option value="number">Number</option>
-                                          <option value="text">Text</option>
-                                          <option value="mcq">MCQ</option>
-                                          <option value="image">Image upload</option>
-                                        </select>
-                                        <label className="inline-flex items-center gap-1.5 text-xs text-slate-700 shrink-0">
-                                          <input type="checkbox" checked={field.mandatory} onChange={e => updateInspectionField(step.id, field.id, { mandatory: e.target.checked })} className="h-3.5 w-3.5 rounded border-slate-300" />
-                                          Mandatory
-                                        </label>
-                                      </div>
-                                      {field.inputType === 'mcq' && (
-                                        <div className="space-y-1.5">
-                                          <div className="flex items-center justify-between">
-                                            <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Options</span>
-                                            <button type="button" onClick={() => updateInspectionField(step.id, field.id, { options: [...(field.options || []), ''] })} className="inline-flex items-center gap-1 text-[10px] font-medium text-sky-600 hover:underline">
-                                              <Plus className="h-3 w-3" /> Add option
-                                            </button>
-                                          </div>
-                                          {(field.options || []).length === 0 ? (
-                                            <p className="text-[10px] text-slate-400 italic">No options yet — click Add option.</p>
-                                          ) : (field.options || []).map((opt, oi) => (
-                                            <div key={oi} className="flex items-center gap-1.5">
-                                              <span className="text-[10px] text-slate-400 w-4 shrink-0">{oi + 1}.</span>
-                                              <input value={opt} onChange={e => { const next = [...(field.options || [])]; next[oi] = e.target.value; updateInspectionField(step.id, field.id, { options: next }); }} placeholder={`Option ${oi + 1}`} className="flex-1 rounded-md border border-slate-200 px-2 py-1 text-xs focus:border-slate-900 focus:outline-none" />
-                                              <button type="button" onClick={() => { const next = (field.options || []).filter((_, i) => i !== oi); updateInspectionField(step.id, field.id, { options: next }); }} className="text-red-400 hover:text-red-600"><X className="h-3 w-3" /></button>
-                                            </div>
-                                          ))}
-                                        </div>
-                                      )}
-                                    </div>
-                                  )) : (
-                                    <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-xs text-slate-500">No fields yet. Use Add field above.</div>
-                                  )}
-                                </div>
-                              )}
-
-                              {/* On Field Task */}
-                              {step.type === 'on_field' && (() => {
-                                const scope = scopeByStep[step.id] || {};
-                                const scopeVendorIds = Object.keys(scope);
-                                const selectedScope = step.details.vendorId ? scope[step.details.vendorId] : undefined;
-                                const plots = plotsByStep[step.id] || [];
-                                const excludedPlotIds = excludedPlotsByStep[step.id] || [];
-                                const activePlots = plots.filter(p => !excludedPlotIds.includes(p.plot_id));
-                                const excludedPlots = plots.filter(p => excludedPlotIds.includes(p.plot_id));
-                                const calendars = calendarsByStep[step.id] || [];
-                                const schedule = computePlotSchedule(activePlots, step.details.onFieldStartDate, Number(step.details.onFieldWorkQuantity) || 0);
-                                // Flatten into plot rows + a subtotal row whenever the assigned date changes
-                                const scheduleRows = schedule.reduce<Array<{ kind: 'plot'; plot: OnFieldPlot; assignedDate: string } | { kind: 'subtotal'; date: string; total: number; count: number }>>((rows, { plot, assignedDate }, i) => {
-                                  rows.push({ kind: 'plot', plot, assignedDate });
-                                  const isLastOfDay = i === schedule.length - 1 || schedule[i + 1].assignedDate !== assignedDate;
-                                  if (isLastOfDay) {
-                                    const dayRows = schedule.filter(r => r.assignedDate === assignedDate);
-                                    rows.push({ kind: 'subtotal', date: assignedDate, total: dayRows.reduce((s, r) => s + (Number(r.plot.plot_area) || 0), 0), count: dayRows.length });
-                                  }
-                                  return rows;
-                                }, []);
-                                return (
-                                  <div className="space-y-2">
-                                    {/* Mode switch + Farm, same row */}
-                                    <div className="flex items-center gap-2">
-                                      <div className="flex items-center gap-0.5 rounded-md border border-slate-200 bg-slate-50 p-0.5 shrink-0">
-                                        <button type="button" onClick={() => handleOnFieldModeChange(step.id, 'cultivation')} className={cn('px-2 py-1 rounded text-[11px] font-semibold transition-colors', step.details.onFieldMode === 'cultivation' ? 'bg-lime-700 text-white' : 'text-slate-600 hover:bg-white')}>Cultivation</button>
-                                        <button type="button" onClick={() => handleOnFieldModeChange(step.id, 'non_cultivation')} className={cn('px-2 py-1 rounded text-[11px] font-semibold transition-colors', step.details.onFieldMode === 'non_cultivation' ? 'bg-slate-700 text-white' : 'text-slate-600 hover:bg-white')}>Non-Cult.</button>
-                                      </div>
-                                      <select value={step.details.landId} onChange={e => handleOnFieldFarmChange(step.id, e.target.value)} className="flex-1 min-w-0 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
-                                        <option value="">Choose farm</option>
-                                        {farms.map((f: any) => <option key={f.farm_id} value={f.farm_id}>{f?.owner_name || f?.farm_id}{f?.crop_type ? ` · ${f.crop_type}` : ''}{f?.area ? ` (${f.area}ac)` : ''}</option>)}
-                                      </select>
-                                    </div>
-                                    {selectedLand && (
-                                      <p className="text-[10px] text-slate-400">{Number(selectedLand?.area || 0).toFixed(2)} acres · {selectedLand?.land_data?.village || '—'}</p>
-                                    )}
-
-                                    {/* Calendar select — this farm may have multiple overlapping calendars, so ask which one this task belongs to */}
-                                    {step.details.landId && step.details.onFieldMode === 'cultivation' && (
-                                      <div>
-                                        <select
-                                          value={step.details.onFieldCalendarId}
-                                          onChange={e => updateStepDetails(step.id, { onFieldCalendarId: e.target.value })}
-                                          disabled={calendarsLoadingByStep[step.id] || calendars.length === 0}
-                                          className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100"
-                                        >
-                                          <option value="">
-                                            {calendarsLoadingByStep[step.id] ? 'Loading calendars…' : calendars.length === 0 ? 'No calendar found for this farm' : 'Select calendar'}
-                                          </option>
-                                          {calendars.map(c => (
-                                            <option key={c.calander_id} value={c.calander_id}>{formatShortDate(c.start_date)} - {formatShortDate(c.end_date)}</option>
-                                          ))}
-                                        </select>
-                                        {calendars.length > 1 && (
-                                          <p className="mt-0.5 text-[10px] text-amber-600">This farm has {calendars.length} calendars — pick the one this task belongs to, or it may get created in the wrong one.</p>
-                                        )}
-                                      </div>
-                                    )}
-
-                                    {/* Vendors from scope of work — compact chips */}
-                                    {step.details.landId && (
-                                      <div className="space-y-1">
-                                        {scopeLoadingByStep[step.id] ? (
-                                          <p className="text-[11px] text-slate-400 italic">Loading vendors…</p>
-                                        ) : scopeVendorIds.length === 0 ? (
-                                          <p className="text-[11px] text-slate-400 italic">No vendor scope for this land — assign one in Scope of Work.</p>
-                                        ) : (
-                                          <div className="flex flex-wrap gap-1">
-                                            {scopeVendorIds.map(vendorId => {
-                                              const v = scope[vendorId];
-                                              const isSelected = step.details.vendorId === vendorId;
-                                              return (
-                                                <button
-                                                  key={vendorId}
-                                                  type="button"
-                                                  onClick={() => handleOnFieldVendorChange(step.id, step.details.landId, vendorId, v.vendor_details?.vendor_name || vendorId, step.details.onFieldMode)}
-                                                  className={cn('rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-colors', isSelected ? 'border-lime-600 bg-lime-600 text-white' : 'border-slate-200 bg-white text-slate-700 hover:border-lime-300 hover:bg-lime-50/60')}
-                                                >
-                                                  {v.vendor_details?.vendor_name || vendorId}
-                                                </button>
-                                              );
-                                            })}
-                                          </div>
-                                        )}
-                                        {selectedScope && selectedScope.activities?.length > 0 && step.details.onFieldMode === 'cultivation' && (
-                                          <div className="flex flex-wrap gap-1">
-                                            {selectedScope.activities.map(a => <span key={a} className="text-[10px] px-1.5 py-0.5 bg-lime-100 text-lime-800 border border-lime-200 rounded font-medium">{a}</span>)}
-                                          </div>
-                                        )}
-                                      </div>
-                                    )}
-
-                                    {/* Cultivation: activity + date + qty in one row */}
-                                    {step.details.vendorId && step.details.onFieldMode === 'cultivation' && (
-                                      <div className="grid grid-cols-3 gap-1.5">
-                                        <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
-                                          <option value="">Activity</option>
-                                          {cultivationActivityOptions.map(a => <option key={a} value={a}>{a}</option>)}
-                                        </select>
-                                        <input type="date" value={step.details.onFieldStartDate} onChange={e => updateStepDetails(step.id, { onFieldStartDate: e.target.value })} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
-                                        <input type="number" min="0" value={step.details.onFieldWorkQuantity} onChange={e => updateStepDetails(step.id, { onFieldWorkQuantity: e.target.value })} placeholder="Qty/day (acres)" className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
-                                      </div>
-                                    )}
-
-                                    {step.details.vendorId && step.details.onFieldMode === 'cultivation' && (
-                                      <div>
-                                        <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Auto-scheduled by plot</p>
-                                        {plotsLoadingByStep[step.id] ? (
-                                          <p className="mt-1 text-[11px] text-slate-400 italic">Loading plots…</p>
-                                        ) : plots.length === 0 ? (
-                                          <p className="mt-1 text-[11px] text-slate-400 italic">No plots found for this vendor's scope on this land.</p>
-                                        ) : activePlots.length === 0 ? (
-                                          <p className="mt-1 text-[11px] text-slate-400 italic">All plots removed — add one back below.</p>
-                                        ) : !step.details.onFieldStartDate || !step.details.onFieldWorkQuantity ? (
-                                          <p className="mt-1 text-[11px] text-slate-400 italic">Set a start date and work quantity to auto-schedule plots.</p>
-                                        ) : (
-                                          <div className="mt-1 overflow-hidden rounded-md border border-slate-200 bg-white">
-                                            <div className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] gap-2 border-b border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                                              <div>Plot</div><div>Crop</div><div className="text-right">Acres</div><div className="text-right">Date</div><div />
-                                            </div>
-                                            <div className="divide-y divide-slate-100">
-                                              {scheduleRows.map((row, ri) => row.kind === 'plot' ? (
-                                                <div key={`plot-${row.plot.plot_id}`} className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] items-center gap-2 px-2 py-1 text-[11px]">
-                                                  <span className="truncate font-medium text-slate-900">{row.plot.plot_name || row.plot.plot_id}</span>
-                                                  <span className="truncate text-slate-600">{row.plot.crop_type || '—'}</span>
-                                                  <span className="text-right text-slate-600">{Number(row.plot.plot_area || 0).toFixed(2)}</span>
-                                                  <span className="text-right font-medium text-slate-900">{formatShortDate(row.assignedDate)}</span>
-                                                  <button type="button" onClick={() => excludePlotFromStep(step.id, row.plot.plot_id)} title="Remove plot" className="text-slate-300 hover:text-red-500 shrink-0"><X className="h-3.5 w-3.5" /></button>
-                                                </div>
-                                              ) : (
-                                                <div key={`total-${row.date}-${ri}`} className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] items-center gap-2 bg-lime-50 px-2 py-1 text-[11px]">
-                                                  <span className="col-span-2 font-semibold text-lime-800">Total ({row.count} plot{row.count !== 1 ? 's' : ''})</span>
-                                                  <span className="text-right font-bold text-lime-800">{row.total.toFixed(2)}</span>
-                                                  <span className="text-right font-semibold text-lime-800">{formatShortDate(row.date)}</span>
-                                                  <span />
-                                                </div>
-                                              ))}
-                                            </div>
-                                          </div>
-                                        )}
-                                        {excludedPlots.length > 0 && (
-                                          <div className="mt-1 flex flex-wrap items-center gap-1">
-                                            <span className="text-[10px] text-slate-400">Removed:</span>
-                                            {excludedPlots.map(p => (
-                                              <button key={p.plot_id} type="button" onClick={() => restorePlotToStep(step.id, p.plot_id)} title="Add back" className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] text-slate-500 hover:border-lime-300 hover:text-lime-700">
-                                                {p.plot_name || p.plot_id} <Plus className="h-2.5 w-2.5" />
-                                              </button>
-                                            ))}
-                                          </div>
-                                        )}
-                                      </div>
-                                    )}
-
-                                    {/* Non-cultivation: task, timeline, then labelled quantity/unit lines */}
-                                    {step.details.vendorId && step.details.onFieldMode === 'non_cultivation' && (
-                                      <div className="space-y-2">
-                                        <div>
-                                          <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Task / activity</label>
-                                          <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
-                                            <option value="">Choose task</option>
-                                            {cultivationActivityOptions.map(a => <option key={a} value={a}>{a}</option>)}
-                                          </select>
-                                        </div>
-
-                                        <div className="grid grid-cols-2 gap-1.5">
-                                          <div>
-                                            <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">From date</label>
-                                            <input type="date" value={step.details.onFieldFromDate} onChange={e => updateStepDetails(step.id, { onFieldFromDate: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
-                                          </div>
-                                          <div>
-                                            <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">To date</label>
-                                            <input type="date" value={step.details.onFieldToDate} onChange={e => updateStepDetails(step.id, { onFieldToDate: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
-                                          </div>
-                                        </div>
-
-                                        <div className="rounded-md border border-slate-200 bg-slate-50 p-2 space-y-1.5">
-                                          <div className="flex items-center gap-1.5 text-xs text-slate-700">
-                                            <span className="shrink-0 font-medium">Do</span>
-                                            <input type="number" min="0" value={step.details.onFieldQty} onChange={e => updateStepDetails(step.id, { onFieldQty: e.target.value })} placeholder="2" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
-                                            <input value={step.details.onFieldUnit} onChange={e => updateStepDetails(step.id, { onFieldUnit: e.target.value })} placeholder="Borewells" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
-                                          </div>
-                                          <div className="flex items-center gap-1.5 text-xs text-slate-700">
-                                            <span className="shrink-0 font-medium">Up to</span>
-                                            <input type="number" min="0" value={step.details.onFieldSpecValue} onChange={e => updateStepDetails(step.id, { onFieldSpecValue: e.target.value })} placeholder="250" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
-                                            <input value={step.details.onFieldSpecUnit} onChange={e => updateStepDetails(step.id, { onFieldSpecUnit: e.target.value })} placeholder="feet deep" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
-                                            <span className="shrink-0 text-[10px] text-slate-400">(optional)</span>
-                                          </div>
-                                          <p className="text-[10px] text-slate-400">Reads as: "Do {step.details.onFieldQty || '2'} {step.details.onFieldUnit || 'Borewells'}{step.details.onFieldSpecValue && step.details.onFieldSpecUnit ? `, up to ${step.details.onFieldSpecValue} ${step.details.onFieldSpecUnit}` : ''}".</p>
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })()}
-
-                              {/* Other */}
-                              {step.type === 'other' && (
-                                <div>
-                                  <p className="text-xs font-semibold text-slate-900 mb-1.5">Description</p>
-                                  <textarea value={step.details.otherDescription} onChange={e => updateStepDetails(step.id, { otherDescription: e.target.value })} rows={3} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-slate-900 focus:outline-none" placeholder="Add task description" />
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                }) : (
-                  <div className="rounded-xl border border-dashed border-slate-200 bg-white p-5 text-sm text-slate-500 text-center">
-                    Step 1 will appear after selecting a designation and assignee.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Modal footer */}
-            <div className="flex items-center gap-2 px-5 py-3 border-t border-slate-200 shrink-0">
-              <button type="button" onClick={handleAssignTask} disabled={isCreatingTask} className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
-                <UserCheck className="h-4 w-4" />
-                {isCreatingTask ? 'Creating...' : 'Assign Task'}
-              </button>
-              <button type="button" onClick={addStep} disabled={!canAddSteps} className={cn('inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors', canAddSteps ? 'bg-slate-900 text-white hover:bg-slate-800' : 'cursor-not-allowed bg-gray-200 text-gray-400')}>
-                <Plus className="h-4 w-4" /> Add step
-              </button>
-              <button type="button" onClick={closeModal} className="ml-auto rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
-                Cancel
-              </button>
             </div>
           </div>
         </div>

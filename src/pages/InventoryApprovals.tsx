@@ -25,6 +25,7 @@ import {
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
+import getBaseUrl from '@/lib/config';
 import logo3f from '@/Assets/3f-logo.png';
 import {
   InventoryApprovalStatus,
@@ -33,6 +34,9 @@ import {
   subscribeToInventoryApprovals,
   updateInventoryApproval,
 } from '@/lib/inventoryApprovalStore';
+import { TransferSlipDocument, transferSlipDataFromApproval } from '@/components/inventory/TransferSlipDocument';
+
+const BASE_URL = getBaseUrl().replace(/\/$/, '');
 
 const COMPANY_NAME = 'SAI BIORESOURCES PRIVATE LIMITED';
 const COMPANY_ADDRESS = 'Khasra No. 121/1, Kachandur-Dhour Road, Village Jeora (Jeora-Sirsa), Durg, Chhattisgarh – 491001';
@@ -97,7 +101,7 @@ const printTransferSlip = (record: InventoryTransferApproval) => {
       </div></div>
       <div class="section"><div class="section-title">Stock Particulars</div>
         <table><thead><tr><th>Item Code</th><th>Item Description</th><th>Category</th><th>Unit</th><th class="num">Transfer Qty.</th><th class="num">Available Qty.</th></tr></thead>
-        <tbody><tr><td>${escapeHtml(transfer.itemCode || '—')}</td><td>${escapeHtml(transfer.itemName)}</td><td>${escapeHtml(transfer.category)}</td><td>${escapeHtml(transfer.unit)}</td><td class="num"><strong>${transfer.quantity.toLocaleString('en-IN')}</strong></td><td class="num">${transfer.availableStock.toLocaleString('en-IN')}</td></tr></tbody></table>
+        <tbody>${transfer.items.map((line) => `<tr><td>${escapeHtml(line.itemCode || '—')}</td><td>${escapeHtml(line.itemName)}</td><td>${escapeHtml(line.category)}</td><td>${escapeHtml(line.unit)}</td><td class="num"><strong>${line.quantity.toLocaleString('en-IN')}</strong></td><td class="num">${line.availableStock.toLocaleString('en-IN')}</td></tr>`).join('')}</tbody></table>
       </div>
       <div class="section"><div class="section-title">Transport Details</div><div class="grid">
         ${row('Vehicle Number', transfer.vehicleNumber)}${row('Vehicle Type', transfer.vehicleType)}
@@ -123,111 +127,8 @@ const printTransferSlip = (record: InventoryTransferApproval) => {
   setTimeout(() => { popup.print(); popup.close(); }, 450);
 };
 
-const TransferSlipPreview = ({ record }: { record: InventoryTransferApproval }) => {
-  const transfer = record.transfer;
-  const previewRows = [
-    ['From Store', transfer.sourceStore],
-    ['Destination Store', transfer.destinationStore],
-    ['Transfer Date', formatDate(transfer.transferDate)],
-    ['Expected Arrival', formatDate(transfer.expectedArrival, true)],
-  ];
-  return (
-    <div className="mx-auto min-h-[760px] w-full max-w-[620px] border border-slate-300 bg-white p-6 text-[10px] text-slate-800 shadow-[0_18px_50px_rgba(15,23,42,0.15)] sm:p-8">
-      <div className="border-b-2 border-[#0D3A35] pb-4 text-center">
-        <img src={logo3f} alt="Sai Bioresources" className="mx-auto h-14 w-auto" />
-        <h2 className="mt-2 text-base font-black tracking-wide text-slate-950">{COMPANY_NAME}</h2>
-        <p className="mx-auto mt-1 max-w-lg leading-relaxed text-slate-500">{COMPANY_ADDRESS}</p>
-      </div>
-      <div className="mt-3 bg-[#0D3A35] py-2 text-center text-xs font-black tracking-[0.15em] text-white">STOCK TRANSFER SLIP</div>
-      <div className="grid grid-cols-3 border border-t-0 border-slate-300">
-        {[
-          ['Transfer Slip No.', transfer.transferSlipNumber],
-          ['Transfer Date', formatDate(transfer.transferDate)],
-          ['Status', record.status.toUpperCase()],
-        ].map(([label, value]) => (
-          <div key={label} className="border-r border-slate-300 p-2 last:border-r-0">
-            <p className="text-[8px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
-            <p className="mt-1 font-black text-slate-800">{value}</p>
-          </div>
-        ))}
-      </div>
-
-      <PreviewSection title="Store Transfer Details">
-        <div className="grid grid-cols-2">
-          {previewRows.map(([label, value]) => (
-            <div key={label} className="flex justify-between gap-3 border-b border-r border-slate-200 p-2">
-              <span className="font-semibold text-slate-500">{label}</span><strong className="text-right">{value}</strong>
-            </div>
-          ))}
-        </div>
-      </PreviewSection>
-
-      <PreviewSection title="Stock Particulars">
-        <table className="w-full border-collapse">
-          <thead className="bg-[#0D3A35] text-white">
-            <tr>{['Item Code', 'Description', 'Category', 'Unit', 'Transfer Qty.', 'Available'].map((heading) => <th key={heading} className="border border-[#315d57] px-2 py-1.5 text-left text-[8px] uppercase">{heading}</th>)}</tr>
-          </thead>
-          <tbody><tr>
-            {[transfer.itemCode || '—', transfer.itemName, transfer.category, transfer.unit, transfer.quantity.toLocaleString('en-IN'), transfer.availableStock.toLocaleString('en-IN')].map((value, index) => <td key={index} className="border border-slate-300 px-2 py-2 font-semibold">{value}</td>)}
-          </tr></tbody>
-        </table>
-      </PreviewSection>
-
-      <PreviewSection title="Transport Details">
-        <div className="grid grid-cols-2">
-          {[
-            ['Vehicle Number', transfer.vehicleNumber],
-            ['Vehicle Type', transfer.vehicleType],
-            ['Make / Model', [transfer.vehicleMake, transfer.vehicleModel].filter(Boolean).join(' ')],
-            ['Driver', transfer.driverName],
-            ['Driver Contact', transfer.driverContact],
-            ['Prepared By', record.preparedBy],
-          ].map(([label, value]) => (
-            <div key={label} className="flex justify-between gap-3 border-b border-r border-slate-200 p-2">
-              <span className="font-semibold text-slate-500">{label}</span><strong className="text-right">{value || '—'}</strong>
-            </div>
-          ))}
-        </div>
-      </PreviewSection>
-
-      <PreviewSection title="Approval Details">
-        <div className="grid grid-cols-2">
-          {[
-            ['Assigned Approver', record.approverName],
-            ['Designation', record.approverDesignation],
-            ['Approval Date', formatDate(record.approvedAt, true)],
-            ['Approval ID', record.id],
-          ].map(([label, value]) => (
-            <div key={label} className="flex justify-between gap-3 border-b border-r border-slate-200 p-2">
-              <span className="font-semibold text-slate-500">{label}</span><strong className="text-right">{value}</strong>
-            </div>
-          ))}
-        </div>
-      </PreviewSection>
-
-      <PreviewSection title="Remarks / Handling Instructions">
-        <p className="min-h-12 p-2 leading-relaxed text-slate-600">{transfer.remarks || 'No additional remarks'}</p>
-      </PreviewSection>
-
-      <div className="mt-8 grid grid-cols-4 gap-2">
-        {['Prepared By', 'Store Keeper', 'Approved By', 'Received By'].map((label) => (
-          <div key={label} className="border border-slate-300 px-2 pb-2 pt-10 text-center font-bold">
-            {label}
-            {label === 'Approved By' && record.digitalSignature && (
-              <span className="mt-1 block text-[7px] font-semibold leading-tight text-emerald-700">{record.digitalSignature.signature}</span>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-};
-
-const PreviewSection = ({ title, children }: { title: string; children: React.ReactNode }) => (
-  <section className="mt-3 overflow-hidden border border-slate-300">
-    <div className="border-b border-slate-300 bg-slate-100 px-2 py-1.5 text-[9px] font-black uppercase tracking-wider text-slate-600">{title}</div>
-    {children}
-  </section>
+const TransferSlipPreview = ({ record }: { record: InventoryTransferApproval }) => (
+  <TransferSlipDocument data={transferSlipDataFromApproval(record)} />
 );
 
 const InventoryApprovals = () => {
@@ -262,8 +163,8 @@ const InventoryApprovals = () => {
       const haystack = [
         record.id,
         record.transfer.transferSlipNumber,
-        record.transfer.itemName,
-        record.transfer.itemCode,
+        ...record.transfer.items.map((line) => line.itemName),
+        ...record.transfer.items.map((line) => line.itemCode),
         record.transfer.destinationStore,
         record.preparedBy,
         record.approverName,
@@ -277,7 +178,7 @@ const InventoryApprovals = () => {
     || user?.id === record.approverId
     || user?.name?.trim().toLowerCase() === record.approverName.trim().toLowerCase();
 
-  const approve = (record: InventoryTransferApproval) => {
+  const approve = async (record: InventoryTransferApproval) => {
     if (!canApprove(record)) return toast.error(`This approval is assigned to ${record.approverName}`);
     if (!user?.id || !user?.name) return toast.error('You must be logged in to digitally sign this approval');
     const signedAt = new Date();
@@ -299,6 +200,58 @@ const InventoryApprovals = () => {
     if (updated && selectedRecord?.id === record.id) setSelectedRecord(updated);
     refresh();
     toast.success(`${record.transfer.transferSlipNumber} approved and digitally signed`);
+
+    // Only once Inventory Approval is granted does the slip actually land in the
+    // stock-transfer table, ready for the Logistics Request module to pick up.
+    try {
+      const transfer = record.transfer;
+      if (!transfer.storeManagerSignature) {
+        throw new Error('This slip predates the Store Manager signature — recreate the transfer to send it to Logistics.');
+      }
+      const res = await fetch(`${BASE_URL}/inventory/create_stock_transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          approval_id: record.id,
+          transfer_slip_number: transfer.transferSlipNumber,
+          creation_date: transfer.creationDate,
+          transfer_date: transfer.transferDate,
+          items: transfer.items.map((line) => ({
+            item_id: line.itemId,
+            item_name: line.itemName,
+            item_code: line.itemCode,
+            category: line.category,
+            unit: line.unit,
+            quantity: line.quantity,
+            available_stock: line.availableStock,
+          })),
+          source_store: transfer.sourceStore,
+          destination_store: transfer.destinationStore,
+          remarks: transfer.remarks,
+          prepared_by: record.preparedBy,
+          prepared_by_id: record.preparedById,
+          store_manager: {
+            staff_id: transfer.storeManagerSignature.staffId,
+            staff_name: transfer.storeManagerSignature.staffName,
+            staff_designation: transfer.storeManagerSignature.staffDesignation,
+            signed_at: transfer.storeManagerSignature.signedAt,
+          },
+          head_of_operations: {
+            staff_id: record.approverId,
+            staff_name: record.approverName,
+            staff_designation: record.approverDesignation,
+            signed_at: signedAtIso,
+          },
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) throw new Error(data?.detail || 'Failed to persist stock transfer');
+      updateInventoryApproval(record.id, { backendTransferId: data.transfer_id });
+      refresh();
+    } catch (e) {
+      console.error('create_stock_transfer failed:', e);
+      toast.error(e instanceof Error ? e.message : 'Approved locally, but failed to create the backend stock transfer record');
+    }
   };
 
   const askQuestion = () => {
@@ -408,8 +361,12 @@ const InventoryApprovals = () => {
 
               <div className="grid grid-cols-2 gap-px bg-slate-100">
                 {[
-                  ['Item', record.transfer.itemName],
-                  ['Quantity', `${record.transfer.quantity.toLocaleString('en-IN')} ${record.transfer.unit}`],
+                  ['Item(s)', record.transfer.items.length === 1
+                    ? record.transfer.items[0].itemName
+                    : `${record.transfer.items.length} items`],
+                  ['Quantity', record.transfer.items.length === 1
+                    ? `${record.transfer.items[0].quantity.toLocaleString('en-IN')} ${record.transfer.items[0].unit}`
+                    : `${record.transfer.items.length} line items`],
                   ['Destination', record.transfer.destinationStore],
                   ['Vehicle', record.transfer.vehicleNumber || 'N/A'],
                 ].map(([label, value]) => (
@@ -500,10 +457,7 @@ const InventoryApprovals = () => {
                       {[
                         ['Slip Number', selectedRecord.transfer.transferSlipNumber],
                         ['Requested', formatDate(selectedRecord.requestedAt, true)],
-                        ['Item', selectedRecord.transfer.itemName],
-                        ['Item Code', selectedRecord.transfer.itemCode || 'N/A'],
-                        ['Quantity', `${selectedRecord.transfer.quantity.toLocaleString('en-IN')} ${selectedRecord.transfer.unit}`],
-                        ['Available Stock', `${selectedRecord.transfer.availableStock.toLocaleString('en-IN')} ${selectedRecord.transfer.unit}`],
+                        ['Line Items', String(selectedRecord.transfer.items.length)],
                         ['From Store', selectedRecord.transfer.sourceStore],
                         ['Destination', selectedRecord.transfer.destinationStore],
                         ['Vehicle', selectedRecord.transfer.vehicleNumber || 'N/A'],
