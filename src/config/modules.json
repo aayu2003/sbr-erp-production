@@ -160,7 +160,8 @@
           "items": [
             { "key": "vehicle-management",  "label": "Vehicle List",       "path": "/vehicle-management", "icon": "Car",  "enabled": true  },
             { "key": "fleet-chart",         "label": "Fleet Chart",        "path": "/fleet-chart",        "icon": "Map",  "enabled": true, "notificationStatus": "warning" },
-            { "key": "logistics-request",   "label": "Logistics Request",  "path": "/logistics",          "icon": "Truck","enabled": true }
+            { "key": "logistics-request",   "label": "Logistics Request",  "path": "/logistics",          "icon": "Truck","enabled": true },
+            { "key": "stock-transfer-logistics", "label": "Stock Transfer Logistics", "path": "/logistics-request", "icon": "PackageCheck", "enabled": true }
           ]
         },
         {

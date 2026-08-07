@@ -1,17 +1,68 @@
 import { useEffect, useMemo, useState } from 'react';
-import { 
-  Plus, Upload, Search, Filter, X, 
-  Truck, Wrench, CheckCircle2, Car, CalendarDays, FileText, Fuel, UserRound
+import {
+  Plus, Upload, Search, ChevronDown,
+  Truck, Wrench, CheckCircle2, Car, CalendarDays, FileText, Fuel, UserRound, ShieldCheck
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { getBaseUrl } from '@/lib/config';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import { formatDateDDMMYYYY } from '@/lib/dateFormat';
+
+// Brand color used throughout Inventory.tsx — matched here for a consistent look
+const BRAND = '#0D3A35';
+
+// Some staff records store contract/vendor metadata (e.g. { type, vendor, order_number })
+// in fields that are normally plain strings (department, designation, etc.) — this file's
+// staff data is fetched as `any`, so nothing catches that at the type level. Rendering such
+// an object directly as JSX crashes the whole page, so every display value goes through this.
+const safeText = (value: unknown, fallback = '-'): string => {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const parts = [obj.vendor, obj.type, obj.order_number].filter((v) => typeof v === 'string' && v);
+    return parts.length ? parts.join(' · ') : fallback;
+  }
+  return fallback;
+};
+
+const Field = ({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) => (
+  <div className="flex flex-col gap-1.5">
+    <label className="text-xs font-bold text-slate-500">{label}{required && ' *'}</label>
+    {children}
+  </div>
+);
+
+const SelectField = ({
+  value, onChange, disabled, placeholder, options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  placeholder: string;
+  options: Array<{ value: string; label: string }>;
+}) => (
+  <div className="relative">
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={disabled}
+      className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-8 text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100 disabled:text-slate-400"
+    >
+      <option value="">{placeholder}</option>
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
+    <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+  </div>
+);
 
 // --- TYPES ---
 interface Vehicle {
@@ -57,13 +108,30 @@ const VehicleManagement = () => {
 
   const [isSubmittingAddVehicle, setIsSubmittingAddVehicle] = useState(false);
   const [addVehicleForm, setAddVehicleForm] = useState({
+    ownership_mode: 'self_owned' as 'self_owned' | 'contract',
+    work_order_id: '',
+    vendor_id: '',
+    vendor_name: '',
     vehicle_number: '',
     owned_by: 'SBR',
     company: '',
     model: '',
     type: 'Tractor',
+    insurance_validity: '',
+    permit_validity: '',
+    pollution_cert_validity: '',
+    servicing_responsibility: 'SBR' as 'vendor' | 'SBR',
     last_service_date: '',
+    last_service_km: '',
   });
+  const [insuranceFile, setInsuranceFile] = useState<File | null>(null);
+  const [permitFile, setPermitFile] = useState<File | null>(null);
+  const [pollutionFile, setPollutionFile] = useState<File | null>(null);
+
+  const [vendorOptions, setVendorOptions] = useState<Array<{ vendor_id: string; vendor_name: string }>>([]);
+  const [isLoadingVendors, setIsLoadingVendors] = useState(false);
+  const [vendorOrders, setVendorOrders] = useState<Array<{ flow_id: string; order_number: string; order_type: string; status: string }>>([]);
+  const [isLoadingVendorOrders, setIsLoadingVendorOrders] = useState(false);
 
   const baseUrl = useMemo(() => getBaseUrl().replace(/\/$/, ''), []);
 
@@ -90,15 +158,15 @@ const VehicleManagement = () => {
     const assignedStaff = normalizeAssignedStaff(assignedStaffRaw);
     if (assignedStaff.length === 0) return 'Unassigned';
     const first = assignedStaff[0];
-    return (
+    return safeText(
       first?.staff_information?.name ||
       first?.staff_information?.full_name ||
       first?.staff_information?.staff_name ||
       first?.name ||
       first?.full_name ||
       first?.staff_name ||
-      first?.staff_id ||
-      'Unassigned'
+      first?.staff_id,
+      'Unassigned',
     );
   };
 
@@ -260,15 +328,108 @@ const VehicleManagement = () => {
     toast.success("Bulk upload template downloaded");
   };
 
+  const fetchVendorOptions = async (): Promise<Array<{ vendor_id: string; vendor_name: string }>> => {
+    if (vendorOptions.length > 0) return vendorOptions;
+    setIsLoadingVendors(true);
+    try {
+      const res = await fetch(`${baseUrl}/purchase_flow/get_vendors`);
+      const data = await res.json().catch(() => ({}));
+      const list: Array<{ vendor_id: string; vendor_name: string }> = Array.isArray(data?.vendors) ? data.vendors : [];
+      const filtered = list.filter((v) => v?.vendor_id);
+      setVendorOptions(filtered);
+      return filtered;
+    } catch {
+      toast.error('Failed to load vendors');
+      return [];
+    } finally {
+      setIsLoadingVendors(false);
+    }
+  };
+
+  const fetchOrdersForVendor = async (vendorId: string) => {
+    setVendorOrders([]);
+    if (!vendorId) return;
+    setIsLoadingVendorOrders(true);
+    try {
+      const res = await fetch(`${baseUrl}/purchase_flow/get_order_info_by_vendor_id/${vendorId}`);
+      const data = await res.json().catch(() => ({}));
+      const list = Array.isArray(data?.purchase_flows) ? data.purchase_flows : [];
+      setVendorOrders(list.filter((o: any) => o?.order_number));
+    } catch {
+      toast.error('Failed to load orders for this vendor');
+    } finally {
+      setIsLoadingVendorOrders(false);
+    }
+  };
+
+  const handleOwnershipModeChange = async (mode: 'self_owned' | 'contract') => {
+    setAddVehicleForm((prev) => ({
+      ...prev,
+      ownership_mode: mode,
+      owned_by: mode === 'self_owned' ? 'SBR' : '',
+      work_order_id: '',
+      vendor_id: '',
+      vendor_name: '',
+    }));
+    setVendorOrders([]);
+    if (mode === 'contract') {
+      fetchVendorOptions();
+    }
+  };
+
+  const handleVendorSelect = (vendorId: string) => {
+    const v = vendorOptions.find((x) => x.vendor_id === vendorId);
+    setAddVehicleForm((prev) => ({
+      ...prev,
+      vendor_id: vendorId,
+      vendor_name: v?.vendor_name || '',
+      owned_by: v?.vendor_name || prev.owned_by,
+      work_order_id: '', // vendor changed — whatever order was picked may no longer belong to them
+    }));
+    fetchOrdersForVendor(vendorId);
+  };
+
+  const handleWorkOrderSelect = (woId: string) => {
+    setAddVehicleForm((prev) => ({ ...prev, work_order_id: woId }));
+  };
+
+  const uploadDocument = async (file: File): Promise<string> => {
+    const res = await fetch(`${baseUrl}/s3/generate-upload-url`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_name: file.name, file_type: file.type || 'application/octet-stream' }),
+    });
+    if (!res.ok) throw new Error('Failed to get upload URL');
+    const data = await res.json();
+    const formData = new FormData();
+    Object.entries(data.fields || {}).forEach(([k, v]) => formData.append(k, v as string));
+    formData.append('file', file);
+    const uploadRes = await fetch(data.upload_url, { method: 'POST', body: formData });
+    if (!uploadRes.ok) throw new Error(`Failed to upload ${file.name}`);
+    return data.file_key as string;
+  };
+
   const resetAddVehicleForm = () => {
     setAddVehicleForm({
+      ownership_mode: 'self_owned',
+      work_order_id: '',
+      vendor_id: '',
+      vendor_name: '',
       vehicle_number: '',
       owned_by: 'SBR',
       company: '',
       model: '',
       type: 'Tractor',
+      insurance_validity: '',
+      permit_validity: '',
+      pollution_cert_validity: '',
+      servicing_responsibility: 'SBR',
       last_service_date: '',
+      last_service_km: '',
     });
+    setInsuranceFile(null);
+    setPermitFile(null);
+    setPollutionFile(null);
   };
 
   const submitAddVehicle = async () => {
@@ -278,14 +439,26 @@ const VehicleManagement = () => {
       return;
     }
 
-    if (!addVehicleForm.last_service_date) {
-      toast.error('Last servicing date is required');
+    if (addVehicleForm.ownership_mode === 'contract' && !addVehicleForm.work_order_id) {
+      toast.error('Please select a work order');
+      setAddVehicleStep(1);
+      return;
+    }
+
+    if (addVehicleForm.servicing_responsibility === 'SBR' && !addVehicleForm.last_service_date) {
+      toast.error('Last servicing date is required when SBR handles servicing');
       setAddVehicleStep(2);
       return;
     }
 
     setIsSubmittingAddVehicle(true);
     try {
+      const [insuranceDocKey, permitDocKey, pollutionDocKey] = await Promise.all([
+        insuranceFile ? uploadDocument(insuranceFile) : Promise.resolve(''),
+        permitFile ? uploadDocument(permitFile) : Promise.resolve(''),
+        pollutionFile ? uploadDocument(pollutionFile) : Promise.resolve(''),
+      ]);
+
       const payload = {
         vehicle_information: {
           vehicle_number: addVehicleForm.vehicle_number.trim(),
@@ -294,6 +467,18 @@ const VehicleManagement = () => {
           model: addVehicleForm.model,
           type: addVehicleForm.type,
           last_service_date: addVehicleForm.last_service_date,
+          ownership_mode: addVehicleForm.ownership_mode,
+          work_order_id: addVehicleForm.work_order_id,
+          vendor_id: addVehicleForm.vendor_id,
+          vendor_name: addVehicleForm.vendor_name,
+          insurance_validity: addVehicleForm.insurance_validity,
+          insurance_doc_key: insuranceDocKey,
+          permit_validity: addVehicleForm.permit_validity,
+          permit_doc_key: permitDocKey,
+          pollution_cert_validity: addVehicleForm.pollution_cert_validity,
+          pollution_cert_doc_key: pollutionDocKey,
+          servicing_responsibility: addVehicleForm.servicing_responsibility,
+          last_service_km: addVehicleForm.last_service_km ? Number(addVehicleForm.last_service_km) : undefined,
         },
         assigned_staff: [],
         servise_history: [],
@@ -354,6 +539,10 @@ const VehicleManagement = () => {
       toast.error('Vehicle number is required');
       return;
     }
+    if (addVehicleForm.ownership_mode === 'contract' && !addVehicleForm.work_order_id) {
+      toast.error('Please select a work order');
+      return;
+    }
     setAddVehicleStep(2);
   };
 
@@ -375,110 +564,129 @@ const VehicleManagement = () => {
   );
 
   return (
-    <div className="p-8 space-y-8 animate-in fade-in duration-300 relative">
-      
+    <div className="min-h-screen space-y-7 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
+
       {/* --- HEADER --- */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h1 className="text-3xl font-display font-bold text-foreground">Vehicle Management</h1>
-          <p className="text-muted-foreground mt-1">Onboard fleet, track maintenance, and manage ownership.</p>
+          <p className="text-sm font-bold text-emerald-700">Fleet Operations</p>
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">Vehicle Management</h1>
+          <p className="mt-3 text-base font-medium text-slate-600">Onboard fleet, track maintenance, and manage ownership.</p>
         </div>
-        <div className="flex gap-3">
-          <button 
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
             onClick={handleBulkUpload}
-            className="flex items-center gap-2 border border-border bg-white text-foreground px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+            className="h-11 gap-2 rounded-xl border border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5"
           >
             <Upload className="w-4 h-4" />
             Bulk Upload
-          </button>
-          <button 
+          </Button>
+          <Button
             onClick={handleOpenAddModal}
-            className="flex items-center gap-2 bg-primary text-primary-foreground px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-primary/90 transition-colors shadow-sm"
+            className="h-11 gap-2 rounded-xl bg-[#0D3A35] px-5 font-bold text-white shadow-sm hover:bg-[#092e2a]"
           >
             <Plus className="w-4 h-4" />
             Add Vehicle
-          </button>
+          </Button>
         </div>
       </div>
 
       {/* --- STATS --- */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex items-center justify-between">
-          <div><p className="text-xs text-muted-foreground uppercase font-bold">Total Fleet</p><h3 className="text-2xl font-bold">{stats.total}</h3></div>
-          <div className="p-2 bg-gray-100 rounded-lg"><Car className="w-5 h-5 text-gray-600"/></div>
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-slate-500">Total Fleet</p>
+              <p className="mt-3 text-2xl font-bold text-slate-950">{stats.total}</p>
+            </div>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35] ring-2 ring-[#0D3A35]/10">
+              <Car className="h-5 w-5" />
+            </div>
+          </div>
         </div>
-        <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex items-center justify-between">
-          <div><p className="text-xs text-muted-foreground uppercase font-bold">Active / On Road</p><h3 className="text-2xl font-bold text-green-600">{stats.active}</h3></div>
-          <div className="p-2 bg-green-50 rounded-lg"><Truck className="w-5 h-5 text-green-600"/></div>
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-slate-500">Active / On Road</p>
+              <p className="mt-3 text-2xl font-bold text-emerald-700">{stats.active}</p>
+            </div>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 ring-2 ring-emerald-100">
+              <Truck className="h-5 w-5" />
+            </div>
+          </div>
         </div>
-        <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex items-center justify-between">
-          <div><p className="text-xs text-muted-foreground uppercase font-bold">In Service</p><h3 className="text-2xl font-bold text-orange-600">{stats.inService}</h3></div>
-          <div className="p-2 bg-orange-50 rounded-lg"><Wrench className="w-5 h-5 text-orange-600"/></div>
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-slate-500">In Service</p>
+              <p className="mt-3 text-2xl font-bold text-orange-600">{stats.inService}</p>
+            </div>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-orange-100 text-orange-600 ring-2 ring-orange-100">
+              <Wrench className="h-5 w-5" />
+            </div>
+          </div>
         </div>
       </div>
 
       {/* --- LIST VIEW --- */}
       <div className="space-y-4">
         {/* Search */}
-        <div className="flex gap-4 items-center bg-card border border-border p-3 rounded-lg shadow-sm">
-          <div className="relative flex-1 max-w-md">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <input
-              type="text"
-              placeholder="Search Registration No or Make..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 pr-4 py-2 w-full text-sm border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
-            />
-          </div>
-          <button className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground px-3 py-2 rounded-md hover:bg-muted transition-colors">
-            <Filter className="w-4 h-4" />
-            Filter
-          </button>
+        <div className="relative w-full lg:max-w-md">
+          <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Input
+            placeholder="Search by registration no or make…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="h-12 rounded-xl border-slate-200 bg-slate-50/70 pl-11 text-sm font-semibold shadow-none focus-visible:ring-emerald-100"
+          />
         </div>
 
         {/* Table */}
-        <div className="bg-white border border-border rounded-xl overflow-hidden shadow-sm">
+        <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
           {isLoadingVehicles ? (
-            <div className="p-6 text-sm text-muted-foreground">Loading vehicles…</div>
+            <div className="p-6 text-sm font-medium text-slate-500">Loading vehicles…</div>
           ) : filteredVehicles.length === 0 ? (
-            <div className="p-6 text-sm text-muted-foreground">No vehicles found.</div>
+            <div className="p-6 text-sm font-medium text-slate-500">No vehicles found.</div>
           ) : (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-muted/50 border-b border-border">
-              <tr>
-                <th className="px-6 py-4 text-left font-semibold text-muted-foreground">Registration No</th>
-                <th className="px-6 py-4 text-left font-semibold text-muted-foreground">Type</th>
-                <th className="px-6 py-4 text-left font-semibold text-muted-foreground">Make / Model</th>
-                <th className="px-6 py-4 text-left font-semibold text-muted-foreground">Ownership</th>
-                <th className="px-6 py-4 text-left font-semibold text-muted-foreground">Status</th>
-                <th className="px-6 py-4 text-right font-semibold text-muted-foreground">Vehicle Calendar</th>
-                <th className="px-6 py-4 text-right font-semibold text-muted-foreground">Service Action</th>
+            <thead className="sticky top-0 z-10">
+              <tr className="border-b border-white/10 bg-[#0D3A35] text-white">
+                <th className="px-6 py-4 text-left font-bold">Registration No</th>
+                <th className="px-6 py-4 text-left font-bold">Type</th>
+                <th className="px-6 py-4 text-left font-bold">Make / Model</th>
+                <th className="px-6 py-4 text-left font-bold">Ownership</th>
+                <th className="px-6 py-4 text-left font-bold">Status</th>
+                <th className="px-6 py-4 text-right font-bold">Vehicle Calendar</th>
+                <th className="px-6 py-4 text-right font-bold">Service Action</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-border">
+            <tbody className="divide-y divide-slate-100">
               {filteredVehicles.map((vehicle) => (
                 <>
-                  <tr key={vehicle.id} className="hover:bg-muted/20">
-                    <td className="px-6 py-4 font-medium text-foreground">
+                  <tr key={vehicle.id} className="hover:bg-slate-50/70">
+                    <td className="px-6 py-4 font-bold text-slate-900">
                       {vehicle.registrationNo}
                     </td>
-                    <td className="px-6 py-4">{vehicle.vehicleType}</td>
-                    <td className="px-6 py-4 text-muted-foreground">{vehicle.make} {vehicle.model}</td>
+                    <td className="px-6 py-4 font-medium text-slate-700">{vehicle.vehicleType}</td>
+                    <td className="px-6 py-4 font-medium text-slate-500">{vehicle.make} {vehicle.model}</td>
                     <td className="px-6 py-4">
-                      <span className={cn(
-                        "px-2 py-0.5 rounded-full text-xs border",
-                        vehicle.ownerType === 'Owned' ? "bg-purple-50 border-purple-200 text-purple-700" : "bg-gray-50 border-gray-200 text-gray-700"
-                      )}>
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          'rounded-full border px-2.5 py-1 text-[10px] font-bold',
+                          vehicle.ownerType === 'Owned' ? 'border-[#0D3A35]/20 bg-[#0D3A35]/5 text-[#0D3A35]' : 'border-slate-200 bg-slate-50 text-slate-600'
+                        )}
+                      >
                         {vehicle.ownedByRaw || vehicle.ownerType}
-                      </span>
+                      </Badge>
                     </td>
                     <td className="px-6 py-4">
                       <span className={cn(
-                        "px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1.5 w-fit",
-                        vehicle.status === 'Active' ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"
+                        'flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold',
+                        vehicle.status === 'Active' ? 'bg-emerald-100 text-emerald-700' : 'bg-orange-100 text-orange-700'
                       )}>
-                        <span className={cn("w-1.5 h-1.5 rounded-full", vehicle.status === 'Active' ? "bg-green-600" : "bg-orange-600")} />
+                        <span className={cn('h-1.5 w-1.5 rounded-full', vehicle.status === 'Active' ? 'bg-emerald-600' : 'bg-orange-600')} />
                         {vehicle.status}
                       </span>
                     </td>
@@ -487,7 +695,7 @@ const VehicleManagement = () => {
                         variant="outline"
                         size="sm"
                         onClick={() => setCalendarVehicle(vehicle)}
-                        className="gap-2"
+                        className="gap-2 rounded-lg border-[#0D3A35]/15 font-bold text-[#0D3A35] hover:bg-[#0D3A35]/5"
                       >
                         <CalendarDays className="h-4 w-4" />
                         Calendar
@@ -495,18 +703,18 @@ const VehicleManagement = () => {
                     </td>
                     <td className="px-6 py-4 text-right">
                       {vehicle.status === 'Active' ? (
-                        <button 
+                        <button
                           onClick={() => toggleServiceStatus(vehicle.id)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-orange-50 text-orange-700 hover:bg-orange-100 border border-orange-200 transition-colors"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs font-bold text-orange-700 transition-colors hover:bg-orange-100"
                           title="Send to Service Center"
                         >
                           <Wrench className="w-3.5 h-3.5" />
                           Service
                         </button>
                       ) : (
-                        <button 
+                        <button
                           onClick={() => toggleServiceStatus(vehicle.id)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 transition-colors"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 transition-colors hover:bg-emerald-100"
                           title="Mark as Back from Service"
                         >
                           <CheckCircle2 className="w-3.5 h-3.5" />
@@ -516,60 +724,58 @@ const VehicleManagement = () => {
                     </td>
                   </tr>
 
-                  <tr className="bg-muted/10">
+                  <tr className="bg-slate-50/60">
                     <td colSpan={7} className="px-6 py-3">
-                      <div className="flex flex-col gap-2">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <div className="inline-flex items-center gap-2 text-sm">
-                            <UserRound className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-muted-foreground">Assigned to:</span>
-                            <span className="font-medium text-foreground">{getAssignedStaffName(vehicle.assignedStaff)}</span>
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                setAssignVehicle(vehicle);
-                                setSelectedStaffId(getAssignedStaffId(vehicle.assignedStaff));
-                                await fetchStaffOptions();
-                              }}
-                              className="text-sm font-medium text-primary hover:underline"
-                            >
-                              Edit
-                            </button>
-                          </div>
-
-                          <Separator orientation="vertical" className="h-4" />
-
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="inline-flex items-center gap-2 text-sm">
+                          <UserRound className="h-4 w-4 text-slate-400" />
+                          <span className="font-medium text-slate-500">Assigned to:</span>
+                          <span className="font-bold text-slate-800">{getAssignedStaffName(vehicle.assignedStaff)}</span>
                           <button
                             type="button"
-                            onClick={() => setFuelLogsVehicle(vehicle)}
-                            className="inline-flex items-center gap-2 text-sm font-medium text-foreground hover:text-primary"
+                            onClick={async () => {
+                              setAssignVehicle(vehicle);
+                              setSelectedStaffId(getAssignedStaffId(vehicle.assignedStaff));
+                              await fetchStaffOptions();
+                            }}
+                            className="text-sm font-bold text-[#0D3A35] hover:underline"
                           >
-                            <Fuel className="h-4 w-4 text-muted-foreground" />
-                            View fuel logs
-                          </button>
-
-                          <Separator orientation="vertical" className="h-4" />
-
-                          <button
-                            type="button"
-                            onClick={() => setPapersVehicle(vehicle)}
-                            className="inline-flex items-center gap-2 text-sm font-medium text-foreground hover:text-primary"
-                          >
-                            <FileText className="h-4 w-4 text-muted-foreground" />
-                            View vehicle papers
-                          </button>
-
-                          <Separator orientation="vertical" className="h-4" />
-
-                          <button
-                            type="button"
-                            onClick={() => setServiceLogsVehicle(vehicle)}
-                            className="inline-flex items-center gap-2 text-sm font-medium text-foreground hover:text-primary"
-                          >
-                            <Wrench className="h-4 w-4 text-muted-foreground" />
-                            Servicing logs
+                            Edit
                           </button>
                         </div>
+
+                        <Separator orientation="vertical" className="h-4" />
+
+                        <button
+                          type="button"
+                          onClick={() => setFuelLogsVehicle(vehicle)}
+                          className="inline-flex items-center gap-2 text-sm font-bold text-slate-700 hover:text-[#0D3A35]"
+                        >
+                          <Fuel className="h-4 w-4 text-slate-400" />
+                          View fuel logs
+                        </button>
+
+                        <Separator orientation="vertical" className="h-4" />
+
+                        <button
+                          type="button"
+                          onClick={() => setPapersVehicle(vehicle)}
+                          className="inline-flex items-center gap-2 text-sm font-bold text-slate-700 hover:text-[#0D3A35]"
+                        >
+                          <FileText className="h-4 w-4 text-slate-400" />
+                          View vehicle papers
+                        </button>
+
+                        <Separator orientation="vertical" className="h-4" />
+
+                        <button
+                          type="button"
+                          onClick={() => setServiceLogsVehicle(vehicle)}
+                          className="inline-flex items-center gap-2 text-sm font-bold text-slate-700 hover:text-[#0D3A35]"
+                        >
+                          <Wrench className="h-4 w-4 text-slate-400" />
+                          Servicing logs
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -577,69 +783,73 @@ const VehicleManagement = () => {
               ))}
             </tbody>
           </table>
+          </div>
           )}
         </div>
       </div>
 
       {/* Fuel Logs Dialog */}
       <Dialog open={!!fuelLogsVehicle} onOpenChange={(open) => !open && setFuelLogsVehicle(null)}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>Fuel Logs</DialogTitle>
+        <DialogContent className="max-w-3xl rounded-2xl border-0 p-0">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="text-lg font-bold text-white">Fuel Logs</DialogTitle>
+            <p className="text-xs font-medium text-white/70">
+              {fuelLogsVehicle?.registrationNo} • {fuelLogsVehicle?.make} {fuelLogsVehicle?.model}
+            </p>
           </DialogHeader>
-          <div className="text-sm text-muted-foreground">
-            {fuelLogsVehicle?.registrationNo} • {fuelLogsVehicle?.make} {fuelLogsVehicle?.model}
-          </div>
-          <div className="border border-border rounded-lg overflow-hidden">
-            <div className="bg-muted/40 px-4 py-3 text-sm font-medium">Entries</div>
-            <ScrollArea className="max-h-[420px]">
-              <table className="w-full text-sm">
-                <thead className="bg-background border-b border-border sticky top-0">
-                  <tr>
-                    <th className="px-4 py-3 text-left font-semibold text-muted-foreground">Date</th>
-                    <th className="px-4 py-3 text-left font-semibold text-muted-foreground">Volume</th>
-                    <th className="px-4 py-3 text-left font-semibold text-muted-foreground">Type</th>
-                    <th className="px-4 py-3 text-left font-semibold text-muted-foreground">Amount (Rs)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {(fuelLogsVehicle?.fuelLogs ?? []).length === 0 ? (
+          <div className="px-6 py-5">
+            <div className="overflow-hidden rounded-xl border border-slate-200">
+              <ScrollArea className="max-h-[420px]">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-slate-50">
                     <tr>
-                      <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground">No fuel logs available.</td>
+                      <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Date</th>
+                      <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Volume</th>
+                      <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Type</th>
+                      <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Amount (Rs)</th>
                     </tr>
-                  ) : (
-                    (fuelLogsVehicle?.fuelLogs ?? []).map((log, idx) => {
-                      const row = normalizeFuelLog(log);
-                      return (
-                        <tr key={idx} className="hover:bg-muted/20">
-                          <td className="px-4 py-3">{row.date || '-'}</td>
-                          <td className="px-4 py-3">{row.volume !== '' ? row.volume : '-'}</td>
-                          <td className="px-4 py-3">{row.type || '-'}</td>
-                          <td className="px-4 py-3">{row.amount !== '' ? row.amount : '-'}</td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </ScrollArea>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(fuelLogsVehicle?.fuelLogs ?? []).length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="px-4 py-6 text-center font-medium text-slate-400">No fuel logs available.</td>
+                      </tr>
+                    ) : (
+                      (fuelLogsVehicle?.fuelLogs ?? []).map((log, idx) => {
+                        const row = normalizeFuelLog(log);
+                        return (
+                          <tr key={idx} className="hover:bg-slate-50/70">
+                            <td className="px-4 py-3 font-medium text-slate-700">{row.date || '-'}</td>
+                            <td className="px-4 py-3 font-medium text-slate-700">{row.volume !== '' ? row.volume : '-'}</td>
+                            <td className="px-4 py-3 font-medium text-slate-700">{row.type || '-'}</td>
+                            <td className="px-4 py-3 font-medium text-slate-700">{row.amount !== '' ? row.amount : '-'}</td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </ScrollArea>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
 
       {/* Vehicle Papers Dialog */}
       <Dialog open={!!papersVehicle} onOpenChange={(open) => !open && setPapersVehicle(null)}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Vehicle Papers</DialogTitle>
+        <DialogContent className="max-w-2xl rounded-2xl border-0 p-0">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="text-lg font-bold text-white">Vehicle Papers</DialogTitle>
+            <p className="text-xs font-medium text-white/70">
+              {papersVehicle?.registrationNo} • {papersVehicle?.make} {papersVehicle?.model}
+            </p>
           </DialogHeader>
-          <div className="text-sm text-muted-foreground">
-            {papersVehicle?.registrationNo} • {papersVehicle?.make} {papersVehicle?.model}
-          </div>
-          <div className="border border-border rounded-lg p-4 bg-muted/10">
-            <div className="text-sm font-medium text-foreground">Documents</div>
-            <div className="text-sm text-muted-foreground mt-1">
-              No papers available from the backend response yet.
+          <div className="px-6 py-5">
+            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+              <div className="text-sm font-bold text-slate-800">Documents</div>
+              <div className="mt-1 text-sm font-medium text-slate-500">
+                No papers available from the backend response yet.
+              </div>
             </div>
           </div>
         </DialogContent>
@@ -647,50 +857,53 @@ const VehicleManagement = () => {
 
       {/* Servicing Logs Dialog */}
       <Dialog open={!!serviceLogsVehicle} onOpenChange={(open) => !open && setServiceLogsVehicle(null)}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>Servicing Logs</DialogTitle>
+        <DialogContent className="max-w-3xl rounded-2xl border-0 p-0">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="text-lg font-bold text-white">Servicing Logs</DialogTitle>
+            <p className="text-xs font-medium text-white/70">{serviceLogsVehicle?.registrationNo}</p>
           </DialogHeader>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="border border-border rounded-lg p-4 bg-muted/10">
-              <div className="text-sm font-medium text-foreground">Last servicing date</div>
-              <div className="text-sm text-muted-foreground mt-1">{serviceLogsVehicle?.lastServiceDate || '-'}</div>
+          <div className="space-y-4 px-6 py-5">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Last servicing date</div>
+                <div className="mt-1 text-sm font-bold text-slate-800">{serviceLogsVehicle?.lastServiceDate || '-'}</div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Assigned to</div>
+                <div className="mt-1 text-sm font-bold text-slate-800">{getAssignedStaffName(serviceLogsVehicle?.assignedStaff ?? [])}</div>
+              </div>
             </div>
-            <div className="border border-border rounded-lg p-4 bg-muted/10">
-              <div className="text-sm font-medium text-foreground">Assigned to</div>
-              <div className="text-sm text-muted-foreground mt-1">{getAssignedStaffName(serviceLogsVehicle?.assignedStaff ?? [])}</div>
+            <div className="overflow-hidden rounded-xl border border-slate-200">
+              <div className="bg-slate-50 px-4 py-3 text-xs font-bold uppercase tracking-wide text-slate-500">Service history</div>
+              <ScrollArea className="max-h-[360px]">
+                {(serviceLogsVehicle?.serviceHistory ?? []).length === 0 ? (
+                  <div className="p-6 text-sm font-medium text-slate-400">No service history available.</div>
+                ) : (
+                  <div className="space-y-2 p-4">
+                    {(serviceLogsVehicle?.serviceHistory ?? []).map((item, idx) => (
+                      <div key={idx} className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div className="text-sm font-bold text-slate-800">{item?.date || item?.created_at || `Entry ${idx + 1}`}</div>
+                        <div className="mt-1 break-words text-xs font-medium text-slate-500">{typeof item === 'string' ? item : JSON.stringify(item)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </ScrollArea>
             </div>
-          </div>
-          <div className="border border-border rounded-lg overflow-hidden">
-            <div className="bg-muted/40 px-4 py-3 text-sm font-medium">Service history</div>
-            <ScrollArea className="max-h-[360px]">
-              {(serviceLogsVehicle?.serviceHistory ?? []).length === 0 ? (
-                <div className="p-6 text-sm text-muted-foreground">No service history available.</div>
-              ) : (
-                <div className="p-4 space-y-2">
-                  {(serviceLogsVehicle?.serviceHistory ?? []).map((item, idx) => (
-                    <div key={idx} className="border border-border rounded-lg p-3 bg-background">
-                      <div className="text-sm text-foreground">{formatDateDDMMYYYY(item?.date || item?.created_at, `Entry ${idx + 1}`)}</div>
-                      <div className="text-xs text-muted-foreground mt-1 break-words">{typeof item === 'string' ? item : JSON.stringify(item)}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </ScrollArea>
           </div>
         </DialogContent>
       </Dialog>
 
       {/* Vehicle Calendar Dialog */}
       <Dialog open={!!calendarVehicle} onOpenChange={(open) => !open && setCalendarVehicle(null)}>
-        <DialogContent className="max-w-5xl">
-          <DialogHeader>
-            <DialogTitle>Vehicle Calendar (6 months)</DialogTitle>
+        <DialogContent className="max-w-5xl rounded-2xl border-0 p-0">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="text-lg font-bold text-white">Vehicle Calendar (6 months)</DialogTitle>
+            <p className="text-xs font-medium text-white/70">
+              {calendarVehicle?.registrationNo} • {calendarVehicle?.make} {calendarVehicle?.model}
+            </p>
           </DialogHeader>
-          <div className="text-sm text-muted-foreground">
-            {calendarVehicle?.registrationNo} • {calendarVehicle?.make} {calendarVehicle?.model}
-          </div>
-
+          <div className="px-6 py-5">
           {(() => {
             const months = getLastSixMonths();
             const entries = (calendarVehicle?.workCalendar ?? []).map(normalizeCalendarEntry);
@@ -713,30 +926,30 @@ const VehicleManagement = () => {
 
                 {months.map((m) => (
                   <TabsContent key={m.key} value={m.key} className="mt-4">
-                    <div className="border border-border rounded-lg overflow-hidden">
-                      <div className="bg-muted/40 px-4 py-3 text-sm font-medium">Work entries</div>
+                    <div className="overflow-hidden rounded-xl border border-slate-200">
+                      <div className="bg-slate-50 px-4 py-3 text-xs font-bold uppercase tracking-wide text-slate-500">Work entries</div>
                       <ScrollArea className="max-h-[420px]">
                         <table className="w-full text-sm">
-                          <thead className="bg-background border-b border-border sticky top-0">
+                          <thead className="sticky top-0 bg-slate-50">
                             <tr>
-                              <th className="px-4 py-3 text-left font-semibold text-muted-foreground">Location</th>
-                              <th className="px-4 py-3 text-left font-semibold text-muted-foreground">Distance traveled</th>
-                              <th className="px-4 py-3 text-left font-semibold text-muted-foreground">Activity type</th>
-                              <th className="px-4 py-3 text-left font-semibold text-muted-foreground">Total area</th>
+                              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Location</th>
+                              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Distance traveled</th>
+                              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Activity type</th>
+                              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Total area</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-border">
+                          <tbody className="divide-y divide-slate-100">
                             {(byMonth[m.key] ?? []).length === 0 ? (
                               <tr>
-                                <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground">No entries for this month.</td>
+                                <td colSpan={4} className="px-4 py-6 text-center font-medium text-slate-400">No entries for this month.</td>
                               </tr>
                             ) : (
                               (byMonth[m.key] ?? []).map((e, idx) => (
-                                <tr key={idx} className="hover:bg-muted/20">
-                                  <td className="px-4 py-3">{e.location || '-'}</td>
-                                  <td className="px-4 py-3">{e.distanceTraveled !== '' ? e.distanceTraveled : '-'}</td>
-                                  <td className="px-4 py-3">{e.activityType || '-'}</td>
-                                  <td className="px-4 py-3">{e.totalArea !== '' ? e.totalArea : '-'}</td>
+                                <tr key={idx} className="hover:bg-slate-50/70">
+                                  <td className="px-4 py-3 font-medium text-slate-700">{e.location || '-'}</td>
+                                  <td className="px-4 py-3 font-medium text-slate-700">{e.distanceTraveled !== '' ? e.distanceTraveled : '-'}</td>
+                                  <td className="px-4 py-3 font-medium text-slate-700">{e.activityType || '-'}</td>
+                                  <td className="px-4 py-3 font-medium text-slate-700">{e.totalArea !== '' ? e.totalArea : '-'}</td>
                                 </tr>
                               ))
                             )}
@@ -749,65 +962,63 @@ const VehicleManagement = () => {
               </Tabs>
             );
           })()}
+          </div>
         </DialogContent>
       </Dialog>
 
       {/* Assign Driver Dialog */}
       <Dialog open={!!assignVehicle} onOpenChange={(open) => !open && setAssignVehicle(null)}>
-        <DialogContent className="max-w-xl">
-          <DialogHeader>
-            <DialogTitle>Assign Driver</DialogTitle>
+        <DialogContent className="max-w-xl rounded-2xl border-0 p-0">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="text-lg font-bold text-white">Assign Driver</DialogTitle>
+            <p className="text-xs font-medium text-white/70">
+              {assignVehicle?.registrationNo} • Current: {getAssignedStaffName(assignVehicle?.assignedStaff ?? [])}
+            </p>
           </DialogHeader>
-          <div className="text-sm text-muted-foreground">
-            {assignVehicle?.registrationNo} • Current: {getAssignedStaffName(assignVehicle?.assignedStaff ?? [])}
-          </div>
-          <div className="space-y-3">
-            <div className="text-sm font-medium">Select staff</div>
-            <select
-              value={selectedStaffId}
-              onChange={(e) => setSelectedStaffId(e.target.value)}
-              className="w-full px-3 py-2.5 border border-input rounded-lg text-sm bg-background"
-              disabled={isLoadingStaff}
-            >
-              <option value="">Select driver</option>
-              {staffOptions.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
+          <div className="space-y-4 px-6 py-5">
+            <Field label="Select staff">
+              <SelectField
+                value={selectedStaffId}
+                onChange={setSelectedStaffId}
+                disabled={isLoadingStaff}
+                placeholder="Select driver"
+                options={staffOptions.map((s) => ({ value: s.id, label: s.name }))}
+              />
+            </Field>
 
-            <div className="border border-border rounded-lg p-4 bg-muted/10">
+            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
               {(() => {
                 if (!selectedStaffId) {
-                  return <div className="text-sm text-muted-foreground">Select a staff member to view details.</div>;
+                  return <div className="text-sm font-medium text-slate-500">Select a staff member to view details.</div>;
                 }
 
                 const selected = staffList.find((s) => (s?.staff_id || s?.id) === selectedStaffId);
                 const info = selected?.staff_information;
-                const name = info?.staff_name || info?.name || info?.full_name || selected?.name || selected?.full_name || selectedStaffId;
-                const phone = info?.staff_phone || selected?.staff_phone || '-';
-                const department = info?.staff_department || selected?.staff_department || '-';
-                const designation = info?.staff_designation || selected?.staff_designation || '-';
-                const employmentType = info?.employment_type || selected?.employment_type || '-';
+                const name = safeText(info?.staff_name || info?.name || info?.full_name || selected?.name || selected?.full_name, selectedStaffId);
+                const phone = safeText(info?.staff_phone || selected?.staff_phone);
+                const department = safeText(info?.staff_department || selected?.staff_department);
+                const designation = safeText(info?.staff_designation || selected?.staff_designation);
+                const employmentType = safeText(info?.employment_type || selected?.employment_type);
 
                 return (
-                  <div className="space-y-2">
-                    <div className="text-sm font-medium text-foreground">{name}</div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                      <div className="rounded-md border border-border bg-background px-3 py-2">
-                        <div className="text-xs text-muted-foreground">Phone</div>
-                        <div className="font-medium text-foreground mt-0.5">{phone}</div>
+                  <div className="space-y-3">
+                    <div className="text-sm font-bold text-slate-900">{name}</div>
+                    <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+                      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                        <div className="text-xs font-bold uppercase tracking-wide text-slate-400">Phone</div>
+                        <div className="mt-0.5 font-bold text-slate-800">{phone}</div>
                       </div>
-                      <div className="rounded-md border border-border bg-background px-3 py-2">
-                        <div className="text-xs text-muted-foreground">Employment</div>
-                        <div className="font-medium text-foreground mt-0.5">{employmentType}</div>
+                      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                        <div className="text-xs font-bold uppercase tracking-wide text-slate-400">Employment</div>
+                        <div className="mt-0.5 font-bold text-slate-800">{employmentType}</div>
                       </div>
-                      <div className="rounded-md border border-border bg-background px-3 py-2">
-                        <div className="text-xs text-muted-foreground">Department</div>
-                        <div className="font-medium text-foreground mt-0.5">{department}</div>
+                      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                        <div className="text-xs font-bold uppercase tracking-wide text-slate-400">Department</div>
+                        <div className="mt-0.5 font-bold text-slate-800">{department}</div>
                       </div>
-                      <div className="rounded-md border border-border bg-background px-3 py-2">
-                        <div className="text-xs text-muted-foreground">Designation</div>
-                        <div className="font-medium text-foreground mt-0.5">{designation}</div>
+                      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                        <div className="text-xs font-bold uppercase tracking-wide text-slate-400">Designation</div>
+                        <div className="mt-0.5 font-bold text-slate-800">{designation}</div>
                       </div>
                     </div>
                   </div>
@@ -815,10 +1026,11 @@ const VehicleManagement = () => {
               })()}
             </div>
           </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setAssignVehicle(null)}>Cancel</Button>
+          <DialogFooter className="border-t border-slate-100 bg-slate-50/70 px-6 py-4">
+            <Button variant="outline" className="rounded-xl font-bold" onClick={() => setAssignVehicle(null)}>Cancel</Button>
             <Button
               disabled={isSubmittingAssignment}
+              className="rounded-xl bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]"
               onClick={() => {
                 (async () => {
                   if (!assignVehicle) return;
@@ -830,9 +1042,9 @@ const VehicleManagement = () => {
                   const selected = staffList.find((s) => (s?.staff_id || s?.id) === selectedStaffId);
                   const info = selected?.staff_information;
 
-                  const staff_contact = info?.staff_phone || selected?.staff_phone || '';
-                  const stadd_department = info?.staff_department || selected?.staff_department || '';
-                  const staff_designation = info?.staff_designation || selected?.staff_designation || '';
+                  const staff_contact = safeText(info?.staff_phone || selected?.staff_phone, '');
+                  const stadd_department = safeText(info?.staff_department || selected?.staff_department, '');
+                  const staff_designation = safeText(info?.staff_designation || selected?.staff_designation, '');
 
                   if (!staff_contact || !stadd_department || !staff_designation) {
                     toast.error('Selected staff is missing contact/department/designation');
@@ -890,195 +1102,270 @@ const VehicleManagement = () => {
             >
               {isSubmittingAssignment ? 'Saving…' : 'Save'}
             </Button>
-          </div>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* --- ADD VEHICLE MODAL (Matching Screenshot) --- */}
-      {isAddModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-background w-full max-w-lg rounded-xl shadow-lg border border-border overflow-hidden animate-in zoom-in-95 duration-200">
-            
-            {/* Header */}
-            <div className="px-6 py-4 border-b border-border flex justify-between items-center bg-white">
-              <div>
-                <h3 className="font-bold text-lg text-foreground">Add New Vehicle</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">Step {addVehicleStep} of 2</p>
-              </div>
-              <button onClick={handleCloseAddModal} className="text-muted-foreground hover:text-foreground">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+      {/* --- ADD VEHICLE MODAL --- */}
+      <Dialog open={isAddModalOpen} onOpenChange={(open) => !open && handleCloseAddModal()}>
+        <DialogContent className="max-w-lg rounded-2xl border-0 p-0 max-h-[90vh] overflow-y-auto">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-white">
+            <DialogTitle className="flex items-center gap-2 text-lg font-bold text-white">
+              <Plus className="h-5 w-5" />
+              Add New Vehicle
+            </DialogTitle>
+            <p className="text-xs font-medium text-white/70">Step {addVehicleStep} of 2</p>
+          </DialogHeader>
 
-            {/* Form */}
-            <form
-              id="add-vehicle-form"
-              className="p-6 space-y-5"
-            >
-              
-              {addVehicleStep === 1 ? (
-                <>
-                  <div className="grid grid-cols-2 gap-5">
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-foreground">Vehicle Number *</label>
-                      <input
-                        required
-                        value={addVehicleForm.vehicle_number}
-                        onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, vehicle_number: e.target.value }))}
-                        className="w-full px-3 py-2.5 border border-input rounded-lg text-sm bg-gray-50/50"
-                        placeholder="MH12AB1234"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-foreground">Owned By</label>
-                      <select
-                        value={addVehicleForm.owned_by}
-                        onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, owned_by: e.target.value }))}
-                        className="w-full px-3 py-2.5 border border-input rounded-lg text-sm bg-white"
-                      >
-                        <option value="SBR">SBR</option>
-                        <option value="Rented">Rented</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-5">
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-foreground">Company</label>
-                      <input
-                        value={addVehicleForm.company}
-                        onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, company: e.target.value }))}
-                        className="w-full px-3 py-2.5 border border-input rounded-lg text-sm bg-gray-50/50"
-                        placeholder="Tata, Mahindra, etc."
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-foreground">Model</label>
-                      <input
-                        value={addVehicleForm.model}
-                        onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, model: e.target.value }))}
-                        className="w-full px-3 py-2.5 border border-input rounded-lg text-sm bg-gray-50/50"
-                        placeholder="e.g. Prima"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-foreground">Type</label>
-                    <select
-                      value={addVehicleForm.type}
-                      onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, type: e.target.value }))}
-                      className="w-full px-3 py-2.5 border border-input rounded-lg text-sm bg-white"
+          <div className="space-y-5 px-6 py-5">
+            {addVehicleStep === 1 ? (
+              <>
+                <Field label="Ownership">
+                  <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50/70 p-1">
+                    <button
+                      type="button"
+                      onClick={() => handleOwnershipModeChange('self_owned')}
+                      className={cn(
+                        'flex-1 rounded-lg px-3 py-2 text-sm font-bold transition-colors',
+                        addVehicleForm.ownership_mode === 'self_owned' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-600 hover:bg-white'
+                      )}
                     >
-                      <option value="Tractor">Tractor</option>
-                      <option value="Tipper">Tipper</option>
-                      <option value="Harvester">Harvester</option>
-                      <option value="Truck">Truck</option>
-                      <option value="Pickup">Pickup</option>
-                      <option value="Car">Car</option>
-                      <option value="Other">Other</option>
-                    </select>
+                      Self-Owned
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleOwnershipModeChange('contract')}
+                      className={cn(
+                        'flex-1 rounded-lg px-3 py-2 text-sm font-bold transition-colors',
+                        addVehicleForm.ownership_mode === 'contract' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-600 hover:bg-white'
+                      )}
+                    >
+                      Contract / Rental
+                    </button>
                   </div>
-                </>
-              ) : (
-                <>
-                  <div className="border border-border rounded-lg p-4 bg-white space-y-4">
+                </Field>
+
+                {addVehicleForm.ownership_mode === 'contract' && (
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label="Vendor" required>
+                      <SelectField
+                        value={addVehicleForm.vendor_id}
+                        onChange={handleVendorSelect}
+                        disabled={isLoadingVendors}
+                        placeholder={isLoadingVendors ? 'Loading…' : 'Select vendor'}
+                        options={vendorOptions.map((v) => ({ value: v.vendor_id, label: v.vendor_name }))}
+                      />
+                    </Field>
+                    <Field label="Work Order" required>
+                      <SelectField
+                        value={addVehicleForm.work_order_id}
+                        onChange={handleWorkOrderSelect}
+                        disabled={isLoadingVendorOrders || !addVehicleForm.vendor_id}
+                        placeholder={isLoadingVendorOrders ? 'Loading…' : !addVehicleForm.vendor_id ? 'Select a vendor first' : 'Select order'}
+                        options={vendorOrders.map((o) => ({ value: o.order_number, label: `${o.order_number} (${o.order_type} · ${o.status})` }))}
+                      />
+                      {addVehicleForm.vendor_id && vendorOrders.length === 0 && !isLoadingVendorOrders && (
+                        <p className="text-xs font-semibold text-amber-600">No live orders found for this vendor.</p>
+                      )}
+                    </Field>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-4">
+                  <Field label="Vehicle Number" required>
+                    <Input
+                      required
+                      value={addVehicleForm.vehicle_number}
+                      onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, vehicle_number: e.target.value }))}
+                      className="rounded-xl border-slate-200 bg-slate-50/70 font-semibold"
+                      placeholder="MH12AB1234"
+                    />
+                  </Field>
+                  <Field label="Owned By">
+                    <Input
+                      readOnly
+                      value={addVehicleForm.owned_by || (addVehicleForm.ownership_mode === 'contract' ? 'Select a vendor' : 'SBR')}
+                      className="rounded-xl border-slate-200 bg-slate-100 font-semibold text-slate-600"
+                    />
+                  </Field>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <Field label="Company">
+                    <Input
+                      value={addVehicleForm.company}
+                      onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, company: e.target.value }))}
+                      className="rounded-xl border-slate-200 bg-slate-50/70 font-semibold"
+                      placeholder="Tata, Mahindra, etc."
+                    />
+                  </Field>
+                  <Field label="Model">
+                    <Input
+                      value={addVehicleForm.model}
+                      onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, model: e.target.value }))}
+                      className="rounded-xl border-slate-200 bg-slate-50/70 font-semibold"
+                      placeholder="e.g. Prima"
+                    />
+                  </Field>
+                </div>
+
+                <Field label="Type">
+                  <SelectField
+                    value={addVehicleForm.type}
+                    onChange={(v) => setAddVehicleForm((prev) => ({ ...prev, type: v }))}
+                    placeholder="Select type"
+                    options={['Tractor', 'Tipper', 'Harvester', 'Truck', 'Pickup', 'Car', 'Other'].map((t) => ({ value: t, label: t }))}
+                  />
+                </Field>
+              </>
+            ) : (
+              <>
+                <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50/40 p-4">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-[#0D3A35]" />
                     <div>
-                      <p className="text-sm font-medium text-foreground">Documents (Optional)</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">Upload papers and servicing details.</p>
+                      <p className="text-sm font-bold text-slate-800">Compliance Documents</p>
+                      <p className="text-xs font-medium text-slate-500">Validity dates and papers for insurance, permit, and pollution certificate.</p>
                     </div>
+                  </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-foreground">Registration Paper</label>
-                        <input
-                          type="file"
-                          accept="image/*,.pdf"
-                          className="w-full px-3 py-2 border border-input rounded-lg text-sm bg-background file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground hover:file:bg-muted/80"
-                        />
-                      </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <Field label="Insurance Validity">
+                      <Input
+                        type="date"
+                        value={addVehicleForm.insurance_validity}
+                        onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, insurance_validity: e.target.value }))}
+                        className="rounded-xl border-slate-200 bg-white font-semibold"
+                      />
+                    </Field>
+                    <Field label="Insurance Document">
+                      <input
+                        type="file"
+                        accept="image/*,.pdf"
+                        onChange={(e) => setInsuranceFile(e.target.files?.[0] || null)}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-[#0D3A35]/10 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-[#0D3A35] hover:file:bg-[#0D3A35]/15"
+                      />
+                    </Field>
 
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-foreground">Pollution Paper</label>
-                        <input
-                          type="file"
-                          accept="image/*,.pdf"
-                          className="w-full px-3 py-2 border border-input rounded-lg text-sm bg-background file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground hover:file:bg-muted/80"
-                        />
-                      </div>
+                    <Field label="Permit Validity">
+                      <Input
+                        type="date"
+                        value={addVehicleForm.permit_validity}
+                        onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, permit_validity: e.target.value }))}
+                        className="rounded-xl border-slate-200 bg-white font-semibold"
+                      />
+                    </Field>
+                    <Field label="Permit Document">
+                      <input
+                        type="file"
+                        accept="image/*,.pdf"
+                        onChange={(e) => setPermitFile(e.target.files?.[0] || null)}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-[#0D3A35]/10 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-[#0D3A35] hover:file:bg-[#0D3A35]/15"
+                      />
+                    </Field>
 
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-foreground">Insurance Paper</label>
-                        <input
-                          type="file"
-                          accept="image/*,.pdf"
-                          className="w-full px-3 py-2 border border-input rounded-lg text-sm bg-background file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground hover:file:bg-muted/80"
-                        />
-                      </div>
+                    <Field label="Pollution Certificate Validity">
+                      <Input
+                        type="date"
+                        value={addVehicleForm.pollution_cert_validity}
+                        onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, pollution_cert_validity: e.target.value }))}
+                        className="rounded-xl border-slate-200 bg-white font-semibold"
+                      />
+                    </Field>
+                    <Field label="Pollution Certificate Document">
+                      <input
+                        type="file"
+                        accept="image/*,.pdf"
+                        onChange={(e) => setPollutionFile(e.target.files?.[0] || null)}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-[#0D3A35]/10 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-[#0D3A35] hover:file:bg-[#0D3A35]/15"
+                      />
+                    </Field>
+                  </div>
+                </div>
 
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-foreground">Last Servicing Date</label>
-                        <input
+                <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50/40 p-4">
+                  <div>
+                    <p className="text-sm font-bold text-slate-800">Servicing & Maintenance</p>
+                    <p className="text-xs font-medium text-slate-500">Who's responsible for keeping this vehicle serviced.</p>
+                  </div>
+
+                  <div className="flex max-w-xs items-center gap-1 rounded-xl border border-slate-200 bg-white p-1">
+                    <button
+                      type="button"
+                      onClick={() => setAddVehicleForm((prev) => ({ ...prev, servicing_responsibility: 'vendor' }))}
+                      className={cn(
+                        'flex-1 rounded-lg px-3 py-2 text-sm font-bold transition-colors',
+                        addVehicleForm.servicing_responsibility === 'vendor' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-600 hover:bg-slate-50'
+                      )}
+                    >
+                      Vendor
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAddVehicleForm((prev) => ({ ...prev, servicing_responsibility: 'SBR' }))}
+                      className={cn(
+                        'flex-1 rounded-lg px-3 py-2 text-sm font-bold transition-colors',
+                        addVehicleForm.servicing_responsibility === 'SBR' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-600 hover:bg-slate-50'
+                      )}
+                    >
+                      SBR
+                    </button>
+                  </div>
+
+                  {addVehicleForm.servicing_responsibility === 'SBR' && (
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      <Field label="Last Servicing Date" required>
+                        <Input
                           type="date"
                           value={addVehicleForm.last_service_date}
                           onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, last_service_date: e.target.value }))}
-                          className="w-full px-3 py-2 border border-input rounded-lg text-sm bg-background"
+                          className="rounded-xl border-slate-200 bg-white font-semibold"
                         />
-                      </div>
+                      </Field>
+                      <Field label="Last Servicing KM">
+                        <Input
+                          type="number"
+                          min="0"
+                          value={addVehicleForm.last_service_km}
+                          onChange={(e) => setAddVehicleForm((prev) => ({ ...prev, last_service_km: e.target.value }))}
+                          placeholder="e.g. 42500"
+                          className="rounded-xl border-slate-200 bg-white font-semibold"
+                        />
+                      </Field>
                     </div>
-                  </div>
-                </>
-              )}
-
-              <div className="pt-4 flex justify-end gap-3">
-                <button 
-                  type="button" 
-                  onClick={handleCloseAddModal} 
-                  className="px-5 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-                >
-                  Cancel
-                </button>
-
-                {addVehicleStep === 2 && (
-                  <button
-                    type="button"
-                    onClick={() => setAddVehicleStep(1)}
-                    className="px-5 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-                  >
-                    Back
-                  </button>
-                )}
-
-                {addVehicleStep === 1 ? (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      handleNextVehicleStep();
-                    }}
-                    className="px-5 py-2.5 text-sm font-medium text-white bg-[#1e293b] rounded-lg hover:bg-[#0f172a] transition-colors"
-                  >
-                    Next
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={submitAddVehicle}
-                    disabled={isSubmittingAddVehicle}
-                    className={cn(
-                      "px-5 py-2.5 text-sm font-medium text-white bg-[#1e293b] rounded-lg hover:bg-[#0f172a] transition-colors",
-                      isSubmittingAddVehicle && "opacity-60 cursor-not-allowed"
-                    )}
-                  >
-                    {isSubmittingAddVehicle ? 'Adding…' : 'Add Vehicle'}
-                  </button>
-                )}
-              </div>
-            </form>
+                  )}
+                </div>
+              </>
+            )}
           </div>
-        </div>
-      )}
+
+          <DialogFooter className="border-t border-slate-100 bg-slate-50/70 px-6 py-4">
+            <Button variant="outline" className="rounded-xl font-bold" onClick={handleCloseAddModal}>
+              Cancel
+            </Button>
+
+            {addVehicleStep === 2 && (
+              <Button variant="outline" className="rounded-xl font-bold" onClick={() => setAddVehicleStep(1)}>
+                Back
+              </Button>
+            )}
+
+            {addVehicleStep === 1 ? (
+              <Button className="rounded-xl bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]" onClick={handleNextVehicleStep}>
+                Next
+              </Button>
+            ) : (
+              <Button
+                disabled={isSubmittingAddVehicle}
+                className="rounded-xl bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]"
+                onClick={submitAddVehicle}
+              >
+                {isSubmittingAddVehicle ? 'Adding…' : 'Add Vehicle'}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
     </div>
   );

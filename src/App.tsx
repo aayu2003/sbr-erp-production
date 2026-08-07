@@ -28,6 +28,7 @@ import StaffOnboarding from "./pages/StaffOnboarding";
 import ManPowerRequisition from "./pages/ManPowerRequisition";
 import AdminMrfApproval from "./pages/adminmrfapproval";
 import LogisticsManagement from "./pages/LogisticsManagement";
+import LogisticsRequest from "./pages/LogisticsRequest";
 import AdminRequestPage from "./pages/AdminRequestPage";
 import TasksBeta from "./pages/TasksBeta";
 import VehicleManagement from "./pages/VehicleManagement";
@@ -152,6 +153,7 @@ const App = () => (
             }
           />
           <Route path="/logistics" element={<AppLayout><LogisticsManagement /></AppLayout>} />
+          <Route path="/logistics-request" element={<AppLayout><LogisticsRequest /></AppLayout>} />
           <Route path="/admin-request" element={<AppLayout><AdminRequestPage /></AppLayout>} /> {/* [NEW ROUTE] */}
           <Route path="/resource-management" element={<AppLayout><FleetChart /></AppLayout>} />
           <Route path="/vehicle-management" element={<AppLayout><VehicleManagement /></AppLayout>} />
