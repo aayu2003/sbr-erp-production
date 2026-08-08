@@ -197,6 +197,14 @@ const FlyToBounds = ({ coords }: { coords: { lat: number; lng: number }[] | null
 
   useEffect(() => {
     if (!coordinatesKey) return;
+    // The parcels grid stays mounted but CSS-hidden (`hidden` class) while land data is still
+    // loading — a map inside a display:none container has zero rendered size, and Leaflet's
+    // flyTo animation does projection math that divides by that size, producing NaN and
+    // crashing with no error boundary to catch it. Skip the fly-to until the map actually
+    // has pixels to animate within; AutoResizeMap's ResizeObserver will fix the view once
+    // the container becomes visible and gets a real size.
+    const container = map.getContainer();
+    if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) return;
     const latLngs = coordinatesKey.split('|').map((pair) => {
       const [lat, lng] = pair.split(',').map(Number);
       return L.latLng(lat, lng);
