@@ -684,10 +684,15 @@ const [selectedSupervisorId, setSelectedSupervisorId] = useState<string>('');
 const [availableFieldManagers, setAvailableFieldManagers] = useState<{ manager_id: string; name: string; phone: string }[]>([]);
 const [isLoadingStaff, setIsLoadingStaff] = useState(false);
 const [selectedFieldManagerIds, setSelectedFieldManagerIds] = useState<string[]>([]);
-// "Self Work" (own vehicles + equipment) vs "Vendor Scope" (assign to an external vendor)
-const [vendorSectionTab, setVendorSectionTab] = useState<'self' | 'vendor'>('self');
+// "Self Work" (own vehicles + equipment) vs "Vendor per Asset" (separate vendor for the
+// vehicle and/or the equipment) vs "Full Task Vendor" (one vendor for the whole task)
+const [vendorSectionTab, setVendorSectionTab] = useState<'self' | 'vendor_per_asset' | 'full_task_vendor'>('self');
 const [selectedTaskVendorId, setSelectedTaskVendorId] = useState<string | null>(null);
 const [taskVendor, setTaskVendor] = useState({ name: '', contact: '' });
+const [selectedVehicleVendorId, setSelectedVehicleVendorId] = useState<string | null>(null);
+const [vehicleVendorInfo, setVehicleVendorInfo] = useState({ name: '', contact: '' });
+const [selectedEquipmentVendorId, setSelectedEquipmentVendorId] = useState<string | null>(null);
+const [equipmentVendorInfo, setEquipmentVendorInfo] = useState({ name: '', contact: '' });
 const [dosageRows, setDosageRows] = useState<DosageControlRowLite[]>([]);
 const [selectedDosageItemRowId, setSelectedDosageItemRowId] = useState<string>('');
 const [isAssigningTask, setIsAssigningTask] = useState(false);
@@ -706,6 +711,7 @@ const [activitiesData, setActivitiesData] = useState<CalendarData>({});
 const [farmsById, setFarmsById] = useState<FarmsById>({});
 const [farmerNames, setFarmerNames] = useState<Record<string, string>>({});
 const [selectedTaskKeys, setSelectedTaskKeys] = useState<Record<string, boolean>>({});
+const [deletingTaskKey, setDeletingTaskKey] = useState<string | null>(null);
 const [pendingByDate, setPendingByDate] = useState<PendingByDate>({});
 const [dateSwapTaskKey, setDateSwapTaskKey] = useState<string | null>(null);
 const [dateSwapValue, setDateSwapValue] = useState<string>('');
@@ -718,6 +724,14 @@ supervisorName: string;
 supervisorContact: string;
 fieldManagers: { name: string; contact: string }[];
 }>>({});
+// Vendor attached to each assigned task (from the Task record's vendor_details), keyed by
+// task_id — fetched for the footer strip on each row of the day popup.
+const [taskVendorById, setTaskVendorById] = useState<Record<string, { loading: boolean; vendorId: string; vendorName: string }>>({});
+// "+" add-vendor popup for a task that's pending/completed but still has no vendor recorded
+const [addTaskVendorPopup, setAddTaskVendorPopup] = useState<{ taskId: string; farmId: string } | null>(null);
+const [addTaskVendorOptions, setAddTaskVendorOptions] = useState<Record<string, VendorScopeEntry>>({});
+const [isLoadingAddTaskVendorOptions, setIsLoadingAddTaskVendorOptions] = useState(false);
+const [isSavingTaskVendor, setIsSavingTaskVendor] = useState(false);
 const [loading, setLoading] = useState(true);
 const [error, setError] = useState<string | null>(null);
 const taskModalRef = useRef<HTMLDivElement | null>(null);
@@ -951,6 +965,84 @@ setContactsById(next);
 });
 }, [isModalOpen, selectedDate]);
 
+// Fetch vendor_details (from the Task record) for every assigned task in the day popup,
+// so the footer strip's Vendor field can show it (or the "+" add-vendor button if unset).
+useEffect(() => {
+if (!isModalOpen || !selectedDate) return;
+const activities = activitiesData[selectedDate] ?? [];
+const taskIds = [...new Set(
+activities
+.map((a) => a.assignments.find((x) => x.task_id)?.task_id)
+.filter((id): id is string => !!id)
+)];
+if (taskIds.length === 0) return;
+setTaskVendorById((prev) => {
+const next = { ...prev };
+taskIds.forEach((id) => { next[id] = { loading: true, vendorId: '', vendorName: '' }; });
+return next;
+});
+taskIds.forEach((taskId) => {
+fetch(`${BASE_URL}/admin_all_task/get_task_details/${taskId}`)
+.then((res) => (res.ok ? res.json() : null))
+.catch(() => null)
+.then((data) => {
+const vd = data?.vendor_details;
+setTaskVendorById((prev) => ({
+...prev,
+[taskId]: {
+loading: false,
+vendorId: String(vd?.vendor_id ?? 'self'),
+vendorName: String(vd?.vendor_name ?? ''),
+},
+}));
+});
+});
+}, [isModalOpen, selectedDate]);
+
+// Fetch scope-of-work vendors for the "+" add-vendor popup whenever it's opened for a task
+useEffect(() => {
+if (!addTaskVendorPopup) {
+setAddTaskVendorOptions({});
+return;
+}
+let mounted = true;
+setIsLoadingAddTaskVendorOptions(true);
+setAddTaskVendorOptions({});
+fetch(`${BASE_URL}/admin_cultivation/get_scope_of_work_for_land/${addTaskVendorPopup.farmId}`)
+.then((res) => (res.ok ? res.json() : null))
+.then((data) => {
+if (!mounted) return;
+if (data?.success && data?.scope_of_work && typeof data.scope_of_work === 'object') {
+setAddTaskVendorOptions(data.scope_of_work as Record<string, VendorScopeEntry>);
+}
+})
+.catch(() => { if (mounted) setAddTaskVendorOptions({}); })
+.finally(() => { if (mounted) setIsLoadingAddTaskVendorOptions(false); });
+return () => { mounted = false; };
+}, [addTaskVendorPopup]);
+
+const handleAddTaskVendor = async (vendorId: string, vendorName: string) => {
+if (!addTaskVendorPopup) return;
+const { taskId } = addTaskVendorPopup;
+setIsSavingTaskVendor(true);
+try {
+const res = await fetch(`${BASE_URL}/admin_cultivation/add_vendor_to_task`, {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ task_id: taskId, vendor_id: vendorId, vendor_name: vendorName }),
+});
+const body: any = await res.json().catch(() => null);
+if (!res.ok || body?.success !== true) throw new Error(body?.detail || body?.message || 'Failed to add vendor');
+setTaskVendorById((prev) => ({ ...prev, [taskId]: { loading: false, vendorId, vendorName } }));
+setAddTaskVendorPopup(null);
+toast.success('Vendor added to task');
+} catch (error) {
+toast.error(error instanceof Error ? error.message : 'Failed to add vendor');
+} finally {
+setIsSavingTaskVendor(false);
+}
+};
+
 // --- Logic to Populate Sidebar Data (from API or Mock) ---
 const { pendingToday, carryForward, earlyCompletion } = useMemo(() => {
 const today = new Date();
@@ -1017,12 +1109,76 @@ setVendorSectionTab('self');
 setScopeVendors({});
 setSelectedTaskVendorId(null);
 setTaskVendor({ name: '', contact: '' });
+setSelectedVehicleVendorId(null);
+setVehicleVendorInfo({ name: '', contact: '' });
+setSelectedEquipmentVendorId(null);
+setEquipmentVendorInfo({ name: '', contact: '' });
 setSelectedVehicleIds([]);
 setEquipmentCounts({});
 setEquipmentSearchTerm('');
 setDosageRows([]);
 setSelectedDosageItemRowId('');
 };
+
+// Shared by the Vehicle Vendor, Equipment Vendor and Full Task Vendor pickers — same
+// scope-of-work vendor list for the land, just tracking a different selection each time.
+const renderVendorPicker = (selectedVendorId: string | null, onSelect: (vendorId: string, scope: VendorScopeEntry) => void) => (
+<div className="space-y-2">
+{isLoadingScope ? (
+<div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground bg-white rounded-lg border border-[#276152]/15">
+<div className="w-4 h-4 border-2 border-[#276152] border-t-transparent rounded-full animate-spin" />
+Loading vendors for this land…
+</div>
+) : Object.keys(scopeVendors).length > 0 ? (
+<>
+{Object.entries(scopeVendors).map(([vendorId, scope]) => {
+const isSelected = selectedVendorId === vendorId;
+return (
+<button
+key={vendorId}
+type="button"
+onClick={() => onSelect(vendorId, scope)}
+className={cn(
+"w-full text-left rounded-lg border p-3 transition-all",
+isSelected ? "border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]/30" : "border-gray-200 bg-white hover:border-[#0D3A35]/30 hover:bg-[#0D3A35]/5"
+)}
+>
+<div className="flex items-start justify-between gap-3">
+<div className="min-w-0">
+<div className="flex items-center gap-2">
+<span className="text-sm font-semibold text-slate-800">{scope.vendor_details.vendor_name}</span>
+{isSelected && <span className="text-[10px] font-bold text-white bg-[#0D3A35] px-1.5 py-0.5 rounded">Selected</span>}
+</div>
+<div className="mt-0.5 text-xs text-slate-500 flex items-center gap-2 flex-wrap">
+<span className="font-mono text-slate-400">{vendorId}</span>
+{scope.vendor_details.vendor_contact && <span>· {scope.vendor_details.vendor_contact}</span>}
+</div>
+{scope.activities.length > 0 && (
+<div className="mt-1.5 flex flex-wrap gap-1">
+{scope.activities.map(a => (
+<span key={a} className="text-[10px] px-1.5 py-0.5 bg-[#0D3A35]/10 text-[#0D3A35] border border-[#0D3A35]/20 rounded font-medium">{a}</span>
+))}
+</div>
+)}
+</div>
+<div className="text-[10px] text-slate-400 text-right shrink-0">
+{scope.start_date && <div>{formatDateDDMMYYYY(scope.start_date)}</div>}
+{scope.end_date && <div>→ {formatDateDDMMYYYY(scope.end_date)}</div>}
+</div>
+</div>
+</button>
+);
+})}
+</>
+) : (
+<div className="flex flex-col items-center gap-2 py-8 text-center bg-white rounded-lg border border-dashed border-gray-200">
+<User className="w-6 h-6 text-gray-300" />
+<p className="text-sm text-slate-500 font-medium">No vendor scope found for this land</p>
+<p className="text-xs text-slate-400">Assign a vendor in Scope of Work before using this option.</p>
+</div>
+)}
+</div>
+);
 
 const isTaskPending = (task: CalendarActivity) => {
 const list = Array.isArray(task.assignments) ? task.assignments : [];
@@ -1649,7 +1805,13 @@ calander_id: calanderId,
 ...(selectedFieldManagerIds.length > 0 && { field_manager_id: selectedFieldManagerIds }),
 ...(vendorSectionTab === 'self' && vehicles.length > 0 && { vehicles }),
 ...(vendorSectionTab === 'self' && equipment.length > 0 && { equipment }),
-...(vendorSectionTab === 'vendor' && selectedTaskVendorId && taskVendor.name && {
+...(vendorSectionTab === 'vendor_per_asset' && selectedVehicleVendorId && vehicleVendorInfo.name && {
+vehicle_vendor: [{ vendor_id: selectedVehicleVendorId, vendor_name: vehicleVendorInfo.name }],
+}),
+...(vendorSectionTab === 'vendor_per_asset' && selectedEquipmentVendorId && equipmentVendorInfo.name && {
+equipment_vendor: [{ vendor_id: selectedEquipmentVendorId, vendor_name: equipmentVendorInfo.name }],
+}),
+...(vendorSectionTab === 'full_task_vendor' && selectedTaskVendorId && taskVendor.name && {
 task_vendor: [{ vendor_id: selectedTaskVendorId, vendor_name: taskVendor.name }],
 }),
 ...(selectedDosageItemRowId && (() => {
@@ -2117,20 +2279,6 @@ title="Select task"
 <MapPin className="h-3 w-3 shrink-0 text-[#276152]" />
 <span className="truncate">{landLocation || '—'}</span>
 </div>
-{assignedTask && (
-<div className="mt-1.5 flex min-w-0 flex-col gap-0.5 text-[11px] font-semibold text-[#0D3A35]">
-<div className="flex min-w-0 items-center gap-1.5">
-<User className="h-3 w-3 shrink-0 text-[#276152]" />
-<span className="shrink-0 text-[#276152]">Assigned Supervisor:</span>
-<span className="truncate">{supText}</span>
-</div>
-<div className="flex min-w-0 items-center gap-1.5">
-<User className="h-3 w-3 shrink-0 text-[#276152]" />
-<span className="shrink-0 text-[#276152]">Field Manager:</span>
-<span className="truncate">{fmText}</span>
-</div>
-</div>
-)}
 </div>
 <div className="text-center text-sm font-bold text-[#0D3A35]">{totalArea.toFixed(2)} <span className="text-xs text-[#276152]">Acres</span></div>
 {/* Assigned Plots column */}
@@ -2294,8 +2442,29 @@ title="View plot map"
 <div className="flex flex-col items-center gap-1">
 <button
 type="button"
-onClick={() => {
+disabled={deletingTaskKey === taskKey}
+onClick={async () => {
 if (!selectedDate) return;
+setDeletingTaskKey(taskKey);
+try {
+const status = normalizeAssignmentStatus(act.assignments[0]?.status);
+const taskId = act.assignments.find((a) => a.task_id)?.task_id;
+const res = await fetch(`${BASE_URL}/admin_cultivation/delete_task_assignment`, {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({
+calander_id: act.calander_id,
+activity: act.activity,
+date: selectedDate,
+farm_id: act.farm_id,
+status,
+task_id: taskId,
+}),
+});
+const body = await res.json().catch(() => null);
+if (!res.ok || body?.success !== true) {
+throw new Error(body?.detail || body?.message || 'Failed to delete task');
+}
 setActivitiesData((prev) => {
 const list = prev[selectedDate] || [];
 return { ...prev, [selectedDate]: list.filter((item) => getTaskKey(item) !== taskKey) };
@@ -2306,8 +2475,13 @@ delete next[taskKey];
 return next;
 });
 toast.success('Task deleted');
+} catch (error) {
+toast.error(error instanceof Error ? error.message : 'Failed to delete task');
+} finally {
+setDeletingTaskKey(null);
+}
 }}
-className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-200 bg-white text-red-600 transition-colors hover:bg-red-50"
+className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-200 bg-white text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
 title="Delete task"
 >
 <Trash2 className="h-4 w-4" />
@@ -2315,6 +2489,54 @@ title="Delete task"
 <span className="text-[10px] font-semibold leading-none text-red-600">Delete</span>
 </div>
 </div>
+</div>
+<div className="flex flex-wrap items-center gap-x-6 gap-y-1 border-t border-slate-100 bg-slate-50/60 px-5 py-2 text-[11px] font-semibold">
+<div className="flex min-w-0 items-center gap-1.5 text-[#0D3A35]">
+<User className="h-3 w-3 shrink-0 text-[#276152]" />
+<span className="shrink-0 text-[#276152]">Supervisor:</span>
+<span className="truncate">{supText}</span>
+</div>
+<div className="flex min-w-0 items-center gap-1.5 text-[#0D3A35]">
+<User className="h-3 w-3 shrink-0 text-[#276152]" />
+<span className="shrink-0 text-[#276152]">Field Manager:</span>
+<span className="truncate">{fmText}</span>
+</div>
+{!assignedTask ? (
+<div className="flex items-center gap-1.5 text-slate-400">
+<User className="h-3 w-3 shrink-0" />
+<span className="shrink-0 text-[#276152]">Vendor:</span>
+<span>—</span>
+</div>
+) : (() => {
+const taskId = act.assignments.find((a) => a.task_id)?.task_id;
+const vendorState = taskId ? taskVendorById[taskId] : undefined;
+return (
+<div className="flex min-w-0 items-center gap-1.5 text-[#0D3A35]">
+<User className="h-3 w-3 shrink-0 text-[#276152]" />
+<span className="shrink-0 text-[#276152]">Vendor:</span>
+{!taskId || !vendorState || vendorState.loading ? (
+<div className="flex items-center gap-1.5 text-slate-400">
+<div className="h-3 w-3 border-2 border-[#276152] border-t-transparent rounded-full animate-spin" />
+<span>Loading…</span>
+</div>
+) : vendorState.vendorId !== 'self' ? (
+<span className="truncate">{vendorState.vendorName}</span>
+) : (
+<>
+<span className="text-slate-400">Not assigned</span>
+<button
+type="button"
+onClick={() => setAddTaskVendorPopup({ taskId, farmId: act.farm_id })}
+title="Add vendor"
+className="ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[#0D3A35]/40 bg-white text-[#0D3A35] transition-colors hover:bg-[#0D3A35] hover:text-white"
+>
+<Plus className="h-2.5 w-2.5" />
+</button>
+</>
+)}
+</div>
+);
+})()}
 </div>
 </div>
 );
@@ -2475,14 +2697,17 @@ isSelected ? "border-[#0D3A35] bg-[#0D3A35]/5" : "border-gray-200 bg-white hover
 <div className="border-t border-[#276152]/20 pt-8">
 <div className="mb-3 flex items-center justify-between">
 <h4 className="text-sm font-bold text-[#0D3A35] uppercase tracking-wide flex items-center gap-2">
-<User className="w-4 h-4" /> Self Work / Vendor Scope
+<User className="w-4 h-4" /> Self Work / Vendor
 </h4>
 <div className="flex items-center rounded-lg border border-gray-200 overflow-hidden text-xs font-semibold shadow-sm">
 <button type="button" onClick={() => setVendorSectionTab('self')} className={cn("px-3 py-1.5 flex items-center gap-1.5 transition-colors", vendorSectionTab === 'self' ? "bg-[#0D3A35] text-white" : "bg-white text-gray-600 hover:bg-gray-50")}>
 <Truck className="w-3 h-3" /> Self Work
 </button>
-<button type="button" onClick={() => setVendorSectionTab('vendor')} className={cn("px-3 py-1.5 flex items-center gap-1.5 border-l border-gray-200 transition-colors", vendorSectionTab === 'vendor' ? "bg-[#0D3A35] text-white" : "bg-white text-gray-600 hover:bg-gray-50")}>
-<User className="w-3 h-3" /> Vendor Scope
+<button type="button" onClick={() => setVendorSectionTab('vendor_per_asset')} className={cn("px-3 py-1.5 flex items-center gap-1.5 border-l border-gray-200 transition-colors", vendorSectionTab === 'vendor_per_asset' ? "bg-[#0D3A35] text-white" : "bg-white text-gray-600 hover:bg-gray-50")}>
+<Wrench className="w-3 h-3" /> Vendor per Asset
+</button>
+<button type="button" onClick={() => setVendorSectionTab('full_task_vendor')} className={cn("px-3 py-1.5 flex items-center gap-1.5 border-l border-gray-200 transition-colors", vendorSectionTab === 'full_task_vendor' ? "bg-[#0D3A35] text-white" : "bg-white text-gray-600 hover:bg-gray-50")}>
+<User className="w-3 h-3" /> Full Task Vendor
 </button>
 </div>
 </div>
@@ -2525,67 +2750,36 @@ className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 te
 </div>
 </div>
 </div>
-) : (
-<div className="space-y-2">
-{isLoadingScope ? (
-<div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground bg-white rounded-lg border border-[#276152]/15">
-<div className="w-4 h-4 border-2 border-[#276152] border-t-transparent rounded-full animate-spin" />
-Loading vendors for this land…
-</div>
-) : Object.keys(scopeVendors).length > 0 ? (
-<>
-<p className="text-xs font-semibold text-[#0D3A35] uppercase tracking-wide flex items-center gap-1.5">
-<CheckCircle2 className="w-3.5 h-3.5" /> Select a vendor scoped for this land
+) : vendorSectionTab === 'vendor_per_asset' ? (
+<div className="space-y-6">
+<div>
+<p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#0D3A35] flex items-center gap-1.5">
+<Truck className="w-3.5 h-3.5" /> Vehicle Vendor
 </p>
-{Object.entries(scopeVendors).map(([vendorId, scope]) => {
-const isSelected = selectedTaskVendorId === vendorId;
-return (
-<button
-key={vendorId}
-type="button"
-onClick={() => {
+{renderVendorPicker(selectedVehicleVendorId, (vendorId, scope) => {
+setSelectedVehicleVendorId(vendorId);
+setVehicleVendorInfo({ name: scope.vendor_details.vendor_name, contact: scope.vendor_details.vendor_contact });
+})}
+</div>
+<div>
+<p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#0D3A35] flex items-center gap-1.5">
+<Wrench className="w-3.5 h-3.5" /> Equipment Vendor
+</p>
+{renderVendorPicker(selectedEquipmentVendorId, (vendorId, scope) => {
+setSelectedEquipmentVendorId(vendorId);
+setEquipmentVendorInfo({ name: scope.vendor_details.vendor_name, contact: scope.vendor_details.vendor_contact });
+})}
+</div>
+</div>
+) : (
+<div>
+<p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#0D3A35] flex items-center gap-1.5">
+<CheckCircle2 className="w-3.5 h-3.5" /> Select a vendor for the complete task
+</p>
+{renderVendorPicker(selectedTaskVendorId, (vendorId, scope) => {
 setSelectedTaskVendorId(vendorId);
 setTaskVendor({ name: scope.vendor_details.vendor_name, contact: scope.vendor_details.vendor_contact });
-}}
-className={cn(
-"w-full text-left rounded-lg border p-3 transition-all",
-isSelected ? "border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]/30" : "border-gray-200 bg-white hover:border-[#0D3A35]/30 hover:bg-[#0D3A35]/5"
-)}
->
-<div className="flex items-start justify-between gap-3">
-<div className="min-w-0">
-<div className="flex items-center gap-2">
-<span className="text-sm font-semibold text-slate-800">{scope.vendor_details.vendor_name}</span>
-{isSelected && <span className="text-[10px] font-bold text-white bg-[#0D3A35] px-1.5 py-0.5 rounded">Selected</span>}
-</div>
-<div className="mt-0.5 text-xs text-slate-500 flex items-center gap-2 flex-wrap">
-<span className="font-mono text-slate-400">{vendorId}</span>
-{scope.vendor_details.vendor_contact && <span>· {scope.vendor_details.vendor_contact}</span>}
-</div>
-{scope.activities.length > 0 && (
-<div className="mt-1.5 flex flex-wrap gap-1">
-{scope.activities.map(a => (
-<span key={a} className="text-[10px] px-1.5 py-0.5 bg-[#0D3A35]/10 text-[#0D3A35] border border-[#0D3A35]/20 rounded font-medium">{a}</span>
-))}
-</div>
-)}
-</div>
-<div className="text-[10px] text-slate-400 text-right shrink-0">
-{scope.start_date && <div>{formatDateDDMMYYYY(scope.start_date)}</div>}
-{scope.end_date && <div>→ {formatDateDDMMYYYY(scope.end_date)}</div>}
-</div>
-</div>
-</button>
-);
 })}
-</>
-) : (
-<div className="flex flex-col items-center gap-2 py-8 text-center bg-white rounded-lg border border-dashed border-gray-200">
-<User className="w-6 h-6 text-gray-300" />
-<p className="text-sm text-slate-500 font-medium">No vendor scope found for this land</p>
-<p className="text-xs text-slate-400">Assign a vendor in Scope of Work before using this option.</p>
-</div>
-)}
 </div>
 )}
 </div>
@@ -2670,6 +2864,54 @@ onClose={() => setMonitorTask(null)}
 task={mapViewTask}
 onClose={() => setMapViewTask(null)}
 />
+)}
+
+{/* Add Vendor to Task popup — triggered by the "+" button on a pending/completed task's footer strip */}
+{addTaskVendorPopup && (
+<div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={() => !isSavingTaskVendor && setAddTaskVendorPopup(null)}>
+<div className="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]" onClick={(e) => e.stopPropagation()}>
+<div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+<h3 className="text-sm font-bold text-[#0D3A35] flex items-center gap-2">
+<User className="w-4 h-4" /> Add Vendor
+</h3>
+<button type="button" onClick={() => setAddTaskVendorPopup(null)} className="text-gray-400 hover:text-gray-700">
+<X className="w-4 h-4" />
+</button>
+</div>
+<div className="flex-1 overflow-y-auto p-4 space-y-2">
+{isLoadingAddTaskVendorOptions ? (
+<div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+<div className="w-4 h-4 border-2 border-[#276152] border-t-transparent rounded-full animate-spin" />
+Loading vendors for this land…
+</div>
+) : Object.keys(addTaskVendorOptions).length === 0 ? (
+<div className="flex flex-col items-center gap-2 py-8 text-center">
+<User className="w-6 h-6 text-gray-300" />
+<p className="text-sm text-slate-500 font-medium">No vendor scope found for this land</p>
+<p className="text-xs text-slate-400">Assign a vendor in Scope of Work before using this option.</p>
+</div>
+) : (
+Object.entries(addTaskVendorOptions).map(([vendorId, scope]) => (
+<button
+key={vendorId}
+type="button"
+disabled={isSavingTaskVendor}
+onClick={() => handleAddTaskVendor(vendorId, scope.vendor_details.vendor_name)}
+className="w-full text-left rounded-lg border border-gray-200 bg-white p-3 transition-all hover:border-[#0D3A35]/30 hover:bg-[#0D3A35]/5 disabled:cursor-not-allowed disabled:opacity-50"
+>
+<div className="min-w-0">
+<span className="text-sm font-semibold text-slate-800">{scope.vendor_details.vendor_name}</span>
+<div className="mt-0.5 text-xs text-slate-500 flex items-center gap-2 flex-wrap">
+<span className="font-mono text-slate-400">{vendorId}</span>
+{scope.vendor_details.vendor_contact && <span>· {scope.vendor_details.vendor_contact}</span>}
+</div>
+</div>
+</button>
+))
+)}
+</div>
+</div>
+</div>
 )}
 </div>
 );
