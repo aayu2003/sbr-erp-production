@@ -71,6 +71,13 @@ type GrnPoRow = {
   createdAt: string;
 };
 
+// Sentinel value for the "No Order / Manual Entry" choice in the PO dropdown — e.g. fuel,
+// where there's a genuine inward gate entry (invoice, e-way bill, etc.) but no PO to tie it to.
+// Real PO rows never have an empty poNo (see poRows below), so '' can't collide with one.
+const MANUAL_SETUP_ID = '__manual__';
+
+type VendorOption = { vendor_id: string; vendor_name: string; firm_name?: string };
+
 // Mirrors PurchaseFlow.tsx's fetchPurchaseFlows() — same endpoint, same GET-then-POST-fallback
 // (some deployments only accept POST on this route).
 async function fetchPurchaseFlows(signal?: AbortSignal): Promise<ApiPurchaseFlow[]> {
@@ -133,6 +140,10 @@ export function GRNModule() {
   const [setupGateEntryIds, setSetupGateEntryIds] = useState<string[]>([]);
   const [setupGateEntries, setSetupGateEntries] = useState<GateEntryRecord[]>([]);
   const [isLoadingSetupEntries, setIsLoadingSetupEntries] = useState(false);
+  // Manual Entry / No Order — vendor picked directly instead of resolved from a PO.
+  const [manualVendorId, setManualVendorId] = useState('');
+  const [vendors, setVendors] = useState<VendorOption[]>([]);
+  const [isLoadingVendors, setIsLoadingVendors] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<GRNRecord | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -248,19 +259,41 @@ export function GRNModule() {
     setSetupPoId('');
     setSetupGateEntryIds([]);
     setSetupGateEntries([]);
+    setManualVendorId('');
     setIsCreateSetupOpen(true);
     setIsLoadingSetupEntries(true);
     getGateEntries()
       .then(setSetupGateEntries)
       .catch((e: unknown) => toast.error(e instanceof Error ? e.message : 'Failed to load gate entries'))
       .finally(() => setIsLoadingSetupEntries(false));
+    if (vendors.length === 0) {
+      setIsLoadingVendors(true);
+      const url = String(getBaseUrl() ?? '').replace(/\/$/, '');
+      fetch(`${url}/purchase_flow/get_vendors`)
+        .then((r) => r.json())
+        .then((data: { vendors?: unknown }) => {
+          if (Array.isArray(data?.vendors)) {
+            setVendors((data.vendors as Record<string, unknown>[]).map((v) => ({
+              vendor_id: String(v?.vendor_id || ''),
+              vendor_name: String(v?.vendor_name || ''),
+              firm_name: v?.firm_name ? String(v.firm_name) : undefined,
+            })).filter((v) => v.vendor_id));
+          }
+        })
+        .catch(() => {})
+        .finally(() => setIsLoadingVendors(false));
+    }
   };
 
-  const setupOrder = poRows.find((row) => row.id === setupPoId) ?? null;
+  const isManualSetup = setupPoId === MANUAL_SETUP_ID;
+  const setupOrder = isManualSetup ? null : (poRows.find((row) => row.id === setupPoId) ?? null);
+  const manualVendor = vendors.find((v) => v.vendor_id === manualVendorId) ?? null;
   const availableSetupGateEntries = setupGateEntries.filter((entry) => (
     entry.entryType === 'Inward' &&
-    entry.orderNumber === setupOrder?.poNo &&
-    !entry.usedInGrn
+    !entry.usedInGrn &&
+    (isManualSetup
+      ? !entry.orderNumber && entry.vendorId === manualVendorId
+      : entry.orderNumber === setupOrder?.poNo)
   ));
 
   const toggleSetupGateEntry = (entryId: string) => {
@@ -270,6 +303,21 @@ export function GRNModule() {
   };
 
   const beginGrnCreation = () => {
+    if (isManualSetup) {
+      if (!manualVendorId) { toast.error('Select a vendor'); return; }
+      if (setupGateEntryIds.length === 0) { toast.error('Select at least one inward gate entry'); return; }
+      setPane({
+        kind: 'create',
+        order: {
+          poNo: '',
+          vendorId: manualVendorId,
+          vendorName: manualVendor?.firm_name || manualVendor?.vendor_name || '',
+        },
+        gateEntryIds: setupGateEntryIds,
+      });
+      setIsCreateSetupOpen(false);
+      return;
+    }
     if (!setupOrder) { toast.error('Select a purchase order'); return; }
     if (!setupOrder.vendorId) { toast.error('Vendor could not be resolved for this purchase order yet'); return; }
     if (setupGateEntryIds.length === 0) { toast.error('Select at least one inward gate entry'); return; }
@@ -580,6 +628,7 @@ export function GRNModule() {
                     className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10"
                   >
                     <option value="">Select purchase order</option>
+                    <option value={MANUAL_SETUP_ID}>Manual Entry / No Order</option>
                     {poRows.map((row) => (
                       <option key={row.id} value={row.id}>
                         {row.poNo} · {row.vendorName} {row.prNo ? `· PR ${row.prNo}` : ''}
@@ -592,6 +641,27 @@ export function GRNModule() {
                       <span><strong className="text-slate-700">PR:</strong> {setupOrder.prNo || 'Not Recorded'}</span>
                     </div>
                   )}
+                  {isManualSetup && (
+                    <div className="mt-3">
+                      <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-600">
+                        Vendor <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        value={manualVendorId}
+                        onChange={(event) => {
+                          setManualVendorId(event.target.value);
+                          setSetupGateEntryIds([]);
+                        }}
+                        className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10"
+                      >
+                        <option value="">{isLoadingVendors ? 'Loading vendors…' : 'Select a vendor'}</option>
+                        {vendors.map((v) => (
+                          <option key={v.vendor_id} value={v.vendor_id}>{v.firm_name || v.vendor_name}</option>
+                        ))}
+                      </select>
+                      <p className="mt-1 text-xs text-slate-400">No purchase order — used for cases like fuel where there's an inward gate entry but no PO.</p>
+                    </div>
+                  )}
                 </div>
 
                 <div>
@@ -599,12 +669,16 @@ export function GRNModule() {
                     <label className="block text-xs font-bold uppercase tracking-wide text-slate-600">
                       Inward Gate Entries <span className="text-red-500">*</span>
                     </label>
-                    {setupOrder && !isLoadingSetupEntries && (
+                    {(setupOrder || (isManualSetup && manualVendorId)) && !isLoadingSetupEntries && (
                       <span className="text-xs font-medium text-slate-400">{availableSetupGateEntries.length} available</span>
                     )}
                   </div>
 
-                  {!setupOrder ? (
+                  {isManualSetup && !manualVendorId ? (
+                    <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+                      Select a vendor to view its gate entries.
+                    </div>
+                  ) : !setupOrder && !isManualSetup ? (
                     <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
                       Select a purchase order to view its gate entries.
                     </div>
@@ -616,7 +690,11 @@ export function GRNModule() {
                     <div className="rounded-xl border border-amber-200 bg-amber-50 px-5 py-6 text-center">
                       <AlertCircle className="mx-auto h-7 w-7 text-amber-500" />
                       <p className="mt-2 text-sm font-semibold text-amber-800">No unused inward gate entry found</p>
-                      <p className="mt-1 text-xs text-amber-700">Material must first be recorded as inward against {setupOrder.poNo} in Gate Entry.</p>
+                      <p className="mt-1 text-xs text-amber-700">
+                        {isManualSetup
+                          ? 'Material must first be recorded as inward against this vendor (with no order number) in Gate Entry.'
+                          : `Material must first be recorded as inward against ${setupOrder?.poNo} in Gate Entry.`}
+                      </p>
                     </div>
                   ) : (
                     <div className="space-y-2">
@@ -669,7 +747,7 @@ export function GRNModule() {
                 <button
                   type="button"
                   onClick={beginGrnCreation}
-                  disabled={!setupOrder || setupGateEntryIds.length === 0}
+                  disabled={isManualSetup ? (!manualVendorId || setupGateEntryIds.length === 0) : (!setupOrder || setupGateEntryIds.length === 0)}
                   className="rounded-xl bg-[#0D3A35] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#092e2a] disabled:cursor-not-allowed disabled:bg-slate-300"
                 >
                   Continue to GRN Details

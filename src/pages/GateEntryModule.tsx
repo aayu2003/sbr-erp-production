@@ -59,13 +59,6 @@ type LandParcelOption = {
   detail: string;
 };
 
-type InventoryItemOption = {
-  id: string;
-  code: string;
-  name: string;
-  unit: string;
-};
-
 type GateDefinition = {
   id: string;
   gateNo: string;
@@ -96,7 +89,6 @@ const GATE_CONFIG_KEY = 'farm-connect.gate-entry-config.v1';
 const GATE_ENTRY_METADATA_KEY = 'farm-connect.gate-entry-metadata.v1';
 const GATE_ENTRY_OVERRIDES_KEY = 'farm-connect.gate-entry-overrides.v1';
 const DELETED_GATE_ENTRIES_KEY = 'farm-connect.deleted-gate-entries.v1';
-const INVENTORY_MASTER_CONFIG_KEY = 'farm-connect.inventory-master-config.v1';
 const DEFAULT_STORES = ['Warehouse A', 'Warehouse B', 'Cold Storage', 'Chemical Store', 'Equipment Room', 'Irrigation Store'];
 
 const readGateDefinitions = (): GateDefinition[] => {
@@ -106,16 +98,6 @@ const readGateDefinitions = (): GateDefinition[] => {
     return Array.isArray(value) ? value : [];
   } catch {
     return [];
-  }
-};
-
-const readStores = (): string[] => {
-  if (typeof window === 'undefined') return DEFAULT_STORES;
-  try {
-    const value = JSON.parse(window.localStorage.getItem(INVENTORY_MASTER_CONFIG_KEY) || '{}');
-    return Array.isArray(value?.stores) && value.stores.length ? value.stores : DEFAULT_STORES;
-  } catch {
-    return DEFAULT_STORES;
   }
 };
 
@@ -237,11 +219,6 @@ const EMPTY_FORM = {
   destinationType: 'Store' as DestinationType,
   clusterId: '',
   destinationId: '',
-  itemId: '',
-  itemQuantity: '',
-  otherItemName: '',
-  otherItemCode: '',
-  otherItemUnit: '',
   vendorId: '',
   otherVendorName: '',
   otherVendorContact: '',
@@ -280,8 +257,6 @@ function NewGateEntryModal({
   stores,
   clusters,
   landParcels,
-  inventoryItems,
-  isLoadingItems,
   editingEntry,
   onClose,
   onCreated,
@@ -294,8 +269,6 @@ function NewGateEntryModal({
   stores: string[];
   clusters: ClusterOption[];
   landParcels: LandParcelOption[];
-  inventoryItems: InventoryItemOption[];
-  isLoadingItems: boolean;
   editingEntry?: GateEntryRecord | null;
   onClose: () => void;
   onCreated: () => void;
@@ -306,8 +279,6 @@ function NewGateEntryModal({
     const destinationType = editingEntry.destinationType || editingMetadata?.destinationType || 'Store';
     const destinationId = editingEntry.destinationId || editingMetadata?.destinationId || '';
     const parcel = landParcels.find((item) => item.id === destinationId);
-    const savedItemId = editingEntry.itemId || editingMetadata?.itemId || '';
-    const hasCatalogueItem = inventoryItems.some((item) => item.id === savedItemId);
     const hasApprovedVendor = vendors.some((vendor) => vendor.vendor_id === editingEntry.vendorId);
     return {
       ...EMPTY_FORM,
@@ -318,11 +289,6 @@ function NewGateEntryModal({
       destinationType,
       clusterId: parcel?.clusterId || '',
       destinationId,
-      itemId: hasCatalogueItem ? savedItemId : '__other__',
-      itemQuantity: String(editingEntry.itemQuantity ?? editingMetadata?.itemQuantity ?? ''),
-      otherItemName: hasCatalogueItem ? '' : editingEntry.itemName || editingMetadata?.itemName || '',
-      otherItemCode: hasCatalogueItem ? '' : editingEntry.itemCode || editingMetadata?.itemCode || '',
-      otherItemUnit: hasCatalogueItem ? '' : editingEntry.itemUnit || editingMetadata?.itemUnit || '',
       vendorId: editingEntry.entryType === 'Inward' ? (hasApprovedVendor ? editingEntry.vendorId : '__other__') : '',
       otherVendorName: hasApprovedVendor ? '' : editingEntry.vendorName || '',
       otherVendorContact: editingEntry.vendorContactPerson || '',
@@ -358,8 +324,6 @@ function NewGateEntryModal({
       .filter((parcel) => parcel.clusterId === form.clusterId)
       .map((parcel) => ({ id: parcel.id, name: `${parcel.id} — ${parcel.ownerName || 'Owner not recorded'}`, detail: parcel.detail }));
   const selectedDestination = destinations.find((destination) => destination.id === form.destinationId) ?? null;
-  const isOtherItem = form.itemId === '__other__';
-  const selectedItem = inventoryItems.find((item) => item.id === form.itemId) ?? null;
   const matchingGates = gates.filter((gate) => (
     gate.locationType === form.destinationType
     && (gate.locationId === form.destinationId || gate.locationName === selectedDestination?.name)
@@ -379,10 +343,6 @@ function NewGateEntryModal({
     if (form.destinationType === 'Store' && !form.gateNo.trim()) { toast.error('Please select the gate number'); return; }
     if (form.destinationType === 'Site' && !form.clusterId) { toast.error('Please select a cluster'); return; }
     if (!form.destinationId) { toast.error(`Please select a ${form.destinationType === 'Site' ? 'land parcel' : 'store'}`); return; }
-    if (!form.itemId) { toast.error('Please select an item'); return; }
-    if (isOtherItem && !form.otherItemName.trim()) { toast.error('Please enter the item name'); return; }
-    const itemQuantity = Number(form.itemQuantity);
-    if (!Number.isFinite(itemQuantity) || itemQuantity <= 0) { toast.error('Please enter a valid item quantity'); return; }
     if (form.entryType === 'Inward' && !form.vendorId) { toast.error('Please select a vendor'); return; }
     if (form.entryType === 'Inward' && isOtherVendor && !form.otherVendorName.trim()) { toast.error('Please enter the vendor name'); return; }
     if (form.entryType === 'Outward') {
@@ -416,11 +376,6 @@ function NewGateEntryModal({
         destinationType: form.destinationType,
         destinationId: form.destinationId,
         destinationName: selectedDestination?.name || form.destinationId,
-        itemId: isOtherItem ? undefined : selectedItem?.id,
-        itemCode: isOtherItem ? form.otherItemCode.trim() || undefined : selectedItem?.code,
-        itemName: isOtherItem ? form.otherItemName.trim() : selectedItem?.name,
-        itemUnit: isOtherItem ? form.otherItemUnit.trim() || undefined : selectedItem?.unit,
-        itemQuantity,
         outwardToType: form.entryType === 'Outward' ? form.outwardToType : undefined,
         outwardToId: form.entryType === 'Outward' && !isManualOutwardRecipient ? form.outwardToId : undefined,
         outwardToName,
@@ -455,11 +410,6 @@ function NewGateEntryModal({
         destinationType: form.destinationType,
         destinationId: form.destinationId,
         destinationName: selectedDestination?.name || form.destinationId,
-        itemId: isOtherItem ? undefined : selectedItem?.id,
-        itemCode: isOtherItem ? form.otherItemCode.trim() || undefined : selectedItem?.code,
-        itemName: isOtherItem ? form.otherItemName.trim() : selectedItem?.name,
-        itemUnit: isOtherItem ? form.otherItemUnit.trim() || undefined : selectedItem?.unit,
-        itemQuantity,
         siteEntryNo: siteEntryNoPreview || undefined,
         outwardToType: form.entryType === 'Outward' ? form.outwardToType : undefined,
         outwardToId: form.entryType === 'Outward' && !isManualOutwardRecipient ? form.outwardToId : undefined,
@@ -712,96 +662,13 @@ function NewGateEntryModal({
             </section>
           )}
 
-          {/* Vendor */}
+          {/* Vendor — Inward only */}
+          {form.entryType === 'Inward' && (
           <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
             <div className="mb-4">
-              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#0D3A35]">{form.entryType === 'Inward' ? 'Vendor & Documents' : 'Item Details'}</p>
-              <p className="mt-1 text-xs text-slate-500">{form.entryType === 'Inward' ? 'Select the delivered item, vendor and supporting documents.' : 'Select the item and quantity moving outward.'}</p>
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#0D3A35]">Vendor & Documents</p>
+              <p className="mt-1 text-xs text-slate-500">Select the vendor and supporting documents.</p>
             </div>
-            <div className="mb-4 border-b border-slate-100 pb-4">
-              <label className={fieldLabelCls}>Item <span className="text-red-500">*</span></label>
-              <div className="relative">
-                <select
-                  value={form.itemId}
-                  onChange={(event) => setForm((previous) => ({
-                    ...previous,
-                    itemId: event.target.value,
-                    itemQuantity: '',
-                    otherItemName: '',
-                    otherItemCode: '',
-                    otherItemUnit: '',
-                  }))}
-                  disabled={isLoadingItems}
-                  className={selectCls}
-                >
-                  <option value="">{isLoadingItems ? 'Loading inventory items…' : 'Select item'}</option>
-                  {inventoryItems.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}{item.code ? ` · ${item.code}` : ''}{item.unit ? ` · ${item.unit}` : ''}
-                    </option>
-                  ))}
-                  <option value="__other__">Other Item — Manual Entry</option>
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              </div>
-
-              {form.itemId && (
-                <div className="mt-4">
-                  <label className={fieldLabelCls}>
-                    Quantity{!isOtherItem && selectedItem?.unit ? ` (${selectedItem.unit})` : ''} <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={form.itemQuantity}
-                    onChange={(event) => setForm((previous) => ({ ...previous, itemQuantity: event.target.value }))}
-                    placeholder="Enter received quantity"
-                    className={textInputCls}
-                  />
-                  {!isOtherItem && selectedItem?.unit && (
-                    <p className="mt-1.5 text-xs text-slate-400">Quantity will be recorded in {selectedItem.unit}.</p>
-                  )}
-                </div>
-              )}
-
-              {isOtherItem && (
-                <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-4">
-                  <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.08em] text-amber-800">Manual Item Details</p>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <div className="sm:col-span-2">
-                      <label className={fieldLabelCls}>Item Name <span className="text-red-500">*</span></label>
-                      <input
-                        value={form.otherItemName}
-                        onChange={(event) => setForm((previous) => ({ ...previous, otherItemName: event.target.value }))}
-                        placeholder="Enter item name"
-                        className={textInputCls}
-                      />
-                    </div>
-                    <div>
-                      <label className={fieldLabelCls}>Item Code</label>
-                      <input
-                        value={form.otherItemCode}
-                        onChange={(event) => setForm((previous) => ({ ...previous, otherItemCode: event.target.value }))}
-                        placeholder="Optional"
-                        className={textInputCls}
-                      />
-                    </div>
-                    <div>
-                      <label className={fieldLabelCls}>Unit</label>
-                      <input
-                        value={form.otherItemUnit}
-                        onChange={(event) => setForm((previous) => ({ ...previous, otherItemUnit: event.target.value }))}
-                        placeholder="e.g. KGS, Nos, L"
-                        className={textInputCls}
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-            {form.entryType === 'Inward' && (
-              <>
             <label className={fieldLabelCls}>
               Vendor <span className="text-red-500">*</span>
             </label>
@@ -873,10 +740,7 @@ function NewGateEntryModal({
                 </div>
               </div>
             )}
-              </>
-            )}
-          {/* Reference numbers — Inward only */}
-          {form.entryType === 'Inward' && (
+
             <div className="mt-4 space-y-4 border-t border-slate-100 pt-4">
               <div>
                 <label className={fieldLabelCls}>Order Number</label>
@@ -971,8 +835,8 @@ function NewGateEntryModal({
                 />
               </div>
             </div>
-          )}
           </section>
+          )}
         </div>
 
         <div className="flex shrink-0 items-center justify-end gap-3 border-t border-slate-200 bg-white px-6 py-4">
@@ -1021,14 +885,12 @@ export function GateEntryModule() {
   const [isLoadingVendors, setIsLoadingVendors] = useState(false);
   const [vendorPos, setVendorPos] = useState<VendorPo[]>([]);
   const [isLoadingPos, setIsLoadingPos] = useState(false);
-  const [inventoryItems, setInventoryItems] = useState<InventoryItemOption[]>([]);
-  const [isLoadingItems, setIsLoadingItems] = useState(false);
   const [gates, setGates] = useState<GateDefinition[]>(readGateDefinitions);
   const [clusters, setClusters] = useState<ClusterOption[]>([]);
   const [landParcels, setLandParcels] = useState<LandParcelOption[]>([]);
   const [isLoadingLandParcels, setIsLoadingLandParcels] = useState(false);
   const [gateForm, setGateForm] = useState({ gateNo: '', locationType: 'Store' as DestinationType, clusterId: '', locationId: '' });
-  const stores = useMemo(readStores, []);
+  const [stores, setStores] = useState<string[]>(DEFAULT_STORES);
   const entryMetadata = readGateEntryMetadata();
 
   const refresh = useCallback(async (silent = false) => {
@@ -1084,29 +946,24 @@ export function GateEntryModule() {
       .finally(() => setIsLoadingPos(false));
   }, []);
 
+  // Same store list Inventory.tsx manages (Configure tab → Stores) — fetched fresh here
+  // rather than read from localStorage, so the two pages never drift apart.
   useEffect(() => {
     let cancelled = false;
-    const loadItems = async () => {
-      setIsLoadingItems(true);
+    const loadStores = async () => {
       try {
         const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
-        const response = await fetch(`${baseUrl}/inventory/get_all_item`, { headers: { Accept: 'application/json' } });
+        const response = await fetch(`${baseUrl}/inventory/get_inventory_config`, { headers: { Accept: 'application/json' } });
         const data = await response.json().catch(() => null);
-        if (!response.ok || !data?.success || !Array.isArray(data?.items)) throw new Error('Failed to load inventory items');
-        const mapped = data.items.map((item: Record<string, unknown>, index: number): InventoryItemOption => ({
-          id: String(item?.Invent_id || item?.new_item_code || `item-${index}`),
-          code: String(item?.new_item_code || ''),
-          name: String(item?.item_name || 'Unnamed Item'),
-          unit: String(item?.unit || ''),
-        })).sort((a: InventoryItemOption, b: InventoryItemOption) => a.name.localeCompare(b.name));
-        if (!cancelled) setInventoryItems(mapped);
+        const names = Array.isArray(data?.stores)
+          ? (data.stores as Record<string, unknown>[]).map((store) => String(store?.name || '')).filter(Boolean)
+          : [];
+        if (!cancelled && names.length > 0) setStores(names);
       } catch {
-        if (!cancelled) setInventoryItems([]);
-      } finally {
-        if (!cancelled) setIsLoadingItems(false);
+        // keep the DEFAULT_STORES fallback already in state
       }
     };
-    void loadItems();
+    void loadStores();
     return () => { cancelled = true; };
   }, []);
 
@@ -1808,8 +1665,6 @@ export function GateEntryModule() {
           stores={stores}
           clusters={clusters}
           landParcels={landParcels}
-          inventoryItems={inventoryItems}
-          isLoadingItems={isLoadingItems}
           editingEntry={editingEntry}
           onClose={() => { setIsModalOpen(false); setEditingEntry(null); }}
           onCreated={() => { void refresh(true); }}
