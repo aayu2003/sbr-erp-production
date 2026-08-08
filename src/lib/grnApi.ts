@@ -469,8 +469,15 @@ export const createGrn = async (input: CreateGrnInput): Promise<GRNRecord> => {
   if (selectedGateEntries.some((entry) => entry?.entryType !== 'Inward')) {
     throw new Error('GRN can only be created against inward gate entries');
   }
-  if (selectedGateEntries.some((entry) => entry?.orderNumber !== input.orderNumber)) {
-    throw new Error('Every selected gate entry must belong to the selected purchase order');
+  // No-PO entries carry no orderNumber at all (see fromRecord above), so they can't be
+  // matched with a strict equality check against input.orderNumber === ''. Mirror the same
+  // rule the wizard uses to list them: no order number on either side, same vendor.
+  if (input.orderNumber) {
+    if (selectedGateEntries.some((entry) => entry?.orderNumber !== input.orderNumber)) {
+      throw new Error('Every selected gate entry must belong to the selected purchase order');
+    }
+  } else if (selectedGateEntries.some((entry) => entry?.orderNumber || entry?.vendorId !== input.vendorId)) {
+    throw new Error('Every selected gate entry must belong to the selected vendor');
   }
   if (selectedGateEntries.some((entry) => Boolean(entry?.usedInGrn))) {
     throw new Error('One or more selected gate entries are already linked to another GRN');
