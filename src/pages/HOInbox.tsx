@@ -414,12 +414,20 @@ export default function HOInbox() {
     });
   }, [inboxRows, activeTab, query]);
 
-  const metrics = useMemo(() => ({
-    total: inboxRows.length,
-    pending: inboxRows.filter((row) => !safeTrim(row.item.tcApprovedVendorId)).length,
-    approved: inboxRows.filter((row) => Boolean(safeTrim(row.item.tcApprovedVendorId))).length,
-    orders: inboxRows.filter((row) => Boolean(safeTrim((row.item as any).poNo) || safeTrim((row.item as any).poCreatedAt))).length,
-  }), [inboxRows]);
+  const metrics = useMemo(() => {
+    const isTcApproved = (item: ComparativeModel) =>
+      safeTrim(item.tcStatus).toLowerCase() === 'approved' || Boolean(safeTrim(item.tcApprovedVendorId));
+    const isNfaApproved = (item: ComparativeModel) => safeTrim(item.nfaStatus).toLowerCase() === 'approved';
+    const hasOrder = (item: ComparativeModel) =>
+      Boolean(safeTrim((item as any).poNo) || safeTrim((item as any).poCreatedAt));
+
+    return {
+      total: inboxRows.length,
+      pendingTc: inboxRows.filter((row) => !isTcApproved(row.item)).length,
+      pendingNfa: inboxRows.filter((row) => isTcApproved(row.item) && !isNfaApproved(row.item)).length,
+      orders: inboxRows.filter((row) => hasOrder(row.item)).length,
+    };
+  }, [inboxRows]);
 
   const updateComparative = (indentId: string, patch: Partial<ComparativeModel>) => {
     setAll((prev) => {
@@ -449,8 +457,8 @@ export default function HOInbox() {
           </div>
           <div>
             <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Purchase &amp; Procurement</p>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">Head Office Procurement Control</h1>
-            <p className="mt-1 max-w-3xl text-sm text-slate-500">Review commercial comparisons, approve the selected vendor, create PO/WO documents and control forwarding to Finance Admin Operations.</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">Order Approval Flow</h1>
+            <p className="mt-1 max-w-3xl text-sm text-slate-500">Track every vendor comparative statement through TC approval, NFA approval and purchase order creation.</p>
           </div>
         </div>
         <div className="rounded-xl border border-[#d7e4e0] bg-[#edf5f2] px-4 py-3 text-right">
@@ -461,10 +469,10 @@ export default function HOInbox() {
 
       <section className="grid overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: 'Total Comparatives', value: metrics.total, icon: FileText, tone: 'bg-slate-100 text-slate-700' },
-          { label: 'Pending HO Approval', value: metrics.pending, icon: ClipboardCheck, tone: 'bg-amber-50 text-amber-700' },
-          { label: 'TC Approved', value: metrics.approved, icon: CheckCircle2, tone: 'bg-emerald-50 text-emerald-700' },
-          { label: 'PO / WO Created', value: metrics.orders, icon: ShoppingCart, tone: 'bg-[#edf5f2] text-[#0D3A35]' },
+          { label: 'Comparative Statements', value: metrics.total, icon: FileText, tone: 'bg-slate-100 text-slate-700' },
+          { label: 'Pending TC Approval', value: metrics.pendingTc, icon: ClipboardCheck, tone: 'bg-amber-50 text-amber-700' },
+          { label: 'Pending NFA Approval', value: metrics.pendingNfa, icon: CheckCircle2, tone: 'bg-blue-50 text-blue-700' },
+          { label: 'Purchase Orders Created', value: metrics.orders, icon: ShoppingCart, tone: 'bg-[#edf5f2] text-[#0D3A35]' },
         ].map(({ label, value, icon: Icon, tone }, index) => (
           <div key={label} className={cn('flex items-center justify-between px-5 py-5', index > 0 && 'sm:border-l', index > 1 && 'sm:border-t xl:border-t-0', 'border-slate-200')}>
             <div><p className="text-[10px] font-bold uppercase tracking-[0.1em] text-slate-400">{label}</p><p className="mt-1 text-2xl font-black text-slate-950">{value}</p></div>
@@ -477,8 +485,8 @@ export default function HOInbox() {
         <div className="border-b border-slate-200 px-5 py-4">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div>
-              <h2 className="text-base font-bold text-slate-900">HO Approval Register</h2>
-              <p className="mt-0.5 text-xs text-slate-500">Commercial comparison, TC approval and PO/WO processing in one controlled register.</p>
+              <h2 className="text-base font-bold text-slate-900">Vendor Comparative Statement Register</h2>
+              <p className="mt-0.5 text-xs text-slate-500">Comparative statement → TC approval → NFA approval → purchase order.</p>
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <label className="relative block min-w-[300px]">
@@ -496,8 +504,15 @@ export default function HOInbox() {
           </div>
         </div>
 
-        <div className="bg-slate-50/70 px-5 py-2.5 text-[10px] font-bold uppercase tracking-[0.11em] text-slate-400">
-          Purchase workflow records · click a row to review complete details
+        <div className="hidden grid-cols-[minmax(190px,1fr)_minmax(180px,1.15fr)_80px_80px_minmax(120px,.7fr)_minmax(120px,.7fr)_minmax(120px,.7fr)_minmax(250px,auto)] items-center border-b border-slate-200 bg-[#0D3A35] px-5 py-3 text-center text-[11px] font-bold uppercase tracking-[0.08em] text-white lg:grid">
+          <span>Comparative Statement No.</span>
+          <span>Item Details</span>
+          <span>UoM</span>
+          <span>Qty.</span>
+          <span>TC Approval</span>
+          <span>NFA Approval</span>
+          <span>Purchase Order</span>
+          <span>Actions</span>
         </div>
 
         {loading ? (
@@ -505,7 +520,7 @@ export default function HOInbox() {
         ) : filteredRows.length === 0 ? (
           <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><ClipboardCheck className="h-10 w-10 text-slate-300" /><p className="mt-4 font-bold text-slate-700">No HO records found</p><p className="mt-1 text-sm text-slate-400">{query ? 'Try a different search term or document type.' : activeTab === 'all' ? 'Forward a commercial comparison to populate this register.' : `No ${TAB_META[activeTab]?.full ?? activeTab} are available.`}</p></div>
         ) : (
-          <div className="space-y-3 p-4">
+          <div className="divide-y divide-slate-200">
             {filteredRows.map((row) => {
               const isTarget = Boolean(openIndentId) && row.item.indentId === openIndentId;
               return <ComparativeQuotationApprovalRow key={row.key} item={row.item} onOpen={(indentId) => navigate(`/ho/${indentId}`)} onUpdate={updateComparative} defaultOpen={isTarget} defaultTab={isTarget ? desiredTab : undefined} />;

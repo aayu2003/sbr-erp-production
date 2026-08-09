@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, ClipboardList, Download, FileText, Lock, Pencil, SendHorizonal, ShoppingCart, Unlock, Upload, Wrench, X } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
@@ -203,7 +204,9 @@ function InlineTracker({ steps }: { steps: Array<{ label: string; done: boolean;
 }
 
 export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, defaultTab }: Props) {
+  const navigate = useNavigate();
   const [open, setOpen] = useState(Boolean(defaultOpen));
+  const [tcApprovalOpen, setTcApprovalOpen] = useState(false);
   const [approving, setApproving] = useState(false);
   const [makePoOpen, setMakePoOpen] = useState(false);
   const [poForwardDialogOpen, setPoForwardDialogOpen] = useState(false);
@@ -605,6 +608,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
       });
 
       toast.success('TC approved');
+      setTcApprovalOpen(false);
     } catch (e: any) {
       const msg = String(e?.message ?? e ?? '').trim();
       toast.error(`Failed to approve TC${msg ? `: ${msg}` : ''}`);
@@ -656,6 +660,77 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
 
   return (
     <>
+      <Dialog open={tcApprovalOpen} onOpenChange={setTcApprovalOpen}>
+        <DialogContent className="flex max-h-[92vh] w-[96vw] max-w-[1500px] flex-col gap-0 overflow-hidden p-0">
+          <DialogHeader className="border-b border-[#d7e4e0] bg-[#0D3A35] px-6 py-5 text-left text-white">
+            <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10">
+                <ClipboardList className="h-5 w-5" />
+              </span>
+              TC Approval
+            </DialogTitle>
+            <DialogDescription className="ml-[52px] text-sm text-white/70">
+              Review the Vendor Comparative Statement and select the vendor to approve.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50 p-5">
+            <ComparativeStatementPreview c={item} />
+
+            <section className="mt-5 rounded-xl border border-[#d7e4e0] bg-white p-5 shadow-sm">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#58716a]">
+                    {canApprove ? 'Select vendor for TC approval' : 'TC approved vendor'}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {vendors.length ? vendors.map((vendor) => {
+                      const approvalVendorId = String(vendor.directoryVendorId || vendor.id);
+                      const active = approvalVendorId === selectedVendorId || approvalVendorId === approvedVendorId;
+                      return (
+                        <Button
+                          key={vendor.id}
+                          type="button"
+                          variant="outline"
+                          onClick={() => canApprove && setSelectedVendor(approvalVendorId)}
+                          disabled={approving || !canApprove}
+                          className={active
+                            ? 'border-[#0D3A35] bg-[#0D3A35] text-white hover:bg-[#092e2a] hover:text-white'
+                            : 'border-slate-200 bg-white text-slate-700 hover:border-[#7fa89e] hover:bg-[#edf5f2] hover:text-[#0D3A35]'}
+                        >
+                          {vendor.name || vendor.directoryVendorId || vendor.id}
+                          {active ? <Check className="ml-1.5 h-4 w-4" /> : null}
+                        </Button>
+                      );
+                    }) : <p className="text-sm text-slate-500">No vendors are recorded in this comparative statement.</p>}
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button type="button" variant="outline" onClick={() => setTcApprovalOpen(false)}>
+                    Close
+                  </Button>
+                  {canApprove ? (
+                    <Button
+                      type="button"
+                      onClick={approveNow}
+                      disabled={approving || !selectedVendorId}
+                      className="bg-[#0D3A35] px-6 text-white hover:bg-[#092e2a]"
+                    >
+                      {approving ? 'Approving…' : 'Approve TC'}
+                    </Button>
+                  ) : (
+                    <span className="inline-flex h-10 items-center gap-2 rounded-md bg-emerald-50 px-4 text-sm font-bold text-emerald-700">
+                      <Check className="h-4 w-4" /> TC Approved
+                    </span>
+                  )}
+                </div>
+              </div>
+            </section>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={poForwardDialogOpen} onOpenChange={setPoForwardDialogOpen}>
         <DialogContent className="max-w-4xl p-0 overflow-hidden gap-0">
 
@@ -1045,13 +1120,11 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
         </DialogContent>
       </Dialog>
 
-      <Collapsible open={open} onOpenChange={setOpen} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:border-[#bfd3ce]">
+      <Collapsible open={false} onOpenChange={() => undefined} className="overflow-hidden bg-white transition hover:bg-[#fbfdfc]">
         {/* ── Always-visible row ─────────────────────────────────── */}
         <CollapsibleTrigger asChild>
           <div
-            className="group relative flex cursor-pointer items-center gap-4 overflow-hidden px-4 py-4 transition-colors hover:bg-[#f6faf9]"
-            role="button"
-            tabIndex={0}
+            className="group relative grid cursor-default grid-cols-1 items-center gap-4 overflow-hidden px-5 py-4 transition-colors hover:bg-[#f6faf9] lg:grid-cols-[minmax(190px,1fr)_minmax(180px,1.15fr)_80px_80px_minmax(120px,.7fr)_minmax(120px,.7fr)_minmax(120px,.7fr)_minmax(250px,auto)]"
           >
             {poForwarded ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden">
@@ -1061,140 +1134,86 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
               </div>
             ) : null}
 
-            {/* Icon */}
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#edf5f2]">
-              <FileText className="h-5 w-5 text-[#0D3A35]" />
+            {/* Comparative statement identity */}
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#edf5f2]">
+                <FileText className="h-5 w-5 text-[#0D3A35]" />
+              </div>
+              <div className="min-w-0">
+                <div className="truncate font-mono text-sm font-bold text-[#0D3A35]">
+                  {item.comparisonNo || item.comparisonId || item.indentId}
+                </div>
+                <div className="mt-0.5 truncate text-[11px] font-medium text-slate-400">
+                  PR: {item.indentId}
+                </div>
+                <div className="mt-1 truncate text-xs font-semibold text-slate-600">
+                  {item.technicalRecommendationVendorId || item.hoSelectedVendorId || 'Vendor not selected'}
+                </div>
+              </div>
             </div>
 
-            {/* PR No + title */}
-            <div className="w-48 min-w-0 shrink-0">
-              <div className="truncate font-mono text-sm font-bold text-[#0D3A35]">
-                {item.indentId}
-              </div>
-              <div className="mt-0.5 truncate text-[11px] font-medium text-slate-400">
-                Commercial Comparative Statement
-              </div>
+            {/* Item details stay line-aligned with UoM and quantity. */}
+            <div className="min-w-0 space-y-1.5 text-left">
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-slate-400 lg:hidden">Item Details</span>
+              {(item.items || []).length ? (item.items || []).map((line) => (
+                <div key={line.id} className="truncate text-xs font-semibold text-slate-700" title={line.partName || 'Item not recorded'}>
+                  {line.partName || 'Item not recorded'}
+                </div>
+              )) : <span className="text-xs text-slate-400">Not recorded</span>}
             </div>
 
-            {/* Tracker — always visible */}
-            <div className="flex-1 min-w-0">
-              <InlineTracker steps={trackerSteps} />
+            <div className="space-y-1.5 text-left lg:text-center">
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-slate-400 lg:hidden">UoM</span>
+              {(item.items || []).length ? (item.items || []).map((line) => (
+                <div key={line.id} className="text-xs font-semibold text-slate-600">{line.uom || '—'}</div>
+              )) : <span className="text-xs text-slate-400">—</span>}
             </div>
 
-            {/* Toolbox (lock + PO actions + collapse) */}
-            <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
-              <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1">
-                {/* Lock / Unlock */}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  onClick={() => {
-                    const next = !hoLocked;
-                    onUpdate(item.indentId, { hoLocked: next } as any);
-                    toast.message(next ? 'Locked (editing disabled)' : 'Unlocked (editing enabled)');
-                  }}
-                  aria-label={hoLocked ? 'Unlock row' : 'Lock row'}
-                  title={hoLocked ? 'Unlock to enable editing' : 'Lock to disable editing'}
-                >
-                  {hoLocked ? (
-                    <Lock className="h-4 w-4 text-destructive" aria-hidden="true" />
-                  ) : (
-                    <Unlock className="h-4 w-4 text-muted-foreground opacity-50" aria-hidden="true" />
-                  )}
-                </Button>
+            <div className="space-y-1.5 text-left lg:text-center">
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-slate-400 lg:hidden">Qty.</span>
+              {(item.items || []).length ? (item.items || []).map((line) => (
+                <div key={line.id} className="text-xs font-bold tabular-nums text-slate-700">
+                  {new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 }).format(Number(line.qty) || 0)}
+                </div>
+              )) : <span className="text-xs text-slate-400">—</span>}
+            </div>
 
-                {/* Make PO / WO */}
-                <Button
-                  type="button"
-                  size="icon"
-                  className="h-8 w-8"
-                  variant={poDone ? 'outline' : 'default'}
-                  onClick={openMakePo}
-                  disabled={poDone || hoLocked}
-                  title={`Make ${lastStepLabel}`}
-                  aria-label={`Make ${lastStepLabel}`}
-                >
-                  {isSPR
-                    ? <Wrench className="h-4 w-4" aria-hidden="true" />
-                    : <ShoppingCart className="h-4 w-4" aria-hidden="true" />}
-                </Button>
+            {/* Workflow stages */}
+            {trackerSteps.map((step, index) => {
+              const firstIncomplete = trackerSteps.findIndex((candidate) => !candidate.done);
+              const state: StepState = step.done ? 'done' : index === firstIncomplete ? 'active' : 'pending';
+              return (
+                <div key={step.label} className="flex justify-start lg:justify-center">
+                  <StepPill label={index === 0 ? 'TC Approval' : index === 1 ? 'NFA Approval' : lastStepFull} state={state} sub={step.sub} />
+                </div>
+              );
+            })}
 
-                {/* Edit PO / WO */}
-                <Button
-                  type="button"
-                  size="icon"
-                  className="h-8 w-8"
-                  variant="outline"
-                  onClick={openEditPo}
-                  disabled={!poDone || hoLocked}
-                  title={`Edit ${lastStepLabel}`}
-                  aria-label={`Edit ${lastStepLabel}`}
-                >
-                  <Pencil className="h-4 w-4" aria-hidden="true" />
-                </Button>
-
-                {/* Forward PO / WO */}
-                <Button
-                  type="button"
-                  size="icon"
-                  className="h-8 w-8"
-                  variant="outline"
-                  onClick={forwardPo}
-                  disabled={!poDone}
-                  title={`Forward ${lastStepLabel}`}
-                  aria-label={`Forward ${lastStepLabel}`}
-                >
-                  <SendHorizonal className="h-4 w-4" aria-hidden="true" />
-                </Button>
-
-                {/* Download All Documents */}
-                <Button
-                  type="button"
-                  size="icon"
-                  className="h-8 w-8"
-                  variant="outline"
-                  onClick={downloadAllDocs}
-                  title="Download All Documents"
-                  aria-label="Download All Documents"
-                >
-                  <Download className="h-4 w-4" aria-hidden="true" />
-                </Button>
-
-                {/* Upload PO */}
-                <Button
-                  type="button"
-                  size="icon"
-                  className="h-8 w-8"
-                  variant="outline"
-                  onClick={() => {
-                    setUploadPoNumber(poNo || '');
-                    setUploadPoDialogOpen(true);
-                  }}
-                  disabled={uploadingPo}
-                  title="Upload PO"
-                  aria-label="Upload PO"
-                >
-                  <Upload className="h-4 w-4" aria-hidden="true" />
-                </Button>
-
-                {/* Collapse / Expand */}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  onClick={() => setOpen((v) => !v)}
-                  aria-label={open ? 'Collapse' : 'Expand'}
-                  title={open ? 'Collapse' : 'Expand'}
-                >
-                  <ChevronDown
-                    className={`h-4 w-4 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`}
-                    aria-hidden="true"
-                  />
-                </Button>
-              </div>
+            {/* Single controlled action for this stage. */}
+            <div className="flex justify-start lg:justify-center" onClick={(e) => e.stopPropagation()}>
+              <Button
+                type="button"
+                onClick={() => {
+                  if (canApprove) {
+                    setTcApprovalOpen(true);
+                    return;
+                  }
+                  if (nfaDone) {
+                    openMakePo();
+                    return;
+                  }
+                  const params = new URLSearchParams({ section: 'nfa', pr: item.indentId });
+                  navigate(`/finance-admin-ops-indents?${params.toString()}`);
+                }}
+                className="h-9 gap-2 bg-[#0D3A35] px-4 text-white hover:bg-[#092e2a]"
+              >
+                {canApprove
+                  ? <ClipboardList className="h-4 w-4" />
+                  : nfaDone
+                    ? <ShoppingCart className="h-4 w-4" />
+                    : <SendHorizonal className="h-4 w-4" />}
+                {canApprove ? 'TC Approval' : nfaDone ? 'Forward to WO/PO' : 'Forward to NFA'}
+              </Button>
             </div>
           </div>
         </CollapsibleTrigger>

@@ -50,6 +50,7 @@ import QuotationComparative from "./pages/QuotationComparative";
 import SprQuotationComparative from "./pages/SprQuotationComparative";
 import HOInbox from "@/pages/HOInbox";
 import HO from "@/pages/HO";
+import POCreation from "@/pages/POCreation";
 import PurchaseFlow from "@/pages/PurchaseFlow";
 import ProjectConfig from "@/pages/ProjectConfig";
 import DirectorCapex from "./pages/DirectorCapex";
@@ -233,6 +234,14 @@ const App = () => (
             element={
               <AppLayout>
                 <HO />
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/po-creation"
+            element={
+              <AppLayout>
+                <POCreation />
               </AppLayout>
             }
           />
