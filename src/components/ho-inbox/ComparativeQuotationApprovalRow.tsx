@@ -157,14 +157,14 @@ function StepPill({ label, state, sub }: { label: string; state: StepState; sub?
       <div className={cn(
         'flex items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-[11px] font-semibold border transition-all',
         state === 'done'    && 'bg-emerald-50 border-emerald-200 text-emerald-700',
-        state === 'active'  && 'bg-blue-50 border-blue-300 text-blue-700 shadow-sm ring-2 ring-blue-100',
+        state === 'active'  && 'bg-[#edf5f2] border-[#9ec0b7] text-[#0D3A35] shadow-sm ring-2 ring-[#dcebe7]',
         state === 'pending' && 'bg-slate-50 border-slate-200 text-slate-400',
       )}>
         {state === 'done' && <Check className="h-3 w-3 shrink-0" />}
         {state === 'active' && (
           <span className="relative flex h-2 w-2 shrink-0">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-60" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" />
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#4f8c80] opacity-50" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-[#0D3A35]" />
           </span>
         )}
         {state === 'pending' && <span className="h-2 w-2 shrink-0 rounded-full bg-slate-300" />}
@@ -940,7 +940,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Upload className="h-5 w-5 text-blue-600" />
+              <Upload className="h-5 w-5 text-[#0D3A35]" />
               {item.indent_type === 'SPR' ? 'Upload Work Order' : 'Upload Purchase Order'}
             </DialogTitle>
             <DialogDescription>
@@ -961,7 +961,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                 value={uploadPoNumber}
                 onChange={(e) => setUploadPoNumber(e.target.value)}
                 placeholder="e.g. PO-2026-001"
-                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-[#0D3A35] focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/20"
               />
             </div>
 
@@ -984,7 +984,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
               <button
                 type="button"
                 onClick={() => dialogFileInputRef.current?.click()}
-                className="w-full rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 hover:bg-blue-50 hover:border-blue-400 transition-colors p-6 flex flex-col items-center gap-2"
+                className="flex w-full flex-col items-center gap-2 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 p-6 transition-colors hover:border-[#7fa89e] hover:bg-[#edf5f2]"
               >
                 <Upload className="h-7 w-7 text-gray-400" />
                 {uploadPoFile ? (
@@ -1036,7 +1036,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
               type="button"
               onClick={handleUploadPoSubmit}
               disabled={uploadingPo || !uploadPoFile || !uploadPoNumber.trim()}
-              className="gap-2 bg-blue-600 hover:bg-blue-700 text-white"
+              className="gap-2 bg-[#0D3A35] text-white hover:bg-[#092e2a]"
             >
               <Upload className="h-4 w-4" />
               {uploadingPo ? 'Uploading…' : 'Upload & Forward'}
@@ -1045,11 +1045,11 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
         </DialogContent>
       </Dialog>
 
-      <Collapsible open={open} onOpenChange={setOpen}>
+      <Collapsible open={open} onOpenChange={setOpen} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:border-[#bfd3ce]">
         {/* ── Always-visible row ─────────────────────────────────── */}
         <CollapsibleTrigger asChild>
           <div
-            className="group relative flex cursor-pointer items-center gap-4 overflow-hidden px-4 py-3 transition-colors hover:bg-muted/30"
+            className="group relative flex cursor-pointer items-center gap-4 overflow-hidden px-4 py-4 transition-colors hover:bg-[#f6faf9]"
             role="button"
             tabIndex={0}
           >
@@ -1062,17 +1062,17 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
             ) : null}
 
             {/* Icon */}
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted">
-              <FileText className="h-4 w-4 text-muted-foreground" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#edf5f2]">
+              <FileText className="h-5 w-5 text-[#0D3A35]" />
             </div>
 
             {/* PR No + title */}
             <div className="w-48 min-w-0 shrink-0">
-              <div className="truncate text-sm font-semibold text-foreground">
+              <div className="truncate font-mono text-sm font-bold text-[#0D3A35]">
                 {item.indentId}
               </div>
-              <div className="truncate text-[11px] text-muted-foreground">
-                Price Comparative Statement
+              <div className="mt-0.5 truncate text-[11px] font-medium text-slate-400">
+                Commercial Comparative Statement
               </div>
             </div>
 
@@ -1083,7 +1083,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
 
             {/* Toolbox (lock + PO actions + collapse) */}
             <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
-              <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/20 p-1">
+              <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1">
                 {/* Lock / Unlock */}
                 <Button
                   type="button"
@@ -1201,22 +1201,22 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
 
         {/* ── Expanded content ───────────────────────────────────── */}
         <CollapsibleContent>
-          <div className="border-t border-border bg-muted/10 px-4 py-4">
+          <div className="border-t border-slate-200 bg-[#f8faf9] px-4 py-4">
             <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)} className="w-full">
-              <TabsList className="w-full justify-start">
-                <TabsTrigger value="indent">
+              <TabsList className="h-auto w-full justify-start rounded-xl border border-slate-200 bg-slate-100 p-1">
+                <TabsTrigger value="indent" className="rounded-lg px-4 py-2 text-slate-500 data-[state=active]:bg-white data-[state=active]:text-[#0D3A35] data-[state=active]:shadow-sm">
                   <span className="inline-flex items-center gap-2">
                     <ClipboardList className="h-4 w-4" aria-hidden="true" />
                     <span>Indent</span>
                   </span>
                 </TabsTrigger>
-                <TabsTrigger value="comparative">
+                <TabsTrigger value="comparative" className="rounded-lg px-4 py-2 text-slate-500 data-[state=active]:bg-white data-[state=active]:text-[#0D3A35] data-[state=active]:shadow-sm">
                   <span className="inline-flex items-center gap-2">
                     <FileText className="h-4 w-4" aria-hidden="true" />
                     <span>Comparative Statement</span>
                   </span>
                 </TabsTrigger>
-                <TabsTrigger value="po">
+                <TabsTrigger value="po" className="rounded-lg px-4 py-2 text-slate-500 data-[state=active]:bg-white data-[state=active]:text-[#0D3A35] data-[state=active]:shadow-sm">
                   <span className="inline-flex items-center gap-2">
                     {isSPR
                       ? <Wrench className="h-4 w-4" aria-hidden="true" />
@@ -1247,42 +1247,39 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                 </div>
               </TabsContent>
 
-              <TabsContent value="comparative">
+              <TabsContent value="comparative" className="mt-3">
                 <div className="space-y-4">
                   <ComparativeStatementPreview c={item} />
 
-                  {vendors.length && canApprove ? (
-                    <div>
-                      <p className="mb-2 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                        Select vendor to approve
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {vendors.map((v) => {
-                          const active = String(v.id) === selectedVendorId;
-                          return (
-                            <Button
-                              key={v.id}
-                              type="button"
-                              size="sm"
-                              variant={active ? 'default' : 'outline'}
-                              onClick={() => setSelectedVendor(String(v.id))}
-                              disabled={approving}
-                            >
-                              {v.name}
-                            </Button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ) : null}
-
                   {canApprove ? (
-                    <div className="flex items-center gap-2 pt-1">
+                    <div className="flex flex-col gap-4 rounded-xl border border-[#d7e4e0] bg-white p-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#58716a]">Select vendor for TC approval</p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {vendors.map((v) => {
+                            const approvalVendorId = String(v.directoryVendorId || v.id);
+                            const active = approvalVendorId === selectedVendorId;
+                            return (
+                              <Button
+                                key={v.id}
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setSelectedVendor(approvalVendorId)}
+                                disabled={approving}
+                                className={active ? 'border-[#0D3A35] bg-[#0D3A35] text-white hover:bg-[#092e2a] hover:text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-[#7fa89e] hover:bg-[#edf5f2] hover:text-[#0D3A35]'}
+                              >
+                                {v.name || v.directoryVendorId || v.id}
+                              </Button>
+                            );
+                          })}
+                        </div>
+                      </div>
                       <Button
                         type="button"
-                        size="sm"
                         onClick={approveNow}
-                        disabled={approving}
+                        disabled={approving || !selectedVendorId}
+                        className="h-10 shrink-0 bg-[#0D3A35] px-5 text-white hover:bg-[#092e2a]"
                       >
                         {approving ? 'Approving…' : 'Approve TC'}
                       </Button>
@@ -1330,7 +1327,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                             href={poDocUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                            className="inline-flex items-center gap-1 text-xs text-[#0D3A35] hover:underline"
                           >
                             <Download className="h-3 w-3" />
                             Open

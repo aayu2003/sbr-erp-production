@@ -38,10 +38,12 @@ import FleetChart from "./pages/FleetChart";
 import KhasraFinder from "./pages/khasra_finder";
 import FieldMonitoring from "./pages/FieldMonitoring";
 import LandAcquisition from "./pages/LandAcquisition";
+import LeaseMaster from "./pages/LeaseMaster";
 import Legal from "./pages/Legal";
 import AdminOpsIndent from "./pages/AdminOpsIndent";
 import FinanceAdminOpsIndent from "./pages/FinanceAdminOpsIndent";
 import PurchaseRequisition from "./pages/PurchaseRequisition";
+import PurchaseRequisitionEntry from "./pages/PurchaseRequisitionEntry";
 import VendorDirectory from "./pages/VendorDirectory";
 import QuotationComparative from "./pages/QuotationComparative";
 import SprQuotationComparative from "./pages/SprQuotationComparative";
@@ -58,7 +60,15 @@ import DirectorEmisInvestments from "./pages/DirectorEmisInvestments";
 import DirectorAssetsLiabilities from "./pages/DirectorAssetsLiabilities";
 import HRManagement from "./pages/HRManagement";
 import Settings from "./pages/Settings";
-import OnDemandTask from "./pages/OnDemandTask";
+import {
+  TaskCalendarPage,
+  TaskDetailPage,
+  TaskFormPage,
+  TaskInboxPage,
+  TaskSettingsPage,
+  TaskTemplatesPage,
+  TaskWorkspacePage,
+} from "./features/on-demand-tasks/on_demand_task_new";
 import FarmDirectory from "./pages/FarmDirectory";
 import FuelsAndConsumables from "./pages/FuelsAndConsumables";
 import AdminOpsFuelRequest from "./pages/AdminOpsFuelRequest";
@@ -104,6 +114,7 @@ const App = () => (
           <Route path="/farmers" element={<AppLayout><Farmers /></AppLayout>} />
           <Route path="/farmers/:farmer_id" element={<AppLayout><FarmerProfile /></AppLayout>} />
           <Route path="/land-acquisition" element={<AppLayout><LandAcquisition /></AppLayout>} />
+          <Route path="/lease-master" element={<AppLayout><LeaseMaster /></AppLayout>} />
           <Route path="/farm-directory" element={<AppLayout><FarmDirectory /></AppLayout>} />
           
           {/* Operations */}
@@ -133,13 +144,28 @@ const App = () => (
           <Route path="/admin-ops-fuel-requests" element={<AppLayout><AdminOpsFuelRequest /></AppLayout>} />
           <Route path="/director-fuel-requests" element={<AppLayout><DirectorFuelRequest /></AppLayout>} />
           <Route path="/admin-ops-indents" element={<AppLayout><AdminOpsIndent /></AppLayout>} />
-          <Route path="/on-demand-task" element={<AppLayout><OnDemandTask /></AppLayout>} />
+          <Route path="/on-demand-task" element={<AppLayout><TaskWorkspacePage /></AppLayout>} />
+          <Route path="/on-demand-task/new" element={<AppLayout><TaskFormPage /></AppLayout>} />
+          <Route path="/on-demand-task/inbox" element={<AppLayout><TaskInboxPage /></AppLayout>} />
+          <Route path="/on-demand-task/calendar" element={<AppLayout><TaskCalendarPage /></AppLayout>} />
+          <Route path="/on-demand-task/templates" element={<AppLayout><TaskTemplatesPage /></AppLayout>} />
+          <Route path="/on-demand-task/settings" element={<AppLayout><TaskSettingsPage /></AppLayout>} />
+          <Route path="/on-demand-task/:taskId/edit" element={<AppLayout><TaskFormPage /></AppLayout>} />
+          <Route path="/on-demand-task/:taskId" element={<AppLayout><TaskDetailPage /></AppLayout>} />
           <Route path="/finance-admin-ops-indents" element={<AppLayout><FinanceAdminOpsIndent /></AppLayout>} />
           <Route
             path="/purchase-requisition"
             element={
               <AppLayout>
                 <PurchaseRequisition />
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/purchase-requisition-entry"
+            element={
+              <AppLayout>
+                <PurchaseRequisitionEntry />
               </AppLayout>
             }
           />

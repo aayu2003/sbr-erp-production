@@ -27,7 +27,22 @@ import {
   Send,
   Info,
   Printer,
+  TrendingUp,
+  PackageX,
+  Clock3,
 } from 'lucide-react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -35,6 +50,7 @@ import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
@@ -116,6 +132,8 @@ type StockItem = {
     storage_location?: string;
   }[];
 };
+
+const INVENTORY_DASHBOARD_COLORS = ['#0D3A35', '#2563eb', '#f59e0b', '#7c3aed', '#0891b2', '#db2777', '#65a30d', '#64748b'];
 
 // ─────────────────────────────────────────────────────────────
 // MOCK DATA
@@ -946,7 +964,17 @@ const Inventory = () => {
   // modals
   const [addOpen, setAddOpen] = useState(false);
   const [dismissedAlerts, setDismissedAlerts] = useState<Set<string>>(new Set());
-  const [alertPanelOpen, setAlertPanelOpen] = useState(true);
+  const [alertPanelOpen, setAlertPanelOpen] = useState(false);
+  const [dashboardPieView, setDashboardPieView] = useState<'category' | 'item' | 'percentage'>('category');
+  const [inventoryReportPeriodOpen, setInventoryReportPeriodOpen] = useState(false);
+  const [inventoryReportFrom, setInventoryReportFrom] = useState(() => {
+    const date = new Date();
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-01`;
+  });
+  const [inventoryReportTo, setInventoryReportTo] = useState(() => {
+    const date = new Date();
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  });
   const prevStockRef = useRef<Record<string, number>>({});
   const [editItem, setEditItem] = useState<StockItem | null>(null);
   const [informationItem, setInformationItem] = useState<StockItem | null>(null);
@@ -1206,6 +1234,93 @@ const Inventory = () => {
     [centralStoreItems],
   );
 
+  const inventoryDashboard = useMemo(() => {
+    const valueOf = (item: StockItem) => (item.fifoList ?? []).reduce(
+      (total, batch) => total + (Number(batch.stock) || 0) * (Number(batch.per_unit_cost) || 0),
+      0,
+    );
+    const categoryMap = new Map<string, { category: string; value: number; stock: number; items: number; low: number; units: Set<string> }>();
+    centralStoreItems.forEach((item) => {
+      const category = item.category || 'Others';
+      const current = categoryMap.get(category) ?? { category, value: 0, stock: 0, items: 0, low: 0, units: new Set<string>() };
+      current.value += valueOf(item);
+      current.stock += Math.max(0, Number(item.currentStock) || 0);
+      current.items += 1;
+      if (item.unit) current.units.add(item.unit);
+      if (item.currentStock < item.minStock) current.low += 1;
+      categoryMap.set(category, current);
+    });
+    const categories = Array.from(categoryMap.values()).sort((a, b) => b.value - a.value || b.stock - a.stock);
+    const buildPieData = (mode: 'value' | 'stock') => {
+      const source = [...categories].sort((a, b) => mode === 'value' ? b.value - a.value : b.stock - a.stock);
+      const leading = source.slice(0, 7).map((entry) => ({
+        name: entry.category,
+        value: mode === 'value' ? entry.value : entry.stock,
+        unit: entry.units.size === 1 ? Array.from(entry.units)[0] : 'Mixed UoM',
+      }));
+      const remainder = source.slice(7).reduce((sum, entry) => sum + (mode === 'value' ? entry.value : entry.stock), 0);
+      if (remainder > 0) leading.push({ name: 'Other Categories', value: remainder, unit: 'Mixed UoM' });
+      return leading.filter((entry) => entry.value > 0);
+    };
+    const buildItemPieData = (mode: 'value' | 'stock') => {
+      const source = centralStoreItems
+        .map((item) => ({
+          name: item.name,
+          value: mode === 'value' ? valueOf(item) : Math.max(0, Number(item.currentStock) || 0),
+          unit: item.unit || 'Unit not recorded',
+        }))
+        .filter((entry) => entry.value > 0)
+        .sort((a, b) => b.value - a.value);
+      const leading = source.slice(0, 7);
+      const remainder = source.slice(7).reduce((sum, entry) => sum + entry.value, 0);
+      if (remainder > 0) leading.push({ name: 'Other Items', value: remainder, unit: 'Mixed UoM' });
+      return leading;
+    };
+
+    const monthRows = Array.from({ length: 6 }, (_, offset) => {
+      const date = new Date(); date.setDate(1); date.setMonth(date.getMonth() - (5 - offset));
+      return { key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`, month: date.toLocaleDateString('en-IN', { month: 'short' }), received: 0, issued: 0 };
+    });
+    const monthMap = new Map(monthRows.map((row) => [row.key, row]));
+    centralStoreItems.forEach((item) => item.transactions.forEach((transaction) => {
+      const row = monthMap.get(String(transaction.date || '').slice(0, 7));
+      if (!row) return;
+      if (transaction.type === 'incoming' || (transaction.type === 'adjustment' && transaction.qty > 0)) row.received += Math.abs(transaction.qty);
+      if (transaction.type === 'outgoing' || transaction.type === 'issued' || (transaction.type === 'adjustment' && transaction.qty < 0)) row.issued += Math.abs(transaction.qty);
+    }));
+
+    const replenishment = centralStoreItems
+      .filter((item) => item.currentStock < item.minStock)
+      .map((item) => ({ ...item, shortfall: Math.max(0, item.minStock - item.currentStock) }))
+      .sort((a, b) => b.shortfall - a.shortfall)
+      .slice(0, 6);
+    const todayMs = new Date().setHours(0, 0, 0, 0);
+    const expiryItems = centralStoreItems.map((item) => {
+      const batchExpiries = (item.fifoList ?? []).map((batch) => batch.expiry_date).filter(Boolean);
+      const expiry = [item.expiryDate, ...batchExpiries].filter(Boolean).sort()[0] || '';
+      const days = expiry ? Math.ceil((new Date(expiry).setHours(0, 0, 0, 0) - todayMs) / 86400000) : null;
+      return { ...item, dashboardExpiry: expiry, daysToExpiry: days };
+    }).filter((item) => item.daysToExpiry !== null && item.daysToExpiry <= 90).sort((a, b) => Number(a.daysToExpiry) - Number(b.daysToExpiry)).slice(0, 6);
+    const pipeline = centralStoreItems.reduce((sum, item) => sum + (Number(item.stockInPipeline) || 0), 0);
+    const valuePieData = buildPieData('value'); const stockPieData = buildPieData('stock');
+    const itemValuePieData = buildItemPieData('value'); const itemStockPieData = buildItemPieData('stock');
+    return {
+      categories,
+      valuePieData,
+      stockPieData,
+      itemValuePieData,
+      itemStockPieData,
+      valuePieTotal: valuePieData.reduce((sum, entry) => sum + entry.value, 0),
+      stockPieTotal: stockPieData.reduce((sum, entry) => sum + entry.value, 0),
+      itemValuePieTotal: itemValuePieData.reduce((sum, entry) => sum + entry.value, 0),
+      itemStockPieTotal: itemStockPieData.reduce((sum, entry) => sum + entry.value, 0),
+      movement: monthRows,
+      replenishment,
+      expiryItems,
+      pipeline,
+    };
+  }, [centralStoreItems]);
+
   const availableCategories = useMemo(
     () => ['All', ...Array.from(new Set(masterConfig.categories))],
     [masterConfig.categories],
@@ -1394,6 +1509,107 @@ const Inventory = () => {
     );
   };
 
+  const printInventoryReport = () => {
+    if (!inventoryReportFrom || !inventoryReportTo) {
+      toast.error('Please select both From and To dates');
+      return;
+    }
+    if (inventoryReportFrom > inventoryReportTo) {
+      toast.error('From Date cannot be after To Date');
+      return;
+    }
+
+    const escapeHtml = (value: unknown) => String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+    const transactionDelta = (transaction: StockTransaction) => (
+      transaction.type === 'incoming' || (transaction.type === 'adjustment' && transaction.qty >= 0)
+        ? Math.abs(Number(transaction.qty) || 0)
+        : -Math.abs(Number(transaction.qty) || 0)
+    );
+
+    const reportRows = [...centralStoreItems]
+      .sort((first, second) => first.category.localeCompare(second.category) || first.name.localeCompare(second.name))
+      .map((item) => {
+        const transactions = item.transactions ?? [];
+        const openingDelta = transactions
+          .filter((transaction) => String(transaction.date || '').slice(0, 10) >= inventoryReportFrom)
+          .reduce((sum, transaction) => sum + transactionDelta(transaction), 0);
+        const afterPeriodDelta = transactions
+          .filter((transaction) => String(transaction.date || '').slice(0, 10) > inventoryReportTo)
+          .reduce((sum, transaction) => sum + transactionDelta(transaction), 0);
+        const periodTransactions = transactions.filter((transaction) => {
+          const date = String(transaction.date || '').slice(0, 10);
+          return date >= inventoryReportFrom && date <= inventoryReportTo;
+        });
+        const received = periodTransactions
+          .filter((transaction) => transactionDelta(transaction) > 0)
+          .reduce((sum, transaction) => sum + transactionDelta(transaction), 0);
+        const issued = periodTransactions
+          .filter((transaction) => transactionDelta(transaction) < 0)
+          .reduce((sum, transaction) => sum + Math.abs(transactionDelta(transaction)), 0);
+        const opening = Math.max(0, (Number(item.currentStock) || 0) - openingDelta);
+        const closing = Math.max(0, (Number(item.currentStock) || 0) - afterPeriodDelta);
+        const fifoValue = (item.fifoList ?? []).reduce(
+          (sum, batch) => sum + (Number(batch.stock) || 0) * (Number(batch.per_unit_cost) || 0),
+          0,
+        );
+        const latestRate = transactions.find((transaction) => Number(transaction.costPerUnit) > 0)?.costPerUnit ?? 0;
+        const unitRate = item.currentStock > 0 && fifoValue > 0 ? fifoValue / item.currentStock : Number(latestRate) || 0;
+        const closingValue = closing * unitRate;
+        const stockStatus = closing <= 0 ? 'Out of Stock' : closing < item.minStock ? 'Below Minimum' : 'Available';
+        return { item, opening, received, issued, closing, unitRate, closingValue, stockStatus };
+      });
+
+    const totalClosingValue = reportRows.reduce((sum, row) => sum + row.closingValue, 0);
+    const categoryCount = new Set(reportRows.map((row) => row.item.category || 'Others')).size;
+    const belowMinimumCount = reportRows.filter((row) => row.closing < row.item.minStock).length;
+    const generatedOn = new Date().toLocaleString('en-IN', {
+      day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+    const generatedBy = user?.name || user?.username || 'System User';
+    const statementPeriod = `${formatDateDDMMYYYY(inventoryReportFrom)} to ${formatDateDDMMYYYY(inventoryReportTo)}`;
+    const reportId = `INV-${inventoryReportFrom.replace(/-/g, '')}-${inventoryReportTo.replace(/-/g, '')}`;
+    const logoUrl = new URL(logo3f, window.location.origin).href;
+    const rows = reportRows.map(({ item, opening, received, issued, closing, unitRate, closingValue, stockStatus }, index) => `
+      <tr>
+        <td class="center">${index + 1}</td>
+        <td><strong>${escapeHtml(item.sku || item.id)}</strong></td>
+        <td><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.description || '')}</small></td>
+        <td>${escapeHtml(item.category || 'Others')}</td>
+        <td>${escapeHtml(item.location || 'Not Recorded')}</td>
+        <td class="center">${escapeHtml(item.unit || '—')}</td>
+        <td class="num">${opening.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+        <td class="num received">${received > 0 ? received.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '—'}</td>
+        <td class="num issued">${issued > 0 ? issued.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '—'}</td>
+        <td class="num"><strong>${closing.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</strong></td>
+        <td class="num">${unitRate > 0 ? `₹${unitRate.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 'N/A'}</td>
+        <td class="num"><strong>₹${closingValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></td>
+        <td class="center"><span class="status ${stockStatus === 'Available' ? 'ok' : stockStatus === 'Below Minimum' ? 'low' : 'out'}">${escapeHtml(stockStatus)}</span></td>
+      </tr>
+    `).join('');
+
+    const popup = window.open('', '_blank', 'width=1100,height=900');
+    if (!popup) {
+      toast.error('Pop-up blocked. Please allow pop-ups to print.');
+      return;
+    }
+    popup.document.write(`<!doctype html><html><head><title>Inventory Report - ${escapeHtml(reportId)}</title><style>
+      @page{size:A4 portrait;margin:8mm}*{box-sizing:border-box}html,body{width:194mm;margin:0;padding:0}body{font-family:Arial,Helvetica,sans-serif;color:#1e293b;background:#fff;font-size:6.5pt}.sheet{width:194mm;min-height:281mm;border:.3mm solid #b8c5d1;padding:3mm}.header{text-align:center;border-bottom:.6mm solid #0D3A35;padding-bottom:2.2mm}.header img{height:13mm;width:auto}.company{margin-top:.5mm;font-size:13pt;font-weight:900;letter-spacing:.035em}.address{margin-top:.7mm;color:#526173;font-size:6.5pt}.company-meta{margin-top:.7mm;color:#526173;font-size:6.3pt}.title{margin-top:2.2mm;background:#0D3A35;color:#fff;padding:1.6mm;text-align:center;font-size:9pt;font-weight:900;letter-spacing:.12em}.meta{display:grid;grid-template-columns:1.25fr .65fr 1.4fr 1fr 1fr;border:.25mm solid #cbd5e1;border-top:0}.meta>div{min-width:0;padding:1.3mm 1.1mm;border-right:.25mm solid #cbd5e1;overflow-wrap:anywhere}.meta>div:last-child{border-right:0}.label{color:#64748b;font-size:5.1pt;font-weight:700;text-transform:uppercase;letter-spacing:.035em}.value{margin-top:.4mm;font-size:6.4pt;font-weight:800}.section{margin-top:2.2mm;border:.25mm solid #cbd5e1}.section-title{border-bottom:.25mm solid #cbd5e1;background:#f1f5f9;padding:1.2mm 1.5mm;color:#334155;font-size:6.7pt;font-weight:900;text-transform:uppercase;letter-spacing:.07em}.summary{display:grid;grid-template-columns:repeat(4,1fr)}.summary>div{padding:1.5mm;border-right:.25mm solid #cbd5e1}.summary>div:last-child{border-right:0}table{width:100%;border-collapse:collapse;table-layout:fixed}thead{display:table-header-group}tr{break-inside:avoid}th,td{border:.25mm solid #cbd5e1;padding:1mm .55mm;vertical-align:middle;overflow-wrap:anywhere;word-break:break-word}th{background:#0D3A35;color:#fff;text-align:center;font-size:4.4pt;font-weight:700;line-height:1.2;text-transform:uppercase}td{font-size:4.9pt;line-height:1.2}td small{display:block;margin-top:.3mm;color:#64748b;font-size:4.3pt}.num{text-align:right}.center{text-align:center}.received{color:#047857}.issued{color:#b91c1c}.status{display:inline-block;border-radius:20px;padding:.5mm 1mm;font-size:4.2pt;font-weight:800;white-space:nowrap}.status.ok{background:#ecfdf5;color:#047857}.status.low{background:#fffbeb;color:#b45309}.status.out{background:#fef2f2;color:#b91c1c}.footer{display:flex;justify-content:space-between;margin-top:2.2mm;border-top:.25mm solid #cbd5e1;padding-top:1.3mm;color:#64748b;font-size:5.3pt}@media print{html,body{width:194mm}body{-webkit-print-color-adjust:exact;print-color-adjust:exact}.sheet{width:194mm;border-color:#b8c5d1}}</style></head><body><div class="sheet">
+      <div class="header"><img src="${logoUrl}" alt="Sai Bioresources"><div class="company">SAI BIORESOURCES PRIVATE LIMITED</div><div class="address">Khasra No. 121/1, Amrit Dairy Farm, Kachandur-Dhour Road, Village Jeora (Jeora-Sirsa), Durg, Chhattisgarh - 491001</div><div class="company-meta">GSTIN: 22ARPCS5442R1ZM &nbsp;|&nbsp; Phone: +91 75870 76870 &nbsp;|&nbsp; Email: rajendra.s@saiobioenergy.com</div></div>
+      <div class="title">ITEM-WISE INVENTORY REPORT</div>
+      <div class="meta"><div><div class="label">Report ID</div><div class="value">${escapeHtml(reportId)}</div></div><div><div class="label">Items</div><div class="value">${reportRows.length}</div></div><div><div class="label">Statement Period</div><div class="value">${escapeHtml(statementPeriod)}</div></div><div><div class="label">Generated On</div><div class="value">${escapeHtml(generatedOn)}</div></div><div><div class="label">Generated By</div><div class="value">${escapeHtml(generatedBy)}</div></div></div>
+      <div class="section"><div class="section-title">Inventory Summary</div><div class="summary"><div><div class="label">Total Inventory Items</div><div class="value">${reportRows.length}</div></div><div><div class="label">Categories</div><div class="value">${categoryCount}</div></div><div><div class="label">Below Minimum Stock</div><div class="value">${belowMinimumCount}</div></div><div><div class="label">Closing Inventory Value</div><div class="value">₹${totalClosingValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div></div></div></div>
+      <div class="section"><div class="section-title">Item-wise Inventory Position</div><table><colgroup><col style="width:3%"><col style="width:9%"><col style="width:14%"><col style="width:8%"><col style="width:10%"><col style="width:4%"><col style="width:7%"><col style="width:6%"><col style="width:6%"><col style="width:7%"><col style="width:8%"><col style="width:10%"><col style="width:8%"></colgroup><thead><tr><th>S. No.</th><th>Item Code</th><th>Item Name</th><th>Category</th><th>Store / Warehouse</th><th>UoM</th><th>Opening Stock</th><th>Received</th><th>Issued</th><th>Closing Stock</th><th>Unit Rate</th><th>Closing Value</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="footer"><span>System-generated Item-wise Inventory Report</span><span>Report ID: ${escapeHtml(reportId)}</span><span>Page 1 of 1</span></div>
+      </div><script>window.addEventListener('load',()=>setTimeout(()=>window.print(),300));<\/script></body></html>`);
+    popup.document.close();
+    setInventoryReportPeriodOpen(false);
+  };
+
   // ─────────────────────────────────────────────────────────
   // RENDER
   // ─────────────────────────────────────────────────────────
@@ -1409,30 +1625,42 @@ const Inventory = () => {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            onClick={() => setIssuedItemsOpen(true)}
-            className="h-11 gap-2 rounded-xl border border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5"
-          >
-            <ClipboardList className="w-4 h-4" />
-            Issue Items
-          </Button>
-          <Button
-            onClick={() => {
-              setAllocationItem(null);
-              setAllocationOpen(true);
-            }}
-            className="h-11 gap-2 rounded-xl border border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5"
-          >
-            <PackageCheck className="w-4 h-4" />
-            Equipment Allocation
-          </Button>
-          <Button
-            onClick={() => setAddOpen(true)}
-            className="h-11 gap-2 rounded-xl bg-[#0D3A35] px-5 font-bold text-white shadow-sm hover:bg-[#092e2a]"
-          >
-            <Plus className="w-4 h-4" />
-            Create New Product
-          </Button>
+          {activeInventoryTab === 'dashboard' ? (
+            <Button
+              onClick={() => setInventoryReportPeriodOpen(true)}
+              className="h-11 gap-2 rounded-xl bg-[#0D3A35] px-5 font-bold text-white shadow-sm hover:bg-[#092e2a]"
+            >
+              <Printer className="h-4 w-4" />
+              Print Inventory Report
+            </Button>
+          ) : (
+            <>
+              <Button
+                onClick={() => setIssuedItemsOpen(true)}
+                className="h-11 gap-2 rounded-xl border border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5"
+              >
+                <ClipboardList className="h-4 w-4" />
+                Issue Items
+              </Button>
+              <Button
+                onClick={() => {
+                  setAllocationItem(null);
+                  setAllocationOpen(true);
+                }}
+                className="h-11 gap-2 rounded-xl border border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5"
+              >
+                <PackageCheck className="h-4 w-4" />
+                Equipment Allocation
+              </Button>
+              <Button
+                onClick={() => setAddOpen(true)}
+                className="h-11 gap-2 rounded-xl bg-[#0D3A35] px-5 font-bold text-white shadow-sm hover:bg-[#092e2a]"
+              >
+                <Plus className="h-4 w-4" />
+                Create New Product
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -1593,6 +1821,177 @@ const Inventory = () => {
           </div>
         </div>
       </div>
+
+      {/* ── Inventory intelligence dashboard ── */}
+      <div className="space-y-3">
+        <div className="flex justify-end">
+          <div className="inline-flex rounded-lg border border-slate-200 bg-white p-1 shadow-sm" aria-label="Inventory chart view">
+            {([
+              ['category', 'Category'],
+              ['item', 'Item-wise'],
+              ['percentage', 'Percentage'],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setDashboardPieView(value)}
+                className={cn(
+                  'rounded-md px-3 py-1.5 text-[11px] font-bold transition',
+                  dashboardPieView === value
+                    ? 'bg-[#0D3A35] text-white shadow-sm'
+                    : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800',
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="grid gap-5 lg:grid-cols-2">
+        {([
+          {
+            key: 'value',
+            title: 'Stock Value Distribution',
+            description: dashboardPieView === 'item' ? 'FIFO inventory value by item' : 'FIFO inventory value by category',
+            data: dashboardPieView === 'item' ? inventoryDashboard.itemValuePieData : inventoryDashboard.valuePieData,
+            total: dashboardPieView === 'item' ? inventoryDashboard.itemValuePieTotal : inventoryDashboard.valuePieTotal,
+            isValue: true,
+          },
+          {
+            key: 'stock',
+            title: 'Stock Item Distribution',
+            description: dashboardPieView === 'item' ? 'Recorded stock quantity by item' : 'Recorded stock quantity by category',
+            data: dashboardPieView === 'item' ? inventoryDashboard.itemStockPieData : inventoryDashboard.stockPieData,
+            total: dashboardPieView === 'item' ? inventoryDashboard.itemStockPieTotal : inventoryDashboard.stockPieTotal,
+            isValue: false,
+          },
+        ] as const).map((chart) => (
+          <section key={chart.key} className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+            <div className="border-b border-slate-100 px-5 py-4">
+              <h2 className="text-base font-bold text-slate-950">{chart.title}</h2>
+              <p className="mt-1 text-xs font-medium text-slate-500">{chart.description}</p>
+            </div>
+            {chart.data.length > 0 ? (
+              <>
+                <div className="grid h-[350px] min-w-0 grid-cols-[minmax(112px,145px)_minmax(130px,1fr)_minmax(112px,145px)] items-center gap-2 bg-slate-50/40 px-4 py-5">
+                  <div className="flex min-w-0 flex-col justify-center gap-2">
+                    {chart.data.map((entry, index) => ({ entry, index })).filter(({ index }) => index % 2 === 0).map(({ entry, index }) => {
+                      const percentage = chart.total > 0 ? (entry.value / chart.total) * 100 : 0;
+                      const detail = dashboardPieView === 'percentage'
+                        ? `${percentage.toFixed(1)}%`
+                        : chart.isValue
+                          ? `₹${entry.value.toLocaleString('en-IN', { maximumFractionDigits: 0 })} · ${percentage.toFixed(1)}%`
+                          : `${entry.value.toLocaleString('en-IN')} ${entry.unit} · ${percentage.toFixed(1)}%`;
+                      return (
+                        <div key={`${entry.name}-left`} className="min-w-0 rounded-lg border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: INVENTORY_DASHBOARD_COLORS[index % INVENTORY_DASHBOARD_COLORS.length] }} />
+                            <p className="truncate text-[11px] font-bold text-slate-800" title={entry.name}>{entry.name}</p>
+                          </div>
+                          <p className="mt-1 truncate text-[10px] font-semibold text-slate-500" title={detail}>{detail}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="h-full min-w-0">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart margin={{ top: 12, right: 8, bottom: 12, left: 8 }}>
+                      <Pie
+                        data={chart.data}
+                        dataKey="value"
+                        nameKey="name"
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={58}
+                        outerRadius={88}
+                        paddingAngle={2}
+                        stroke="#fff"
+                        strokeWidth={2}
+                        labelLine={false}
+                        label={false}
+                      >
+                        {chart.data.map((entry, index) => (
+                          <Cell key={entry.name} fill={INVENTORY_DASHBOARD_COLORS[index % INVENTORY_DASHBOARD_COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <RechartsTooltip
+                        formatter={(value: number) => chart.isValue
+                          ? `₹${Number(value).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+                          : Number(value).toLocaleString('en-IN')}
+                        contentStyle={{ borderRadius: 12, borderColor: '#e2e8f0', fontSize: 12 }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  </div>
+                  <div className="flex min-w-0 flex-col justify-center gap-2">
+                    {chart.data.map((entry, index) => ({ entry, index })).filter(({ index }) => index % 2 === 1).map(({ entry, index }) => {
+                      const percentage = chart.total > 0 ? (entry.value / chart.total) * 100 : 0;
+                      const detail = dashboardPieView === 'percentage'
+                        ? `${percentage.toFixed(1)}%`
+                        : chart.isValue
+                          ? `₹${entry.value.toLocaleString('en-IN', { maximumFractionDigits: 0 })} · ${percentage.toFixed(1)}%`
+                          : `${entry.value.toLocaleString('en-IN')} ${entry.unit} · ${percentage.toFixed(1)}%`;
+                      return (
+                        <div key={`${entry.name}-right`} className="min-w-0 rounded-lg border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: INVENTORY_DASHBOARD_COLORS[index % INVENTORY_DASHBOARD_COLORS.length] }} />
+                            <p className="truncate text-[11px] font-bold text-slate-800" title={entry.name}>{entry.name}</p>
+                          </div>
+                          <p className="mt-1 truncate text-[10px] font-semibold text-slate-500" title={detail}>{detail}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="grid gap-px border-t border-slate-200 bg-slate-200 sm:grid-cols-2">
+                  {chart.data.map((entry, index) => {
+                    const percentage = chart.total > 0 ? (entry.value / chart.total) * 100 : 0;
+                    return (
+                      <div key={entry.name} className="grid grid-cols-[auto_1fr_auto] items-center gap-2 bg-white px-4 py-3">
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: INVENTORY_DASHBOARD_COLORS[index % INVENTORY_DASHBOARD_COLORS.length] }} />
+                        <p className="min-w-0 truncate text-xs font-bold text-slate-700" title={entry.name}>{entry.name}</p>
+                        <div className="text-right">
+                          <p className="text-xs font-black text-slate-900">{dashboardPieView === 'percentage' ? `${percentage.toFixed(1)}%` : chart.isValue ? `₹${entry.value.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : `${entry.value.toLocaleString('en-IN')} ${entry.unit}`}</p>
+                          {dashboardPieView !== 'percentage' && <p className="text-[10px] font-bold text-slate-400">{percentage.toFixed(1)}%</p>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex items-center justify-between bg-[#0D3A35] px-5 py-3 text-white">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-white/65">Total</span>
+                  <span className="text-sm font-black">{dashboardPieView === 'percentage' ? '100%' : chart.isValue ? `₹${chart.total.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : `${chart.total.toLocaleString('en-IN')} ${new Set(chart.data.map((entry) => entry.unit)).size === 1 ? chart.data[0]?.unit : 'Mixed UoM'}`}</span>
+                </div>
+              </>
+            ) : (
+              <div className="grid h-[330px] place-items-center text-sm font-semibold text-slate-400">No {chart.isValue ? 'valued inventory' : 'stock'} data available</div>
+            )}
+          </section>
+        ))}
+        </div>
+      </div>
+
+      <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-base font-bold text-slate-950">Stock Movement</h2><p className="mt-1 text-xs font-medium text-slate-500">Received versus issued quantity during the last six months</p></div><div className="flex items-center gap-4 text-xs font-bold"><span className="flex items-center gap-1.5 text-[#0D3A35]"><i className="h-2.5 w-2.5 rounded-sm bg-[#0D3A35]"/>Received</span><span className="flex items-center gap-1.5 text-amber-700"><i className="h-2.5 w-2.5 rounded-sm bg-amber-500"/>Issued</span></div></div>
+        <div className="mt-4 h-[290px] w-full"><ResponsiveContainer width="100%" height="100%"><BarChart data={inventoryDashboard.movement} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0"/><XAxis dataKey="month" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false}/><YAxis tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false}/><RechartsTooltip contentStyle={{ borderRadius: 12, borderColor: '#e2e8f0', fontSize: 12 }}/><Bar dataKey="received" fill="#0D3A35" radius={[5,5,0,0]} maxBarSize={42}/><Bar dataKey="issued" fill="#f59e0b" radius={[5,5,0,0]} maxBarSize={42}/></BarChart></ResponsiveContainer></div>
+      </section>
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-base font-bold text-slate-950">Replenishment Priority</h2><p className="mt-1 text-xs font-medium text-slate-500">Largest shortages against minimum stock</p></div><PackageX className="h-5 w-5 text-red-600"/></div>
+          {inventoryDashboard.replenishment.length ? <div className="divide-y divide-slate-100">{inventoryDashboard.replenishment.map((item) => <div key={item.id} className="grid grid-cols-[1fr_auto] items-center gap-4 px-5 py-3.5"><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-900">{item.name}</p><p className="mt-0.5 text-xs text-slate-500">{item.sku} · {item.category}</p></div><div className="text-right"><p className="text-sm font-black text-red-600">Need {item.shortfall.toLocaleString('en-IN')} {item.unit}</p><p className="text-[10px] font-semibold text-slate-400">Stock {item.currentStock.toLocaleString('en-IN')} / Min {item.minStock.toLocaleString('en-IN')}</p></div></div>)}</div> : <div className="grid h-48 place-items-center"><div className="text-center"><ShieldCheck className="mx-auto h-7 w-7 text-emerald-600"/><p className="mt-2 text-sm font-bold text-slate-700">All items meet minimum stock</p></div></div>}
+        </section>
+
+        <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-base font-bold text-slate-950">Expiry Watch</h2><p className="mt-1 text-xs font-medium text-slate-500">Expired and next 90-day batch exposure</p></div><Clock3 className="h-5 w-5 text-amber-600"/></div>
+          {inventoryDashboard.expiryItems.length ? <div className="divide-y divide-slate-100">{inventoryDashboard.expiryItems.map((item) => <div key={item.id} className="grid grid-cols-[1fr_auto] items-center gap-4 px-5 py-3.5"><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-900">{item.name}</p><p className="mt-0.5 text-xs text-slate-500">{item.batchNumber || item.fifoList?.[0]?.batch_number || 'Batch not recorded'} · {item.category}</p></div><div className="text-right"><p className={cn('text-xs font-black', Number(item.daysToExpiry) < 0 ? 'text-red-600' : 'text-amber-700')}>{Number(item.daysToExpiry) < 0 ? `${Math.abs(Number(item.daysToExpiry))} days expired` : `${item.daysToExpiry} days left`}</p><p className="mt-0.5 text-[10px] font-semibold text-slate-400">{formatDateDDMMYYYY(item.dashboardExpiry)}</p></div></div>)}</div> : <div className="grid h-48 place-items-center"><div className="text-center"><ShieldCheck className="mx-auto h-7 w-7 text-emerald-600"/><p className="mt-2 text-sm font-bold text-slate-700">No near-expiry stock recorded</p></div></div>}
+        </section>
+      </div>
+
+      <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4"><div><h2 className="text-base font-bold text-slate-950">Category Overview</h2><p className="mt-1 text-xs font-medium text-slate-500">Stock, valuation and exception summary by category</p></div><div className="flex gap-2"><Badge variant="outline" className="border-blue-200 bg-blue-50 text-blue-700">Pipeline: {inventoryDashboard.pipeline.toLocaleString('en-IN')}</Badge><Badge variant="outline">{inventoryDashboard.categories.length} categories</Badge></div></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[780px] text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr>{['Category','Items','Stock Quantity','Inventory Value','Low / Out of Stock','Value Share'].map((heading) => <th key={heading} className="px-5 py-3 text-right first:text-left">{heading}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{inventoryDashboard.categories.map((entry) => <tr key={entry.category} className="hover:bg-slate-50/70"><td className="px-5 py-3.5 font-bold text-slate-900">{entry.category}</td><td className="px-5 py-3.5 text-right font-semibold">{entry.items}</td><td className="px-5 py-3.5 text-right font-semibold">{entry.stock.toLocaleString('en-IN')}</td><td className="px-5 py-3.5 text-right font-bold">₹{entry.value.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</td><td className="px-5 py-3.5 text-right"><span className={cn('rounded-full px-2 py-1 text-xs font-bold', entry.low ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700')}>{entry.low}</span></td><td className="px-5 py-3.5 text-right font-semibold">{inventoryValue > 0 ? `${((entry.value / inventoryValue) * 100).toFixed(1)}%` : '0.0%'}</td></tr>)}</tbody></table></div>
+      </section>
         </>
       )}
 
@@ -2431,6 +2830,62 @@ const Inventory = () => {
           }}
         />
       )}
+
+      <Dialog open={inventoryReportPeriodOpen} onOpenChange={setInventoryReportPeriodOpen}>
+        <DialogContent className="overflow-hidden rounded-2xl border-0 bg-white p-0 shadow-2xl sm:max-w-lg">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left">
+            <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10">
+                <Printer className="h-5 w-5" />
+              </span>
+              Select Statement Period
+            </DialogTitle>
+            <DialogDescription className="mt-2 text-sm text-white/75">
+              Choose the period for the item-wise inventory report.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 px-6 py-6 sm:grid-cols-2">
+            <Field label="From Date *">
+              <Input
+                type="date"
+                value={inventoryReportFrom}
+                max={inventoryReportTo || undefined}
+                onChange={(event) => setInventoryReportFrom(event.target.value)}
+                className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7]"
+              />
+            </Field>
+            <Field label="To Date *">
+              <Input
+                type="date"
+                value={inventoryReportTo}
+                min={inventoryReportFrom || undefined}
+                onChange={(event) => setInventoryReportTo(event.target.value)}
+                className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7]"
+              />
+            </Field>
+          </div>
+
+          <DialogFooter className="border-t border-slate-100 bg-slate-50/70 px-6 py-4 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setInventoryReportPeriodOpen(false)}
+              className="h-10 rounded-xl border-slate-200 bg-white px-5 font-bold text-slate-700"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={printInventoryReport}
+              className="h-10 gap-2 rounded-xl bg-[#0D3A35] px-5 font-bold text-white hover:bg-[#092e2a]"
+            >
+              <Printer className="h-4 w-4" />
+              Continue to Print
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Issued Items */}
       <IssuedItemsModal

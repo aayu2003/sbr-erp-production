@@ -32,6 +32,7 @@
             { "key": "leads",          "label": "Leads",            "path": "/leads",          "icon": "Users",        "enabled": true },
             { "key": "farmers",        "label": "Land Owner Directory", "path": "/farmers",        "icon": "UserCheck",    "enabled": true },
             { "key": "farm-directory", "label": "Land Directory",   "path": "/farm-directory", "icon": "FolderKanban", "enabled": true },
+            { "key": "lease-master",   "label": "Lease Master",     "path": "/lease-master",   "icon": "CalendarClock", "enabled": true },
             { "key": "land-acquisition", "label": "Map",              "path": "/land-acquisition", "icon": "Map",         "enabled": true },
             { "key": "legal",          "label": "Legal",            "path": "/legal",          "icon": "Scale",        "enabled": true }
           ]
@@ -114,7 +115,8 @@
           "enabled": true,
           "items": [
             { "key": "finance-admin-ops",  "label": "Finance Admin Ops",          "path": "/finance-admin-ops-indents","icon": "FileText",      "enabled": true  },
-            { "key": "purchase-req",       "label": "Purchase Requisition",       "path": "/purchase-requisition",     "icon": "FileText",      "enabled": true  },
+            { "key": "purchase-req",       "label": "Comparative Statement",      "path": "/purchase-requisition",     "icon": "FileText",      "enabled": true  },
+            { "key": "purchase-req-entry", "label": "Purchase Requisition",       "path": "/purchase-requisition-entry","icon": "FileText",      "enabled": true  },
             { "key": "vendor-directory",   "label": "Vendor Directory",           "path": "/vendor-directory",         "icon": "FileText",      "enabled": true  },
             { "key": "ho-module",          "label": "HO Module",                  "path": "/ho",                       "icon": "FileText",      "enabled": true  },
             { "key": "purchase-flow",      "label": "Purchase Flow",              "path": "/purchase-flow",            "icon": "FileText",      "enabled": true  },
