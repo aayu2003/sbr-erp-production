@@ -14,6 +14,7 @@ import {
   type GRNRecord,
   type GrnSigner,
   type GrnLineItemInput,
+  type GrnStoreAllocation,
   type GateEntryRecord,
 } from '@/lib/grnApi';
 import { GrnDocumentPreview, type GrnDocumentData } from '@/components/grn/GrnDocumentPreview';
@@ -125,8 +126,25 @@ const initialValuesFor = (items: OrderItem[], existingGrn?: GRNRecord | null): R
   return map;
 };
 
-const STEP_LABELS = ['Link Gate Entry', 'Select Items', 'Enter Values', 'Final Preview'] as const;
-type Step = 1 | 2 | 3 | 4;
+const STEP_LABELS = ['Link Gate Entry', 'Select Items', 'Enter Values', 'Allocate Stores', 'Final Preview'] as const;
+type Step = 1 | 2 | 3 | 4 | 5;
+
+// Quantity + per-unit-cost a store receives for one item — string-valued while editing,
+// same convention as ItemValues above.
+type StoreAllocationValue = { quantity: string; perUnitCost: string };
+
+const initialStoreAllocationsFor = (items: OrderItem[], existingGrn?: GRNRecord | null): Record<string, Record<string, StoreAllocationValue>> => {
+  const map: Record<string, Record<string, StoreAllocationValue>> = {};
+  for (const it of items) {
+    const existing = existingGrn?.items.find((g) => g.itemId === it.id);
+    const rows: Record<string, StoreAllocationValue> = {};
+    for (const alloc of existing?.storeAllocations || []) {
+      rows[alloc.store] = { quantity: String(alloc.quantity), perUnitCost: String(alloc.perUnitCost) };
+    }
+    map[it.id] = rows;
+  }
+  return map;
+};
 
 const Checkmark = ({ checked }: { checked: boolean }) => (
   <div className={cn(
@@ -159,6 +177,9 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
   const [step, setStep] = useState<Step>(1);
   const [orderItems, setOrderItems] = useState<OrderItem[]>(() => orderItemsFromGrn(existingGrn));
   const [values, setValues] = useState<Record<string, ItemValues>>(() => initialValuesFor(orderItemsFromGrn(existingGrn), existingGrn));
+  const [storeAllocations, setStoreAllocations] = useState<Record<string, Record<string, StoreAllocationValue>>>(
+    () => initialStoreAllocationsFor(orderItemsFromGrn(existingGrn), existingGrn),
+  );
   const [busy, setBusy] = useState(false);
   const [isAddItemOpen, setIsAddItemOpen] = useState(false);
   const [newItem, setNewItem] = useState({ ...EMPTY_NEW_ITEM });
@@ -204,6 +225,16 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
 
   const setItem = (id: string, patch: Partial<ItemValues>) => {
     setValues((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+  };
+
+  const setStoreAllocation = (itemId: string, store: string, patch: Partial<StoreAllocationValue>) => {
+    setStoreAllocations((prev) => ({
+      ...prev,
+      [itemId]: {
+        ...prev[itemId],
+        [store]: { quantity: '', perUnitCost: '', ...prev[itemId]?.[store], ...patch },
+      },
+    }));
   };
 
   const selectedItems = useMemo(
@@ -281,10 +312,10 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
   const gateEntriesForOrder = useMemo(
     () => gateEntries.filter((ge) => (
       ge.entryType === 'Inward' &&
-      ge.orderNumber === order.poNo &&
+      (order.poNo ? ge.orderNumber === order.poNo : (!ge.orderNumber && ge.vendorId === order.vendorId)) &&
       (!ge.usedInGrn || ge.usedInGrn === existingGrn?.grnNo)
     )),
-    [gateEntries, order.poNo, existingGrn?.grnNo],
+    [gateEntries, order.poNo, order.vendorId, existingGrn?.grnNo],
   );
 
   const toggleGateEntry = (enteryId: string) => {
@@ -300,6 +331,42 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
   const selectedGateEntries = useMemo(
     () => gateEntries.filter((ge) => selectedGateEntryIds.includes(ge.enteryId)),
     [gateEntries, selectedGateEntryIds],
+  );
+
+  // ── Step 4: Allocate Stores — where each item's received qty actually landed, per the
+  // destination store(s) recorded on this GRN's linked gate entries.
+  const availableStores = useMemo(
+    () => Array.from(new Set(
+      selectedGateEntries
+        .filter((ge) => ge.destinationType === 'Store' && ge.destinationName)
+        .map((ge) => ge.destinationName as string),
+    )),
+    [selectedGateEntries],
+  );
+
+  // Seed a blank row (per-unit-cost defaulted to the item's own unit price) for every
+  // item × store combo that doesn't have one yet, without clobbering anything already typed.
+  useEffect(() => {
+    if (availableStores.length === 0 || selectedItems.length === 0) return;
+    setStoreAllocations((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const it of selectedItems) {
+        const rows = { ...(next[it.id] || {}) };
+        for (const store of availableStores) {
+          if (!rows[store]) {
+            rows[store] = { quantity: '', perUnitCost: String(it.unitPrice || '') };
+            changed = true;
+          }
+        }
+        next[it.id] = rows;
+      }
+      return changed ? next : prev;
+    });
+  }, [availableStores, selectedItems]);
+
+  const allocatedTotalFor = (itemId: string) => (
+    Object.values(storeAllocations[itemId] || {}).reduce((sum, row) => sum + num(row.quantity), 0)
   );
 
   const draftGrn = useMemo<GrnDocumentData>(() => {
@@ -361,9 +428,27 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
       return;
     }
     if (step === 2 && selectedItems.length === 0) { toast.error('Select at least one item to continue'); return; }
-    setStep((s) => (s < 4 ? ((s + 1) as Step) : s));
+    if (step === 4) {
+      if (availableStores.length === 0) {
+        toast.error('No store destination found on the linked gate entries — cannot allocate stock to a store');
+        return;
+      }
+      for (const c of computed) {
+        const allocated = allocatedTotalFor(c.item.id);
+        if (Math.abs(allocated - c.receivedQty) > 0.001) {
+          toast.error(`${c.item.description}: allocated ${allocated} across stores, but received qty is ${c.receivedQty}`);
+          return;
+        }
+      }
+    }
+    setStep((s) => (s < 5 ? ((s + 1) as Step) : s));
   };
   const goBack = () => setStep((s) => (s > 1 ? ((s - 1) as Step) : s));
+
+  const buildStoreAllocationsFor = (itemId: string): GrnStoreAllocation[] =>
+    Object.entries(storeAllocations[itemId] || {})
+      .map(([store, row]) => ({ store, quantity: num(row.quantity), perUnitCost: num(row.perUnitCost) }))
+      .filter((a) => a.quantity > 0);
 
   const handleSubmit = async () => {
     if (!user?.id || !user?.name) { toast.error('You must be logged in.'); return; }
@@ -371,6 +456,13 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
     if (selectedGateEntryIds.some((id) => !gateEntriesForOrder.some((entry) => entry.enteryId === id))) {
       toast.error('A selected gate entry is no longer available for this purchase order');
       return;
+    }
+    for (const c of computed) {
+      const allocated = allocatedTotalFor(c.item.id);
+      if (Math.abs(allocated - c.receivedQty) > 0.001) {
+        toast.error(`${c.item.description}: allocated ${allocated} across stores, but received qty is ${c.receivedQty}`);
+        return;
+      }
     }
 
     const items: GrnLineItemInput[] = computed.map((c) => ({
@@ -392,6 +484,7 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
       pf: c.pf,
       totalGrnValue: c.totalGrnValue,
       location: c.item.location,
+      storeAllocations: buildStoreAllocationsFor(c.item.id),
     }));
 
     setBusy(true);
@@ -603,6 +696,59 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
         {step === 4 && (
           <div>
             <p className="text-xs text-slate-400 mb-3">
+              Split each item's received quantity across the store(s) recorded on the linked gate entries — this is what lands in that store's stock once the GRN is approved.
+            </p>
+            {availableStores.length === 0 ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-8 text-center text-xs text-amber-700">
+                None of the linked gate entries have a store destination recorded, so there's nowhere to allocate this stock to.
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {computed.map((c) => {
+                  const allocated = allocatedTotalFor(c.item.id);
+                  const matches = Math.abs(allocated - c.receivedQty) <= 0.001;
+                  return (
+                    <div key={c.item.id} className="rounded-xl border border-slate-200 p-3.5">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-slate-800 truncate">{c.item.description}</div>
+                          <div className="text-xs text-slate-400">Received: {c.receivedQty} {c.item.uom}</div>
+                        </div>
+                        <span className={cn(
+                          'shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold',
+                          matches ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700',
+                        )}>
+                          Allocated: {allocated} / {c.receivedQty}
+                        </span>
+                      </div>
+                      <div className="mt-3 space-y-2">
+                        <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                          <span className="w-32 shrink-0">Store</span>
+                          <span className="flex-1">Quantity</span>
+                          <span className="flex-1">Per Unit Cost</span>
+                        </div>
+                        {availableStores.map((store) => {
+                          const row = storeAllocations[c.item.id]?.[store] || { quantity: '', perUnitCost: String(c.item.unitPrice || '') };
+                          return (
+                            <div key={store} className="flex items-center gap-2">
+                              <span className="w-32 shrink-0 truncate text-xs font-medium text-slate-600">{store}</span>
+                              <CellInput width="flex-1" value={row.quantity} onChange={(v) => setStoreAllocation(c.item.id, store, { quantity: v })} />
+                              <CellInput width="flex-1" value={row.perUnitCost} onChange={(v) => setStoreAllocation(c.item.id, store, { perUnitCost: v })} />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {step === 5 && (
+          <div>
+            <p className="text-xs text-slate-400 mb-3">
               This is exactly how the GRN document will look once generated — review it, then confirm below.
             </p>
             <GrnDocumentPreview grn={draftGrn} />
@@ -624,7 +770,7 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
               Back
             </button>
           )}
-          {step < 4 && (
+          {step < 5 && (
             <button
               type="button"
               onClick={goNext}
@@ -633,7 +779,7 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
               Next
             </button>
           )}
-          {step === 4 && (
+          {step === 5 && (
             <button
               type="button"
               onClick={handleSubmit}

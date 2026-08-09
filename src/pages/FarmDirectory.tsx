@@ -10,6 +10,7 @@ import {
 import { MapContainer, TileLayer, Polygon, Polyline, CircleMarker, Tooltip, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { PieChart, Pie, Cell, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
@@ -575,6 +576,9 @@ const FarmDirectory = () => {
     value: string | number;
     icon: React.ComponentType<{ className?: string }>;
     details?: Array<{ label: string; value: string; color?: string }>;
+    chart?: Array<{ label: string; value: number; color: string }>;
+    secondaryLabel?: string;
+    secondaryValue?: string;
   }> = [
     { label: 'Total Lands', value: farms.length, icon: LayoutGrid },
     { label: 'Total Area', value: `${totalArea.toLocaleString('en-IN', { maximumFractionDigits: 3 })} acres`, icon: Ruler },
@@ -582,19 +586,20 @@ const FarmDirectory = () => {
       label: 'Crop Wise Area',
       value: `${assignedCropArea.toLocaleString('en-IN', { maximumFractionDigits: 3 })} acres`,
       icon: Wheat,
-      details: cropWiseArea.map(item => ({
+      chart: cropWiseArea.map(item => ({
         label: item.crop.charAt(0).toUpperCase() + item.crop.slice(1),
-        value: `${item.area.toLocaleString('en-IN', { maximumFractionDigits: 3 })} ac`,
+        value: item.area,
         color: item.crop.trim().toLowerCase() === 'unassigned'
           ? '#94a3b8'
           : directoryCropColors[item.crop.trim().toLowerCase()] ?? '#0D3A35',
       })),
     },
-    { label: 'Total Investment', value: `₹${totalInvestment.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`, icon: IndianRupee },
     {
-      label: 'Average Investment/Acre',
-      value: `₹${averageInvestmentPerAcre.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`,
-      icon: TrendingUp,
+      label: 'Total Investment',
+      value: `₹${totalInvestment.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`,
+      icon: IndianRupee,
+      secondaryLabel: 'Avg / Acre',
+      secondaryValue: `₹${averageInvestmentPerAcre.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`,
     },
   ];
 
@@ -621,34 +626,77 @@ const FarmDirectory = () => {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
         {kpis.map(kpi => (
           <div key={kpi.label} className="h-full rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
-            <div className="flex items-start justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-bold text-slate-500">{kpi.label}</p>
-                <p className="mt-3 break-words text-2xl font-bold text-slate-950">{kpi.value}</p>
-                {kpi.details && (
-                  <div className="mt-3 max-h-28 space-y-1.5 overflow-y-auto pr-1">
-                    {kpi.details.map(detail => (
-                      <div key={detail.label} className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50/80 px-2.5 py-1.5 text-[11px]">
-                        <span className="flex min-w-0 items-center gap-2 truncate font-semibold capitalize text-slate-600">
-                          <span
-                            className="h-2.5 w-2.5 shrink-0 rounded-full ring-2 ring-white"
-                            style={{ backgroundColor: detail.color ?? '#0D3A35' }}
-                          />
-                          <span className="truncate">{detail.label}</span>
+            {!kpi.chart && (
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold text-slate-500">{kpi.label}</p>
+                  <p className="mt-3 break-words text-2xl font-bold text-slate-950">{kpi.value}</p>
+                  {kpi.secondaryValue && (
+                    <p className="mt-1.5 text-xs font-semibold text-slate-500">
+                      {kpi.secondaryLabel}: <span className="font-bold text-[#0D3A35]">{kpi.secondaryValue}</span>
+                    </p>
+                  )}
+                </div>
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35] ring-2 ring-[#0D3A35]/10">
+                  <kpi.icon className="h-5 w-5" />
+                </div>
+              </div>
+            )}
+            {kpi.chart && kpi.chart.length > 0 && (() => {
+              const legendSlices = kpi.chart.slice(0, 4);
+              const overflowCount = kpi.chart.length - legendSlices.length;
+              return (
+                <div className="flex items-center gap-4">
+                  <div className="h-20 w-20 shrink-0">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={kpi.chart}
+                          dataKey="value"
+                          nameKey="label"
+                          innerRadius={22}
+                          outerRadius={38}
+                          paddingAngle={kpi.chart.length > 1 ? 2 : 0}
+                          stroke="#ffffff"
+                          strokeWidth={2}
+                          isAnimationActive={false}
+                        >
+                          {kpi.chart.map(slice => (
+                            <Cell key={slice.label} fill={slice.color} />
+                          ))}
+                        </Pie>
+                        <RechartsTooltip
+                          formatter={(value: number, name: string) => [
+                            `${Number(value).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ac`,
+                            name,
+                          ]}
+                          contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e2e8f0', padding: '6px 10px' }}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    {legendSlices.map(slice => (
+                      <div key={slice.label} className="flex items-start justify-between gap-2 text-[11px]">
+                        <span className="flex min-w-0 items-center gap-1.5 font-semibold capitalize leading-tight text-slate-600">
+                          <span className="mt-px h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: slice.color }} />
+                          <span className="break-words">{slice.label}</span>
                         </span>
-                        <span className="shrink-0 font-bold text-[#0D3A35]">{detail.value}</span>
+                        <span className="shrink-0 font-bold text-[#0D3A35]">
+                          {slice.value.toLocaleString('en-IN', { maximumFractionDigits: 1 })} ac
+                        </span>
                       </div>
                     ))}
+                    {overflowCount > 0 && (
+                      <p className="text-[10px] font-semibold text-slate-400">+{overflowCount} more crop{overflowCount === 1 ? '' : 's'}</p>
+                    )}
                   </div>
-                )}
-              </div>
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#0D3A35]/10 text-[#0D3A35] ring-2 ring-[#0D3A35]/10">
-                <kpi.icon className="h-5 w-5" />
-              </div>
-            </div>
+                </div>
+              );
+            })()}
           </div>
         ))}
       </div>

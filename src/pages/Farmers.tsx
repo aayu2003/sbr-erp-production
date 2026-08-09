@@ -64,6 +64,9 @@ type FarmerRow = {
   documents?: Record<string, any> | null;
   bankDetails?: any[];
   farms?: any[];
+  // True once farmer_details/{id} has resolved (success or failure) for this row — until then,
+  // land-derived fields (acres, parcel count) are still defaults, not confirmed zeroes.
+  detailsLoaded?: boolean;
   crop?: CropValue;
   farmingOption?: string;
   farmerAddress?: string;
@@ -133,6 +136,22 @@ type FarmCardData = {
   block?: string | null;
 };
 
+// Shape returned by GET /farmer_managment/get_co_owners_for_farm/{farm_id} — the authoritative
+// source for a parcel's co-owners (a separate table from the farm's own co_owner_details).
+type ParcelCoOwnerApi = {
+  co_owner_id: string;
+  farm_id: string;
+  co_owner_name: string;
+  co_owner_contact: string;
+  co_owner_address: string;
+  co_owner_email?: string | null;
+  co_owner_adhar_number: string;
+  co_owner_pan_number: string;
+  co_owner_share_percentage: number;
+  co_owner_bank_details?: { bank_name?: string; account_number?: string; ifsc_code?: string; holder_name?: string } | null;
+  created_at?: string;
+};
+
 type LandCoOwner = {
   fullName: string;
   relationship: string;
@@ -197,6 +216,10 @@ const cropOptions: Array<{ value: Exclude<CropValue, ''>; label: string; Icon: R
   { value: 'ragi', label: 'Ragi', Icon: Sprout },
 ];
 
+// Segment colors for a parcel's owner/co-owner acreage split (owner is always the brand color).
+const LAND_DISTRIBUTION_OWNER_COLOR = '#0D3A35';
+const LAND_DISTRIBUTION_CO_OWNER_COLORS = ['#f59e0b', '#0ea5e9', '#e11d48', '#8b5cf6', '#059669'];
+
 const CEO_CULTIVATION_CROP_COLORS: Record<string, string> = {
   paddy: 'var(--crop-paddy-color, #22c55e)',
   napier: 'var(--crop-napier-color, #22c55e)',
@@ -207,16 +230,26 @@ const CEO_CULTIVATION_FALLBACK_COLORS = ['#2563eb', '#6d28d9', '#0891b2', '#dc26
 
 const FlyToBounds = ({ coords }: { coords: { lat: number; lng: number }[] | null }) => {
   const map = useMap();
-  const coordinatesKey = coords
-    ?.map(({ lat, lng }) => `${Number(lat)},${Number(lng)}`)
-    .join('|') ?? '';
+  // Drop non-finite entries before building the key — otherwise a NaN pair survives as the
+  // literal string "NaN,NaN" (still a truthy, non-empty key) and crashes Leaflet's flyToBounds.
+  const validCoords = (coords ?? []).filter(({ lat, lng }) => Number.isFinite(Number(lat)) && Number.isFinite(Number(lng)));
+  const coordinatesKey = validCoords.map(({ lat, lng }) => `${Number(lat)},${Number(lng)}`).join('|');
 
   useEffect(() => {
     if (!coordinatesKey) return;
+    // The parcels grid stays mounted but CSS-hidden (`hidden` class) while land data is still
+    // loading — a map inside a display:none container has zero rendered size, and Leaflet's
+    // flyTo animation does projection math that divides by that size, producing NaN and
+    // crashing with no error boundary to catch it. Skip the fly-to until the map actually
+    // has pixels to animate within; AutoResizeMap's ResizeObserver will fix the view once
+    // the container becomes visible and gets a real size.
+    const container = map.getContainer();
+    if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) return;
     const latLngs = coordinatesKey.split('|').map((pair) => {
       const [lat, lng] = pair.split(',').map(Number);
       return L.latLng(lat, lng);
     });
+    if (latLngs.length === 0) return;
     map.flyToBounds(L.latLngBounds(latLngs), { padding: [40, 40], duration: 1.4, animate: true });
   }, [coordinatesKey, map]);
   return null;
@@ -382,8 +415,22 @@ const Farmers = () => {
   const [profilePopupTab, setProfilePopupTab] = useState<'details' | 'documents' | 'parcels'>('details');
   const [parcelPlotView, setParcelPlotView] = useState<Record<string, boolean>>({});
   const [parcelPlotDetailsOpen, setParcelPlotDetailsOpen] = useState<Record<string, boolean>>({});
+  // Cluster/zone/block names per farm_id, fetched lazily when the parcels tab is opened — acts
+  // as a session-long cache keyed by farm_id so re-opening the same parcel doesn't refetch.
+  const [parcelBlockZoneCluster, setParcelBlockZoneCluster] = useState<Record<string, { loading: boolean; block_name?: string | null; zone_name?: string | null; cluster_name?: string | null }>>({});
+  // Co-owners per farm_id, fetched (one call per farm_id) as soon as the view-profile popup opens —
+  // acts as a session-long cache keyed by farm_id so re-opening the same profile doesn't refetch.
+  const [parcelCoOwners, setParcelCoOwners] = useState<Record<string, { loading: boolean; items: ParcelCoOwnerApi[] }>>({});
   const [newLandModal, setNewLandModal] = useState<{ open: boolean; farmerId: string | null }>({ open: false, farmerId: null });
   const [bankAddModal, setBankAddModal] = useState<{ open: boolean; farmerId: string | null }>({ open: false, farmerId: null });
+  // Dedicated "Add Co-owner" popup — POSTs straight to add_co_owner_to_farm (a separate table
+  // from the farm's own co_owner_details, so it isn't bundled into the land-parcel save flow).
+  const [coOwnerAddModal, setCoOwnerAddModal] = useState<{ open: boolean; farmId: string; farmTotalAcres: number }>({ open: false, farmId: '', farmTotalAcres: 0 });
+  const [coOwnerAddForm, setCoOwnerAddForm] = useState({
+    name: '', contact: '', address: '', email: '', aadhaar: '', pan: '', shareAcres: '',
+    bankName: '', bankHolderName: '', bankAccountNumber: '', bankIfsc: '',
+  });
+  const [coOwnerAddSaving, setCoOwnerAddSaving] = useState(false);
   const [localBankDetails, setLocalBankDetails] = useState<Record<string, Array<{ holderName: string; bankName: string; accountNumber: string; ifsc: string; passbookPdfName: string }>>>({});
   const [bankDrafts, setBankDrafts] = useState<Record<string, { holderName: string; bankName: string; accountNumber: string; ifsc: string; passbookPdf?: File | null }>>({});
   const [bankSaving, setBankSaving] = useState<Record<string, boolean>>({});
@@ -481,6 +528,10 @@ const Farmers = () => {
     lockInEnd: string;
   }>>([]);
   const [editFarmIndex, setEditFarmIndex] = useState(0);
+  // True while a farmer's authoritative land/farm data is being fetched in the
+  // background (profile view or Edit Farmer open) — drives the spinner in the
+  // Land Parcels and Farm Details tabs so stale/empty data isn't shown mid-fetch.
+  const [farmerLandLoading, setFarmerLandLoading] = useState(false);
 
   useEffect(() => {
     loadFarmers();
@@ -547,6 +598,7 @@ const Farmers = () => {
           documents: item.documents || null,
           bankDetails: [],
           farms: [],
+          detailsLoaded: false,
           farmingOption: fd.farming_option ?? '',
           coOwner: hasCoOwner ? coOwner : null,
         };
@@ -666,8 +718,10 @@ const Farmers = () => {
 
         setFarmers((prev) =>
           prev.map((farmer) => {
+            if (!(farmer.id in detailMap)) return farmer;
             const detail = detailMap[farmer.id];
-            return detail ? enrichFarmer(farmer, detail) : farmer;
+            const next = detail ? enrichFarmer(farmer, detail) : farmer;
+            return { ...next, detailsLoaded: true };
           })
         );
       }
@@ -1082,41 +1136,47 @@ const Farmers = () => {
     return Array.isArray(body?.farms) ? body.farms : [];
   };
 
-  const refreshFarmerDetails = async (farmerId: string) => {
+  // Returns the refreshed farmer (or null on failure) so callers that need the
+  // fresh data synchronously — not just whatever eventually lands in `farmers`
+  // state — can use it directly instead of racing a re-render.
+  const refreshFarmerDetails = async (farmerId: string): Promise<FarmerRow | null> => {
     const base = getBaseUrl();
     const resp = await fetch(`${base.replace(/\/$/, '')}/farmer_managment/farmer_details/${farmerId}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
-    if (!resp.ok) return;
+    if (!resp.ok) return null;
     const detailJson = await resp.json();
     const farmerDetail = detailJson?.farmer ?? {};
     const farmDetail = Array.isArray(detailJson?.farm) ? detailJson.farm : [];
     const detailArea = farmDetail.reduce((sum: number, f: any) => sum + Number(f?.total_area ?? 0), 0);
 
+    let updatedFarmer: FarmerRow | null = null;
     setFarmers((prev) =>
-      prev.map((farmer) =>
-        farmer.id === farmerId
-          ? {
-              ...farmer,
-              fullName: farmerDetail?.farmer_name || farmer.fullName,
-              phoneNumber: farmerDetail?.farmer_contact || farmer.phoneNumber,
-              alternatePhone: farmerDetail?.farmer_alternate_contact ?? farmer.alternatePhone,
-              farmerAddress: farmerDetail?.farmer_address ?? farmer.farmerAddress ?? '',
-              kyc: farmerDetail?.kyc_data ?? farmer.kyc,
-              agreements: farmerDetail?.agreement_data ?? farmer.agreements,
-              documents: farmerDetail?.documents ?? farmer.documents,
-              bankDetails: Array.isArray(farmerDetail?.bank_details) ? farmerDetail.bank_details : farmer.bankDetails,
-              farms: farmDetail,
-              farmingOption: farmerDetail?.farming_option || farmer.farmingOption || '',
-              landMapping: detailArea > 0
-                ? { totalArea: detailArea, coordinates: farmDetail[0]?.land_coordinates || farmer.landMapping?.coordinates || [] }
-                : farmer.landMapping,
-              profileImageUrl: farmerDetail?.documents?.profile_photo?.url || farmer.profileImageUrl,
-            }
-          : farmer
-      )
+      prev.map((farmer) => {
+        if (farmer.id !== farmerId) return farmer;
+        const next: FarmerRow = {
+          ...farmer,
+          fullName: farmerDetail?.farmer_name || farmer.fullName,
+          phoneNumber: farmerDetail?.farmer_contact || farmer.phoneNumber,
+          alternatePhone: farmerDetail?.farmer_alternate_contact ?? farmer.alternatePhone,
+          farmerAddress: farmerDetail?.farmer_address ?? farmer.farmerAddress ?? '',
+          kyc: farmerDetail?.kyc_data ?? farmer.kyc,
+          agreements: farmerDetail?.agreement_data ?? farmer.agreements,
+          documents: farmerDetail?.documents ?? farmer.documents,
+          bankDetails: Array.isArray(farmerDetail?.bank_details) ? farmerDetail.bank_details : farmer.bankDetails,
+          farms: farmDetail,
+          farmingOption: farmerDetail?.farming_option || farmer.farmingOption || '',
+          landMapping: detailArea > 0
+            ? { totalArea: detailArea, coordinates: farmDetail[0]?.land_coordinates || farmer.landMapping?.coordinates || [] }
+            : farmer.landMapping,
+          profileImageUrl: farmerDetail?.documents?.profile_photo?.url || farmer.profileImageUrl,
+        };
+        updatedFarmer = next;
+        return next;
+      })
     );
+    return updatedFarmer;
   };
 
   const handleAddBankDetail = async (farmer: FarmerRow) => {
@@ -1200,6 +1260,77 @@ const Farmers = () => {
         delete copy[farmer.id];
         return copy;
       });
+    }
+  };
+
+  const openAddCoOwnerModal = (farmId: string, farmTotalAcres: number) => {
+    setCoOwnerAddForm({
+      name: '', contact: '', address: '', email: '', aadhaar: '', pan: '', shareAcres: '',
+      bankName: '', bankHolderName: '', bankAccountNumber: '', bankIfsc: '',
+    });
+    setCoOwnerAddModal({ open: true, farmId: String(farmId), farmTotalAcres });
+  };
+
+  const closeAddCoOwnerModal = () => setCoOwnerAddModal({ open: false, farmId: '', farmTotalAcres: 0 });
+
+  const handleSaveCoOwner = async () => {
+    const form = coOwnerAddForm;
+    if (!form.name.trim() || !form.contact.trim() || !form.address.trim() || !form.aadhaar.trim() || !form.pan.trim() || !form.shareAcres.trim()) {
+      toast({ title: 'Missing fields', description: 'Fill in name, contact, address, Aadhaar, PAN and share before saving.', variant: 'destructive' });
+      return;
+    }
+    const shareAcres = Number(form.shareAcres);
+    if (!Number.isFinite(shareAcres) || shareAcres <= 0) {
+      toast({ title: 'Invalid share', description: "Enter the co-owner's share in acres as a positive number.", variant: 'destructive' });
+      return;
+    }
+    const bankFields = [form.bankName, form.bankHolderName, form.bankAccountNumber, form.bankIfsc];
+    const anyBankFilled = bankFields.some((value) => value.trim());
+    const allBankFilled = bankFields.every((value) => value.trim());
+    if (anyBankFilled && !allBankFilled) {
+      toast({ title: 'Incomplete bank details', description: 'Fill in bank name, holder name, account number and IFSC, or leave them all blank.', variant: 'destructive' });
+      return;
+    }
+
+    setCoOwnerAddSaving(true);
+    try {
+      const base = getBaseUrl().replace(/\/$/, '');
+      const resp = await fetch(`${base}/farmer_managment/add_co_owner_to_farm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          farm_id: coOwnerAddModal.farmId,
+          co_owner_name: form.name.trim(),
+          co_owner_contact: form.contact.trim(),
+          co_owner_address: form.address.trim(),
+          co_owner_email: form.email.trim() || null,
+          co_owner_adhar_number: form.aadhaar.trim(),
+          co_owner_pan_number: form.pan.trim().toUpperCase(),
+          co_owner_share_percentage: shareAcres,
+          co_owner_bank_details: allBankFilled ? {
+            bank_name: form.bankName.trim(),
+            holder_name: form.bankHolderName.trim(),
+            account_number: form.bankAccountNumber.trim(),
+            ifsc_code: form.bankIfsc.trim().toUpperCase(),
+          } : null,
+        }),
+      });
+      const body = await resp.json().catch(() => null);
+      if (!resp.ok || body?.success !== true) {
+        throw new Error(body?.message || body?.detail || `Failed to add co-owner (${resp.status})`);
+      }
+      toast({ title: 'Success', description: body?.message || 'Co-owner added successfully.', variant: 'success' });
+      // Drop the cached entry for this farm so the co-owners effect refetches and picks up the new one.
+      setParcelCoOwners((prev) => {
+        if (!(coOwnerAddModal.farmId in prev)) return prev;
+        const { [coOwnerAddModal.farmId]: _removed, ...rest } = prev;
+        return rest;
+      });
+      closeAddCoOwnerModal();
+    } catch (error) {
+      toast({ title: 'Error', description: error instanceof Error ? error.message : 'Failed to add co-owner.', variant: 'destructive' });
+    } finally {
+      setCoOwnerAddSaving(false);
     }
   };
 
@@ -1646,10 +1777,159 @@ const Farmers = () => {
     [farmers, viewProfileFarmerId]
   );
 
+  // Opening a profile shows whatever's cached locally first, then refreshes in the
+  // background — viewProfileFarmer re-derives automatically once `farmers` updates.
+  useEffect(() => {
+    if (!viewProfileFarmerId) return;
+    setFarmerLandLoading(true);
+    refreshFarmerDetails(viewProfileFarmerId).finally(() => setFarmerLandLoading(false));
+  }, [viewProfileFarmerId]);
+
+  // Land Parcels tab: fetch cluster/zone/block names per parcel, lazily, once the tab is opened
+  // and the farmer's farms have loaded — each parcel's grid cell spins until its own call resolves.
+  useEffect(() => {
+    if (profilePopupTab !== 'parcels' || !viewProfileFarmer) return;
+    const farmList = Array.isArray(viewProfileFarmer.farms) ? viewProfileFarmer.farms : [];
+    if (farmList.length === 0) return;
+    const base = getBaseUrl().replace(/\/$/, '');
+
+    farmList.forEach((rawFarm: any, index: number) => {
+      const parcelId = String(rawFarm?.farm_id ?? rawFarm?.id ?? `${viewProfileFarmer.id}-farm-${index + 1}`);
+      if (parcelBlockZoneCluster[parcelId]) return;
+
+      setParcelBlockZoneCluster((prev) => (prev[parcelId] ? prev : { ...prev, [parcelId]: { loading: true } }));
+
+      fetch(`${base}/farmer_managment/get_block_zone_cluster_for_farm/${parcelId}`)
+        .then((resp) => (resp.ok ? resp.json() : null))
+        .catch(() => null)
+        .then((data) => {
+          setParcelBlockZoneCluster((prev) => ({
+            ...prev,
+            [parcelId]: {
+              loading: false,
+              block_name: data?.block_name ?? null,
+              zone_name: data?.zone_name ?? null,
+              cluster_name: data?.cluster_name ?? null,
+            },
+          }));
+        });
+    });
+  }, [profilePopupTab, viewProfileFarmer, parcelBlockZoneCluster]);
+
+  // Co-owners: fetched once the view-profile popup is opened (not gated to a specific tab) —
+  // one call per farm_id, so an owner with 3 lands fires 3 calls, each cached by farm_id.
+  useEffect(() => {
+    if (!viewProfileFarmerId || !viewProfileFarmer) return;
+    const farmList = Array.isArray(viewProfileFarmer.farms) ? viewProfileFarmer.farms : [];
+    if (farmList.length === 0) return;
+    const base = getBaseUrl().replace(/\/$/, '');
+
+    farmList.forEach((rawFarm: any, index: number) => {
+      const farmId = String(rawFarm?.farm_id ?? rawFarm?.id ?? `${viewProfileFarmer.id}-farm-${index + 1}`);
+      if (parcelCoOwners[farmId]) return;
+
+      setParcelCoOwners((prev) => (prev[farmId] ? prev : { ...prev, [farmId]: { loading: true, items: [] } }));
+
+      fetch(`${base}/farmer_managment/get_co_owners_for_farm/${farmId}`)
+        .then((resp) => (resp.ok ? resp.json() : null))
+        .catch(() => null)
+        .then((data) => {
+          setParcelCoOwners((prev) => ({
+            ...prev,
+            [farmId]: {
+              loading: false,
+              items: Array.isArray(data?.co_owners) ? data.co_owners : [],
+            },
+          }));
+        });
+    });
+  }, [viewProfileFarmerId, viewProfileFarmer, parcelCoOwners]);
+
+  // Flattens co-owners across every farm belonging to the viewed owner — used by both the
+  // Co-Owner Details card and the Bank Details card in the Land Owner Details tab.
+  const viewProfileFarmerCoOwners = useMemo(() => {
+    if (!viewProfileFarmer) return { items: [] as Array<ParcelCoOwnerApi & { farmId: string }>, loading: false };
+    const farmList = Array.isArray(viewProfileFarmer.farms) ? viewProfileFarmer.farms : [];
+    if (farmList.length === 0) return { items: [] as Array<ParcelCoOwnerApi & { farmId: string }>, loading: false };
+    let loading = false;
+    const items: Array<ParcelCoOwnerApi & { farmId: string }> = [];
+    farmList.forEach((rawFarm: any, index: number) => {
+      const farmId = String(rawFarm?.farm_id ?? rawFarm?.id ?? `${viewProfileFarmer.id}-farm-${index + 1}`);
+      const state = parcelCoOwners[farmId];
+      if (!state || state.loading) { loading = true; return; }
+      state.items.forEach((coOwner) => items.push({ ...coOwner, farmId }));
+    });
+    return { items, loading };
+  }, [viewProfileFarmer, parcelCoOwners]);
+
   const activeEditFarmer = useMemo(
     () => farmers.find((f) => f.id === editFarmerModal.farmerId) ?? null,
     [farmers, editFarmerModal.farmerId]
   );
+
+  // Shared by openEditModal (instant open with whatever's cached locally) and the
+  // background refresh that follows it (swaps in the authoritative data once it lands).
+  const buildEditFarmerFarms = (farmer: FarmerRow, agreement: any) => {
+    const farms = Array.isArray(farmer.farms) ? farmer.farms : [];
+    const normalizeCoords = (rawCoords: any[]): [number, number][] =>
+      rawCoords
+        .map((c: any) => Array.isArray(c) ? [Number(c[0]), Number(c[1])] : [Number(c?.lat), Number(c?.lng)])
+        .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b)) as [number, number][];
+
+    return farms.length > 0
+      ? farms.map((farm: any) => ({
+        farmId: farm.farm_id ?? farm.id ?? '',
+        village: farm.village ?? '',
+        district: farm.district ?? '',
+        state: farm.state ?? '',
+        cropType: farm.crop_type ?? '',
+        totalArea: String(farm.total_area ?? ''),
+        images: [null, null, null],
+        imagePreviews: [
+          farm.land_media?.images?.[0] ?? null,
+          farm.land_media?.images?.[1] ?? null,
+          farm.land_media?.images?.[2] ?? null,
+        ],
+        video: null,
+        videoPreview: farm.land_media?.video ?? null,
+        landCoordinates: normalizeCoords(Array.isArray(farm.land_coordinates) ? farm.land_coordinates : []),
+        kmlCoordinates: null,
+        isParsingKml: false,
+        coOwners: normalizeLandCoOwners(farm),
+        leaseStart: String(farm.lease_start_date ?? farm.lease_start ?? agreement?.agreement_start_date ?? agreement?.agreementStart ?? ''),
+        leaseEnd: String(farm.lease_end_date ?? farm.lease_end ?? agreement?.agreement_end_date ?? agreement?.agreementEnd ?? ''),
+        leaseRate: String(farm.lease_rate ?? farm.lease_rent ?? agreement?.lease_rate ?? agreement?.lease_rent ?? agreement?.leaseRent ?? ''),
+        lockInStart: String(farm.lock_in_start_date ?? farm.lock_in_start ?? ''),
+        lockInEnd: String(farm.lock_in_end_date ?? farm.lock_in_end ?? ''),
+      }))
+      // Legacy farmers whose land was never migrated into `farms[]` still carry it on
+      // the top-level landMapping/documents/agreement fields — the read-only "Land
+      // Parcels" tab (getFarmCards) already synthesizes one card from those; mirror
+      // that here so Edit Land isn't empty for them. farmId stays '' — the save flow
+      // creates a real farm record (via add_new_land_to_existing_farmer) the first
+      // time this gets saved, since there's no existing farm_id to update.
+      : [{
+        farmId: '',
+        village: farmer.village ?? '',
+        district: farmer.district ?? '',
+        state: farmer.state ?? '',
+        cropType: cropSelections[farmer.id] ?? farmer.crop ?? '',
+        totalArea: String(farmer.landMapping?.totalArea ?? ''),
+        images: [null, null, null],
+        imagePreviews: [farmer.documents?.land_image_1?.url ?? null, null, null],
+        video: null,
+        videoPreview: null,
+        landCoordinates: normalizeCoords(Array.isArray(farmer.landMapping?.coordinates) ? farmer.landMapping.coordinates : []),
+        kmlCoordinates: null,
+        isParsingKml: false,
+        coOwners: [],
+        leaseStart: String(agreement?.agreement_start_date ?? agreement?.agreementStart ?? ''),
+        leaseEnd: String(agreement?.agreement_end_date ?? agreement?.agreementEnd ?? ''),
+        leaseRate: String(agreement?.lease_rate ?? agreement?.lease_rent ?? agreement?.leaseRent ?? ''),
+        lockInStart: '',
+        lockInEnd: '',
+      }];
+  };
 
   const openEditModal = (farmer: FarmerRow, openInSeparateDialog = true) => {
     const kyc = Array.isArray(farmer.kyc) ? farmer.kyc[0] : farmer.kyc;
@@ -1684,45 +1964,23 @@ const Farmers = () => {
       passbookFile: null,
     });
     setEditProfilePhotoPreview(null);
-
-    const farms = Array.isArray(farmer.farms) ? farmer.farms : [];
-    setEditFarmerFarms(
-      farms.map((farm: any) => {
-        const rawCoords: any[] = Array.isArray(farm.land_coordinates) ? farm.land_coordinates : [];
-        const landCoordinates: [number, number][] = rawCoords
-          .map((c: any) => Array.isArray(c) ? [Number(c[0]), Number(c[1])] : [Number(c?.lat), Number(c?.lng)])
-          .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b)) as [number, number][];
-        return {
-          farmId: farm.farm_id ?? farm.id ?? '',
-          village: farm.village ?? '',
-          district: farm.district ?? '',
-          state: farm.state ?? '',
-          cropType: farm.crop_type ?? '',
-          totalArea: String(farm.total_area ?? ''),
-          images: [null, null, null],
-          imagePreviews: [
-            farm.land_media?.images?.[0] ?? null,
-            farm.land_media?.images?.[1] ?? null,
-            farm.land_media?.images?.[2] ?? null,
-          ],
-          video: null,
-          videoPreview: farm.land_media?.video ?? null,
-          landCoordinates,
-          kmlCoordinates: null,
-          isParsingKml: false,
-          coOwners: normalizeLandCoOwners(farm),
-          leaseStart: String(farm.lease_start_date ?? farm.lease_start ?? agreement?.agreement_start_date ?? agreement?.agreementStart ?? ''),
-          leaseEnd: String(farm.lease_end_date ?? farm.lease_end ?? agreement?.agreement_end_date ?? agreement?.agreementEnd ?? ''),
-          leaseRate: String(farm.lease_rate ?? farm.lease_rent ?? agreement?.lease_rate ?? agreement?.lease_rent ?? agreement?.leaseRent ?? ''),
-          lockInStart: String(farm.lock_in_start_date ?? farm.lock_in_start ?? ''),
-          lockInEnd: String(farm.lock_in_end_date ?? farm.lock_in_end ?? ''),
-        };
-      })
-    );
+    setEditFarmerFarms(buildEditFarmerFarms(farmer, agreement));
     setEditFarmIndex(0);
     setEditFarmerTab('personal');
     setEditFarmerModal({ open: openInSeparateDialog, farmerId: farmer.id });
     setInlineProfileEditing(!openInSeparateDialog);
+
+    // The modal opens instantly with whatever's cached locally; swap in the
+    // authoritative land data (correct farm_ids included) once it lands, so a
+    // stale/missing farm_id here can't silently break saving or hide a parcel.
+    setFarmerLandLoading(true);
+    refreshFarmerDetails(farmer.id)
+      .then((refreshed) => {
+        if (!refreshed) return;
+        const refreshedAgreement = Array.isArray(refreshed.agreements) ? refreshed.agreements[0] : refreshed.agreements;
+        setEditFarmerFarms(buildEditFarmerFarms(refreshed, refreshedAgreement));
+      })
+      .finally(() => setFarmerLandLoading(false));
   };
 
   const openLandEditModal = (farmer: FarmerRow, farmIndex: number, addCoOwner = false) => {
@@ -1917,9 +2175,44 @@ const Farmers = () => {
         if (invalidShare) {
           throw new Error(`Ownership share must be between 0 and 100 for Farm ${index + 1}`);
         }
-        const farmId = await resolveFarmId(farm, originalFarm, index);
+        let farmId = await resolveFarmId(farm, originalFarm, index);
         if (!farmId) {
-          throw new Error(`Farm ID missing for Farm ${index + 1}`);
+          // No existing farm_id anywhere — this is a legacy single-parcel farmer
+          // (land only ever lived on landMapping/agreements) being edited for the
+          // first time. Create a real farm record so there's something to update.
+          const base = getBaseUrl().replace(/\/$/, '');
+          const createResp = await fetch(`${base}/farmer_managment/add_new_land_to_existing_farmer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              farmer_id: farmerId,
+              land_coordinates: farm.kmlCoordinates
+                ? farm.kmlCoordinates.map((coord) => [coord.lat, coord.lng])
+                : farm.landCoordinates,
+              total_area: farm.totalArea === '' ? 0 : Number(farm.totalArea),
+              state: farm.state,
+              district: farm.district,
+              village: farm.village,
+              crop_type: String(farm.cropType || '').toLowerCase(),
+              farming_option: activeEditFarmer.farmingOption || 'Lease Farming',
+              land_photos_urls: [],
+              land_video_url: null,
+              co_owner_details: serializeLandCoOwners(farm.coOwners),
+              lease_start_date: farm.leaseStart || null,
+              lease_end_date: farm.leaseEnd || null,
+              lease_rate: farm.leaseRate === '' ? null : Number(farm.leaseRate),
+              lock_in_start_date: farm.lockInStart || null,
+              lock_in_end_date: farm.lockInEnd || null,
+            }),
+          });
+          const createBody = await createResp.json().catch(() => null);
+          if (!createResp.ok || createBody?.success !== true || !createBody?.farm_id) {
+            throw new Error(createBody?.message || `Failed to create Farm ${index + 1}`);
+          }
+          farmId = String(createBody.farm_id);
+          // The create endpoint only persists coordinates/state/district/village/crop_type/
+          // media — fall through into the normal update call below so lease, lock-in, and
+          // co-owner details (which it silently ignores) actually get saved too.
         }
 
         const originalMedia = originalFarm.land_media ?? {};
@@ -2521,11 +2814,15 @@ const Farmers = () => {
                       </div>
                       <div>
                         <p className="text-xs font-bold text-[#0D3A35]/65">Acres</p>
-                        <p className="mt-0.5 text-sm font-bold text-[#0D3A35]">
-                          {(Number(farmer.landMapping?.totalArea ?? 0) || 0).toLocaleString('en-IN', {
-                            maximumFractionDigits: 3,
-                          })}
-                        </p>
+                        {farmer.detailsLoaded ? (
+                          <p className="mt-0.5 text-sm font-bold text-[#0D3A35]">
+                            {(Number(farmer.landMapping?.totalArea ?? 0) || 0).toLocaleString('en-IN', {
+                              maximumFractionDigits: 3,
+                            })}
+                          </p>
+                        ) : (
+                          <Loader2 className="mt-1 h-4 w-4 animate-spin text-[#0D3A35]/50" />
+                        )}
                       </div>
                     </div>
                     <div className="flex min-w-0 items-center justify-center gap-3 rounded-xl border border-[#0D3A35]/15 bg-[#0D3A35]/[0.04] p-3 text-center">
@@ -2534,7 +2831,11 @@ const Farmers = () => {
                       </div>
                       <div>
                         <p className="text-xs font-bold text-[#0D3A35]/65">Land Parcels</p>
-                        <p className="mt-0.5 text-sm font-bold text-[#0D3A35]">{getFarmCards(farmer).length}</p>
+                        {farmer.detailsLoaded ? (
+                          <p className="mt-0.5 text-sm font-bold text-[#0D3A35]">{getFarmCards(farmer).length}</p>
+                        ) : (
+                          <Loader2 className="mt-1 h-4 w-4 animate-spin text-[#0D3A35]/50" />
+                        )}
                       </div>
                     </div>
                 </div>
@@ -2764,17 +3065,6 @@ const Farmers = () => {
                     ],
                   },
                   {
-                    title: 'Co-Owner Details',
-                    Icon: Users,
-                    items: [
-                      { label: 'Full Name', value: viewProfileFarmer.coOwner?.fullName || 'N/A', Icon: UserRound },
-                      { label: 'Relationship', value: viewProfileFarmer.coOwner?.relationship || 'N/A', Icon: Users },
-                      { label: 'Phone Number', value: viewProfileFarmer.coOwner?.phoneNumber || 'N/A', Icon: Phone },
-                      { label: 'Aadhaar Number', value: viewProfileFarmer.coOwner?.aadhaarNumber || 'N/A', Icon: IdCard },
-                      { label: 'PAN Number', value: viewProfileFarmer.coOwner?.panNumber || 'N/A', Icon: FileBadge2 },
-                    ],
-                  },
-                  {
                     title: 'Address',
                     Icon: MapPin,
                     items: [
@@ -2832,6 +3122,64 @@ const Farmers = () => {
                   </div>
                 );
               })()}
+
+              <section className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
+                <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50">
+                    <Users className="h-4 w-4 text-emerald-700" />
+                  </div>
+                  <h4 className="text-sm font-bold text-slate-900">Co-Owner Details</h4>
+                </div>
+                <div className="p-5">
+                  {viewProfileFarmerCoOwners.loading ? (
+                    <div className="flex items-center justify-center py-6">
+                      <Loader2 className="h-5 w-5 animate-spin text-slate-300" />
+                    </div>
+                  ) : viewProfileFarmerCoOwners.items.length === 0 ? (
+                    <p className="text-sm text-slate-500">No co-owners recorded across this land owner's parcels.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                      {viewProfileFarmerCoOwners.items.map((coOwner) => (
+                        <div key={coOwner.co_owner_id} className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-sm font-bold text-slate-900">{coOwner.co_owner_name || 'Name not recorded'}</p>
+                              <p className="mt-0.5 text-[11px] font-semibold text-slate-500">Parcel: {coOwner.farmId}</p>
+                            </div>
+                            {Number.isFinite(coOwner.co_owner_share_percentage) && (
+                              <span className="shrink-0 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700">
+                                {coOwner.co_owner_share_percentage} ac
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-slate-100 pt-3 text-xs">
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Contact</p>
+                              <p className="mt-0.5 font-bold text-slate-700">{coOwner.co_owner_contact || 'N/A'}</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Email</p>
+                              <p className="mt-0.5 font-bold text-slate-700">{coOwner.co_owner_email || 'N/A'}</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Aadhaar Number</p>
+                              <p className="mt-0.5 font-bold text-slate-700">{coOwner.co_owner_adhar_number || 'N/A'}</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">PAN Number</p>
+                              <p className="mt-0.5 font-bold text-slate-700">{coOwner.co_owner_pan_number || 'N/A'}</p>
+                            </div>
+                            <div className="col-span-2">
+                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Address</p>
+                              <p className="mt-0.5 break-words font-bold text-slate-700">{coOwner.co_owner_address || 'N/A'}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </section>
 
               {(() => {
                 const bank = getBankDetails(viewProfileFarmer);
@@ -2924,6 +3272,38 @@ const Farmers = () => {
                         </div>
                       </div>
                     )}
+                    {!inlineProfileEditing && viewProfileFarmerCoOwners.items.some((co) => co.co_owner_bank_details) && (
+                      <div className="border-t border-slate-100 bg-slate-50/40 p-5">
+                        <p className="mb-3 text-xs font-bold uppercase tracking-wide text-slate-500">Co-owner Bank Accounts</p>
+                        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                          {viewProfileFarmerCoOwners.items
+                            .filter((co) => co.co_owner_bank_details)
+                            .map((co) => (
+                              <div key={co.co_owner_id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-bold text-slate-900">{co.co_owner_bank_details?.bank_name || 'Bank not recorded'}</p>
+                                    <p className="mt-1 truncate text-xs font-semibold text-slate-500">{co.co_owner_bank_details?.holder_name || 'Holder not recorded'}</p>
+                                  </div>
+                                  <span className="shrink-0 rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-700">
+                                    Co-owner: {co.co_owner_name || 'Unnamed'}
+                                  </span>
+                                </div>
+                                <div className="mt-3 grid grid-cols-2 gap-3 border-t border-slate-100 pt-3">
+                                  <div>
+                                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Account Number</p>
+                                    <p className="mt-1 break-all text-xs font-bold text-slate-700">{co.co_owner_bank_details?.account_number || 'N/A'}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">IFSC Code</p>
+                                    <p className="mt-1 break-all text-xs font-bold uppercase text-slate-700">{co.co_owner_bank_details?.ifsc_code || 'N/A'}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
                   </section>
                 );
               })()}
@@ -2992,7 +3372,12 @@ const Farmers = () => {
                   Add Land
                 </Button>
               </div>
-              <div className="grid grid-cols-1 gap-5">
+              {farmerLandLoading && (
+                <div className="flex items-center justify-center py-16">
+                  <div className="w-8 h-8 border-4 border-[#0D3A35] border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
+              <div className={`grid grid-cols-1 gap-5 ${farmerLandLoading ? 'hidden' : ''}`}>
                 {getFarmCards(viewProfileFarmer).map((farm, farmIndex) => {
                   const rawFarm = Array.isArray(viewProfileFarmer.farms) ? viewProfileFarmer.farms[farmIndex] : null;
                   const editableFarm = editFarmerFarms[farmIndex];
@@ -3006,9 +3391,21 @@ const Farmers = () => {
                   const fallbackImage = farm.mediaUrl && farm.mediaUrl !== '/placeholder.svg' ? farm.mediaUrl : '';
                   const parcelImages = images.length > 0 ? images : (fallbackImage ? [fallbackImage] : []);
                   const videoUrl = rawFarm?.land_media?.video || '';
-                  const landCoOwners = normalizeLandCoOwners(rawFarm);
                   const parcelId = rawFarm?.farm_id ?? rawFarm?.id ?? farm.id;
-                  const cropLabel = cropOptions.find((option) => option.value === farm.cropType)?.label || farm.cropType || 'Not assigned';
+                  const coOwnerState = parcelCoOwners[String(parcelId)];
+                  const landCoOwners = coOwnerState?.items ?? [];
+                  const landCoOwnersLoading = coOwnerState?.loading ?? true;
+                  // A parcel itself carries no crop type — its plots do, and different plots can
+                  // grow different crops. Show every distinct plot crop, e.g. "Paddy + Rahar".
+                  const plotCropTypes = Array.from(new Set(
+                    plots
+                      .map((plot: any) => String(plot?.crop_type ?? '').trim())
+                      .filter(Boolean)
+                      .map((value: string) => value.charAt(0).toUpperCase() + value.slice(1).toLowerCase())
+                  ));
+                  const cropLabel = plotCropTypes.length > 0
+                    ? plotCropTypes.join(' + ')
+                    : (cropOptions.find((option) => option.value === farm.cropType)?.label || farm.cropType || 'Not assigned');
                   const farmCoords: [number, number][] = (Array.isArray(farm.landMapping?.coordinates) ? farm.landMapping.coordinates : [])
                     .map((coordinate: any) => {
                       if (Array.isArray(coordinate) && coordinate.length >= 2) {
@@ -3416,17 +3813,24 @@ const Farmers = () => {
                       </div>
 
                       <div className="grid grid-cols-3 gap-px border-y border-slate-100 bg-slate-100">
-                        {[
-                          { label: 'Cluster', value: farm.cluster || 'N/A' },
-                          { label: 'Zone', value: farm.zone || 'N/A' },
-                          { label: 'Block', value: farm.block || 'N/A' },
-                          { label: 'Crop', value: cropLabel },
-                          { label: 'Plots', value: String(plots.length) },
-                          { label: 'Lease Rate', value: leaseRateDisplay },
-                        ].map((item) => (
+                        {(() => {
+                          const bzc = parcelBlockZoneCluster[String(parcelId)];
+                          return [
+                            { label: 'Cluster', value: bzc?.cluster_name || farm.cluster || 'N/A', loading: bzc?.loading ?? true },
+                            { label: 'Zone', value: bzc?.zone_name || farm.zone || 'N/A', loading: bzc?.loading ?? true },
+                            { label: 'Block', value: bzc?.block_name || farm.block || 'N/A', loading: bzc?.loading ?? true },
+                            { label: 'Crop', value: cropLabel, loading: false },
+                            { label: 'Plots', value: String(plots.length), loading: false },
+                            { label: 'Lease Rate', value: leaseRateDisplay, loading: false },
+                          ];
+                        })().map((item) => (
                           <div key={item.label} className="min-w-0 bg-white px-3 py-2.5">
                             <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{item.label}</p>
-                            <p className="mt-0.5 truncate text-xs font-bold text-slate-700">{item.value}</p>
+                            {item.loading ? (
+                              <Loader2 className="mt-1 h-3.5 w-3.5 animate-spin text-slate-300" />
+                            ) : (
+                              <p className="mt-0.5 truncate text-xs font-bold text-slate-700">{item.value}</p>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -3436,15 +3840,17 @@ const Farmers = () => {
                           <div>
                             <p className="text-xs font-bold text-slate-700">Land Co-owners</p>
                             <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
-                              {landCoOwners.length > 0
-                                ? `${landCoOwners.length} co-owner${landCoOwners.length === 1 ? '' : 's'} linked to this parcel`
-                                : 'No co-owners linked to this parcel'}
+                              {landCoOwnersLoading
+                                ? 'Loading co-owners…'
+                                : landCoOwners.length > 0
+                                  ? `${landCoOwners.length} co-owner${landCoOwners.length === 1 ? '' : 's'} linked to this parcel`
+                                  : 'No co-owners linked to this parcel'}
                             </p>
                           </div>
                           {!inlineProfileEditing && (
                             <Button
                               type="button"
-                              onClick={() => openLandEditModal(viewProfileFarmer, farmIndex, true)}
+                              onClick={() => openAddCoOwnerModal(String(parcelId), Number(farm.acres) || 0)}
                               className="h-8 gap-1.5 rounded-lg border border-[#0D3A35]/20 bg-white px-3 text-[11px] font-bold text-[#0D3A35] shadow-sm hover:bg-emerald-50"
                             >
                               <Plus className="h-3.5 w-3.5" />
@@ -3452,20 +3858,24 @@ const Farmers = () => {
                             </Button>
                           )}
                         </div>
-                        {landCoOwners.length > 0 && (
+                        {landCoOwnersLoading ? (
+                          <div className="mt-3 flex items-center justify-center py-4">
+                            <Loader2 className="h-4 w-4 animate-spin text-slate-300" />
+                          </div>
+                        ) : landCoOwners.length > 0 && (
                           <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                            {landCoOwners.map((coOwner, coOwnerIndex) => (
-                              <div key={`${coOwner.fullName}-${coOwnerIndex}`} className="rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2.5">
+                            {landCoOwners.map((coOwner) => (
+                              <div key={coOwner.co_owner_id} className="rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2.5">
                                 <div className="flex items-start justify-between gap-2">
                                   <div className="min-w-0">
-                                    <p className="truncate text-xs font-bold text-slate-800">{coOwner.fullName || 'Name not recorded'}</p>
+                                    <p className="truncate text-xs font-bold text-slate-800">{coOwner.co_owner_name || 'Name not recorded'}</p>
                                     <p className="mt-0.5 truncate text-[10px] font-semibold text-slate-500">
-                                      {[coOwner.relationship, coOwner.phoneNumber].filter(Boolean).join(' · ') || 'Details not recorded'}
+                                      {coOwner.co_owner_contact || 'Contact not recorded'}
                                     </p>
                                   </div>
-                                  {coOwner.ownershipShare && (
+                                  {Number.isFinite(coOwner.co_owner_share_percentage) && (
                                     <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
-                                      {coOwner.ownershipShare}%
+                                      {coOwner.co_owner_share_percentage} ac
                                     </span>
                                   )}
                                 </div>
@@ -3473,6 +3883,54 @@ const Farmers = () => {
                             ))}
                           </div>
                         )}
+                      </section>
+
+                      <section className="border-b border-slate-100 bg-white px-4 py-3">
+                        <p className="text-xs font-bold text-slate-700">Land Distribution</p>
+                        {landCoOwnersLoading ? (
+                          <div className="mt-3 flex items-center justify-center py-2">
+                            <Loader2 className="h-4 w-4 animate-spin text-slate-300" />
+                          </div>
+                        ) : (() => {
+                          const totalAcres = Number(farm.acres) || 0;
+                          const coOwnerSegments = landCoOwners.map((coOwner, coOwnerIndex) => ({
+                            label: coOwner.co_owner_name || `Co-owner ${coOwnerIndex + 1}`,
+                            acres: Number(coOwner.co_owner_share_percentage) || 0,
+                            color: LAND_DISTRIBUTION_CO_OWNER_COLORS[coOwnerIndex % LAND_DISTRIBUTION_CO_OWNER_COLORS.length],
+                          }));
+                          const coOwnerAcresSum = coOwnerSegments.reduce((sum, seg) => sum + seg.acres, 0);
+                          const ownerAcres = Math.max(totalAcres - coOwnerAcresSum, 0);
+                          const segments = [
+                            { label: 'Owner', acres: ownerAcres, color: LAND_DISTRIBUTION_OWNER_COLOR },
+                            ...coOwnerSegments,
+                          ].filter((segment) => segment.acres > 0);
+
+                          if (totalAcres <= 0 || segments.length === 0) {
+                            return <p className="mt-2 text-[11px] italic text-slate-400">No distribution data available for this parcel.</p>;
+                          }
+
+                          return (
+                            <>
+                              <div className="mt-3 flex h-3 w-full overflow-hidden rounded-full bg-slate-100">
+                                {segments.map((segment) => (
+                                  <div
+                                    key={segment.label}
+                                    style={{ width: `${Math.min((segment.acres / totalAcres) * 100, 100)}%`, backgroundColor: segment.color }}
+                                    title={`${segment.label}: ${segment.acres.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ac`}
+                                  />
+                                ))}
+                              </div>
+                              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
+                                {segments.map((segment) => (
+                                  <div key={segment.label} className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600">
+                                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: segment.color }} />
+                                    {segment.label}: {segment.acres.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ac ({((segment.acres / totalAcres) * 100).toFixed(1)}%)
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          );
+                        })()}
                       </section>
 
                       <div className="border-b border-slate-100 bg-slate-50/60 px-4 py-3">
@@ -4544,7 +5002,11 @@ const Farmers = () => {
           {editFarmerTab === 'farms' && (
             <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <EditSectionHeader icon={Leaf} title="Farm Details" description="Review farm parcels, media, crop type, acreage, and land boundary mapping." />
-              {editFarmerFarms.length === 0 ? (
+              {farmerLandLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="w-8 h-8 border-4 border-[#0D3A35] border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : editFarmerFarms.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 gap-2 text-muted-foreground">
                   <Leaf className="h-8 w-8 opacity-30" />
                   <span className="text-sm">No farms registered for this farmer.</span>
@@ -4967,6 +5429,102 @@ const Farmers = () => {
             </div>
           );
         })()}
+      </DialogContent>
+    </Dialog>
+
+    <Dialog open={coOwnerAddModal.open} onOpenChange={(open) => (open ? null : closeAddCoOwnerModal())}>
+      <DialogContent className="max-w-lg rounded-2xl">
+        <DialogHeader>
+          <DialogTitle>Add Co-owner</DialogTitle>
+          <DialogDescription>
+            Add a co-owner for this parcel{coOwnerAddModal.farmTotalAcres > 0 ? ` (${coOwnerAddModal.farmTotalAcres.toLocaleString('en-IN')} ac total)` : ''}. Share is entered in acres, e.g. Co-owner 1: 72 ac, Owner: 28 ac.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <Input
+            placeholder="Co-owner name"
+            value={coOwnerAddForm.name}
+            onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, name: e.target.value }))}
+          />
+          <Input
+            placeholder="Contact number"
+            value={coOwnerAddForm.contact}
+            onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, contact: e.target.value }))}
+          />
+          <Input
+            placeholder="Address"
+            value={coOwnerAddForm.address}
+            onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, address: e.target.value }))}
+          />
+          <Input
+            type="email"
+            placeholder="Email (optional)"
+            value={coOwnerAddForm.email}
+            onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, email: e.target.value }))}
+          />
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              placeholder="Aadhaar number"
+              value={coOwnerAddForm.aadhaar}
+              onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, aadhaar: e.target.value.replace(/\D/g, '').slice(0, 12) }))}
+              inputMode="numeric"
+            />
+            <Input
+              placeholder="PAN number"
+              value={coOwnerAddForm.pan}
+              onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, pan: e.target.value.toUpperCase().slice(0, 10) }))}
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-600">Share (in acres)</label>
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="e.g. 72"
+              value={coOwnerAddForm.shareAcres}
+              onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, shareAcres: e.target.value }))}
+            />
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 space-y-2">
+            <p className="text-xs font-bold text-slate-700">Bank Details (optional)</p>
+            <Input
+              placeholder="Bank name"
+              value={coOwnerAddForm.bankName}
+              onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, bankName: e.target.value }))}
+            />
+            <Input
+              placeholder="Holder's name"
+              value={coOwnerAddForm.bankHolderName}
+              onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, bankHolderName: e.target.value }))}
+            />
+            <Input
+              placeholder="Account number"
+              value={coOwnerAddForm.bankAccountNumber}
+              onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, bankAccountNumber: e.target.value }))}
+            />
+            <Input
+              placeholder="IFSC code"
+              value={coOwnerAddForm.bankIfsc}
+              onChange={(e) => setCoOwnerAddForm((prev) => ({ ...prev, bankIfsc: e.target.value.toUpperCase() }))}
+            />
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={closeAddCoOwnerModal} disabled={coOwnerAddSaving}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              className="h-9 bg-[#0D3A35] px-4 text-xs text-white hover:bg-[#092b27]"
+              onClick={handleSaveCoOwner}
+              disabled={coOwnerAddSaving}
+            >
+              {coOwnerAddSaving ? 'Saving...' : 'Save Co-owner'}
+            </Button>
+          </div>
+        </div>
       </DialogContent>
     </Dialog>
     </>
