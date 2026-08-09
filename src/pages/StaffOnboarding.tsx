@@ -356,6 +356,17 @@ const StaffOnboarding = () => {
   const staffDesignationOf = (staff: StaffApiItem) =>
     typeof staff.staff_information?.staff_designation === 'string' ? staff.staff_information.staff_designation : '';
 
+  // Backend stores saved staff credentials as { user_name, password } (no `saved` flag),
+  // while freshly generated credentials use { userId, password }. Normalize both shapes here.
+  const staffCredentialsOf = (staff: StaffApiItem) => {
+    const raw: any = staff.credentials;
+    if (!raw) return { userId: null as string | null, password: null as string | null, saved: false };
+    const userId = raw.userId ?? raw.user_name ?? raw.userName ?? null;
+    const password = raw.password ?? null;
+    const saved = raw.saved ?? Boolean(userId && password);
+    return { userId, password, saved };
+  };
+
   const generateStaffCredentials = async (staff: StaffApiItem) => {
     setIsGeneratingCredentials(true);
     try {
@@ -381,8 +392,8 @@ const StaffOnboarding = () => {
   };
 
   const saveStaffCredentials = async (staff: StaffApiItem) => {
-    const userId = credentialsDraft?.userId ?? staff.credentials?.userId ?? null;
-    const password = credentialsDraft?.password ?? staff.credentials?.password ?? null;
+    const userId = credentialsDraft?.userId ?? staffCredentialsOf(staff).userId;
+    const password = credentialsDraft?.password ?? staffCredentialsOf(staff).password;
     if (!userId || !password) {
       toast.error('Generate credentials first');
       return;
@@ -907,9 +918,10 @@ const StaffOnboarding = () => {
         const staffType = getStaffType(staff);
         const showEmployeeScore = isFieldStaff(staff);
         const payrollConfig = payrollConfigs[staff.staff_id];
-        const effectiveCredUserId = credentialsDraft?.userId ?? staff.credentials?.userId ?? null;
-        const effectiveCredPassword = credentialsDraft?.password ?? staff.credentials?.password ?? null;
-        const credentialsSaved = credentialsDraft ? credentialsDraftSaved : (staff.credentials?.saved ?? false);
+        const savedCredentials = staffCredentialsOf(staff);
+        const effectiveCredUserId = credentialsDraft?.userId ?? savedCredentials.userId;
+        const effectiveCredPassword = credentialsDraft?.password ?? savedCredentials.password;
+        const credentialsSaved = credentialsDraft ? credentialsDraftSaved : savedCredentials.saved;
         const profileImage = info.profile_image_url;
         const employeeCode = getStaffField(staff, ['employee_code', 'employeeCode'], staff.staff_id || '-');
         const rawScore = getStaffField(staff, ['employee_score', 'employeeScore', 'score'], '');

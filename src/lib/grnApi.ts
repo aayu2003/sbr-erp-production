@@ -87,11 +87,6 @@ export type GateEntryInput = {
   destinationType?: 'Store' | 'Site';
   destinationId?: string;
   destinationName?: string;
-  itemId?: string;
-  itemCode?: string;
-  itemName?: string;
-  itemUnit?: string;
-  itemQuantity?: number;
   outwardToType?: string;
   outwardToId?: string;
   outwardToName?: string;
@@ -160,11 +155,6 @@ const gateEntryPayload = (input: GateEntryInput) => ({
     destination_type: input.destinationType || '',
     destination_id: input.destinationId || '',
     destination_name: input.destinationName || '',
-    item_id: input.itemId || '',
-    item_code: input.itemCode || '',
-    item_name: input.itemName || '',
-    item_unit: input.itemUnit || '',
-    item_quantity: input.itemQuantity ?? '',
     outward_to_type: input.outwardToType || '',
     outward_to_id: input.outwardToId || '',
     outward_to_name: input.outwardToName || '',
@@ -240,6 +230,14 @@ export type GrnRejection = {
   reason: string;
 };
 
+// Where this item's received quantity actually landed — one row per store, captured at GRN
+// creation and applied to that store's Inventory `dissociation` bucket once the GRN is approved.
+export type GrnStoreAllocation = {
+  store: string;
+  quantity: number;
+  perUnitCost: number;
+};
+
 export type GrnLineItem = {
   itemId: string;
   itemCode?: string;
@@ -259,6 +257,7 @@ export type GrnLineItem = {
   pf: number;
   totalGrnValue: number;
   location?: string;
+  storeAllocations?: GrnStoreAllocation[];
 };
 
 export type GRNRecord = {
@@ -374,6 +373,13 @@ const toLineItem = (raw: Record<string, unknown>): GrnLineItem => ({
   pf: Number(raw.pf) || 0,
   totalGrnValue: Number(raw.total_grn_value) || 0,
   location: raw.location ? String(raw.location) : undefined,
+  storeAllocations: Array.isArray(raw.store_allocations)
+    ? (raw.store_allocations as Record<string, unknown>[]).map((a) => ({
+        store: String(a.store || ''),
+        quantity: Number(a.quantity) || 0,
+        perUnitCost: Number(a.per_unit_cost) || 0,
+      })).filter((a) => a.store)
+    : undefined,
 });
 
 const fromLineItem = (it: GrnLineItemInput) => ({
@@ -395,6 +401,11 @@ const fromLineItem = (it: GrnLineItemInput) => ({
   pf: it.pf,
   total_grn_value: it.totalGrnValue,
   location: it.location || '',
+  store_allocations: (it.storeAllocations || []).map((a) => ({
+    store: a.store,
+    quantity: a.quantity,
+    per_unit_cost: a.perUnitCost,
+  })),
 });
 
 const toGrnRecord = (raw: Record<string, unknown>): GRNRecord => {
@@ -458,8 +469,15 @@ export const createGrn = async (input: CreateGrnInput): Promise<GRNRecord> => {
   if (selectedGateEntries.some((entry) => entry?.entryType !== 'Inward')) {
     throw new Error('GRN can only be created against inward gate entries');
   }
-  if (selectedGateEntries.some((entry) => entry?.orderNumber !== input.orderNumber)) {
-    throw new Error('Every selected gate entry must belong to the selected purchase order');
+  // No-PO entries carry no orderNumber at all (see fromRecord above), so they can't be
+  // matched with a strict equality check against input.orderNumber === ''. Mirror the same
+  // rule the wizard uses to list them: no order number on either side, same vendor.
+  if (input.orderNumber) {
+    if (selectedGateEntries.some((entry) => entry?.orderNumber !== input.orderNumber)) {
+      throw new Error('Every selected gate entry must belong to the selected purchase order');
+    }
+  } else if (selectedGateEntries.some((entry) => entry?.orderNumber || entry?.vendorId !== input.vendorId)) {
+    throw new Error('Every selected gate entry must belong to the selected vendor');
   }
   if (selectedGateEntries.some((entry) => Boolean(entry?.usedInGrn))) {
     throw new Error('One or more selected gate entries are already linked to another GRN');
