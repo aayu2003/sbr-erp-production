@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, Paperclip, Search, Send, Settings, UserCircle, BookUser, Plus, Trash2 } from 'lucide-react';
+import { BookUser, ChevronDown, Eye, FileText, Loader2, Paperclip, Plus, Search, Send, Settings, Trash2, UserCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -1051,85 +1051,78 @@ const AdminOpsIndent = () => {
   let sectionContent: JSX.Element | null = null;
   if (activeSection === 'indents') {
     sectionContent = (
-      <div className="bg-white rounded-lg border border-gray-100 shadow-sm">
-        <div className="grid grid-cols-[minmax(220px,3fr)_minmax(140px,2fr)_minmax(180px,3fr)_minmax(130px,2fr)_80px_140px] gap-2 px-4 py-3 text-xs font-semibold text-gray-500 border-b border-gray-100">
-          <div>PR No / Project</div>
-          <div>Department</div>
-          <div>Indented By</div>
-          <div>Date</div>
-          <div className="text-center">Items</div>
-          <div className="text-right">Status</div>
+      <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+        <div className="border-b border-slate-100 px-5 py-5">
+          <h2 className="text-lg font-bold text-slate-950">Finance Admin Ops Indent Register</h2>
+          <p className="mt-1 text-sm font-medium text-slate-500">{filtered.length} purchase requisition{filtered.length === 1 ? '' : 's'} available for finance review</p>
         </div>
-
-        <div className="space-y-3">
+        {filtered.length === 0 ? (
+          <div className="flex min-h-[300px] flex-col items-center justify-center px-6 py-12 text-center">
+            <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400"><FileText className="h-7 w-7" /></span>
+            <h3 className="mt-4 text-base font-bold text-slate-900">No finance indents found</h3>
+            <p className="mt-1 text-sm text-slate-500">Try another PR number, project, item or requester.</p>
+          </div>
+        ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1080px] table-fixed border-collapse text-[13px] leading-5">
+            <thead className="bg-[#0D3A35] text-white">
+              <tr>
+                {[
+                  ['PR Number', 'w-[13%]'], ['Project', 'w-[16%]'], ['Department', 'w-[12%]'],
+                  ['Item Details', 'w-[20%]'], ['Indented By', 'w-[15%]'], ['Date', 'w-[9%]'],
+                  ['Status', 'w-[7%]'], ['Action', 'w-[8%]'],
+                ].map(([label, width]) => <th key={label} className={`${width} px-3 py-4 text-center text-[12px] font-bold uppercase tracking-[0.07em] text-white/90`}>{label}</th>)}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
           {filtered.map((it) => {
-            const attached = Boolean(attachedMap[it.id]);
             const alreadySigned = Boolean(it.directorsApprovalSignature) || Boolean(indentApprovalsMap[it.id]);
-            void attached;
+            const attaching = Boolean(attachingApprovalMap[it.id]);
+            const displayItems = it.indentType === 'SPR'
+              ? (it.sprItems ?? []).map((item) => item.serviceDescription).filter(Boolean)
+              : (it.items ?? []).map((item) => item.partName).filter(Boolean);
 
             return (
-              <div
-                key={it.id}
-                className="bg-white p-4 rounded-lg border border-gray-100 shadow-sm flex items-center justify-between cursor-pointer hover:border-gray-200"
-                onClick={() => setPreviewIndent(it)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') setPreviewIndent(it);
-                }}
-              >
-                <div>
-                  <div className="flex items-baseline gap-3">
-                    <h3 className="font-semibold text-gray-800">{it.prNo || 'PR (Draft)'}</h3>
-                    <span className="text-xs text-gray-400">{it.project}</span>
-                  </div>
-                  <p className="text-sm text-gray-500">
-                    Items: {(it.items ?? []).length} · Total: {formatInr(totalValue(it.items ?? []))} · Indented by {it.indentedBy || '—'}
-                  </p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="text-right">
-                    <p
-                      className={`text-sm font-semibold ${
-                        it.status === 'pending'
-                          ? 'text-yellow-600'
-                          : it.status === 'forwarded'
-                            ? 'text-blue-600'
-                            : 'text-gray-600'
-                      }`}
-                    >
-                      {it.status.toUpperCase()}
-                    </p>
-                    <p className="text-xs text-gray-400">{it.date}</p>
-                  </div>
-
-                  <div className="flex items-center gap-2">
+              <tr key={it.id} className="transition-colors hover:bg-[#0D3A35]/[0.025]">
+                <td className="px-3 py-4"><button type="button" onClick={() => setPreviewIndent(it)} className="font-bold text-[#0D3A35] hover:underline">{it.prNo || 'PR (Draft)'}</button></td>
+                <td className="px-3 py-4 font-semibold text-slate-800"><span className="line-clamp-2">{it.project || 'Not Recorded'}</span></td>
+                <td className="px-3 py-4 text-center font-semibold text-slate-700">{it.department || '—'}</td>
+                <td className="px-3 py-4">
+                  <p className="line-clamp-2 font-semibold text-slate-800">{displayItems.join(', ') || 'Not Recorded'}</p>
+                  <p className="mt-1 text-[11px] font-medium text-slate-500">{displayItems.length} item{displayItems.length === 1 ? '' : 's'} · {it.indentType}</p>
+                </td>
+                <td className="px-3 py-4"><span className="line-clamp-2 font-medium text-slate-700">{it.indentedBy || 'Not Recorded'}</span></td>
+                <td className="px-3 py-4 text-center font-semibold text-slate-700">{formatDateDDMMYYYY(it.date)}</td>
+                <td className="px-3 py-4 text-center"><span className={`inline-flex rounded-full border px-2.5 py-1 text-[12px] font-bold capitalize ${it.status === 'forwarded' ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>{it.status}</span></td>
+                <td className="px-3 py-4">
+                  <div className="flex items-center justify-center gap-2">
+                    <Button type="button" variant="outline" size="icon" onClick={() => setPreviewIndent(it)} className="h-9 w-9 rounded-xl border-slate-200 text-[#0D3A35] hover:bg-[#0D3A35]/5" title="View indent"><Eye className="h-4 w-4" /></Button>
                     <Button
+                      type="button"
                       variant="outline"
-                      size="sm"
-                      className="gap-2"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        void attachIndentApproval({ id: it.id, prNo: it.prNo });
-                      }}
-                      disabled={alreadySigned || Boolean(attachingApprovalMap[it.id])}
+                      size="icon"
+                      onClick={() => void attachIndentApproval({ id: it.id, prNo: it.prNo })}
+                      disabled={alreadySigned || attaching}
+                      className="h-9 w-9 rounded-xl border-slate-200 text-[#0D3A35] hover:bg-[#0D3A35]/5 disabled:opacity-45"
+                      title={alreadySigned ? 'Finance approval attached' : 'Approve and attach signature'}
                     >
-                      <Paperclip className="w-4 h-4" />
-                      {alreadySigned ? 'Approved' : attachingApprovalMap[it.id] ? 'Attaching…' : 'Attach Sign'}
+                      {attaching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
                     </Button>
                   </div>
-                </div>
-              </div>
+                </td>
+              </tr>
             );
           })}
+            </tbody>
+          </table>
         </div>
-      </div>
+        )}
+      </section>
     );
   } else if (activeSection === 'mrf') {
     sectionContent = (
-      <div className="bg-white rounded-lg border border-gray-100 shadow-sm">
-        <div className="grid grid-cols-[minmax(220px,3fr)_minmax(200px,2fr)_minmax(120px,1fr)_120px] gap-2 px-4 py-3 text-xs font-semibold text-gray-500 border-b border-gray-100">
+      <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+        <div className="grid grid-cols-[minmax(220px,3fr)_minmax(200px,2fr)_minmax(120px,1fr)_120px] gap-2 bg-[#0D3A35] px-4 py-4 text-xs font-bold uppercase tracking-[0.07em] text-white/90">
           <div>MRF No / Department</div>
           <div>Approval Flow</div>
           <div>Created</div>
@@ -1161,7 +1154,7 @@ const AdminOpsIndent = () => {
               const simpleAdmin = adminStatus === 'approved' ? 'Approved' : adminStatus === 'reject' ? 'Reject' : 'Pending';
               const canAct = adminStatus === 'pending' && savingMrfFor !== mrfNo;
               return (
-                <div key={mrfNo || Math.random()} className="rounded-lg border border-gray-100 bg-white shadow-sm overflow-hidden">
+                <div key={mrfNo || Math.random()} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                   <button
                     type="button"
                     className="w-full flex items-center justify-between gap-3 px-3 py-3 text-left hover:bg-gray-50"
@@ -1264,7 +1257,7 @@ const AdminOpsIndent = () => {
                         </Button>
                         <Button
                           size="sm"
-                          className="bg-green-600 text-white"
+                          className="rounded-lg bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]"
                           disabled={!canAct}
                           onClick={(e) => {
                             e.preventDefault();
@@ -1286,7 +1279,7 @@ const AdminOpsIndent = () => {
     );
   } else {
     sectionContent = (
-      <div className="bg-white rounded-lg border border-gray-100 shadow-sm">
+      <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
         <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold text-gray-900">NFA (Note For Approval)</h2>
@@ -1294,7 +1287,7 @@ const AdminOpsIndent = () => {
           </div>
         </div>
 
-        <div className="grid grid-cols-[minmax(220px,3fr)_minmax(320px,5fr)_minmax(220px,3fr)] gap-2 px-4 py-3 text-xs font-semibold text-gray-500 border-b border-gray-100">
+        <div className="grid grid-cols-[minmax(220px,3fr)_minmax(320px,5fr)_minmax(220px,3fr)] gap-2 bg-[#0D3A35] px-4 py-4 text-xs font-bold uppercase tracking-[0.07em] text-white/90">
           <div>PR No / Project</div>
           <div>Finalized Quotation (HO Selected)</div>
           <div className="text-right">Approval</div>
@@ -1333,7 +1326,7 @@ const AdminOpsIndent = () => {
                 <div className="flex items-start justify-end gap-2 pt-1">
                   <Button
                     size="sm"
-                    className="bg-gray-900 hover:bg-gray-800 text-white"
+                    className="rounded-lg bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]"
                     disabled={alreadySigned || !canApprove || Boolean(attachingApprovalMap[loadingKey])}
                     onClick={() => {
                       if (!prNo) {
@@ -1363,62 +1356,59 @@ const AdminOpsIndent = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="flex items-start justify-between mb-5">
+    <div className="min-h-screen space-y-6 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
+      <header className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Finance NFA Approval</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Review the finalized quotation and approve & forward</p>
+          <div className="flex items-center gap-2 text-sm font-bold text-emerald-700"><FileText className="h-4 w-4" />Finance Operations</div>
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">Finance Admin Ops</h1>
+          <p className="mt-2 text-base font-medium text-slate-600">Review indents, workforce requests and finalized quotations before approval</p>
         </div>
-        <Button variant="outline" onClick={() => setConfigOpen(true)} className="gap-2">
-          <Settings className="w-4 h-4" />
+        <Button variant="outline" onClick={() => setConfigOpen(true)} className="h-11 gap-2 rounded-xl border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5">
+          <Settings className="h-4 w-4" />
           Configure
         </Button>
-      </div>
+      </header>
 
-      <div className="relative mb-4 max-w-md">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-        <Input
-          placeholder="Search by PR no, project, item or requester…"
-          className="pl-9 bg-white border-gray-200 shadow-sm h-10"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </div>
-
-      {/* Sticky section switcher so Indents + NFA are always easy to access */}
-      <div className="sticky top-0 z-10 -mx-6 px-6 py-3 bg-gray-50/90 backdrop-blur border-b border-gray-100">
-        <div className="inline-flex rounded-lg border border-gray-200 bg-white p-1 shadow-sm">
+      <section className="flex flex-col gap-4 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_14px_40px_rgba(15,23,42,0.05)] lg:flex-row lg:items-center lg:justify-between">
+        <div className="inline-flex w-fit rounded-xl border border-slate-200 bg-slate-50 p-1">
           <button
             type="button"
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${activeSection === 'indents' ? 'bg-gray-900 text-white' : 'text-gray-700 hover:bg-gray-50'}`}
+            className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'indents' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('indents')}
           >
             Indents ({filtered.length})
           </button>
           <button
             type="button"
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${activeSection === 'nfa' ? 'bg-gray-900 text-white' : 'text-gray-700 hover:bg-gray-50'}`}
+            className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'nfa' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('nfa')}
           >
             NFA Notes
           </button>
           <button
             type="button"
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${activeSection === 'mrf' ? 'bg-gray-900 text-white' : 'text-gray-700 hover:bg-gray-50'}`}
+            className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'mrf' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('mrf')}
           >
             MRF ({mrfRecords.length})
           </button>
         </div>
-      </div>
+        <div className="relative w-full lg:w-[390px]">
+          <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Input placeholder="Search PR no., project, item or requester" className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7] pl-10 shadow-none focus-visible:ring-[#0D3A35]/20" value={search} onChange={(event) => setSearch(event.target.value)} />
+        </div>
+      </section>
 
       {sectionContent}
 
       <Dialog open={Boolean(previewIndent)} onOpenChange={(v) => { if (!v) setPreviewIndent(null); }}>
-        <DialogContent className="max-w-[1200px] w-[1200px] max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>{previewIndent?.indentType === 'SPR' ? 'SPR Preview' : 'PR Preview'}</DialogTitle>
+        <DialogContent className="max-h-[92vh] max-w-[min(96vw,1280px)] overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left">
+            <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><Eye className="h-5 w-5" /></span>{previewIndent?.indentType === 'SPR' ? 'SPR Preview' : 'PR Preview'}</DialogTitle>
+            <p className="mt-1 pl-[52px] text-sm text-white/70">Review the requisition, item values and complete approval trail.</p>
           </DialogHeader>
+          <div className="max-h-[calc(92vh-154px)] overflow-auto px-5 py-5 sm:px-6">
+            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           {previewIndent && previewIndent.indentType === 'SPR' ? (
             <SprPreview
               indent={previewIndent}
@@ -1449,14 +1439,16 @@ const AdminOpsIndent = () => {
               showDirectorSignature={Boolean(directorsAttachedMap[previewIndent.id])}
             />
           )}
-                {previewIndent && (
-            <DialogFooter>
-              <div className="flex justify-end gap-2 w-full">
-                <Button variant="outline" onClick={() => setPreviewIndent(null)}>Close</Button>
+            </div>
+          </div>
+          {previewIndent && (
+            <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+              <div className="flex w-full justify-end gap-2">
+                <Button variant="outline" onClick={() => setPreviewIndent(null)} className="h-10 rounded-xl border-slate-200 px-5 font-bold">Close</Button>
                 <Button
                   onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!previewIndent) return; void attachIndentApproval({ id: previewIndent.id, prNo: previewIndent.prNo }); }}
                   disabled={Boolean((previewIndent && (previewIndent.directorsApprovalSignature || indentApprovalsMap[previewIndent.id])) || (previewIndent && attachingApprovalMap[previewIndent.id]))}
-                  className="bg-green-600 hover:bg-green-700 text-white"
+                  className="h-10 rounded-xl bg-[#0D3A35] px-5 font-bold text-white hover:bg-[#092e2a]"
                 >
                   {previewIndent && (previewIndent.directorsApprovalSignature || indentApprovalsMap[previewIndent.id]) ? 'Approved' : (previewIndent && attachingApprovalMap[previewIndent.id]) ? 'Attaching…' : 'Attach Sign'}
                 </Button>

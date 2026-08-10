@@ -10,6 +10,8 @@ import {
   resubmitGrn,
   updateGrn,
   getGateEntries,
+  getNextGrnNumber,
+  checkGrnNumberExists,
   type GrnOrderInfo,
   type GRNRecord,
   type GrnSigner,
@@ -74,7 +76,13 @@ export interface GrnCreateWizardProps {
 // item-level data); every one is added explicitly via the "+ Add Item" inventory picker,
 // or (when revising) reconstructed from the rejected GRN's own item list.
 type OrderItem = {
+  // Unique per row in this wizard's local state (React keys, values/storeAllocations
+  // lookup maps) — may have a disambiguating suffix, so it must NEVER be sent to the
+  // backend as the inventory reference. Use `inventoryId` for that.
   id: string;
+  // The real Inventory.Invent_id this row refers to — this is what's sent as item_id,
+  // so the backend can actually find the item to credit stock into on GRN approval.
+  inventoryId: string;
   itemCode?: string;
   description: string;
   uom: string;
@@ -101,6 +109,11 @@ const num = (v: string) => {
 const orderItemsFromGrn = (grn?: GRNRecord | null): OrderItem[] =>
   (grn?.items || []).map((it) => ({
     id: it.itemId,
+    // Best-effort: this GRN's own stored itemId is already the "real" reference for
+    // anything created after the id-mangling bug was fixed. For older records created
+    // before the fix, itemId may still carry the old `${Invent_id}-${timestamp}` suffix —
+    // there's no way to recover the clean id purely from already-stored data.
+    inventoryId: it.itemId,
     itemCode: it.itemCode,
     description: it.description,
     uom: it.uom,
@@ -250,7 +263,11 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
     if (!billedQty || billedQty <= 0) { toast.error('Please enter a valid quantity'); return; }
 
     const added: OrderItem = {
+      // Suffix is only to keep this row's key unique in local state (values/storeAllocations
+      // maps) if the same inventory item gets added twice — it must never leak into what's
+      // sent to the backend. inventoryId below carries the real, unmodified Invent_id for that.
       id: `${selectedInventoryItem.id}-${Date.now()}`,
+      inventoryId: selectedInventoryItem.id,
       itemCode: selectedInventoryItem.code || undefined,
       description: selectedInventoryItem.name,
       uom: selectedInventoryItem.unit,
@@ -324,6 +341,22 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
     ));
   };
 
+  // ── GRN Number — auto-suggested (fills any gap left by a manually-numbered GRN, see
+  // compute_next_grn_number), but user-editable up until submit. Only relevant for a fresh
+  // create — a revision/resubmit reuses existingGrn.grnNo, which is fixed.
+  const [suggestedGrnNumber, setSuggestedGrnNumber] = useState('');
+  const [grnNumberOverride, setGrnNumberOverride] = useState('');
+
+  useEffect(() => {
+    if (existingGrn) return;
+    getNextGrnNumber()
+      .then((n) => {
+        setSuggestedGrnNumber(n);
+        setGrnNumberOverride((prev) => prev || n);
+      })
+      .catch(() => {});
+  }, [existingGrn]);
+
   // ── Step 4: Final Preview — a live "draft" of the actual GRN document, built from
   // whatever's been picked so far. Mirrors the backend's own gate-entry aggregation
   // (admin_grn_inspection.py's _aggregate_gate_entry_fields) so the preview matches what
@@ -374,6 +407,7 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
       Array.from(new Set(selectedGateEntries.map(pick).filter((v): v is string => !!v))).sort().join(', ');
 
     return {
+      grnNo: existingGrn ? existingGrn.grnNo : (grnNumberOverride || undefined),
       poNo: order.poNo,
       poDate: order.poDate,
       prNo: order.prNo,
@@ -394,7 +428,7 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
       lrNo: joined((ge) => ge.lrNumber),
       lrDate: joined((ge) => ge.lrDate),
       items: computed.map((c) => ({
-        itemId: c.item.id,
+        itemId: c.item.inventoryId,
         itemCode: c.item.itemCode,
         description: c.item.description,
         uom: c.item.uom,
@@ -418,7 +452,7 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
       verifiedBy: existingGrn?.verifiedBy,
       approvedBy: existingGrn?.approvedBy,
     };
-  }, [order, selectedGateEntries, computed, user, existingGrn]);
+  }, [order, selectedGateEntries, computed, user, existingGrn, grnNumberOverride]);
 
   const goNext = () => {
     if (step === 1 && isLoadingGateEntries) { toast.error('Please wait while gate entries are verified'); return; }
@@ -452,6 +486,8 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
 
   const handleSubmit = async () => {
     if (!user?.id || !user?.name) { toast.error('You must be logged in.'); return; }
+    const grnNumber = grnNumberOverride.trim();
+    if (!existingGrn && !grnNumber) { toast.error('Enter a GRN number'); return; }
     if (selectedGateEntryIds.length === 0) { toast.error('Link at least one inward gate entry'); return; }
     if (selectedGateEntryIds.some((id) => !gateEntriesForOrder.some((entry) => entry.enteryId === id))) {
       toast.error('A selected gate entry is no longer available for this purchase order');
@@ -466,7 +502,7 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
     }
 
     const items: GrnLineItemInput[] = computed.map((c) => ({
-      itemId: c.item.id,
+      itemId: c.item.inventoryId,
       itemCode: c.item.itemCode,
       description: c.item.description,
       uom: c.item.uom,
@@ -507,7 +543,12 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
             ? `${grn.grnNo} updated and sent for fresh approval`
             : `${grn.grnNo} updated successfully`);
       } else {
+        if (await checkGrnNumberExists(grnNumber)) {
+          toast.error(`GRN number ${grnNumber} already exists`);
+          return;
+        }
         const grn = await createGrn({
+          grnNumber,
           orderNumber: order.poNo,
           poDate: order.poDate,
           prNumber: order.prNo,
@@ -751,6 +792,23 @@ export function GrnCreateWizard({ order, initialGateEntryIds = [], existingGrn, 
             <p className="text-xs text-slate-400 mb-3">
               This is exactly how the GRN document will look once generated — review it, then confirm below.
             </p>
+            {!existingGrn && (
+              <div className="mb-4 max-w-xs">
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-600">
+                  GRN Number
+                </label>
+                <input
+                  type="text"
+                  value={grnNumberOverride}
+                  onChange={(e) => setGrnNumberOverride(e.target.value)}
+                  placeholder={suggestedGrnNumber || 'Loading…'}
+                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10"
+                />
+                <p className="mt-1 text-xs text-slate-400">
+                  Auto-suggested: {suggestedGrnNumber || '…'}. Change it if needed — it'll be checked for uniqueness before the GRN is created.
+                </p>
+              </div>
+            )}
             <GrnDocumentPreview grn={draftGrn} />
           </div>
         )}

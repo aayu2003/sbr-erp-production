@@ -28,6 +28,7 @@ Monitor,
 User,
 FileText,
 Map as MapIcon,
+AlertTriangle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
@@ -706,6 +707,17 @@ const [isLoadingVehiclesForAssignment, setIsLoadingVehiclesForAssignment] = useS
 const [inventoryItems, setInventoryItems] = useState<ApiInventoryItem[]>([]);
 const [isLoadingInventoryItems, setIsLoadingInventoryItems] = useState(false);
 const [equipmentSearchTerm, setEquipmentSearchTerm] = useState('');
+// Per-store split — which warehouse(s) each selected equipment/dosage item is pulled
+// from, and how much from each. Deduction now happens against Inventory's `dissociation`
+// map instead of the item's flat fifo_list, so this has to be picked manually.
+const [storeOptions, setStoreOptions] = useState<string[]>([]);
+const [itemDissociationById, setItemDissociationById] = useState<Record<string, Record<string, { quantity: number }>>>({});
+const [equipmentStoreAllocations, setEquipmentStoreAllocations] = useState<Record<string, Record<string, string>>>({});
+const [dosageStoreAllocations, setDosageStoreAllocations] = useState<Record<string, string>>({});
+const [logisticsRequired, setLogisticsRequired] = useState(false);
+// "+ Add store" dropdown's pending selection, keyed by equipmentId (or the literal
+// 'dosage' key for the dosage item's own panel), cleared once that row is added.
+const [storeRowDraft, setStoreRowDraft] = useState<Record<string, string>>({});
 
 const [activitiesData, setActivitiesData] = useState<CalendarData>({});
 const [farmsById, setFarmsById] = useState<FarmsById>({});
@@ -1118,6 +1130,7 @@ setEquipmentCounts({});
 setEquipmentSearchTerm('');
 setDosageRows([]);
 setSelectedDosageItemRowId('');
+resetStoreAllocationState();
 };
 
 // Shared by the Vehicle Vendor, Equipment Vendor and Full Task Vendor pickers — same
@@ -1639,6 +1652,30 @@ setIsLoadingInventoryItems(false);
 }
 };
 
+// Warehouse names for the store-split picker — same source Inventory.tsx already
+// uses for its transfer From/To dropdowns.
+const fetchStoreOptions = async () => {
+try {
+const res = await fetch(`${BASE_URL}/inventory/get_inventory_config`);
+const data: any = await res.json().catch(() => null);
+const names = Array.isArray(data?.stores) ? data.stores.map((s: any) => String(s?.name || '')).filter(Boolean) : [];
+setStoreOptions(names);
+} catch { /* leave empty, picker just shows nothing to choose from */ }
+};
+
+// Live per-store balance for one item, fetched lazily the first time its store-split
+// panel is opened (i.e. its quantity goes above 0, or it's picked as the dosage item).
+const fetchItemDissociation = async (itemId: string) => {
+if (!itemId || itemDissociationById[itemId]) return;
+try {
+const res = await fetch(`${BASE_URL}/inventory/get_inventory_item_dissociation/${itemId}`);
+const data: any = await res.json().catch(() => null);
+if (data?.success && data?.dissociation && typeof data.dissociation === 'object') {
+setItemDissociationById((prev) => ({ ...prev, [itemId]: data.dissociation }));
+}
+} catch { /* leave unfetched, picker just shows no balance hint */ }
+};
+
 const fetchVehiclesForAssignment = async () => {
 setIsLoadingVehiclesForAssignment(true);
 try {
@@ -1691,15 +1728,53 @@ if (next === 0) {
 const { [eId]: _, ...rest } = prev;
 return rest;
 }
+if (current === 0 && next > 0) fetchItemDissociation(eId);
 return { ...prev, [eId]: next };
 });
+if (delta < 0) {
+setEquipmentStoreAllocations(prev => {
+const current = prev[eId];
+if (!current) return prev;
+const { [eId]: _, ...rest } = prev;
+return rest;
+});
+}
 };
+
+const resetStoreAllocationState = () => {
+setEquipmentStoreAllocations({});
+setDosageStoreAllocations({});
+setLogisticsRequired(false);
+setItemDissociationById({});
+};
+
+const setEquipmentStoreQty = (equipmentId: string, store: string, qty: string) =>
+setEquipmentStoreAllocations(prev => ({ ...prev, [equipmentId]: { ...(prev[equipmentId] || {}), [store]: qty } }));
+
+const removeEquipmentStoreRow = (equipmentId: string, store: string) =>
+setEquipmentStoreAllocations(prev => {
+const rows = { ...(prev[equipmentId] || {}) };
+delete rows[store];
+return { ...prev, [equipmentId]: rows };
+});
+
+const setDosageStoreQty = (store: string, qty: string) =>
+setDosageStoreAllocations(prev => ({ ...prev, [store]: qty }));
+
+const removeDosageStoreRow = (store: string) =>
+setDosageStoreAllocations(prev => {
+const rows = { ...prev };
+delete rows[store];
+return rows;
+});
 
 const handleAssignTasksClick = () => {
 if (!anyAssignableSelected) return;
 setIsAssignmentOpen(true);
 fetchVehiclesForAssignment();
 fetchInventoryItems();
+fetchStoreOptions();
+resetStoreAllocationState();
 };
 
 const handleAssignSingleTaskClick = (task: CalendarActivity) => {
@@ -1708,6 +1783,8 @@ setSelectedTaskKeys({ [getTaskKey(task)]: true });
 setIsAssignmentOpen(true);
 fetchVehiclesForAssignment();
 fetchInventoryItems();
+fetchStoreOptions();
+resetStoreAllocationState();
 };
 
 const handleConfirmAssignment = async () => {
@@ -1765,6 +1842,7 @@ assignedByCalendarFarmActivity.set(calanderId, perCalendar);
 
 const feildIds = Array.from(feildIdSet);
 const assignedAcres = Array.from(assignedByFarmActivity.values());
+const totalAssignedAcres = assignedAcres.reduce((sum, x) => sum + (Number(x.assigned_acres) || 0), 0);
 
 const seenPlotIds = new Set<string>();
 const plots = selectedTasks
@@ -1783,18 +1861,58 @@ return { vehicle_id: vehicleId, vehicle_number: v?.name || vehicleId };
 })
 : [];
 
-const equipment = vendorSectionTab === 'self'
+// Converts a { store: "qty" } draft map into the [{store, quantity}] shape the backend
+// expects, dropping blank/zero rows.
+const toStoreAllocations = (rows: Record<string, string>) =>
+Object.entries(rows)
+.map(([store, qty]) => ({ store, quantity: Number(qty) || 0 }))
+.filter((a) => a.store && a.quantity > 0);
+
+const selfEquipment = vendorSectionTab === 'self'
 ? Object.entries(equipmentCounts)
 .filter(([, qty]) => (Number(qty) || 0) > 0)
 .map(([equipmentId, qty]) => {
 const item = inventoryItems.find((it) => getInventoryItemId(it) === equipmentId);
+const quantity = Math.max(0, Math.floor(Number(qty) || 0));
 return {
 equipment_id: equipmentId,
 equipment_name: String(item?.item_name || item?.name || item?.item || equipmentId),
-quantity: Math.max(0, Math.floor(Number(qty) || 0))
+quantity,
+store_allocations: toStoreAllocations(equipmentStoreAllocations[equipmentId] || {}),
 };
 })
 : [];
+
+// The dosage item picked in "Choose Item" is a material consumed against these acres
+// (fertilizer/pesticide/seed etc.), deducted the same way as any other equipment
+// allocation — regardless of who executes the task (self or vendor), since the input
+// still comes out of our own inventory either way. Rounds up (never under-deducts);
+// the popup's own disclaimer covers returning any surplus to inventory afterward.
+const selectedDosageRow = selectedDosageItemRowId ? dosageRows.find((r) => r.id === selectedDosageItemRowId) : null;
+const dosageEquipment = selectedDosageRow ? (() => {
+const dosagePerAcre = Number(selectedDosageRow.dosagePerAcre) || 0;
+const qty = Math.ceil(totalAssignedAcres * dosagePerAcre);
+if (qty <= 0) return [];
+const item = inventoryItems.find((it) => getInventoryItemId(it) === selectedDosageRow.inventoryItemId);
+return [{
+equipment_id: selectedDosageRow.inventoryItemId,
+equipment_name: getInventoryItemName(item, selectedDosageRow.inventoryItemId),
+quantity: qty,
+store_allocations: toStoreAllocations(dosageStoreAllocations),
+}];
+})() : [];
+
+const equipment = [...selfEquipment, ...dosageEquipment];
+
+// Every item pulling from inventory must have its warehouse split fully accounted for
+// before this can go out — otherwise the backend would silently deduct nothing for it.
+for (const eq of equipment) {
+const sourced = eq.store_allocations.reduce((sum, a) => sum + a.quantity, 0);
+if (Math.abs(sourced - eq.quantity) > 0.001) {
+toast.error(`${eq.equipment_name}: sourced ${sourced} from warehouses, but ${eq.quantity} is required — add or adjust store rows to match`);
+return;
+}
+}
 
 const payload: Record<string, any> = {
 feild_id: feildIds,
@@ -1804,7 +1922,7 @@ calander_id: calanderId,
 ...(selectedSupervisorId && { supervisor_id: selectedSupervisorId }),
 ...(selectedFieldManagerIds.length > 0 && { field_manager_id: selectedFieldManagerIds }),
 ...(vendorSectionTab === 'self' && vehicles.length > 0 && { vehicles }),
-...(vendorSectionTab === 'self' && equipment.length > 0 && { equipment }),
+...(equipment.length > 0 && { equipment }),
 ...(vendorSectionTab === 'vendor_per_asset' && selectedVehicleVendorId && vehicleVendorInfo.name && {
 vehicle_vendor: [{ vendor_id: selectedVehicleVendorId, vendor_name: vehicleVendorInfo.name }],
 }),
@@ -1814,13 +1932,11 @@ equipment_vendor: [{ vendor_id: selectedEquipmentVendorId, vendor_name: equipmen
 ...(vendorSectionTab === 'full_task_vendor' && selectedTaskVendorId && taskVendor.name && {
 task_vendor: [{ vendor_id: selectedTaskVendorId, vendor_name: taskVendor.name }],
 }),
-...(selectedDosageItemRowId && (() => {
-const row = dosageRows.find((r) => r.id === selectedDosageItemRowId);
-return row ? { dosage_item: { item_id: row.inventoryItemId, dosage_per_acre: row.dosagePerAcre, uom: row.uom } } : {};
-})()),
+...(selectedDosageRow && {
+dosage_item: { item_id: selectedDosageRow.inventoryItemId, dosage_per_acre: selectedDosageRow.dosagePerAcre, uom: selectedDosageRow.uom },
+}),
+...(equipment.length > 0 && { logistics_required: logisticsRequired }),
 };
-
-const totalAssignedAcres = assignedAcres.reduce((sum, x) => sum + (Number(x.assigned_acres) || 0), 0);
 
 const updateVehicleCalendar = async (vehicleId: string, acresCovered: number, blockId: string, farmId: string, activity: string) => {
 const res = await fetch(`${BASE_URL}/admin_vehicles/update_vehicle_calander`, {
@@ -1967,6 +2083,70 @@ return (
 );
 };
 
+// Manual per-store split for one item — pick a warehouse, type a quantity, add more
+// rows as needed. Shows each store's live balance (once fetched) and a running total
+// vs. the required quantity. Shared between the plain Equipment checklist and the
+// single selected dosage item.
+const StoreAllocationPanel = ({
+draftKey, itemId, unit, requiredQty, allocations, onSetQty, onRemoveRow,
+}: {
+draftKey: string; itemId: string; unit: string; requiredQty: number;
+allocations: Record<string, string>; onSetQty: (store: string, qty: string) => void; onRemoveRow: (store: string) => void;
+}) => {
+const balances = itemDissociationById[itemId] || {};
+const usedStores = Object.keys(allocations);
+const availableStores = storeOptions.filter((s) => !usedStores.includes(s));
+const draft = storeRowDraft[draftKey] || '';
+const total = usedStores.reduce((sum, s) => sum + (Number(allocations[s]) || 0), 0);
+const isMatched = Math.abs(total - requiredQty) < 0.001;
+
+return (
+<div className="mt-2 rounded-lg border border-dashed border-slate-200 bg-slate-50/60 p-2.5">
+<div className="mb-1.5 flex items-center gap-1.5">
+<select
+value={draft}
+onChange={(e) => setStoreRowDraft((prev) => ({ ...prev, [draftKey]: e.target.value }))}
+className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-[#0D3A35] focus:outline-none"
+>
+<option value="">+ Source from warehouse</option>
+{availableStores.map((s) => (
+<option key={s} value={s}>{s}{balances[s] ? ` (${balances[s].quantity} ${unit} available)` : ''}</option>
+))}
+</select>
+<button
+type="button"
+disabled={!draft}
+onClick={() => { onSetQty(draft, allocations[draft] || ''); setStoreRowDraft((prev) => ({ ...prev, [draftKey]: '' })); }}
+className="shrink-0 rounded-md bg-[#0D3A35] px-2.5 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+>
+Add
+</button>
+</div>
+{usedStores.length > 0 && (
+<div className="space-y-1">
+{usedStores.map((store) => (
+<div key={store} className="flex items-center gap-1.5">
+<span className="min-w-0 flex-1 truncate text-xs text-slate-600">{store}</span>
+<input
+type="text"
+inputMode="decimal"
+value={allocations[store] || ''}
+onChange={(e) => onSetQty(store, e.target.value)}
+placeholder="Qty"
+className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-right text-xs focus:border-[#0D3A35] focus:outline-none"
+/>
+<button type="button" onClick={() => onRemoveRow(store)} className="shrink-0 text-slate-300 hover:text-red-500">×</button>
+</div>
+))}
+</div>
+)}
+<p className={cn("mt-1.5 text-[10px] font-semibold", isMatched ? "text-emerald-600" : "text-amber-600")}>
+{total} / {requiredQty} {unit} sourced{isMatched ? '' : ' — must match before confirming'}
+</p>
+</div>
+);
+};
+
 const EquipmentQuantityRow = ({ item, count }: { item: ApiInventoryItem; count: number }) => {
 const id = getInventoryItemId(item);
 const title = String(item?.item_name || item?.name || item?.item || '').trim() || 'Equipment';
@@ -1976,7 +2156,8 @@ const maxQty = Number(item?.stock ?? 0);
 const maxSafe = Number.isFinite(maxQty) ? Math.max(0, Math.floor(maxQty)) : 0;
 
 return (
-<div className={cn("flex items-center justify-between p-3 rounded-lg border transition-all", count > 0 ? "border-[#0D3A35]/20 bg-[#0D3A35]/5" : "border-border hover:border-gray-300 bg-white")}>
+<div className={cn("flex flex-col p-3 rounded-lg border transition-all", count > 0 ? "border-[#0D3A35]/20 bg-[#0D3A35]/5" : "border-border hover:border-gray-300 bg-white")}>
+<div className="flex items-center justify-between">
 <div className="flex items-center gap-3">
 <div className={cn("p-2 rounded-md border shadow-sm", count > 0 ? "bg-[#0D3A35]/10 text-[#0D3A35] border-[#0D3A35]/20" : "bg-gray-50 text-muted-foreground")}><Wrench className="w-4 h-4" /></div>
 <div>
@@ -1996,6 +2177,18 @@ Stock: {maxSafe}
 <button onClick={() => updateEquipmentCount(id, 1, maxSafe)} disabled={maxSafe === 0 || count >= maxSafe} className="p-1 hover:bg-gray-100 rounded text-gray-700 disabled:opacity-30 disabled:hover:bg-transparent"><Plus className="w-3 h-3" /></button>
 </div>
 </div>
+</div>
+{count > 0 && (
+<StoreAllocationPanel
+draftKey={id}
+itemId={id}
+unit={unit}
+requiredQty={count}
+allocations={equipmentStoreAllocations[id] || {}}
+onSetQty={(store, qty) => setEquipmentStoreQty(id, store, qty)}
+onRemoveRow={(store) => removeEquipmentStoreRow(id, store)}
+/>
+)}
 </div>
 );
 };
@@ -2789,11 +2982,21 @@ setTaskVendor({ name: scope.vendor_details.vendor_name, contact: scope.vendor_de
 const selectedTaskForItem = selectedActivities.find((t) => selectedTaskKeys[getTaskKey(t)] && isTaskAssignable(t));
 const taskCrop = resolveTaskCrop(selectedTaskForItem, farmsById);
 const taskActivity = normalizeDosageKey(selectedTaskForItem?.activity);
+// Total acreage across every selected task's assignments — same figure handleConfirmAssignment
+// sums into assigned_acres/totalAssignedAcres, used here to project each dosage rate into an
+// actual quantity to pull from inventory.
+const selectedTasksForItem = selectedActivities.filter((t) => selectedTaskKeys[getTaskKey(t)] && isTaskAssignable(t));
+const totalAssignedAcresForItem = selectedTasksForItem.reduce(
+(sum, t) => sum + (Array.isArray(t.assignments) ? t.assignments.reduce((s, a) => s + (Number(a.assigned_area) || 0), 0) : 0),
+0,
+);
 const matchingDosageRows = dosageRows.filter((row) => {
 const cropMatches = row.allCrops || normalizeDosageKey(row.cropName) === taskCrop;
 const configuredActivity = normalizeDosageKey(row.activityName);
 return cropMatches && (!configuredActivity || configuredActivity === taskActivity);
 });
+const selectedDosageRow = matchingDosageRows.find((r) => r.id === selectedDosageItemRowId);
+const selectedDosageRequiredQty = selectedDosageRow ? Math.ceil(totalAssignedAcresForItem * (Number(selectedDosageRow.dosagePerAcre) || 0)) : 0;
 return (
 <div>
 <h4 className="mb-1 text-sm font-bold text-[#0D3A35] uppercase tracking-wide flex items-center gap-2">
@@ -2812,11 +3015,13 @@ return (
 const isSelected = selectedDosageItemRowId === row.id;
 const inventoryItem = inventoryItems.find((item) => normalizeDosageKey(getInventoryItemId(item)) === normalizeDosageKey(row.inventoryItemId));
 const itemName = getInventoryItemName(inventoryItem, row.inventoryItemId);
+const dosagePerAcre = Number(row.dosagePerAcre) || 0;
+const totalRequired = totalAssignedAcresForItem * dosagePerAcre;
 return (
 <button
 key={row.id}
 type="button"
-onClick={() => setSelectedDosageItemRowId(row.id)}
+onClick={() => { setSelectedDosageItemRowId(row.id); fetchItemDissociation(row.inventoryItemId); }}
 className={cn(
 "w-full text-left rounded-lg border p-3 transition-all",
 isSelected ? "border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]/30" : "border-gray-200 bg-white hover:border-[#0D3A35]/30 hover:bg-[#0D3A35]/5"
@@ -2828,15 +3033,48 @@ isSelected ? "border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]/30" : "borde
 </div>
 {normalizeDosageKey(itemName) !== normalizeDosageKey(row.inventoryItemId) && <div className="mt-0.5 font-mono text-[10px] text-slate-400">{row.inventoryItemId}</div>}
 <div className="mt-0.5 text-xs text-slate-500">{row.dosagePerAcre || '0'} {row.uom} / acre</div>
+{totalAssignedAcresForItem > 0 && (
+<div className="mt-1 text-xs font-semibold text-[#0D3A35]">
+{totalAssignedAcresForItem.toFixed(2)} acres × {row.dosagePerAcre || '0'} {row.uom}/acre = {totalRequired.toFixed(2)} {row.uom} required
+</div>
+)}
 </button>
 );
 })}
 </div>
 )}
+{matchingDosageRows.length > 0 && (
+<p className="mt-3 flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-snug text-amber-700">
+<AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+If the actual requirement is more than this dosage, raise an On-Demand allocation for the extra. If it's less, return the surplus stock back to inventory.
+</p>
+)}
+{selectedDosageRow && (
+<StoreAllocationPanel
+draftKey="dosage"
+itemId={selectedDosageRow.inventoryItemId}
+unit={selectedDosageRow.uom}
+requiredQty={selectedDosageRequiredQty}
+allocations={dosageStoreAllocations}
+onSetQty={setDosageStoreQty}
+onRemoveRow={removeDosageStoreRow}
+/>
+)}
 </div>
 );
 })()}
 </div>
+
+{(Object.keys(equipmentStoreAllocations).length > 0 || Object.keys(dosageStoreAllocations).length > 0) && (
+<div className="border-t border-[#276152]/20 pt-6">
+<p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#0D3A35]">Logistics required for this task?</p>
+<p className="mb-2 text-[11px] text-slate-500">Turn this on if these items need a truck to reach the field — it'll queue a pickup request on the Logistics Request page.</p>
+<div className="inline-flex rounded-lg border border-gray-200 overflow-hidden text-xs font-semibold shadow-sm">
+<button type="button" onClick={() => setLogisticsRequired(true)} className={cn("px-4 py-1.5 transition-colors", logisticsRequired ? "bg-[#0D3A35] text-white" : "bg-white text-gray-600 hover:bg-gray-50")}>Yes</button>
+<button type="button" onClick={() => setLogisticsRequired(false)} className={cn("px-4 py-1.5 border-l border-gray-200 transition-colors", !logisticsRequired ? "bg-[#0D3A35] text-white" : "bg-white text-gray-600 hover:bg-gray-50")}>No</button>
+</div>
+</div>
+)}
 
 </div>
 
