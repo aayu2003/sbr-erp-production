@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Building2, CheckCircle2, ClipboardCheck, FileText, Search, ShoppingCart } from 'lucide-react';
 
 import { ComparativeQuotationApprovalRow } from '@/components/ho-inbox/ComparativeQuotationApprovalRow';
 import { type ComparativeModel } from '@/components/purchase/ComparativeStatementPreview';
@@ -42,6 +43,7 @@ type ApiTcComparative = {
 };
 
 const HO_OVERRIDES_KEY = 'farmconnect.hoInboxOverrides.v1';
+const COMPARATIVE_SNAPSHOT_KEY = 'farmconnect.prComparative.v1';
 
 type HoOverrides = Record<
   string,
@@ -74,6 +76,17 @@ const writeHoOverrides = (next: HoOverrides) => {
     window.localStorage.setItem(HO_OVERRIDES_KEY, JSON.stringify(next));
   } catch {
     // ignore
+  }
+};
+
+const readComparativeSnapshots = (): Record<string, ComparativeModel> => {
+  try {
+    const raw = window.localStorage.getItem(COMPARATIVE_SNAPSHOT_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
   }
 };
 
@@ -233,6 +246,7 @@ export default function HOInbox() {
   const [all, setAll] = useState<Record<string, ComparativeModel>>({});
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('all');
+  const [query, setQuery] = useState('');
 
   const openIndentId = safeTrim(searchParams.get('open'));
   const desiredTab = (() => {
@@ -302,19 +316,36 @@ export default function HOInbox() {
 
         // ── Step 3: merge with local HO overrides ──────────────────────────
         const overrides = readHoOverrides();
+        const snapshots = readComparativeSnapshots();
         const next: Record<string, ComparativeModel> = {};
         for (const m of resolvedMapped) {
           const o = overrides[m.indentId];
-          next[m.indentId] = o
+          const snapshot = snapshots[m.indentId];
+          const completeModel: ComparativeModel = snapshot
             ? {
                 ...m,
-                ...o,
-                hoSelectedVendorId: o.hoSelectedVendorId || m.hoSelectedVendorId,
-                tcApprovedVendorId: m.tcApprovedVendorId || o.tcApprovedVendorId,
-                tcApprovedAt: o.tcApprovedAt || m.tcApprovedAt,
-                hoForwardedAt: o.hoForwardedAt || m.hoForwardedAt,
+                ...snapshot,
+                indentId: m.indentId,
+                comparisonId: m.comparisonId || snapshot.comparisonId,
+                flowStatus: m.flowStatus,
+                tcStatus: m.tcStatus,
+                nfaStatus: m.nfaStatus,
+                backendApprovedVendorId: m.backendApprovedVendorId,
+                tcApprovedVendorId: m.tcApprovedVendorId,
+                tcApprovedAt: m.tcApprovedAt,
+                indent_type: m.indent_type || snapshot.indent_type,
               }
             : m;
+          next[m.indentId] = o
+            ? {
+                ...completeModel,
+                ...o,
+                hoSelectedVendorId: o.hoSelectedVendorId || completeModel.hoSelectedVendorId,
+                tcApprovedVendorId: completeModel.tcApprovedVendorId || o.tcApprovedVendorId,
+                tcApprovedAt: o.tcApprovedAt || completeModel.tcApprovedAt,
+                hoForwardedAt: o.hoForwardedAt || completeModel.hoForwardedAt,
+              }
+            : completeModel;
         }
 
         if (!cancelled) setAll(next);
@@ -368,11 +399,35 @@ export default function HOInbox() {
 
   // Rows visible in the current tab
   const filteredRows = useMemo(() => {
-    if (activeTab === 'all') return inboxRows;
-    return inboxRows.filter(
-      (r) => safeTrim(r.item.indent_type).toUpperCase() === activeTab
-    );
-  }, [inboxRows, activeTab]);
+    const normalizedQuery = query.trim().toLowerCase();
+    return inboxRows.filter((row) => {
+      const matchesTab = activeTab === 'all' || safeTrim(row.item.indent_type).toUpperCase() === activeTab;
+      const matchesQuery = !normalizedQuery || [
+        row.item.indentId,
+        row.item.title,
+        row.item.comparisonId,
+        row.item.hoSelectedVendorId,
+        ...(row.item.vendors || []).flatMap((vendor) => [vendor.id, vendor.name]),
+        ...(row.item.items || []).map((item) => item.partName),
+      ].some((value) => safeTrim(value).toLowerCase().includes(normalizedQuery));
+      return matchesTab && matchesQuery;
+    });
+  }, [inboxRows, activeTab, query]);
+
+  const metrics = useMemo(() => {
+    const isTcApproved = (item: ComparativeModel) =>
+      safeTrim(item.tcStatus).toLowerCase() === 'approved' || Boolean(safeTrim(item.tcApprovedVendorId));
+    const isNfaApproved = (item: ComparativeModel) => safeTrim(item.nfaStatus).toLowerCase() === 'approved';
+    const hasOrder = (item: ComparativeModel) =>
+      Boolean(safeTrim((item as any).poNo) || safeTrim((item as any).poCreatedAt));
+
+    return {
+      total: inboxRows.length,
+      pendingTc: inboxRows.filter((row) => !isTcApproved(row.item)).length,
+      pendingNfa: inboxRows.filter((row) => isTcApproved(row.item) && !isNfaApproved(row.item)).length,
+      orders: inboxRows.filter((row) => hasOrder(row.item)).length,
+    };
+  }, [inboxRows]);
 
   const updateComparative = (indentId: string, patch: Partial<ComparativeModel>) => {
     setAll((prev) => {
@@ -394,86 +449,85 @@ export default function HOInbox() {
   };
 
   return (
-    <div className="min-h-screen bg-background text-foreground p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <div className="text-2xl font-bold">HO Inbox</div>
-          <div className="text-xs text-muted-foreground">
-            Select an indent to review quotations and forward to Finance Admin Ops.
+    <div className="min-h-screen space-y-6 bg-slate-50/70 p-4 font-sans sm:p-6 lg:p-8">
+      <header className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex items-center gap-4">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#0D3A35] text-white shadow-[0_12px_28px_-12px_rgba(13,58,53,0.75)]">
+            <Building2 className="h-7 w-7" />
+          </div>
+          <div>
+            <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Purchase &amp; Procurement</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">Order Approval Flow</h1>
+            <p className="mt-1 max-w-3xl text-sm text-slate-500">Track every vendor comparative statement through TC approval, NFA approval and purchase order creation.</p>
           </div>
         </div>
-      </div>
+        <div className="rounded-xl border border-[#d7e4e0] bg-[#edf5f2] px-4 py-3 text-right">
+          <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#58716a]">Live Register</p>
+          <p className="mt-1 text-sm font-bold text-[#0D3A35]">{filteredRows.length} record{filteredRows.length === 1 ? '' : 's'} shown</p>
+        </div>
+      </header>
 
-      <div className="rounded-xl border border-border bg-card">
+      <section className="grid overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          { label: 'Comparative Statements', value: metrics.total, icon: FileText, tone: 'bg-slate-100 text-slate-700' },
+          { label: 'Pending TC Approval', value: metrics.pendingTc, icon: ClipboardCheck, tone: 'bg-amber-50 text-amber-700' },
+          { label: 'Pending NFA Approval', value: metrics.pendingNfa, icon: CheckCircle2, tone: 'bg-blue-50 text-blue-700' },
+          { label: 'Purchase Orders Created', value: metrics.orders, icon: ShoppingCart, tone: 'bg-[#edf5f2] text-[#0D3A35]' },
+        ].map(({ label, value, icon: Icon, tone }, index) => (
+          <div key={label} className={cn('flex items-center justify-between px-5 py-5', index > 0 && 'sm:border-l', index > 1 && 'sm:border-t xl:border-t-0', 'border-slate-200')}>
+            <div><p className="text-[10px] font-bold uppercase tracking-[0.1em] text-slate-400">{label}</p><p className="mt-1 text-2xl font-black text-slate-950">{value}</p></div>
+            <span className={cn('flex h-11 w-11 items-center justify-center rounded-xl', tone)}><Icon className="h-5 w-5" /></span>
+          </div>
+        ))}
+      </section>
 
-        {/* ── Tab bar ────────────────────────────────────────────────────── */}
-        <div className="border-b border-border px-2 flex items-end gap-0 overflow-x-auto">
-          {visibleTabs.map((tab) => {
-            const meta = TAB_META[tab] ?? { label: tab, full: tab };
-            const count = tabCounts[tab] ?? 0;
-            const isActive = activeTab === tab;
-            return (
-              <button
-                key={tab}
-                title={meta.full}
-                onClick={() => setActiveTab(tab)}
-                className={cn(
-                  'flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap select-none',
-                  isActive
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground/40'
-                )}
-              >
-                {meta.label}
-                <span
-                  className={cn(
-                    'text-xs px-1.5 py-0.5 rounded-full font-normal transition-colors',
-                    isActive
-                      ? 'bg-primary/10 text-primary'
-                      : 'bg-muted text-muted-foreground'
-                  )}
-                >
-                  {count}
-                </span>
-              </button>
-            );
-          })}
-          {/* Total counter pushed to the right */}
-          <div className="ml-auto flex items-center px-4 py-3">
-            <span className="text-xs text-muted-foreground">Total: {inboxRows.length}</span>
+      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-200 px-5 py-4">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Vendor Comparative Statement Register</h2>
+              <p className="mt-0.5 text-xs text-slate-500">Comparative statement → TC approval → NFA approval → purchase order.</p>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <label className="relative block min-w-[300px]">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PR, vendor, item or comparison" className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm font-medium text-slate-700 outline-none transition focus:border-[#0D3A35] focus:bg-white" />
+              </label>
+              <div className="flex min-w-max items-center rounded-xl border border-slate-200 bg-slate-50 p-1">
+                {visibleTabs.map((tab) => {
+                  const meta = TAB_META[tab] ?? { label: tab, full: tab };
+                  const active = activeTab === tab;
+                  return <button key={tab} type="button" title={meta.full} onClick={() => setActiveTab(tab)} className={cn('inline-flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-bold transition', active ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800')}><span>{meta.label}</span><span className={cn('rounded-full px-1.5 py-0.5 text-[10px]', active ? 'bg-white/15 text-white' : 'bg-slate-200/70 text-slate-500')}>{tabCounts[tab] ?? 0}</span></button>;
+                })}
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* ── Content ─────────────────────────────────────────────────────── */}
+        <div className="hidden grid-cols-[minmax(190px,1fr)_minmax(180px,1.15fr)_80px_80px_minmax(120px,.7fr)_minmax(120px,.7fr)_minmax(120px,.7fr)_minmax(250px,auto)] items-center border-b border-slate-200 bg-[#0D3A35] px-5 py-3 text-center text-[11px] font-bold uppercase tracking-[0.08em] text-white lg:grid">
+          <span>Comparative Statement No.</span>
+          <span>Item Details</span>
+          <span>UoM</span>
+          <span>Qty.</span>
+          <span>TC Approval</span>
+          <span>NFA Approval</span>
+          <span>Purchase Order</span>
+          <span>Actions</span>
+        </div>
+
         {loading ? (
-          <div className="p-6 text-sm text-muted-foreground">Loading…</div>
+          <div className="space-y-3 p-5">{[1, 2, 3].map((row) => <div key={row} className="h-16 animate-pulse rounded-xl bg-slate-100" />)}</div>
         ) : filteredRows.length === 0 ? (
-          <div className="p-6 text-sm text-muted-foreground">
-            {activeTab === 'all'
-              ? 'No comparatives found. Create quotations first to see items here.'
-              : `No ${TAB_META[activeTab]?.full ?? activeTab} found in the inbox.`}
-          </div>
+          <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><ClipboardCheck className="h-10 w-10 text-slate-300" /><p className="mt-4 font-bold text-slate-700">No HO records found</p><p className="mt-1 text-sm text-slate-400">{query ? 'Try a different search term or document type.' : activeTab === 'all' ? 'Forward a commercial comparison to populate this register.' : `No ${TAB_META[activeTab]?.full ?? activeTab} are available.`}</p></div>
         ) : (
-          <div className="divide-y divide-border">
-            {filteredRows.map((r) => {
-              if (r.kind === 'comparative') {
-                const isTarget = Boolean(openIndentId) && r.item.indentId === openIndentId;
-                return (
-                  <ComparativeQuotationApprovalRow
-                    key={r.key}
-                    item={r.item}
-                    onOpen={(indentId) => navigate(`/ho/${indentId}`)}
-                    onUpdate={updateComparative}
-                    defaultOpen={isTarget}
-                    defaultTab={isTarget ? desiredTab : undefined}
-                  />
-                );
-              }
-              return null;
+          <div className="divide-y divide-slate-200">
+            {filteredRows.map((row) => {
+              const isTarget = Boolean(openIndentId) && row.item.indentId === openIndentId;
+              return <ComparativeQuotationApprovalRow key={row.key} item={row.item} onOpen={(indentId) => navigate(`/ho/${indentId}`)} onUpdate={updateComparative} defaultOpen={isTarget} defaultTab={isTarget ? desiredTab : undefined} />;
             })}
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }

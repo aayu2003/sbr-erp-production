@@ -43,7 +43,7 @@ const SBR_ADMIN_USER: AuthUser = {
   module_access: [
     'indents-request', 'admin-ops-indents', 'fuel-requests-admin', 'on-demand-task',
     'admin-request', 'admin-mrf-approvals', 'admin-inbox',
-    'leads', 'farmers', 'land-acquisition', 'farm-directory', 'land-hierarchy', 'tasks-beta',
+    'leads', 'farmers', 'land-acquisition', 'farm-directory', 'lease-master', 'land-hierarchy', 'tasks-beta',
     'user-management',
     'inventory', 'inventory-approvals', 'inventory-indents', 'fuels-consumables', 'inventory-inbox',
     'finance-admin-ops', 'purchase-req', 'vendor-directory', 'ho-module',

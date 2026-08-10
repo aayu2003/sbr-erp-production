@@ -1,6 +1,20 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, CheckCircle, FilePlus, PlusCircle, Trash2 } from 'lucide-react';
+import {
+  Plus,
+  CheckCircle,
+  FilePlus,
+  PlusCircle,
+  Trash2,
+  Search,
+  ClipboardList,
+  Clock3,
+  ShoppingCart,
+  FileText,
+  Send,
+  PackageCheck,
+  RotateCcw,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -13,6 +27,7 @@ import {
 import { toast } from 'sonner';
 import { readSignatureDiary, type SignatureDiary } from '@/lib/signatureDiary';
 import { getBaseUrl } from '@/lib/config';
+import { PRPreview as ThemedPRPreview, type PRPreviewIndent } from '@/components/purchase/PRPreview';
 
 // Vendor Quote type
 type Quote = {
@@ -101,6 +116,11 @@ type Indent = {
 
 const genId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const today = () => new Date().toISOString().split('T')[0];
+const formatDisplayDate = (value?: string) => {
+  const raw = str(value);
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : raw || '—';
+};
 
 const getApiBaseUrl = () => String(getBaseUrl() ?? '').replace(/\/$/, '');
 
@@ -878,32 +898,72 @@ type ComparativeVendor = {
   phone?: string;
   location?: string;
   address?: string;
+  attachmentName?: string;
+  quotationNo?: string;
 };
 
 type ComparativeItem = {
   id: string;
   srNo?: number;
   partName?: string;
+  specification?: string;
   uom?: string;
   qty: number;
   gstPercent?: number;
+  taxType?: string;
 };
 
 type ComparativeQuote = {
   vendorId: string;
   unitRateByItemId: Record<string, number>;
+  discountPercentByItemId?: Record<string, number>;
+};
+
+type ComparativeCharge = {
+  id: string;
+  label: string;
+  nature: 'Charge' | 'Discount';
+  calculation: 'Fixed' | '% of Basic';
+  taxPercent?: number;
+  values?: Record<string, number>;
+};
+
+type ComparativeParameter = {
+  id: string;
+  label: string;
+  values?: Record<string, string>;
 };
 
 type Comparative = {
   indentId: string;
   title?: string;
   subTitle?: string;
+  comparisonNo?: string;
+  revision?: number;
+  revisionOf?: string;
+  revisionDate?: string;
+  indentDate?: string;
+  department?: string;
+  projectCluster?: string;
+  deliveryLocation?: string;
+  requirementType?: string;
+  comparisonBasis?: string;
+  requiredByDate?: string;
+  preparedBy?: string;
+  purposeRemarks?: string;
   vendors?: ComparativeVendor[];
   items?: ComparativeItem[];
   quotes?: ComparativeQuote[];
   gstPercent?: number;
   freightCharges?: Record<string, number>;
   otherCharges?: Record<string, number>;
+  itemDiscountAmount?: Record<string, number>;
+  additionalChargesAmount?: Record<string, number>;
+  commercialDiscountAmount?: Record<string, number>;
+  roundOffAmount?: Record<string, number>;
+  charges?: ComparativeCharge[];
+  comparisonParameters?: ComparativeParameter[];
+  vendorStatus?: Record<string, string>;
   technicalRecommendationVendorId?: string;
   // some older pages used a slightly different key
   technicalRecommendedVendorId?: string;
@@ -922,6 +982,19 @@ const readComparatives = (): Record<string, Comparative> => {
   }
 };
 
+const latestComparative = (...candidates: Array<Comparative | null | undefined>): Comparative | null => {
+  const available = candidates.filter(Boolean) as Comparative[];
+  if (!available.length) return null;
+  return available.sort((left, right) => {
+    const leftRevision = Number(left.revision || String(left.comparisonNo || '').match(/\/R(\d+)$/i)?.[1] || 0);
+    const rightRevision = Number(right.revision || String(right.comparisonNo || '').match(/\/R(\d+)$/i)?.[1] || 0);
+    if (leftRevision !== rightRevision) return rightRevision - leftRevision;
+    const leftSaved = new Date(left.lastSavedAt || left.revisionDate || 0).getTime() || 0;
+    const rightSaved = new Date(right.lastSavedAt || right.revisionDate || 0).getTime() || 0;
+    return rightSaved - leftSaved;
+  })[0];
+};
+
 const numOr0 = (v: unknown) => {
   const n = typeof v === 'number' ? v : Number(String(v ?? '').trim());
   return Number.isFinite(n) ? n : 0;
@@ -938,11 +1011,16 @@ const ComparativeStatementPreview = ({ c, showForwardedStamp }: { c: Comparative
   const quoteByVendorId: Record<string, ComparativeQuote | undefined> = {};
   for (const q of quotes) quoteByVendorId[String((q as any)?.vendorId ?? '')] = q;
 
-  const gstPctForItem = (it: ComparativeItem) => {
-    const ip = numOr0((it as any)?.gstPercent);
-    if (ip) return ip;
-    return numOr0((c as any)?.gstPercent);
+  const money = (value: unknown) => new Intl.NumberFormat('en-IN', {
+    style: 'currency', currency: 'INR', minimumFractionDigits: 2, maximumFractionDigits: 2,
+  }).format(numOr0(value));
+  const showDate = (value?: string) => {
+    if (!value) return 'Not Recorded';
+    const iso = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return `${iso[3]}-${iso[2]}-${iso[1]}`;
+    return value;
   };
+  const gstPctForItem = (it: ComparativeItem) => numOr0(it.gstPercent) || numOr0(c.gstPercent);
 
   const baseForVendor = (vendorId: string) => {
     const q = quoteByVendorId[vendorId];
@@ -952,139 +1030,175 @@ const ComparativeStatementPreview = ({ c, showForwardedStamp }: { c: Comparative
     }, 0);
   };
 
+  const lineDiscountForVendor = (vendorId: string) => {
+    const q = quoteByVendorId[vendorId];
+    return items.reduce((sum, it) => {
+      const amount = numOr0(q?.unitRateByItemId?.[it.id]) * numOr0(it.qty);
+      return sum + amount * (numOr0(q?.discountPercentByItemId?.[it.id]) / 100);
+    }, 0);
+  };
+
+  const itemDiscountForVendor = (vendorId: string) =>
+    lineDiscountForVendor(vendorId) + numOr0(c.itemDiscountAmount?.[vendorId]);
+
+  const netBasicForVendor = (vendorId: string) =>
+    Math.max(0, baseForVendor(vendorId) - itemDiscountForVendor(vendorId));
+
   const gstForVendor = (vendorId: string) => {
     const q = quoteByVendorId[vendorId];
     return items.reduce((sum, it) => {
       const unit = numOr0(q?.unitRateByItemId?.[it.id]);
-      const amt = unit * numOr0(it.qty);
+      const gross = unit * numOr0(it.qty);
+      const discount = gross * (numOr0(q?.discountPercentByItemId?.[it.id]) / 100);
+      const amt = Math.max(0, gross - discount);
       const gp = gstPctForItem(it);
-      return sum + amt * (gp / 100);
+      const taxType = String(it.taxType || '').toLowerCase();
+      return sum + (/(exempt|nil rated|rcm|inclusive)/.test(taxType) ? 0 : amt * (gp / 100));
     }, 0);
   };
 
-  const freightForVendor = (vendorId: string) => numOr0((c as any)?.freightCharges?.[vendorId]);
-  const otherForVendor = (vendorId: string) => numOr0((c as any)?.otherCharges?.[vendorId]);
-
-  const grandTotalForVendor = (vendorId: string) => {
-    return baseForVendor(vendorId) + gstForVendor(vendorId) + freightForVendor(vendorId) + otherForVendor(vendorId);
+  const adjustmentForVendor = (vendorId: string) => {
+    let charges = numOr0(c.additionalChargesAmount?.[vendorId]);
+    let discounts = numOr0(c.commercialDiscountAmount?.[vendorId]);
+    let tax = 0;
+    for (const entry of c.charges || []) {
+      const entered = numOr0(entry.values?.[vendorId]);
+      const amount = entry.calculation === '% of Basic' ? netBasicForVendor(vendorId) * entered / 100 : entered;
+      if (entry.nature === 'Discount') discounts += amount;
+      else {
+        charges += amount;
+        tax += amount * numOr0(entry.taxPercent) / 100;
+      }
+    }
+    return { charges, discounts, tax };
   };
 
-  if (!vendors.length || !items.length) {
-    return (
-      <div className="text-sm text-gray-500">
-        No comparative statement details found for this PR.
-      </div>
-    );
-  }
+  const grandTotalForVendor = (vendorId: string) => {
+    const adjustment = adjustmentForVendor(vendorId);
+    return netBasicForVendor(vendorId) + adjustment.charges - adjustment.discounts + gstForVendor(vendorId) + adjustment.tax + numOr0(c.roundOffAmount?.[vendorId]);
+  };
+
+  const summaryRows = [
+    { label: 'Basic Amount (Excl. Tax)', value: baseForVendor },
+    { label: 'Item Discount', value: itemDiscountForVendor },
+    { label: 'Net Basic Amount', value: netBasicForVendor },
+    { label: 'GST (as per item GST%)', value: gstForVendor },
+    { label: 'Additional Charges', value: (id: string) => adjustmentForVendor(id).charges },
+    { label: 'Commercial Discount', value: (id: string) => adjustmentForVendor(id).discounts },
+    { label: 'Round Off', value: (id: string) => numOr0(c.roundOffAmount?.[id]) },
+  ];
+  const parameters = (c.comparisonParameters || []).filter((parameter) =>
+    vendors.some((vendor) => String(parameter.values?.[vendor.id] || '').trim()),
+  );
+  const vendorWidth = vendors.length ? `${60 / vendors.length}%` : '60%';
 
   return (
-    <div className="border border-gray-200 rounded bg-white relative">
+    <div className="relative overflow-hidden rounded-2xl border border-[#cbded9] bg-white shadow-sm">
       {showForwardedStamp ? (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div className="border-4 border-green-800/30 text-green-800/30 rounded-lg px-10 py-4 font-extrabold text-5xl tracking-[0.25em]">
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
+          <div className="rotate-[-8deg] rounded-lg border-4 border-[#0b463f]/20 px-10 py-4 text-5xl font-extrabold tracking-[0.25em] text-[#0b463f]/20">
             FORWARDED
           </div>
         </div>
       ) : null}
-      <div className="px-3 py-2 border-b border-gray-200 flex items-center justify-between">
-        <div className="text-sm font-semibold text-gray-900">Comparative Statement</div>
-        <div className="text-xs text-gray-500">
-          {c.isDraft ? 'Draft' : 'Saved'}{c.lastSavedAt ? ` · ${new Date(c.lastSavedAt).toLocaleString()}` : ''}
+
+      <div className="bg-[#0b463f] px-5 py-4 text-white">
+        <div className="text-center text-base font-bold uppercase tracking-[0.16em]">Commercial Comparative Statement</div>
+        <div className="mt-2 flex flex-wrap items-center justify-center gap-x-5 gap-y-1 text-xs text-white/80">
+          <span>Comparison No.: <b className="text-white">{c.comparisonNo || 'Not Recorded'}</b></span>
+          <span>{c.isDraft ? 'Draft' : 'Saved'}{c.revision ? ` · Revision R${c.revision}` : ''}</span>
+          {c.lastSavedAt ? <span>Updated: {new Date(c.lastSavedAt).toLocaleString('en-IN')}</span> : null}
         </div>
       </div>
 
-      {techRecId ? (
-        <div className="px-3 py-2 border-b border-gray-200 text-xs">
-          <span className="font-semibold text-gray-700">Technical recommendation:</span>{' '}
-          <span className="text-gray-900">{techRecName}</span>
-        </div>
-      ) : null}
+      <div className="grid grid-cols-2 border-b border-[#d7e4e0] bg-[#f4f8f7] text-xs md:grid-cols-4">
+        {[
+          ['Indent Date', showDate(c.indentDate)],
+          ['Department', c.department || 'Not Recorded'],
+          ['Project / Cluster', c.projectCluster || 'Not Recorded'],
+          ['Requirement', c.requirementType || 'Goods'],
+          ['Delivery Location', c.deliveryLocation || 'Not Recorded'],
+          ['Required By', showDate(c.requiredByDate)],
+          ['Prepared By', c.preparedBy || 'Not Recorded'],
+          ['Purpose / Remarks', c.purposeRemarks || 'Not Recorded'],
+        ].map(([label, value]) => (
+          <div key={label} className="min-h-14 border-b border-r border-[#d7e4e0] px-3 py-2">
+            <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">{label}</div>
+            <div className="mt-1 font-semibold text-slate-800">{value}</div>
+          </div>
+        ))}
+      </div>
 
-      <div className="overflow-auto">
-        <table className="w-max min-w-full text-[11px] border-collapse">
-          <thead>
-            <tr className="bg-gray-50">
-              <th className="border border-gray-200 px-2 py-1 text-left">Sr</th>
-              <th className="border border-gray-200 px-2 py-1 text-left">Item</th>
-              <th className="border border-gray-200 px-2 py-1 text-right">Qty</th>
-              <th className="border border-gray-200 px-2 py-1 text-center">UoM</th>
-              {vendors.map((v) => (
-                <Fragment key={v.id}>
-                  <th className="border border-gray-200 px-2 py-1 text-right">{v.name} (Unit)</th>
-                  <th className="border border-gray-200 px-2 py-1 text-right">{v.name} (Amt)</th>
-                </Fragment>
-              ))}
-            </tr>
-          </thead>
+      <div className="grid border-b border-[#d7e4e0] bg-white" style={{ gridTemplateColumns: `repeat(${Math.max(vendors.length, 1)}, minmax(0, 1fr))` }}>
+        {vendors.length ? vendors.map((vendor, index) => (
+          <div key={vendor.id} className="border-r border-[#d7e4e0] px-4 py-3 text-xs last:border-r-0">
+            <div className="font-bold uppercase text-[#0b463f]">Vendor {index + 1}</div>
+            <div className="mt-1 text-sm font-bold text-slate-900">{vendor.name || 'Not Recorded'}</div>
+            <div className="mt-1 text-slate-500">{vendor.address || vendor.location || 'Address not recorded'}</div>
+            <div className="text-slate-500">Phone: {vendor.phone || 'Not Recorded'}</div>
+            <div className="text-slate-500">Quotation: {vendor.attachmentName || vendor.quotationNo || 'Not Uploaded'}</div>
+          </div>
+        )) : <div className="px-4 py-3 text-sm text-slate-500">No vendor has been recorded in this statement.</div>}
+      </div>
+
+      <div className="bg-[#edf4f2] px-4 py-2 text-xs font-bold uppercase tracking-wide text-[#0b463f]">Item &amp; Vendor Comparison</div>
+      <div className="overflow-x-auto">
+        <table className="w-full table-fixed border-collapse text-xs">
+          <colgroup>
+            <col style={{ width: '6%' }} /><col style={{ width: '24%' }} /><col style={{ width: '5%' }} /><col style={{ width: '5%' }} />
+            {vendors.map((vendor) => <col key={vendor.id} style={{ width: vendorWidth }} />)}
+          </colgroup>
+          <thead><tr className="bg-[#0b463f] text-white">
+            <th className="border border-[#2c625b] px-2 py-2 text-center">S. No.</th>
+            <th className="border border-[#2c625b] px-2 py-2 text-left">Item / Part Name</th>
+            <th className="border border-[#2c625b] px-2 py-2 text-center">Qty.</th>
+            <th className="border border-[#2c625b] px-2 py-2 text-center">UOM</th>
+            {vendors.map((vendor) => <th key={vendor.id} className="border border-[#2c625b] px-2 py-2 text-center">{vendor.name || 'Vendor'}</th>)}
+          </tr></thead>
           <tbody>
-            {items.map((it, idx) => (
-              <tr key={it.id}>
-                <td className="border border-gray-200 px-2 py-1 text-left">{(it as any)?.srNo ?? idx + 1}</td>
-                <td className="border border-gray-200 px-2 py-1 text-left">{String((it as any)?.partName ?? '')}</td>
-                <td className="border border-gray-200 px-2 py-1 text-right">{numOr0(it.qty)}</td>
-                <td className="border border-gray-200 px-2 py-1 text-center">{String((it as any)?.uom ?? '')}</td>
-                {vendors.map((v) => {
-                  const q = quoteByVendorId[v.id];
-                  const unit = numOr0(q?.unitRateByItemId?.[it.id]);
-                  const amt = unit * numOr0(it.qty);
-                  return (
-                    <Fragment key={`${it.id}-${v.id}`}>
-                      <td className="border border-gray-200 px-2 py-1 text-right">{unit ? unit.toLocaleString() : '—'}</td>
-                      <td className="border border-gray-200 px-2 py-1 text-right">{amt ? formatInr(amt) : '—'}</td>
-                    </Fragment>
-                  );
+            {items.length ? items.map((item, index) => (
+              <tr key={item.id} className="bg-white">
+                <td className="border border-[#d7e4e0] p-2 text-center">{item.srNo || index + 1}</td>
+                <td className="border border-[#d7e4e0] p-2"><div className="font-semibold text-slate-900">{item.partName || 'Not Recorded'}</div>{item.specification ? <div className="mt-0.5 text-[10px] text-slate-500">{item.specification}</div> : null}</td>
+                <td className="border border-[#d7e4e0] p-2 text-center tabular-nums">{numOr0(item.qty)}</td>
+                <td className="border border-[#d7e4e0] p-2 text-center">{item.uom || '—'}</td>
+                {vendors.map((vendor) => {
+                  const rate = numOr0(quoteByVendorId[vendor.id]?.unitRateByItemId?.[item.id]);
+                  return <td key={vendor.id} className="border border-[#d7e4e0] p-2 text-center tabular-nums"><div className="font-semibold">{money(rate)}</div><div className="text-[10px] text-slate-500">Amount: {money(rate * numOr0(item.qty))}</div></td>;
                 })}
               </tr>
-            ))}
-
-            <tr className="bg-gray-50">
-              <td className="border border-gray-200 px-2 py-1 font-semibold text-right" colSpan={4}>Base total</td>
-              {vendors.map((v) => (
-                <Fragment key={`base-${v.id}`}>
-                  <td className="border border-gray-200 px-2 py-1"></td>
-                  <td className="border border-gray-200 px-2 py-1 text-right font-semibold">{formatInr(baseForVendor(v.id))}</td>
-                </Fragment>
-              ))}
-            </tr>
-            <tr>
-              <td className="border border-gray-200 px-2 py-1 font-semibold text-right" colSpan={4}>Freight</td>
-              {vendors.map((v) => (
-                <Fragment key={`freight-${v.id}`}>
-                  <td className="border border-gray-200 px-2 py-1"></td>
-                  <td className="border border-gray-200 px-2 py-1 text-right">{formatInr(freightForVendor(v.id))}</td>
-                </Fragment>
-              ))}
-            </tr>
-            <tr>
-              <td className="border border-gray-200 px-2 py-1 font-semibold text-right" colSpan={4}>Other</td>
-              {vendors.map((v) => (
-                <Fragment key={`other-${v.id}`}>
-                  <td className="border border-gray-200 px-2 py-1"></td>
-                  <td className="border border-gray-200 px-2 py-1 text-right">{formatInr(otherForVendor(v.id))}</td>
-                </Fragment>
-              ))}
-            </tr>
-            <tr>
-              <td className="border border-gray-200 px-2 py-1 font-semibold text-right" colSpan={4}>GST</td>
-              {vendors.map((v) => (
-                <Fragment key={`gst-${v.id}`}>
-                  <td className="border border-gray-200 px-2 py-1"></td>
-                  <td className="border border-gray-200 px-2 py-1 text-right">{formatInr(gstForVendor(v.id))}</td>
-                </Fragment>
-              ))}
-            </tr>
-            <tr className="bg-gray-50">
-              <td className="border border-gray-200 px-2 py-1 font-extrabold text-right" colSpan={4}>Grand total</td>
-              {vendors.map((v) => (
-                <Fragment key={`grand-${v.id}`}>
-                  <td className="border border-gray-200 px-2 py-1"></td>
-                  <td className={`border border-gray-200 px-2 py-1 text-right font-extrabold ${techRecId && v.id === techRecId ? 'text-green-700' : ''}`}>{formatInr(grandTotalForVendor(v.id))}</td>
-                </Fragment>
-              ))}
-            </tr>
+            )) : <tr><td colSpan={4 + vendors.length} className="border border-[#d7e4e0] p-5 text-center text-slate-500">No item details recorded.</td></tr>}
           </tbody>
         </table>
       </div>
+
+      {vendors.length ? <>
+        <div className="bg-[#edf4f2] px-4 py-2 text-xs font-bold uppercase tracking-wide text-[#0b463f]">Commercial Summary</div>
+        <table className="w-full table-fixed border-collapse text-xs">
+          <colgroup><col style={{ width: '40%' }} />{vendors.map((vendor) => <col key={vendor.id} style={{ width: vendorWidth }} />)}</colgroup>
+          <thead><tr className="bg-[#0b463f] text-white"><th className="border border-[#2c625b] px-3 py-2 text-left">Particular</th>{vendors.map((vendor) => <th key={vendor.id} className="border border-[#2c625b] px-3 py-2 text-center">{vendor.name}</th>)}</tr></thead>
+          <tbody>
+            {summaryRows.map((row) => <tr key={row.label}><td className="border border-[#d7e4e0] px-3 py-2 font-semibold">{row.label}</td>{vendors.map((vendor) => <td key={vendor.id} className="border border-[#d7e4e0] px-3 py-2 text-center tabular-nums">{money(row.value(vendor.id))}</td>)}</tr>)}
+            <tr className="bg-[#e6f1ee] font-bold text-[#086a45]"><td className="border border-[#bcd4ce] px-3 py-2">Landed Cost / Grand Total</td>{vendors.map((vendor) => <td key={vendor.id} className="border border-[#bcd4ce] px-3 py-2 text-center tabular-nums">{money(grandTotalForVendor(vendor.id))}</td>)}</tr>
+          </tbody>
+        </table>
+      </> : null}
+
+      {parameters.length ? <>
+        <div className="bg-[#edf4f2] px-4 py-2 text-xs font-bold uppercase tracking-wide text-[#0b463f]">Commercial Terms</div>
+        <table className="w-full table-fixed border-collapse text-xs">
+          <colgroup><col style={{ width: '40%' }} />{vendors.map((vendor) => <col key={vendor.id} style={{ width: vendorWidth }} />)}</colgroup>
+          <thead><tr className="bg-[#0b463f] text-white"><th className="border border-[#2c625b] px-3 py-2 text-left">Comparison Parameter</th>{vendors.map((vendor) => <th key={vendor.id} className="border border-[#2c625b] px-3 py-2 text-center">{vendor.name}</th>)}</tr></thead>
+          <tbody>{parameters.map((parameter) => <tr key={parameter.id}><td className="border border-[#d7e4e0] px-3 py-2 font-semibold">{parameter.label}</td>{vendors.map((vendor) => <td key={vendor.id} className="border border-[#d7e4e0] px-3 py-2 text-center">{parameter.values?.[vendor.id] || 'Not Recorded'}</td>)}</tr>)}</tbody>
+        </table>
+      </> : null}
+
+      {(techRecId || vendors.length) ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#d7e4e0] bg-[#f7faf9] px-4 py-3 text-xs">
+          <div><span className="font-bold text-slate-600">Technical recommendation:</span> <span className="font-semibold text-slate-900">{techRecName || 'Not Recorded'}</span></div>
+          <div className="flex flex-wrap gap-2">{vendors.map((vendor) => c.vendorStatus?.[vendor.id] ? <span key={vendor.id} className="rounded-full bg-[#e5f2ee] px-3 py-1 font-semibold text-[#0b463f]">{vendor.name}: {c.vendorStatus[vendor.id]}</span> : null)}</div>
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -1313,7 +1427,7 @@ const PurchaseRequisition = () => {
     const all = readComparatives();
     const key1 = str(previewIndent.id);
     const key2 = str(previewIndent.prNo);
-    setPreviewComparative((all as any)[key1] || (all as any)[key2] || null);
+    setPreviewComparative(latestComparative((all as any)[key1], (all as any)[key2]));
   }, [previewIndent]);
 
   const labelForQuotationStatus = (s: QuotationStatus) => {
@@ -1500,73 +1614,101 @@ const PurchaseRequisition = () => {
     navigate(`/purchase-requisition/${typeSegment}/${encodeURIComponent(indent.id)}/quotation`);
   };
 
+  const openRevisionPage = (indent: Indent) => {
+    const typeSegment = indent.indentType === 'SPR' ? 'SPR' : 'PR';
+    navigate(`/purchase-requisition/${typeSegment}/${encodeURIComponent(indent.id)}/quotation?revise=1`);
+  };
+
   const indentsAfterSearch = useMemo(() => {
     const q = str(searchQuery);
     if (!q) return indents;
     return indents.filter((it) => indentMatchesSearch(it, q));
   }, [indents, searchQuery]);
 
-  const newIndents = useMemo(() => indentsAfterSearch.filter((it) => it.status === 'draft'), [indentsAfterSearch]);
+  const newIndents = useMemo(() => indentsAfterSearch.filter((it) => it.status !== 'po'), [indentsAfterSearch]);
   const processIndents = useMemo(
-    () => indentsAfterSearch.filter((it) => it.status !== 'po' && hasAnyQuotes(it)),
-    [indentsAfterSearch],
+    () => indentsAfterSearch.filter((it) => {
+      if (it.status === 'po') return false;
+      const status = quotationStatusByPr[str(it.prNo || it.id)]?.status;
+      return status === 'draft' || status === 'saved' || status === 'forwarded' || hasAnyQuotes(it);
+    }),
+    [indentsAfterSearch, quotationStatusByPr],
   );
   const poIndents = useMemo(() => indentsAfterSearch.filter((it) => it.status === 'po'), [indentsAfterSearch]);
 
   const newGroups = useMemo(() => groupIndentsByDate(newIndents), [newIndents]);
   const processGroups = useMemo(() => groupIndentsByDate(processIndents), [processIndents]);
   const poGroups = useMemo(() => groupIndentsByDate(poIndents), [poIndents]);
+  const comparativeSummary = useMemo(() => {
+    const statuses = indentsAfterSearch.map((indent) => quotationStatusByPr[str(indent.prNo || indent.id)]?.status || 'unknown');
+    return {
+      total: indentsAfterSearch.length,
+      notStarted: statuses.filter((status) => status === 'no_comparative_statement' || status === 'unknown').length,
+      inProgress: statuses.filter((status) => status === 'draft' || status === 'saved').length,
+      forwarded: statuses.filter((status) => status === 'forwarded').length,
+    };
+  }, [indentsAfterSearch, quotationStatusByPr]);
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="flex items-center justify-between mb-4">
+    <div className="min-h-screen space-y-7 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
+      <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Purchase Requisition</h1>
-          <p className="text-sm text-gray-500">Raise PRs and manage received indents once all signatures are present.</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setOpen(true)} className="bg-green-600 text-white gap-2">
-            <Plus className="w-4 h-4" /> New Indent
-          </Button>
+          <p className="text-sm font-bold text-emerald-700">Purchase Operations</p>
+          <h1 className="mt-3 text-3xl font-black tracking-tight text-slate-950">Comparative Statement</h1>
+          <p className="mt-3 text-base font-medium text-slate-600">Create and manage commercial comparative statements against every purchase requisition raised in the system.</p>
         </div>
       </div>
 
-      <div className="mb-4">
-        <Input
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search indents (PR no, project, person, item…)"
-          className="max-w-xl bg-white"
-        />
-      </div>
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          { label: 'Purchase Requisitions', value: comparativeSummary.total, hint: 'All PRs available for comparison', Icon: ClipboardList, tone: 'bg-[#0D3A35]/10 text-[#0D3A35]' },
+          { label: 'Not Started', value: comparativeSummary.notStarted, hint: 'Comparative statement pending', Icon: FileText, tone: 'bg-blue-50 text-blue-700' },
+          { label: 'Draft / Saved', value: comparativeSummary.inProgress, hint: 'Statements being prepared', Icon: Clock3, tone: 'bg-amber-50 text-amber-700' },
+          { label: 'Forwarded', value: comparativeSummary.forwarded, hint: 'Sent for HO processing', Icon: ShoppingCart, tone: 'bg-emerald-50 text-emerald-700' },
+        ].map(({ label, value, hint, Icon, tone }) => (
+          <div key={label} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+            <div className="flex items-start justify-between gap-4">
+              <div><p className="text-sm font-bold text-slate-500">{label}</p><p className="mt-3 text-3xl font-black text-slate-950">{value}</p><p className="mt-2 text-xs font-semibold text-slate-400">{hint}</p></div>
+              <span className={`flex h-11 w-11 items-center justify-center rounded-full ${tone}`}><Icon className="h-5 w-5" /></span>
+            </div>
+          </div>
+        ))}
+      </section>
 
       <div>
-        <div className="flex items-center gap-3 mb-4">
+        <div className="rounded-2xl border border-slate-200 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+          <div className="flex flex-col gap-4 border-b border-slate-200 p-5 xl:flex-row xl:items-center xl:justify-between">
+            <div className="relative w-full xl:max-w-xl">
+              <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <Input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search PR number, project, requester or item" className="h-12 rounded-xl border-slate-200 bg-slate-50 pl-11 font-semibold focus-visible:ring-emerald-100" />
+            </div>
+            <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-1">
           <button
             onClick={() => setActiveTab('new')}
-            className={`px-3 py-2 rounded-t-md ${activeTab === 'new' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-600'}`}
+            className={`rounded-lg px-4 py-2.5 text-sm font-black transition ${activeTab === 'new' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
           >
-            New Indent ({newIndents.length})
+            All PRs ({newIndents.length})
           </button>
           <button
             onClick={() => setActiveTab('process')}
-            className={`px-3 py-2 rounded-t-md ${activeTab === 'process' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-600'}`}
+            className={`rounded-lg px-4 py-2.5 text-sm font-black transition ${activeTab === 'process' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
           >
-            Process ({processIndents.length})
+            Statements ({processIndents.length})
           </button>
           <button
             onClick={() => setActiveTab('po')}
-            className={`px-3 py-2 rounded-t-md ${activeTab === 'po' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-600'}`}
+            className={`rounded-lg px-4 py-2.5 text-sm font-black transition ${activeTab === 'po' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
           >
-            Purchase Order ({poIndents.length})
+            Completed ({poIndents.length})
           </button>
-        </div>
+            </div>
+          </div>
 
-        <div className="bg-white rounded border">
-          <div className="divide-y divide-gray-100">
+        <div className="overflow-hidden rounded-b-2xl bg-white">
+          <div className="divide-y divide-slate-100">
             {activeTab === 'new' && newGroups.map((g) => (
               <Fragment key={`new-${g.date}`}>
-                <div className="px-4 py-2 text-xs font-semibold text-gray-600 bg-gray-50">{g.date}</div>
+                <div className="border-y border-slate-200 bg-slate-50 px-5 py-2.5 text-xs font-black uppercase tracking-[0.12em] text-slate-500">Entry Date · {formatDisplayDate(g.date)}</div>
                 {g.indents.map((it) => {
                   const s = signaturesPresent(it);
                   const pr = str(it.prNo || it.id);
@@ -1578,31 +1720,47 @@ const PurchaseRequisition = () => {
                   const forwardEnabled = !qLoading && qStatus === 'saved' && !forwarding && !forwarded;
                   return (
                     <div key={it.id}>
-                      <div className={`relative flex items-center justify-between py-3 px-4 ${forwarded ? 'bg-green-100/50' : ''}`}>
-                        {forwarded ? (
-                          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                            <div className="text-green-800/50 font-extrabold text-3xl tracking-[0.35em]">FORWARDED</div>
-                          </div>
-                        ) : null}
-                        <div className="min-w-0">
-                          <div className="font-medium truncate">{it.prNo} — {it.project}</div>
-                          <div className="text-xs text-gray-500 truncate">Indented by {it.indentedBy} · Forwarded by {it.forwardedBy}</div>
-                          <div className="text-xs text-gray-500 truncate">
-                            Quotation:{' '}
+                      <div className={`relative flex flex-col gap-4 px-5 py-5 transition hover:bg-slate-50/70 xl:flex-row xl:items-center xl:justify-between ${forwarded ? 'bg-emerald-50/70' : ''}`}>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-sm font-black text-[#0D3A35]">{it.prNo}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-black uppercase text-slate-500">{it.indentType || 'PR'}</span></div>
+                          <div className="mt-2 truncate text-base font-black text-slate-900">{it.project}</div>
+                          <div className="mt-2 text-xs font-semibold text-slate-500">{it.items.length} item{it.items.length === 1 ? '' : 's'} · Indented by {it.indentedBy} · Forwarded by {it.forwardedBy}</div>
+                          <div className="mt-1 text-xs font-semibold text-slate-500">
+                            Comparative Statement:{' '}
                             {qLoading ? (
                               <span className="font-semibold text-gray-500">Checking…</span>
                             ) : (
                               <span className={`font-semibold ${classForQuotationStatus(qStatus)}`}>{labelForQuotationStatus(qStatus)}</span>
                             )}
                           </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {[
+                              ['Indented', s.indented],
+                              ['Forwarded', s.forwarded],
+                              ['Director', s.director],
+                            ].map(([label, complete]) => (
+                              <span key={String(label)} className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${complete ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
+                                <CheckCircle className="h-3 w-3" /> {label}
+                              </span>
+                            ))}
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2 ml-4">
-                          <Button variant="outline" onClick={() => setPreviewIndent(it)} className="gap-2">
+                        <div className="relative z-[1] flex flex-wrap items-center gap-2 xl:ml-4 xl:justify-end">
+                          <Button variant="outline" onClick={() => setPreviewIndent(it)} className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]">
                             <FilePlus className="w-4 h-4" /> Preview
                           </Button>
                           <Button
                             variant="outline"
-                            className="gap-2"
+                            onClick={() => openRevisionPage(it)}
+                            className="h-10 gap-2 rounded-xl border-[#0D3A35]/25 font-bold text-[#0D3A35] hover:bg-[#edf5f2]"
+                            disabled={qLoading || !['saved', 'forwarded', 'draft'].includes(qStatus)}
+                            title="Create a new revision of the comparative statement"
+                          >
+                            <RotateCcw className="h-4 w-4" /> Revise
+                          </Button>
+                          <Button
+                            variant="outline"
+                            className="h-10 gap-2 rounded-xl border-slate-200 font-bold"
                             disabled={!forwardEnabled}
                             title={
                               forwarded
@@ -1615,16 +1773,17 @@ const PurchaseRequisition = () => {
                             }
                             onClick={() => void forwardNow(pr)}
                           >
+                            <Send className="h-4 w-4" />
                             {forwarding ? 'Forwarding…' : forwarded ? 'Forwarded' : 'Forward'}
                           </Button>
                           <Button
                             variant="outline"
                             onClick={() => openQuotationPage(it)}
-                            className="gap-2"
+                            className="h-10 gap-2 rounded-xl bg-[#0D3A35] font-bold text-white hover:bg-[#092b27] disabled:bg-slate-100 disabled:text-slate-400"
                             disabled={forwarded}
                             title={forwarded ? 'Cannot add quotation after forwarding' : 'Add / edit comparative statement'}
                           >
-                            <PlusCircle className="w-4 h-4" /> Add Quotation
+                            <PlusCircle className="w-4 h-4" /> {qStatus === 'no_comparative_statement' || qStatus === 'unknown' ? 'Create Statement' : 'Edit Statement'}
                           </Button>
                         </div>
                       </div>
@@ -1668,10 +1827,13 @@ const PurchaseRequisition = () => {
                 })}
               </Fragment>
             ))}
+            {activeTab === 'new' && newGroups.length === 0 && (
+              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><ClipboardList className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No purchase requisitions found</p><p className="mt-1 text-sm font-semibold text-slate-400">Raised and approved purchase requisitions will appear here for comparative statement preparation.</p></div>
+            )}
 
             {activeTab === 'process' && processGroups.map((g) => (
               <Fragment key={`process-${g.date}`}>
-                <div className="px-4 py-2 text-xs font-semibold text-gray-600 bg-gray-50">{g.date}</div>
+                <div className="border-y border-slate-200 bg-slate-50 px-5 py-2.5 text-xs font-black uppercase tracking-[0.12em] text-slate-500">Entry Date · {formatDisplayDate(g.date)}</div>
                 {g.indents.map((it) => {
                   const pr = str(it.prNo || it.id);
                   const qs = quotationStatusByPr[pr];
@@ -1682,17 +1844,13 @@ const PurchaseRequisition = () => {
                   const forwardEnabled = !qLoading && qStatus === 'saved' && !forwarding && !forwarded;
                   return (
                     <div key={it.id}>
-                      <div className={`relative flex items-center justify-between py-3 px-4 ${forwarded ? 'bg-green-100/50' : ''}`}>
-                        {forwarded ? (
-                          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                            <div className="text-green-800/50 font-extrabold text-3xl tracking-[0.35em]">FORWARDED</div>
-                          </div>
-                        ) : null}
-                        <div className="min-w-0">
-                          <div className="font-medium truncate">{it.prNo} — {it.project}</div>
-                          <div className="text-xs text-gray-500 truncate">Quoted items: {it.items.reduce((c, li) => c + ((li.quotes?.length) || 0), 0)}</div>
-                          <div className="text-xs text-gray-500 truncate">
-                            Quotation:{' '}
+                      <div className={`relative flex flex-col gap-4 px-5 py-5 transition hover:bg-slate-50/70 xl:flex-row xl:items-center xl:justify-between ${forwarded ? 'bg-emerald-50/70' : ''}`}>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-sm font-black text-[#0D3A35]">{it.prNo}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-black uppercase text-amber-700">In Process</span></div>
+                          <div className="mt-2 truncate text-base font-black text-slate-900">{it.project}</div>
+                          <div className="mt-2 text-xs font-semibold text-slate-500">{it.items.length} item{it.items.length === 1 ? '' : 's'} · {it.items.reduce((c, li) => c + ((li.quotes?.length) || 0), 0)} quotation entries</div>
+                          <div className="mt-1 text-xs font-semibold text-slate-500">
+                            Comparative Statement:{' '}
                             {qLoading ? (
                               <span className="font-semibold text-gray-500">Checking…</span>
                             ) : (
@@ -1700,13 +1858,22 @@ const PurchaseRequisition = () => {
                             )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-2 ml-4">
-                          <Button variant="outline" onClick={() => setPreviewIndent(it)} className="gap-2">
+                        <div className="relative z-[1] flex flex-wrap items-center gap-2 xl:ml-4 xl:justify-end">
+                          <Button variant="outline" onClick={() => setPreviewIndent(it)} className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]">
                             <FilePlus className="w-4 h-4" /> Preview
                           </Button>
                           <Button
                             variant="outline"
-                            className="gap-2"
+                            onClick={() => openRevisionPage(it)}
+                            className="h-10 gap-2 rounded-xl border-[#0D3A35]/25 font-bold text-[#0D3A35] hover:bg-[#edf5f2]"
+                            disabled={qLoading || !['saved', 'forwarded', 'draft'].includes(qStatus)}
+                            title="Create a new revision of the comparative statement"
+                          >
+                            <RotateCcw className="h-4 w-4" /> Revise
+                          </Button>
+                          <Button
+                            variant="outline"
+                            className="h-10 gap-2 rounded-xl border-slate-200 font-bold"
                             disabled={!forwardEnabled}
                             title={
                               forwarded
@@ -1719,20 +1886,21 @@ const PurchaseRequisition = () => {
                             }
                             onClick={() => void forwardNow(pr)}
                           >
+                            <Send className="h-4 w-4" />
                             {forwarding ? 'Forwarding…' : forwarded ? 'Forwarded' : 'Forward'}
                           </Button>
                           <Button
                             variant="outline"
                             onClick={() => openQuotationPage(it)}
-                            className="gap-2"
+                            className="h-10 gap-2 rounded-xl bg-[#0D3A35] font-bold text-white hover:bg-[#092b27] disabled:bg-slate-100 disabled:text-slate-400"
                             disabled={forwarded}
                             title={forwarded ? 'Cannot add quotation after forwarding' : 'Add / edit comparative statement'}
                           >
-                            <PlusCircle className="w-4 h-4" /> Add Quotation
+                            <PlusCircle className="w-4 h-4" /> Edit Statement
                           </Button>
                           <Button
                             onClick={() => createPO(it.id)}
-                            className={`gap-2 ${it.items.some(li => !(li.quotes && li.quotes.length > 0)) ? 'bg-gray-200 text-gray-600' : 'bg-blue-600 text-white'}`}
+                            className={`h-10 gap-2 rounded-xl font-black ${it.items.some(li => !(li.quotes && li.quotes.length > 0)) ? 'bg-slate-100 text-slate-400' : 'bg-[#0D3A35] text-white hover:bg-[#092b27]'}`}
                             disabled={it.items.some(li => !(li.quotes && li.quotes.length > 0))}
                           >
                             <Plus className="w-4 h-4" /> Create PO
@@ -1779,10 +1947,13 @@ const PurchaseRequisition = () => {
                 })}
               </Fragment>
             ))}
+            {activeTab === 'process' && processGroups.length === 0 && (
+              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><Clock3 className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No requisitions in process</p><p className="mt-1 text-sm font-semibold text-slate-400">Requisitions with quotation activity will appear here.</p></div>
+            )}
 
             {activeTab === 'po' && poGroups.map((g) => (
               <Fragment key={`po-${g.date}`}>
-                <div className="px-4 py-2 text-xs font-semibold text-gray-600 bg-gray-50">{g.date}</div>
+                <div className="border-y border-slate-200 bg-slate-50 px-5 py-2.5 text-xs font-black uppercase tracking-[0.12em] text-slate-500">PO Date · {formatDisplayDate(g.date)}</div>
                 {g.indents.map((it) => {
                   const pr = str(it.prNo || it.id);
                   const qs = quotationStatusByPr[pr];
@@ -1792,17 +1963,13 @@ const PurchaseRequisition = () => {
                   const forwarded = isForwarded(pr);
                   const forwardEnabled = !qLoading && qStatus === 'saved' && !forwarding && !forwarded;
                   return (
-                    <div key={it.id} className={`relative flex items-center justify-between py-3 px-4 ${forwarded ? 'bg-green-100/50' : ''}`}>
-                      {forwarded ? (
-                        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                          <div className="text-green-800/50 font-extrabold text-3xl tracking-[0.35em]">FORWARDED</div>
-                        </div>
-                      ) : null}
-                      <div className="min-w-0">
-                        <div className="font-medium truncate">{it.prNo} — {it.project}</div>
-                        <div className="text-xs text-gray-500 truncate">PO Date: {it.purchaseOrder?.date} · Total: {it.purchaseOrder ? formatInr(it.purchaseOrder.totalValue) : '—'}</div>
-                        <div className="text-xs text-gray-500 truncate">
-                          Quotation:{' '}
+                    <div key={it.id} className={`relative flex flex-col gap-4 px-5 py-5 transition hover:bg-slate-50/70 xl:flex-row xl:items-center xl:justify-between ${forwarded ? 'bg-emerald-50/70' : ''}`}>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-sm font-black text-[#0D3A35]">{it.prNo}</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase text-emerald-700">PO Created</span></div>
+                        <div className="mt-2 truncate text-base font-black text-slate-900">{it.project}</div>
+                        <div className="mt-2 text-xs font-semibold text-slate-500">PO Date: {formatDisplayDate(it.purchaseOrder?.date)} · Total: <span className="font-black text-slate-700">{it.purchaseOrder ? formatInr(it.purchaseOrder.totalValue) : '—'}</span></div>
+                        <div className="mt-1 text-xs font-semibold text-slate-500">
+                          Comparative Statement:{' '}
                           {qLoading ? (
                             <span className="font-semibold text-gray-500">Checking…</span>
                           ) : (
@@ -1810,10 +1977,19 @@ const PurchaseRequisition = () => {
                           )}
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 ml-4">
+                      <div className="relative z-[1] flex flex-wrap items-center gap-2 xl:ml-4 xl:justify-end">
                         <Button
                           variant="outline"
-                          className="gap-2"
+                          onClick={() => openRevisionPage(it)}
+                          className="h-10 gap-2 rounded-xl border-[#0D3A35]/25 font-bold text-[#0D3A35] hover:bg-[#edf5f2]"
+                          disabled={qLoading || !['saved', 'forwarded', 'draft'].includes(qStatus)}
+                          title="Create a new revision of the comparative statement"
+                        >
+                          <RotateCcw className="h-4 w-4" /> Revise
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="h-10 gap-2 rounded-xl border-slate-200 font-bold"
                           disabled={!forwardEnabled}
                           title={
                             forwarded
@@ -1826,9 +2002,10 @@ const PurchaseRequisition = () => {
                           }
                           onClick={() => void forwardNow(pr)}
                         >
+                          <Send className="h-4 w-4" />
                           {forwarding ? 'Forwarding…' : forwarded ? 'Forwarded' : 'Forward'}
                         </Button>
-                        <Button variant="outline" onClick={() => setPreviewIndent(it)} className="gap-2">
+                        <Button variant="outline" onClick={() => setPreviewIndent(it)} className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]">
                           <FilePlus className="w-4 h-4" /> View PO
                         </Button>
                       </div>
@@ -1837,74 +2014,73 @@ const PurchaseRequisition = () => {
                 })}
               </Fragment>
             ))}
+            {activeTab === 'po' && poGroups.length === 0 && (
+              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><PackageCheck className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No purchase orders created</p><p className="mt-1 text-sm font-semibold text-slate-400">Converted requisitions will be listed in this tab.</p></div>
+            )}
           </div>
         </div>
       </div>
+      </div>
 
       <Dialog open={open} onOpenChange={(v) => { if (!v) setOpen(false); }}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>New Indent</DialogTitle>
+        <DialogContent className="max-h-[92vh] max-w-3xl overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left">
+            <DialogTitle className="flex items-center gap-3 text-xl font-black text-white"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><FilePlus className="h-5 w-5" /></span>Create Purchase Requisition</DialogTitle>
+            <p className="pl-[52px] text-sm font-semibold text-white/65">Record requisition identity, approval routing and the initial item.</p>
           </DialogHeader>
 
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs font-medium text-gray-500">Project</label>
-              <Input value={newProject} onChange={(e) => setNewProject(e.target.value)} />
-            </div>
-            <div>
-              <label className="text-xs font-medium text-gray-500">PR No</label>
-              <Input value={newPrNo} onChange={(e) => setNewPrNo(e.target.value)} />
-            </div>
-            <div className="grid grid-cols-2 gap-2">
+          <div className="max-h-[calc(92vh-165px)] space-y-5 overflow-y-auto p-6">
+            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="mb-4 text-sm font-black uppercase tracking-wider text-[#0D3A35]">Requisition Details</h3>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="text-xs font-bold text-slate-500">Project *</label>
+                  <Input value={newProject} onChange={(e) => setNewProject(e.target.value)} className="mt-1.5 h-11 rounded-xl border-slate-200" placeholder="Select or enter project" />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-500">PR Number *</label>
+                  <Input value={newPrNo} onChange={(e) => setNewPrNo(e.target.value)} className="mt-1.5 h-11 rounded-xl border-slate-200" placeholder="Purchase requisition number" />
+                </div>
               <div>
-                <label className="text-xs font-medium text-gray-500">Date</label>
-                <Input value={newDate} onChange={(e) => setNewDate(e.target.value)} type="date" />
+                  <label className="text-xs font-bold text-slate-500">Requisition Date *</label>
+                  <Input value={newDate} onChange={(e) => setNewDate(e.target.value)} type="date" className="mt-1.5 h-11 rounded-xl border-slate-200" />
+                </div>
               </div>
-              <div>
-                <label className="text-xs font-medium text-gray-500">Indented By</label>
-                <Input value={newIndentedBy} onChange={(e) => setNewIndentedBy(e.target.value)} />
+            </section>
+
+            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="mb-4 text-sm font-black uppercase tracking-wider text-[#0D3A35]">Approval Routing</h3>
+              <div className="grid gap-4 md:grid-cols-3">
+                <div><label className="text-xs font-bold text-slate-500">Indented By *</label><Input value={newIndentedBy} onChange={(e) => setNewIndentedBy(e.target.value)} className="mt-1.5 h-11 rounded-xl border-slate-200" /></div>
+                <div><label className="text-xs font-bold text-slate-500">Forwarded By *</label><Input value={newForwardedBy} onChange={(e) => setNewForwardedBy(e.target.value)} className="mt-1.5 h-11 rounded-xl border-slate-200" /></div>
+                <div><label className="text-xs font-bold text-slate-500">Director's Approval *</label><Input value={newDirectorsApproval} onChange={(e) => setNewDirectorsApproval(e.target.value)} className="mt-1.5 h-11 rounded-xl border-slate-200" /></div>
               </div>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs font-medium text-gray-500">Forwarded By</label>
-                <Input value={newForwardedBy} onChange={(e) => setNewForwardedBy(e.target.value)} />
+            </section>
+
+            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="mb-4 text-sm font-black uppercase tracking-wider text-[#0D3A35]">Initial Item</h3>
+              <div className="grid gap-4 md:grid-cols-[minmax(0,2fr)_1fr_1fr]">
+                <div><label className="text-xs font-bold text-slate-500">Item Name *</label><Input value={newItemName} onChange={(e) => setNewItemName(e.target.value)} className="mt-1.5 h-11 rounded-xl border-slate-200" placeholder="Item description" /></div>
+                <div><label className="text-xs font-bold text-slate-500">Quantity *</label><Input type="number" min="0" value={String(newItemQty)} onChange={(e) => setNewItemQty(Number(e.target.value))} className="mt-1.5 h-11 rounded-xl border-slate-200" /></div>
+                <div><label className="text-xs font-bold text-slate-500">UoM</label><Input value="Nos" readOnly className="mt-1.5 h-11 rounded-xl border-slate-200 bg-slate-50 font-bold text-slate-500" /></div>
               </div>
-              <div>
-                <label className="text-xs font-medium text-gray-500">Director</label>
-                <Input value={newDirectorsApproval} onChange={(e) => setNewDirectorsApproval(e.target.value)} />
-              </div>
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label className="text-xs font-medium text-gray-500">Item Name</label>
-                <Input value={newItemName} onChange={(e) => setNewItemName(e.target.value)} />
-              </div>
-              <div>
-                <label className="text-xs font-medium text-gray-500">Qty</label>
-                <Input type="number" value={String(newItemQty)} onChange={(e) => setNewItemQty(Number(e.target.value))} />
-              </div>
-              <div>
-                <label className="text-xs font-medium text-gray-500">UoM</label>
-                <Input value={"No"} disabled />
-              </div>
-            </div>
+            </section>
           </div>
 
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button className="bg-green-600 text-white" onClick={saveNew}>Create</Button>
+          <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+            <Button variant="outline" onClick={() => setOpen(false)} className="h-10 rounded-xl border-slate-200 px-5 font-bold">Cancel</Button>
+            <Button className="h-10 rounded-xl bg-[#0D3A35] px-6 font-black text-white hover:bg-[#092b27]" onClick={saveNew}><Plus className="mr-2 h-4 w-4" />Create Requisition</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       <Dialog open={Boolean(previewIndent)} onOpenChange={(v) => { if (!v) setPreviewIndent(null); }}>
-        <DialogContent className="max-w-6xl max-h-[90vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle>{previewIndent?.indentType === 'SPR' ? 'SPR Preview' : 'PR Preview'}</DialogTitle>
+        <DialogContent className="flex max-h-[92vh] max-w-[min(96vw,1280px)] flex-col overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left">
+            <DialogTitle className="flex items-center gap-3 text-xl font-black text-white"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><FileText className="h-5 w-5" /></span>{previewIndent?.indentType === 'SPR' ? 'Service Requisition Preview' : 'Indent Preview'}</DialogTitle>
+            <p className="pl-[52px] text-sm font-medium text-white/70">Review the complete purchase requisition and approval details.</p>
           </DialogHeader>
-          <div className="flex-1 overflow-auto pr-1">
+          <div className="flex-1 overflow-auto p-5">
             {previewIndent ? (
               <div className="space-y-4">
                 {previewIndent.indentType === 'SPR' ? (
@@ -1917,27 +2093,43 @@ const PurchaseRequisition = () => {
                     approved={signaturesPresent(previewIndent).director}
                   />
                 ) : (
-                  <PRPreview
+                  <ThemedPRPreview
                     indent={{
                       project: previewIndent.project,
                       prNo: previewIndent.prNo,
                       date: previewIndent.date,
-                      department: previewIndent.department,
+                      department: previewIndent.department || 'INVENTORY',
                       indentedBy: previewIndent.indentedBy,
+                      indentedBySignature: previewIndent.indentedSignature,
                       forwardedBy: previewIndent.forwardedBy,
+                      forwardedBySignature: previewIndent.forwardedSignature,
                       directorsApproval: previewIndent.directorsApproval,
-                      indentedSignature: previewIndent.indentedSignature,
-                      forwardedSignature: previewIndent.forwardedSignature,
-                      directorSignature: previewIndent.directorSignature,
+                      directorsApprovalSignature: previewIndent.directorSignature,
                       remarksNotes: previewIndent.remarksNotes || '',
                       budgetHead: previewIndent.budgetHead || '',
-                      items: previewIndent.items,
-                    }}
+                      items: previewIndent.items.map((item) => ({
+                        id: item.id,
+                        srNo: item.srNo,
+                        itemCode: item.itemCode || '',
+                        partName: item.partName,
+                        specification: item.specification || '',
+                        uom: item.uom,
+                        totalQtyRequired: numOr0(item.totalQtyRequired),
+                        lessQtyAvailableInStock: numOr0(item.lessQtyAvailableInStock),
+                        procurementLeadTimeWeeks: numOr0(item.procurementLeadTimeWeeks),
+                        materialRequiredByDate: item.materialRequiredByDate || '',
+                        indigenousOrImported: item.indigenousOrImported === 'Imported' ? 'Imported' : 'Indigenous',
+                        ratePerItem: numOr0(item.ratePerItem),
+                        preferredVendorName: item.preferredVendorName || '',
+                        validityOfWarrantyAndGuarantee: item.validityOfWarrantyAndGuarantee || '',
+                        fullLifeHr: item.fullLifeHr || '',
+                        actualLifeHr: item.actualLifeHr || '',
+                        reasonForReplacement: item.reasonForReplacement || '',
+                        repairingPossibility: item.repairingPossibility === 'Yes' || item.repairingPossibility === 'No' ? item.repairingPossibility : 'NA',
+                      })),
+                    } satisfies PRPreviewIndent}
                     attachments={diary}
-                    onAddQuote={(lineItemId, quote) => addQuote(previewIndent.id, lineItemId, quote)}
-                    onRemoveQuote={(lineItemId, quoteId) => removeQuote(previewIndent.id, lineItemId, quoteId)}
-                    readOnly={isForwarded(str(previewIndent.prNo || previewIndent.id))}
-                    approved={signaturesPresent(previewIndent).director}
+                    showDirectorSignature={signaturesPresent(previewIndent).director}
                   />
                 )}
 
@@ -1950,14 +2142,19 @@ const PurchaseRequisition = () => {
                     }
                   />
                 ) : (
-                  <div className="text-sm text-gray-500">No comparative statement saved for this PR yet.</div>
+                  <div className="rounded-xl border border-dashed border-slate-300 bg-white px-5 py-6 text-center text-sm font-semibold text-slate-400">No comparative statement has been saved for this requisition.</div>
                 )}
               </div>
             ) : null}
           </div>
 
-          <DialogFooter>
-            <Button onClick={() => setPreviewIndent(null)}>Close</Button>
+          <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+            {previewIndent && previewIndent.indentType !== 'SPR' ? (
+              <Button disabled variant="outline" className="h-10 rounded-xl border-slate-200 px-5 font-bold text-emerald-700 disabled:opacity-60">
+                {signaturesPresent(previewIndent).director ? 'Approved' : isForwarded(str(previewIndent.prNo || previewIndent.id)) ? 'Forwarded' : 'Pending'}
+              </Button>
+            ) : null}
+            <Button onClick={() => setPreviewIndent(null)} className="h-10 rounded-xl bg-[#0D3A35] px-6 font-black text-white hover:bg-[#092b27]">Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

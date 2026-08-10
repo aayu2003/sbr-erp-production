@@ -79,6 +79,46 @@ type FarmerRow = {
   } | null;
 };
 
+const normalizeProfilePhotoUrl = (value?: string | null) => {
+  const source = String(value || '').trim();
+  if (!source) return '';
+  try {
+    const url = new URL(source);
+    const expiresAt = Number(url.searchParams.get('Expires'));
+    const isAmazonS3 = url.hostname.endsWith('.amazonaws.com');
+    if (isAmazonS3 && Number.isFinite(expiresAt) && expiresAt <= Math.floor(Date.now() / 1000)) {
+      url.search = '';
+      return url.toString();
+    }
+  } catch {
+    // Keep blob URLs, relative paths and other browser-supported sources unchanged.
+  }
+  return source;
+};
+
+const ProfileAvatar = ({
+  src,
+  name,
+  imageClassName = 'h-full w-full object-cover',
+  fallbackClassName = 'text-2xl font-bold text-emerald-700',
+}: {
+  src?: string | null;
+  name: string;
+  imageClassName?: string;
+  fallbackClassName?: string;
+}) => {
+  const normalizedSrc = normalizeProfilePhotoUrl(src);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [normalizedSrc]);
+  const initials = name.split(/\s+/).filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'FR';
+
+  if (!normalizedSrc || failed) {
+    return <div className={`flex h-full w-full items-center justify-center ${fallbackClassName}`}>{initials}</div>;
+  }
+
+  return <img src={normalizedSrc} alt="" className={imageClassName} onError={() => setFailed(true)} />;
+};
+
 type FarmCardData = {
   id: string;
   location: string;
@@ -2729,13 +2769,7 @@ const Farmers = () => {
                 {/* Profile */}
                 <div className="relative flex min-h-[132px] items-center gap-4 border-b border-slate-100 px-5 py-5">
                   <div className="h-20 w-20 shrink-0 overflow-hidden rounded-full bg-emerald-50 shadow-sm ring-2 ring-slate-100">
-                    {farmer.profileImageUrl ? (
-                      <img src={farmer.profileImageUrl} alt={farmer.fullName} className="h-full w-full object-cover" />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-2xl font-bold text-emerald-700">
-                        {farmer.fullName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'FR'}
-                      </div>
-                    )}
+                    <ProfileAvatar src={farmer.profileImageUrl} name={farmer.fullName} />
                   </div>
                   <div className="min-w-0 flex-1">
                     <h3 className="line-clamp-2 text-lg font-bold leading-snug text-slate-950">{farmer.fullName}</h3>
@@ -2851,13 +2885,11 @@ const Farmers = () => {
                 }`}
                 onClick={() => inlineProfileEditing && editProfilePhotoRef.current?.click()}
               >
-                {editProfilePhotoPreview || viewProfileFarmer.profileImageUrl ? (
-                  <img src={editProfilePhotoPreview ?? viewProfileFarmer.profileImageUrl} alt={viewProfileFarmer.fullName} className="h-full w-full object-cover" />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center text-3xl font-semibold">
-                    {viewProfileFarmer.fullName.split(' ').map((p) => p[0]).join('').slice(0, 2).toUpperCase() || 'FR'}
-                  </div>
-                )}
+                <ProfileAvatar
+                  src={editProfilePhotoPreview ?? viewProfileFarmer.profileImageUrl}
+                  name={viewProfileFarmer.fullName}
+                  fallbackClassName="text-3xl font-semibold text-white"
+                />
                 {inlineProfileEditing && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
                     <Camera className="h-5 w-5 text-white" />
@@ -4703,13 +4735,11 @@ const Farmers = () => {
               <div className="flex items-center gap-4">
                 <div className="relative group cursor-pointer shrink-0" onClick={() => editProfilePhotoRef.current?.click()}>
                   <div className="h-16 w-16 overflow-hidden rounded-2xl border border-white/20 bg-white/10 shadow">
-                    {editProfilePhotoPreview || activeEditFarmer?.profileImageUrl ? (
-                      <img src={editProfilePhotoPreview ?? activeEditFarmer?.profileImageUrl} alt="profile" className="h-full w-full object-cover" />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-lg font-bold text-white">
-                        {activeEditFarmer?.fullName.split(' ').map((p) => p[0]).join('').slice(0, 2).toUpperCase() || 'FR'}
-                      </div>
-                    )}
+                    <ProfileAvatar
+                      src={editProfilePhotoPreview ?? activeEditFarmer?.profileImageUrl}
+                      name={activeEditFarmer?.fullName || 'Farmer'}
+                      fallbackClassName="text-lg font-bold text-white"
+                    />
                   </div>
                   <div className="absolute inset-0 flex items-center justify-center rounded-2xl bg-black/45 opacity-0 transition-opacity group-hover:opacity-100">
                     <Camera className="h-5 w-5 text-white" />

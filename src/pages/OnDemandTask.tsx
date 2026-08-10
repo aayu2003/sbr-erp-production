@@ -145,12 +145,18 @@ type AllocationRecord = {
   createdAt: string;
 };
 
+type StoreAllocationEntry = { store: string; quantity: number };
+
 type ApiAllocationItem = {
   unit: string;
   item_name: string;
   quantity: number;
-  farm_allocation: Record<string, { owner_name: string; quantity: number }>;
+  farm_allocation: Record<string, { owner_name: string; quantity: number; store_allocations?: StoreAllocationEntry[] }>;
 };
+
+// A single editable row in the store-split UI (Lock Confirmation modal) — quantity is
+// string-valued while editing, same convention as the rest of this file's numeric inputs.
+type StoreSplitRow = { store: string; quantity: string };
 
 type ApiAllocationSchema = {
   task_id: string;
@@ -587,6 +593,9 @@ const OnDemandTask = () => {
 
   // Lock confirmation popup
   const [lockConfirmTarget, setLockConfirmTarget] = useState<LockConfirmTarget | null>(null);
+  // Store-wise split entered in the Lock Confirmation modal, before it's actually locked —
+  // keyed by [productId][farmId]. Reset whenever the modal is (re)opened.
+  const [storeSplits, setStoreSplits] = useState<Record<string, Record<string, StoreSplitRow[]>>>({});
 
   // ── Fetch shared resources ──────────────────────────────────────────────────
 
@@ -1165,6 +1174,111 @@ const OnDemandTask = () => {
     }
   };
 
+  // ── Store-wise allocation (Lock Confirmation modal) ─────────────────────────
+  // Deduction now happens per-store (Inventory.dissociation[store].LIFO) instead of the
+  // item's shared fifo_list, so every farm's quantity must be split across store(s) before
+  // the allocation can actually be locked.
+
+  const getItemDissociationStores = (productId: string): string[] => {
+    const inv = inventoryItems.find(it => getInventoryItemId(it) === productId);
+    const dissociation = (inv as any)?.dissociation;
+    return dissociation && typeof dissociation === 'object' ? Object.keys(dissociation) : [];
+  };
+
+  const getStoreSplitRows = (productId: string, farmId: string): StoreSplitRow[] =>
+    storeSplits[productId]?.[farmId] ?? [];
+
+  const setStoreSplitRows = (productId: string, farmId: string, rows: StoreSplitRow[]) =>
+    setStoreSplits(prev => ({ ...prev, [productId]: { ...(prev[productId] || {}), [farmId]: rows } }));
+
+  const addStoreSplitRow = (productId: string, farmId: string) =>
+    setStoreSplitRows(productId, farmId, [...getStoreSplitRows(productId, farmId), { store: '', quantity: '' }]);
+
+  const updateStoreSplitRow = (productId: string, farmId: string, index: number, patch: Partial<StoreSplitRow>) =>
+    setStoreSplitRows(productId, farmId, getStoreSplitRows(productId, farmId).map((r, i) => (i === index ? { ...r, ...patch } : r)));
+
+  const removeStoreSplitRow = (productId: string, farmId: string, index: number) =>
+    setStoreSplitRows(productId, farmId, getStoreSplitRows(productId, farmId).filter((_, i) => i !== index));
+
+  const getStoreSplitTotal = (productId: string, farmId: string): number =>
+    getStoreSplitRows(productId, farmId).reduce((s, r) => s + (Number(r.quantity) || 0), 0);
+
+  // Same "local edit overrides API value" fallback used everywhere else in this file
+  // (handleSaveAllocation, the pending-allocation table) for a farm's needed quantity.
+  const neededQtyFor = (target: LockConfirmTarget, productId: string, item: ApiAllocationItem, farmId: string): number => {
+    const local = apiAllocDistribution[target.taskId]?.[productId]?.[farmId];
+    const val = local !== undefined ? Number(local) : (item.farm_allocation?.[farmId]?.quantity ?? 0);
+    return isNaN(val) ? 0 : val;
+  };
+
+  const farmIdsNeedingSplitFor = (target: LockConfirmTarget, productId: string, item: ApiAllocationItem): string[] => {
+    const farmIds = Object.keys(item.farm_allocation || {});
+    const localFarmIds = Object.keys(apiAllocDistribution[target.taskId]?.[productId] || {});
+    return Array.from(new Set([...farmIds, ...localFarmIds])).filter(
+      (farmId) => neededQtyFor(target, productId, item, farmId) > 0,
+    );
+  };
+
+  const handleConfirmLockWithStores = async (target: LockConfirmTarget) => {
+    const allocItems = Object.entries(target.allocationSchema);
+
+    // Validate every farm's quantity is fully accounted for across its chosen store(s).
+    for (const [productId, item] of allocItems) {
+      for (const farmId of farmIdsNeedingSplitFor(target, productId, item)) {
+        const needed = neededQtyFor(target, productId, item, farmId);
+        const rows = getStoreSplitRows(productId, farmId).filter((r) => r.store && Number(r.quantity) > 0);
+        if (rows.length === 0) {
+          toast.error(`${item.item_name || productId} → ${farmId}: assign at least one store for ${needed} ${item.unit}`);
+          return;
+        }
+        const allocated = rows.reduce((s, r) => s + Number(r.quantity), 0);
+        if (Math.abs(allocated - needed) > 0.001) {
+          toast.error(`${item.item_name || productId} → ${farmId}: store split totals ${allocated}, but ${needed} ${item.unit} is needed`);
+          return;
+        }
+      }
+    }
+
+    try {
+      // Persist store_allocations onto each farm's allocation entry before locking —
+      // allocate_inventory_to_farm replaces each farm's whole entry, so owner_name/quantity
+      // must be resent alongside the new store_allocations.
+      for (const [productId, item] of allocItems) {
+        const farmIds = farmIdsNeedingSplitFor(target, productId, item);
+        if (farmIds.length === 0) continue;
+
+        const farm_allocation: Record<string, { owner_name: string; quantity: number; store_allocations: StoreAllocationEntry[] }> = {};
+        for (const farmId of farmIds) {
+          const farmData = farms.find((f: any) => String(f?.farm_id || '') === farmId);
+          const owner_name = String((farmData as any)?.owner_name || item.farm_allocation?.[farmId]?.owner_name || farmId);
+          const rows = getStoreSplitRows(productId, farmId).filter((r) => r.store && Number(r.quantity) > 0);
+          farm_allocation[farmId] = {
+            owner_name,
+            quantity: neededQtyFor(target, productId, item, farmId),
+            store_allocations: rows.map((r) => ({ store: r.store, quantity: Number(r.quantity) })),
+          };
+        }
+
+        const res = await fetch(`${BASE_URL}/admin_ops_requests/allocate_inventory_to_farm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: target.taskId, equipment_id: productId, farm_allocation }),
+        });
+        if (!res.ok) {
+          toast.error(`Failed to save store allocation for ${item.item_name || productId}`);
+          return;
+        }
+      }
+    } catch {
+      toast.error('Failed to save store allocation. Please check your connection.');
+      return;
+    }
+
+    await handleLockAllocation(target.taskId);
+    setLockConfirmTarget(null);
+    setStoreSplits({});
+  };
+
   const updateDistribution = (allocId: string, itemId: string, farmId: string, qty: string) =>
     setAllocationRecords(prev => prev.map(a =>
       a.id !== allocId ? a : {
@@ -1467,7 +1581,7 @@ const OnDemandTask = () => {
                                                     >
                                                       <option value="">+ Add land</option>
                                                       {availableFarms.map((f: any) => (
-                                                        <option key={f.farm_id} value={f.farm_id}>{f?.owner_name || f?.farm_id}</option>
+                                                        <option key={f.farm_id} value={f.farm_id}>{f?.owner_name || f?.farm_id}{f?.area ? ` (${f.area}ac)` : ''}</option>
                                                       ))}
                                                     </select>
                                                     <button type="button" disabled={!alloc.farmSelector} onClick={() => addAllocationFarm(step.id)} className="shrink-0 rounded-md bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
@@ -1500,8 +1614,11 @@ const OnDemandTask = () => {
                                                             return (
                                                               <tr key={farmId} className="border-t border-slate-100">
                                                                 <td className="px-2 py-1.5">
-                                                                  <div className="flex items-center gap-1">
-                                                                    <span className="max-w-[90px] truncate font-medium text-slate-900" title={farm?.owner_name || farmId}>{farm?.owner_name || farmId}</span>
+                                                                  <div className="flex items-center justify-between gap-1">
+                                                                    <div className="min-w-0">
+                                                                      <div className="max-w-[90px] truncate font-medium text-slate-900" title={farm?.owner_name || farmId}>{farm?.owner_name || farmId}</div>
+                                                                      {farm?.area != null && <div className="text-[10px] text-slate-400">{farm.area}ac</div>}
+                                                                    </div>
                                                                     <button type="button" onClick={() => removeAllocationFarm(step.id, farmId)} title="Remove land" className="shrink-0 text-slate-300 hover:text-red-500">×</button>
                                                                   </div>
                                                                 </td>
@@ -2033,7 +2150,7 @@ const OnDemandTask = () => {
                         </button>
                         <button
                           type="button"
-                          onClick={() => setLockConfirmTarget({ taskId: task.task_id, stepsDict: task.steps_dict, allocationSchema: task.allocation_schema, createdAt: task.created_at, staffId: task.staff_id })}
+                          onClick={() => { setStoreSplits({}); setLockConfirmTarget({ taskId: task.task_id, stepsDict: task.steps_dict, allocationSchema: task.allocation_schema, createdAt: task.created_at, staffId: task.staff_id }); }}
                           className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-amber-200 bg-amber-50 text-[11px] font-medium text-amber-700 hover:bg-amber-100 hover:border-amber-300 transition-colors shadow-sm"
                         >
                           <Lock className="h-3.5 w-3.5" /> Lock
@@ -2049,14 +2166,24 @@ const OnDemandTask = () => {
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200">
                             <th className="sticky left-0 bg-slate-50 z-10 text-left px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500 min-w-[160px] border-r border-slate-200">Item / Farm →</th>
-                            {currentFarms.map(farmId => (
+                            {currentFarms.map(farmId => {
+                              const fd = farms.find((f: any) => String(f?.farm_id || '') === farmId);
+                              return (
                               <th key={farmId} className="px-3 py-2 text-center text-[10px] font-semibold uppercase tracking-wide text-slate-500 min-w-[120px] border-r border-slate-100">
                                 <div className="flex items-center justify-between gap-1">
-                                  <span className="truncate">{getFarmLabel(farmId)}</span>
+                                  <div className="text-left min-w-0">
+                                    <div className="truncate">{getFarmLabel(farmId)}</div>
+                                    {fd && (
+                                      <div className="text-[9px] font-normal normal-case tracking-normal text-slate-400 mt-0.5 capitalize">
+                                        {fd.crop_type}{fd.area ? ` · ${fd.area}ac` : ''}
+                                      </div>
+                                    )}
+                                  </div>
                                   <button type="button" onClick={() => setApiAllocFarms(prev => ({ ...prev, [task.task_id]: currentFarms.filter(f => f !== farmId) }))} className="shrink-0 text-slate-300 hover:text-red-500 transition-colors text-sm font-bold">×</button>
                                 </div>
                               </th>
-                            ))}
+                              );
+                            })}
                             <th className="px-2 py-2 min-w-[180px] border-r border-slate-100">
                               <div className="flex items-center gap-1">
                                 <select
@@ -2195,7 +2322,7 @@ const OnDemandTask = () => {
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => setLockConfirmTarget({ taskId: alloc.task_id, stepsDict: alloc.steps_dict ?? {}, allocationSchema: alloc.allocation_schema, createdAt: alloc.created_at, staffId: alloc.staff_id })}
+                                  onClick={() => { setStoreSplits({}); setLockConfirmTarget({ taskId: alloc.task_id, stepsDict: alloc.steps_dict ?? {}, allocationSchema: alloc.allocation_schema, createdAt: alloc.created_at, staffId: alloc.staff_id }); }}
                                   className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-amber-200 bg-amber-50 text-[11px] font-medium text-amber-700 hover:bg-amber-100 hover:border-amber-300 transition-colors shadow-sm"
                                 >
                                   <Lock className="h-3.5 w-3.5" />
@@ -2725,6 +2852,87 @@ const OnDemandTask = () => {
                   </div>
                 </div>
 
+                {/* Store-wise allocation — required before locking, since stock is now debited
+                    per-store (dissociation[store].LIFO) rather than the item's shared fifo_list. */}
+                {(() => {
+                  const rowsToRender = allocItems.flatMap(([productId, item]) =>
+                    farmIdsNeedingSplitFor(target, productId, item).map((farmId) => ({
+                      productId,
+                      item,
+                      farmId,
+                      needed: neededQtyFor(target, productId, item, farmId),
+                    })),
+                  );
+                  return (
+                    <div>
+                      <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 mb-2">Store-wise Allocation</p>
+                      {rowsToRender.length === 0 ? (
+                        <p className="text-xs text-slate-400 italic">No farm quantities set yet — nothing to allocate to stores.</p>
+                      ) : (
+                        <div className="space-y-3">
+                          {rowsToRender.map(({ productId, item, farmId, needed }) => {
+                            const rows = getStoreSplitRows(productId, farmId);
+                            const allocated = getStoreSplitTotal(productId, farmId);
+                            const matches = Math.abs(allocated - needed) <= 0.001;
+                            const storeOptions = getItemDissociationStores(productId);
+                            return (
+                              <div key={`${productId}::${farmId}`} className="rounded-lg border border-slate-200 p-3">
+                                <div className="flex items-center justify-between gap-3 mb-2">
+                                  <div className="min-w-0">
+                                    <p className="text-xs font-semibold text-slate-800 truncate">{item.item_name || productId} → {getFarmName(farmId)}</p>
+                                    <p className="text-[10px] text-slate-400">Needed: {needed} {item.unit}</p>
+                                  </div>
+                                  <span className={cn(
+                                    'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold',
+                                    matches ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700',
+                                  )}>
+                                    Allocated: {allocated} / {needed}
+                                  </span>
+                                </div>
+                                <div className="space-y-1.5">
+                                  {rows.map((row, idx) => (
+                                    <div key={idx} className="flex items-center gap-2">
+                                      <select
+                                        value={row.store}
+                                        onChange={(e) => updateStoreSplitRow(productId, farmId, idx, { store: e.target.value })}
+                                        className="flex-1 rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 focus:outline-none focus:border-green-500"
+                                      >
+                                        <option value="">Select store…</option>
+                                        {storeOptions.map((store) => (
+                                          <option key={store} value={store}>{store}</option>
+                                        ))}
+                                      </select>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        value={row.quantity}
+                                        onChange={(e) => updateStoreSplitRow(productId, farmId, idx, { quantity: e.target.value })}
+                                        placeholder="Qty"
+                                        className="w-24 rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-right text-slate-700 focus:outline-none focus:border-green-500"
+                                      />
+                                      <button type="button" onClick={() => removeStoreSplitRow(productId, farmId, idx)} className="shrink-0 text-slate-300 hover:text-red-500 text-sm font-bold">×</button>
+                                    </div>
+                                  ))}
+                                  <button
+                                    type="button"
+                                    onClick={() => addStoreSplitRow(productId, farmId)}
+                                    className="text-[11px] font-medium text-green-700 hover:underline"
+                                  >
+                                    + Add store
+                                  </button>
+                                  {storeOptions.length === 0 && (
+                                    <p className="text-[10px] text-amber-600">No stores currently hold stock for this item.</p>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* Disclaimer */}
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 flex gap-3">
                   <div className="shrink-0 mt-0.5 h-4 w-4 rounded-full bg-red-500 flex items-center justify-center text-white text-[9px] font-bold">!</div>
@@ -2748,7 +2956,7 @@ const OnDemandTask = () => {
                 </button>
                 <button
                   type="button"
-                  onClick={() => { handleLockAllocation(target.taskId); setLockConfirmTarget(null); }}
+                  onClick={() => handleConfirmLockWithStores(target)}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold transition-colors shadow-sm"
                 >
                   <Lock className="h-3.5 w-3.5" /> Confirm & Lock
