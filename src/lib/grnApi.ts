@@ -318,6 +318,9 @@ export type GrnOrderInfo = {
 };
 
 export type CreateGrnInput = {
+  // User-editable override for the auto-suggested GRN number (see getNextGrnNumber).
+  // Left blank/omitted, the backend auto-generates one as before.
+  grnNumber?: string;
   orderNumber: string;
   poDate?: string;
   prNumber?: string;
@@ -451,6 +454,20 @@ const toGrnRecord = (raw: Record<string, unknown>): GRNRecord => {
 
 const fromSigner = (s: GrnSigner) => ({ staff_id: s.staffId, name: s.name, designation: s.designation || '' });
 
+// The next GRN number in the current fiscal year's series — offered as a pre-filled
+// suggestion; the user is free to override it before submitting.
+export const getNextGrnNumber = async (): Promise<string> => {
+  const data = await apiGet<{ next_grn_number: string }>('/admin_grn_inspection/get_next_grn_number');
+  return data.next_grn_number;
+};
+
+export const checkGrnNumberExists = async (grnNumber: string): Promise<boolean> => {
+  const data = await apiGet<{ exists: boolean }>(
+    `/admin_grn_inspection/check_grn_number_exists/${encodeURIComponent(grnNumber)}`,
+  );
+  return data.exists;
+};
+
 export const createGrn = async (input: CreateGrnInput): Promise<GRNRecord> => {
   if (input.gateEntryIds.length === 0) {
     throw new Error('Link at least one inward gate entry before creating a GRN');
@@ -484,6 +501,7 @@ export const createGrn = async (input: CreateGrnInput): Promise<GRNRecord> => {
   }
 
   const data = await apiPost<{ grn: Record<string, unknown> } | { grn_number: string }>('/admin_grn_inspection/create_grn', {
+    grn_number: input.grnNumber?.trim() || null,
     order_number: input.orderNumber,
     po_date: input.poDate || '',
     pr_number: input.prNumber || '',

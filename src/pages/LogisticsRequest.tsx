@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Truck, PackageCheck, MapPin, ArrowRight, Loader2, ClipboardList, FileText } from 'lucide-react';
+import { Truck, PackageCheck, MapPin, ArrowRight, Loader2, ClipboardList, FileText, CheckCircle2, Sprout } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
@@ -105,6 +105,94 @@ const formatDate = (value?: string) => {
   return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
 };
 
+// ─────────────────────────────────────────────────────────────
+// MATERIAL DISPATCH — task-driven requests to move dosage/equipment items from a
+// warehouse to a field, queued whenever "Logistics required" is toggled on while
+// assigning a cultivation task (see CultivationCalendar.tsx). Deliberately separate
+// from the StockTransfer flow above (different shape, different destination — a farm,
+// not another store), but reuses the same vehicle-availability calendar UI that
+// CultivationCalendar.tsx's own "Select Vehicles" step already has, replicated here
+// (not imported — it's defined inline there too) since a dropdown doesn't show whether
+// a truck is actually free on the day it's needed.
+// ─────────────────────────────────────────────────────────────
+
+// One request per warehouse now (not per task) — "store" is the single source
+// ("From"), farm_id is the single destination ("To"), matching how the backend
+// splits a task's store_allocations into one task_material_dispatch row per store.
+type MaterialDispatchItem = { equipment_id: string; equipment_name: string; quantity: number };
+type MaterialDispatchRequest = {
+  request_id: string;
+  task_id: string;
+  calander_id?: string;
+  farm_id: string;
+  store: string;
+  type: string;
+  activity: string;
+  date: string;
+  items: MaterialDispatchItem[];
+  status: 'pending_vehicle' | 'dispatched';
+  vehicle_id: string;
+  vehicle_number: string;
+  vehicle_type: string;
+  vehicle_make: string;
+  vehicle_model: string;
+  driver_name: string;
+  driver_contact: string;
+  created_at: string;
+};
+
+// Same vehicle-availability grid shape as CultivationCalendar.tsx's Asset/schedule.
+interface DispatchAsset {
+  id: string;
+  name: string;
+  type: string;
+  schedule: Record<string, number>;
+}
+
+const formatDateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const addDays = (dateStr: string, days: number): string => {
+  const date = new Date(dateStr);
+  date.setDate(date.getDate() + days);
+  return formatDateKey(date);
+};
+const getDayName = (dateStr: string) => new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short' });
+const getDayNum = (dateStr: string) => new Date(dateStr).getDate();
+
+// Normalizes the vehicle API's work_calandar (object-keyed-by-date or array form) into
+// a plain { date: acresCovered } map — identical to CultivationCalendar.tsx's version.
+const buildVehicleSchedule = (raw: unknown): Record<string, number> => {
+  if (!raw) return {};
+  if (!Array.isArray(raw) && typeof raw === 'object') {
+    const schedule: Record<string, number> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (!k) continue;
+      if (typeof v === 'string') {
+        schedule[k] = 0;
+      } else if (v && typeof v === 'object') {
+        const acres = Number((v as Record<string, unknown>)?.acres_covered);
+        schedule[k] = Number.isFinite(acres) ? acres : 0;
+      } else {
+        schedule[k] = 0;
+      }
+    }
+    return schedule;
+  }
+  if (Array.isArray(raw)) {
+    const schedule: Record<string, number> = {};
+    for (const item of raw as Record<string, unknown>[]) {
+      const date = item?.date || item?.day || item?.created_at;
+      if (!date) continue;
+      const acres = Number(item?.acres_covered);
+      schedule[String(date).slice(0, 10)] = Number.isFinite(acres) ? acres : 0;
+    }
+    return schedule;
+  }
+  return {};
+};
+
+const itemsSummary = (items: MaterialDispatchItem[]) =>
+  items.map((it) => `${it.equipment_name} (${it.quantity})`).join('; ');
+
 const LogisticsRequest = () => {
   const { user } = useAuth();
   const [transfers, setTransfers] = useState<StockTransfer[]>([]);
@@ -116,6 +204,15 @@ const LogisticsRequest = () => {
   const [selectedTransferId, setSelectedTransferId] = useState<string | null>(null);
   const [showRejectReason, setShowRejectReason] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
+
+  // Material dispatch — separate from the stock-transfer state above.
+  const [dispatchRequests, setDispatchRequests] = useState<MaterialDispatchRequest[]>([]);
+  const [dispatchRequestsLoading, setDispatchRequestsLoading] = useState(true);
+  const [dispatchVehicles, setDispatchVehicles] = useState<DispatchAsset[]>([]);
+  const [dispatchVehiclesLoading, setDispatchVehiclesLoading] = useState(false);
+  const [selectedDispatchRequestId, setSelectedDispatchRequestId] = useState<string | null>(null);
+  const [selectedDispatchVehicleId, setSelectedDispatchVehicleId] = useState<string>('');
+  const [dispatchSubmittingId, setDispatchSubmittingId] = useState<string | null>(null);
 
   const refreshTransfers = async () => {
     setTransfersLoading(true);
@@ -182,6 +279,47 @@ const LogisticsRequest = () => {
       .finally(() => setVehiclesLoading(false));
   }, []);
 
+  const refreshDispatchRequests = async () => {
+    setDispatchRequestsLoading(true);
+    try {
+      const res = await fetch(`${BASE_URL}/admin_cultivation/get_material_dispatch_requests`);
+      const data = await res.json().catch(() => null);
+      if (!data?.success || !Array.isArray(data.requests)) throw new Error('Unexpected response');
+      setDispatchRequests(data.requests as MaterialDispatchRequest[]);
+    } catch {
+      toast.error('Failed to load material dispatch requests');
+    } finally {
+      setDispatchRequestsLoading(false);
+    }
+  };
+
+  useEffect(() => { refreshDispatchRequests(); }, []);
+
+  // Fetched lazily when a dispatch request's vehicle-assignment popup opens — same
+  // endpoint CultivationCalendar.tsx's own "Select Vehicles" step uses.
+  const fetchDispatchVehicles = async () => {
+    setDispatchVehiclesLoading(true);
+    try {
+      const res = await fetch(`${BASE_URL}/admin_vehicles/get_all_vehicles`);
+      const data: unknown = await res.json().catch(() => null);
+      const list = Array.isArray(data) ? data : [];
+      setDispatchVehicles(list.map((vehicle: any) => {
+        const info = vehicle?.vehicle_information || {};
+        const vehicleNumber = info?.vehicle_number || '';
+        return {
+          id: String(vehicle?.vehicle_id ?? ''),
+          name: vehicleNumber || String(vehicle?.vehicle_id ?? ''),
+          type: String(info?.type || 'Vehicle'),
+          schedule: buildVehicleSchedule(vehicle?.work_calandar),
+        };
+      }).filter((v: DispatchAsset) => v.id));
+    } catch {
+      toast.error('Failed to load fleet vehicles');
+      setDispatchVehicles([]);
+    } finally {
+      setDispatchVehiclesLoading(false);
+    }
+  };
 
   const pendingVehicle = useMemo(() => transfers.filter((t) => t.logistics_status === 'pending_vehicle'), [transfers]);
   const pendingApproval = useMemo(() => transfers.filter((t) => t.logistics_status === 'pending_approval'), [transfers]);
@@ -191,6 +329,98 @@ const LogisticsRequest = () => {
     () => transfers.find((t) => t.transfer_id === selectedTransferId) ?? null,
     [transfers, selectedTransferId],
   );
+
+  const pendingDispatch = useMemo(() => dispatchRequests.filter((r) => r.status === 'pending_vehicle'), [dispatchRequests]);
+  const dispatchedRequests = useMemo(() => dispatchRequests.filter((r) => r.status === 'dispatched'), [dispatchRequests]);
+  const selectedDispatchRequest = useMemo(
+    () => dispatchRequests.find((r) => r.request_id === selectedDispatchRequestId) ?? null,
+    [dispatchRequests, selectedDispatchRequestId],
+  );
+  // 5-day availability window anchored on the request's own delivery date, instead of a
+  // clicked calendar cell (there's no month grid on this page).
+  const dispatchChartDates = useMemo(() => {
+    if (!selectedDispatchRequest?.date) return [];
+    const dates: string[] = [];
+    for (let i = 0; i < 5; i++) dates.push(addDays(selectedDispatchRequest.date, i));
+    return dates;
+  }, [selectedDispatchRequest?.date]);
+
+  const openDispatchVehiclePicker = (request: MaterialDispatchRequest) => {
+    setSelectedDispatchRequestId(request.request_id);
+    setSelectedDispatchVehicleId('');
+    fetchDispatchVehicles();
+  };
+
+  const assignDispatchVehicle = async (request: MaterialDispatchRequest) => {
+    const vehicle = dispatchVehicles.find((v) => v.id === selectedDispatchVehicleId);
+    if (!vehicle) return toast.error('Select a vehicle');
+    setDispatchSubmittingId(request.request_id);
+    try {
+      const res = await fetch(`${BASE_URL}/admin_cultivation/assign_material_dispatch_vehicle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          request_id: request.request_id,
+          vehicle_id: vehicle.id,
+          vehicle_number: vehicle.name,
+          vehicle_type: vehicle.type,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) throw new Error(data?.detail || 'Failed to assign vehicle');
+
+      // Two separate calendars need this booking, fed by two separate endpoints:
+      // - work_calandar (on the vehicle record itself, via update_vehicle_calander) is what
+      //   the "Select Vehicles" busy/free availability grids read (CultivationCalendar.tsx's
+      //   own picker, and this page's dispatch-vehicle popup above).
+      // - admin_logistics_plan (via save_logistics_plan) is what the actual Fleet Chart page
+      //   (FleetChart.tsx, route /fleet-chart, GET get_logistics_plan) reads — a *different*
+      //   page from LogisticsManagement.tsx, which was the wrong target for an earlier fix
+      //   here. Both are best-effort; neither should block the vehicle assignment itself.
+      const dispatchDescription = `Material Dispatch: ${itemsSummary(request.items)} — from ${request.store}`;
+      try {
+        await fetch(`${BASE_URL}/admin_vehicles/update_vehicle_calander`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            vehicle_id: vehicle.id,
+            date: request.date,
+            acres_covered: 0,
+            activity: 'Logistics Request',
+            farm_id: request.farm_id,
+            description: dispatchDescription,
+            request_id: request.request_id,
+          }),
+        });
+      } catch {
+        toast.error('Vehicle assigned, but failed to add a Fleet Chart task');
+      }
+      try {
+        await fetch(`${BASE_URL}/admin_vehicles/save_logistics_plan`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            vehicle_id: vehicle.id,
+            plan: {
+              [request.date]: {
+                plans: [{ activity: dispatchDescription, status: 'pending', farm_id: request.farm_id }],
+              },
+            },
+          }),
+        });
+      } catch {
+        toast.error('Vehicle assigned, but failed to add a Fleet Chart task');
+      }
+
+      toast.success(`Vehicle assigned to ${request.task_id}`);
+      setSelectedDispatchRequestId(null);
+      refreshDispatchRequests();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to assign vehicle');
+    } finally {
+      setDispatchSubmittingId(null);
+    }
+  };
 
   const assignVehicle = async (transfer: StockTransfer) => {
     const vehicleId = selectedVehicleByTransfer[transfer.transfer_id];
@@ -368,6 +598,89 @@ const LogisticsRequest = () => {
     </button>
   );
 
+  const DispatchRequestCard = ({ request }: { request: MaterialDispatchRequest }) => (
+    <button
+      type="button"
+      onClick={() => request.status === 'pending_vehicle' ? openDispatchVehiclePicker(request) : undefined}
+      disabled={request.status !== 'pending_vehicle'}
+      className={cn(
+        'overflow-hidden rounded-2xl border border-slate-200/80 bg-white text-left shadow-[0_14px_40px_rgba(15,23,42,0.05)] transition',
+        request.status === 'pending_vehicle' ? 'hover:border-[#0D3A35]/30 hover:shadow-[0_14px_40px_rgba(15,23,42,0.1)]' : 'cursor-default',
+      )}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wide text-indigo-600">{request.type || 'Logistics Request'}</p>
+          <p className="text-sm font-bold text-slate-950">{request.task_id}</p>
+        </div>
+        <p className="text-[11px] font-medium text-slate-500">{formatDate(request.date)}</p>
+      </div>
+      <div className="p-4">
+        <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
+          <span>{request.store}</span>
+          <ArrowRight className="h-3.5 w-3.5 text-slate-400" />
+          <span>{request.farm_id}</span>
+        </div>
+        <div className="mt-2 flex items-start gap-2 text-sm font-bold text-slate-900">
+          <Sprout className="mt-0.5 h-4 w-4 shrink-0 text-[#0D3A35]" />
+          <span>{request.items.length === 1 ? request.items[0].equipment_name : `${request.items.length} items`}</span>
+        </div>
+        <div className="mt-1.5 space-y-0.5">
+          {request.items.map((it) => (
+            <p key={it.equipment_id} className="text-xs font-semibold text-slate-500">
+              {it.equipment_name}: {it.quantity}
+            </p>
+          ))}
+        </div>
+        {request.status === 'pending_vehicle' ? (
+          <p className="mt-3 flex items-center gap-1.5 border-t border-slate-100 pt-3 text-xs font-bold text-[#0D3A35]">
+            <Truck className="h-3.5 w-3.5" /> Assign Vehicle
+          </p>
+        ) : (
+          <p className="mt-3 border-t border-slate-100 pt-3 text-xs font-semibold text-slate-500">
+            {request.vehicle_number} · {request.driver_name || 'Driver not recorded'}
+          </p>
+        )}
+      </div>
+    </button>
+  );
+
+  // Same visual pattern as CultivationCalendar.tsx's VehicleAvailabilityRow — a 5-day
+  // grid of busy (red, acres-covered) vs free (highlighted on the anchor day) cells.
+  const DispatchVehicleAvailabilityRow = ({ asset, isSelected, onSelect }: { asset: DispatchAsset; isSelected: boolean; onSelect: () => void }) => (
+    <div
+      onClick={onSelect}
+      className={cn(
+        'grid grid-cols-[1.5fr_repeat(5,1fr)] gap-2 rounded-lg border p-2 transition-all cursor-pointer items-center group',
+        isSelected ? 'border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]/30' : 'border-border hover:border-[#0D3A35]/40',
+      )}
+    >
+      <div className="flex items-center gap-3 pr-2">
+        <div className={cn('rounded-md border p-2 shadow-sm', isSelected ? 'bg-[#0D3A35] text-white' : 'bg-white text-muted-foreground')}><Truck className="h-4 w-4" /></div>
+        <div className="min-w-0"><div className="truncate text-sm font-semibold text-foreground">{asset.name}</div><div className="text-[10px] text-muted-foreground">{asset.type}</div></div>
+      </div>
+      {dispatchChartDates.map((date) => {
+        const acresCovered = asset.schedule[date];
+        const isBusy = acresCovered !== undefined;
+        return (
+          <div key={date} className="flex h-full items-center justify-center">
+            {isBusy ? (
+              <div className="group/tooltip relative flex h-8 w-full items-center justify-center rounded-md border border-red-200 bg-red-100">
+                <span className="text-[10px] font-bold text-red-700">{Number(acresCovered || 0).toFixed(0)} ac</span>
+                <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 -translate-x-1/2 whitespace-nowrap rounded bg-black px-2 py-1 text-[10px] text-white opacity-0 group-hover/tooltip:opacity-100">Acres covered: {Number(acresCovered || 0).toFixed(2)}</div>
+              </div>
+            ) : (
+              <div className={cn('flex h-8 w-full items-center justify-center rounded-md border transition-colors', date === dispatchChartDates[0] ? (isSelected ? 'border-[#0D3A35] bg-[#0D3A35] text-white' : 'border-[#0D3A35]/20 bg-[#0D3A35]/10 text-[#0D3A35]') : 'border-gray-100 bg-gray-50')}>
+                {date === dispatchChartDates[0] && isSelected && <CheckCircle2 className="h-4 w-4" />}
+                {date === dispatchChartDates[0] && !isSelected && <span className="text-[10px] font-bold">Free</span>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-gray-50/50 p-8 font-sans">
       <div className="flex items-center gap-4">
@@ -380,6 +693,54 @@ const LogisticsRequest = () => {
             Assign a vehicle to inventory-approved stock transfers, then approve for dispatch.
           </p>
         </div>
+      </div>
+
+      <div className="mt-8">
+        <h2 className="mb-3 flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-slate-500">
+          <Sprout className="h-3.5 w-3.5" /> Material Dispatch Requests
+        </h2>
+        {dispatchRequestsLoading ? (
+          <div className="flex items-center justify-center gap-2 py-6 text-sm font-semibold text-slate-400">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading dispatch requests…
+          </div>
+        ) : dispatchRequests.length === 0 ? (
+          <p className="text-xs font-semibold text-slate-400">
+            Nothing queued yet — these show up when a cultivation task is assigned with "Logistics required" turned on.
+          </p>
+        ) : (
+          <div className="space-y-6">
+            <section>
+              <h3 className="mb-2 text-[11px] font-bold uppercase tracking-widest text-slate-400">
+                Awaiting Vehicle ({pendingDispatch.length})
+              </h3>
+              {pendingDispatch.length === 0 ? (
+                <p className="text-xs font-semibold text-slate-400">Nothing waiting on a vehicle right now.</p>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {pendingDispatch.map((request) => <DispatchRequestCard key={request.request_id} request={request} />)}
+                </div>
+              )}
+            </section>
+            <section>
+              <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">
+                <MapPin className="h-3.5 w-3.5" /> Dispatched ({dispatchedRequests.length})
+              </h3>
+              {dispatchedRequests.length === 0 ? (
+                <p className="text-xs font-semibold text-slate-400">No completed dispatches yet.</p>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {dispatchedRequests.map((request) => <DispatchRequestCard key={request.request_id} request={request} />)}
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-10 flex items-center gap-3">
+        <div className="h-px flex-1 bg-slate-200" />
+        <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Stock Transfers</span>
+        <div className="h-px flex-1 bg-slate-200" />
       </div>
 
       {transfersLoading ? (
@@ -549,6 +910,92 @@ const LogisticsRequest = () => {
                   </DialogFooter>
                 </>
               )}
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Material dispatch vehicle picker — the calendar view, not a dropdown, so whoever's
+          assigning a truck can actually see who's free on the day the field needs it. */}
+      <Dialog open={!!selectedDispatchRequest} onOpenChange={(open) => { if (!open) setSelectedDispatchRequestId(null); }}>
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto rounded-2xl border-0 bg-slate-100 p-0">
+          <DialogHeader className="sr-only">
+            <DialogTitle>Assign Vehicle to Material Dispatch</DialogTitle>
+          </DialogHeader>
+          {selectedDispatchRequest && (
+            <>
+              <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-6 py-4">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-indigo-600">{selectedDispatchRequest.type || 'Logistics Request'}</p>
+                  <p className="text-sm font-bold text-slate-950">{selectedDispatchRequest.task_id}</p>
+                </div>
+                <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-700">Awaiting Vehicle</span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3 border-b border-slate-200 bg-white px-6 py-4">
+                <div>
+                  <p className="text-[9px] font-semibold uppercase tracking-widest text-slate-400">From</p>
+                  <p className="text-xs font-bold text-slate-800">{selectedDispatchRequest.store}</p>
+                </div>
+                <div>
+                  <p className="text-[9px] font-semibold uppercase tracking-widest text-slate-400">To</p>
+                  <p className="text-xs font-bold text-slate-800">{selectedDispatchRequest.farm_id}</p>
+                </div>
+                <div>
+                  <p className="text-[9px] font-semibold uppercase tracking-widest text-slate-400">Date of Delivery</p>
+                  <p className="text-xs font-bold text-slate-800">{formatDate(selectedDispatchRequest.date)}</p>
+                </div>
+              </div>
+
+              <div className="space-y-1 border-b border-slate-200 bg-white px-6 py-4">
+                <p className="mb-1.5 text-xs font-bold text-slate-700">Items to Move</p>
+                {selectedDispatchRequest.items.map((it) => (
+                  <p key={it.equipment_id} className="text-xs font-semibold text-slate-500">
+                    {it.equipment_name}: {it.quantity}
+                  </p>
+                ))}
+              </div>
+
+              <div className="px-6 py-4">
+                <p className="mb-2 text-xs font-bold text-slate-700">Select a Vehicle</p>
+                <div className="overflow-x-auto rounded-lg border border-border bg-white p-4 shadow-sm">
+                  <div className="min-w-[600px]">
+                    <div className="mb-3 grid grid-cols-[1.5fr_repeat(5,1fr)] gap-2 text-xs font-semibold text-muted-foreground">
+                      <div className="self-end pb-2">Vehicle</div>
+                      {dispatchChartDates.map((date) => (
+                        <div key={date} className={cn('border-b-2 pb-2 text-center', date === dispatchChartDates[0] ? 'border-[#0D3A35] text-[#0D3A35]' : 'border-transparent')}>
+                          <div className="text-[10px] uppercase">{getDayName(date)}</div>
+                          <div>{getDayNum(date)}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="space-y-2">
+                      {dispatchVehiclesLoading ? (
+                        <div className="p-4 text-sm text-muted-foreground">Loading vehicles…</div>
+                      ) : dispatchVehicles.length === 0 ? (
+                        <div className="p-4 text-sm text-muted-foreground">No vehicles found.</div>
+                      ) : (
+                        dispatchVehicles.map((vehicle) => (
+                          <DispatchVehicleAvailabilityRow
+                            key={vehicle.id}
+                            asset={vehicle}
+                            isSelected={selectedDispatchVehicleId === vehicle.id}
+                            onSelect={() => setSelectedDispatchVehicleId(vehicle.id)}
+                          />
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <Button
+                  onClick={() => assignDispatchVehicle(selectedDispatchRequest)}
+                  disabled={dispatchSubmittingId === selectedDispatchRequest.request_id || !selectedDispatchVehicleId}
+                  className="mt-3 w-full gap-2 bg-[#0D3A35] font-bold text-white hover:bg-[#092e2a]"
+                >
+                  {dispatchSubmittingId === selectedDispatchRequest.request_id && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  Assign & Dispatch
+                </Button>
+              </div>
             </>
           )}
         </DialogContent>
