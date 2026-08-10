@@ -5,6 +5,7 @@ import {
   Bar,
   BarChart,
   Cell,
+  Legend,
   Line,
   LineChart,
   Pie,
@@ -24,6 +25,7 @@ import {
   ClipboardList,
   Droplets,
   Image as ImageIcon,
+  Info,
   IndianRupee,
   Landmark,
   Leaf,
@@ -40,6 +42,7 @@ import { cn } from "@/lib/utils";
 import getBaseUrl from "@/lib/config";
 import { getFarmerNames } from "@/lib/farmerNameCache";
 import type { Lead } from "@/types/farm";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 type Tone = "green" | "blue" | "orange" | "purple" | "red";
 
@@ -408,7 +411,15 @@ type FinancialKpis = {
   active_budgets_count?: number;
 };
 
-const formatCr = (value: number) => `Rs ${(value / 1e7).toFixed(2)}`;
+const FINANCIAL_DECIMAL_PLACES = 2;
+const formatFinancialAmount = (valueInRupees: number) => {
+  const value = Number(valueInRupees || 0);
+  if (Math.abs(value) >= 1e7) {
+    return `Rs ${(value / 1e7).toFixed(FINANCIAL_DECIMAL_PLACES)} Cr`;
+  }
+  return `Rs ${(value / 1e5).toFixed(FINANCIAL_DECIMAL_PLACES)} Lakh`;
+};
+const formatCroreChartValue = (valueInCrores: number) => formatFinancialAmount(Number(valueInCrores || 0) * 1e7);
 
 const financialStatDefs = [
   { label: "Total Budget", key: "total_budget" as const, tone: "text-blue-700" },
@@ -440,9 +451,9 @@ const buildBudgetSegments = (entry: {
   remaining: number;
 }) => {
   const segments = [
-    { key: "pipeline", label: "In Pipeline", color: BUDGET_SEGMENT_COLORS.pipeline, value: Math.max(entry.amount_in_pipeline, 0) },
-    { key: "utilized", label: "Utilized", color: BUDGET_SEGMENT_COLORS.utilized, value: Math.max(entry.amount_utilized, 0) },
-    { key: "remaining", label: "Remaining", color: BUDGET_SEGMENT_COLORS.remaining, value: Math.max(entry.remaining, 0) },
+    { key: "pipeline", label: "Allocated", color: BUDGET_SEGMENT_COLORS.pipeline, value: Math.max(entry.amount_in_pipeline, 0) },
+    { key: "utilized", label: "Actual Utilized", color: BUDGET_SEGMENT_COLORS.utilized, value: Math.max(entry.amount_utilized, 0) },
+    { key: "remaining", label: "Balance", color: BUDGET_SEGMENT_COLORS.remaining, value: Math.max(entry.remaining, 0) },
   ];
   const unallocated = entry.total_budget - (entry.amount_in_pipeline + entry.amount_utilized + entry.remaining);
   if (unallocated > 0) {
@@ -465,20 +476,20 @@ const BudgetBifurcationRow = ({ budget }: { budget: BudgetBifurcation }) => {
                   <Cell key={entry.key} fill={entry.color} />
                 ))}
               </Pie>
-              <Tooltip formatter={(value: number, _name, item) => [`${formatCr(value)} Cr`, item?.payload?.label]} />
+              <Tooltip formatter={(value: number, _name, item) => [formatFinancialAmount(value), item?.payload?.label]} />
             </PieChart>
           </ResponsiveContainer>
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-xs font-black text-slate-950">{budget.budget_name}</p>
-          <p className="text-[11px] font-bold text-slate-500">{formatCr(budget.total_budget)} Cr Total Value</p>
+          <p className="text-[11px] font-bold text-slate-500">{formatFinancialAmount(budget.total_budget)} Total Budget</p>
           <div className="mt-1.5 flex flex-wrap gap-1.5">
             {segments
               .filter((entry) => entry.key !== "unallocated")
               .map((entry) => (
                 <span key={entry.key} className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-600">
                   <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: entry.color }} />
-                  {entry.label} {formatCr(entry.value)} Cr
+                  {entry.label} {formatFinancialAmount(entry.value)}
                 </span>
               ))}
           </div>
@@ -515,10 +526,10 @@ const BudgetBifurcationCard = ({ budgets, loading }: { budgets: BudgetBifurcatio
   );
 
   const totalsList = [
-    { label: "Total Value", value: totals.totalBudget, color: "#0f172a" },
-    { label: "Total in Pipeline", value: totals.pipeline, color: BUDGET_SEGMENT_COLORS.pipeline },
-    { label: "Total Utilized", value: totals.utilized, color: BUDGET_SEGMENT_COLORS.utilized },
-    { label: "Total Remaining", value: totals.remaining, color: BUDGET_SEGMENT_COLORS.remaining },
+    { label: "Total Budget", value: totals.totalBudget, color: "#0f172a" },
+    { label: "Allocated", value: totals.pipeline, color: BUDGET_SEGMENT_COLORS.pipeline },
+    { label: "Actual Utilized", value: totals.utilized, color: BUDGET_SEGMENT_COLORS.utilized },
+    { label: "Balance", value: totals.remaining, color: BUDGET_SEGMENT_COLORS.remaining },
   ];
 
   return (
@@ -527,7 +538,7 @@ const BudgetBifurcationCard = ({ budgets, loading }: { budgets: BudgetBifurcatio
         title="Budget Bifurcation"
         right={
           <Pill tone="blue">
-            {budgets.length} Budgets · {formatCr(totals.totalBudget)} Cr
+            {budgets.length} Budgets · {formatFinancialAmount(totals.totalBudget)}
           </Pill>
         }
       />
@@ -548,12 +559,11 @@ const BudgetBifurcationCard = ({ budgets, loading }: { budgets: BudgetBifurcatio
                     <Cell key={entry.key} fill={entry.color} />
                   ))}
                 </Pie>
-                <Tooltip formatter={(value: number, _name, item) => [`${formatCr(value)} Cr`, item?.payload?.label]} />
+                <Tooltip formatter={(value: number, _name, item) => [formatFinancialAmount(value), item?.payload?.label]} />
               </PieChart>
             </ResponsiveContainer>
             <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <p className="text-sm font-black text-slate-950">{formatCr(totals.totalBudget)}</p>
-              <p className="text-[9px] font-bold text-slate-600">Cr</p>
+              <p className="text-sm font-black text-slate-950">{formatFinancialAmount(totals.totalBudget)}</p>
             </div>
           </div>
           <div className="min-w-0 flex-1 space-y-3">
@@ -563,7 +573,7 @@ const BudgetBifurcationCard = ({ budgets, loading }: { budgets: BudgetBifurcatio
                   <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
                   {item.label}
                 </span>
-                <span className="text-xs font-black text-slate-950">{formatCr(item.value)} Cr</span>
+                <span className="text-xs font-black text-slate-950">{formatFinancialAmount(item.value)}</span>
               </div>
             ))}
           </div>
@@ -668,9 +678,9 @@ const fetchAggregateDisbursementSeries = async (
     cumulative += plannedCr;
     return {
       week: `${parsed.monthShort} W${parsed.week}`,
-      planned: Number(plannedCr.toFixed(2)),
-      disbursed: Number(disbursedCr.toFixed(2)),
-      cumulative: Number(cumulative.toFixed(2)),
+      planned: Number(plannedCr.toFixed(3)),
+      disbursed: Number(disbursedCr.toFixed(3)),
+      cumulative: Number(cumulative.toFixed(3)),
     };
   });
 };
@@ -684,6 +694,7 @@ const DisbursementSequenceCard = ({
   loading: boolean;
   budgets: BudgetBifurcation[];
 }) => {
+  const [chartView, setChartView] = useState<"line" | "bar">("line");
   const expectedTillNow = series.reduce((sum, item) => sum + item.disbursed, 0);
   const { totalBudget, utilized } = sumBudgetTotals(budgets);
   const totalBudgetCr = totalBudget / 1e7;
@@ -691,9 +702,42 @@ const DisbursementSequenceCard = ({
 
   return (
     <Card className="p-5">
-      <SectionHeader title="Disbursement Sequence" right={<Pill tone="blue">Week-wise · Rs Cr</Pill>} />
+      <SectionHeader
+        title="Disbursement Sequence"
+        right={(
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+              <button
+                type="button"
+                onClick={() => setChartView("bar")}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-[11px] font-bold transition",
+                  chartView === "bar"
+                    ? "bg-[#0D3A35] text-white shadow-sm"
+                    : "text-slate-500 hover:bg-white hover:text-slate-800"
+                )}
+              >
+                Bar
+              </button>
+              <button
+                type="button"
+                onClick={() => setChartView("line")}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-[11px] font-bold transition",
+                  chartView === "line"
+                    ? "bg-[#0D3A35] text-white shadow-sm"
+                    : "text-slate-500 hover:bg-white hover:text-slate-800"
+                )}
+              >
+                Line
+              </button>
+            </div>
+            <Pill tone="blue">Week-wise</Pill>
+          </div>
+        )}
+      />
       <p className="-mt-2 mb-3 text-xs font-semibold text-slate-500">
-        Week-wise disbursement pace aggregated across all active budgets.
+        Planned versus actual week-wise disbursement across all active budgets.
       </p>
       <div className="h-64">
         {loading ? (
@@ -704,47 +748,66 @@ const DisbursementSequenceCard = ({
           </div>
         ) : (
           <ResponsiveContainer>
-            <LineChart data={series} margin={{ left: -18, right: 8, top: 28, bottom: 0 }}>
-              <XAxis dataKey="week" axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
-              <Tooltip formatter={(value: number) => [`Rs ${value.toFixed(2)} Cr`, "Planned"]} />
-              <Line
-                type="monotone"
-                dataKey="planned"
-                name="Planned"
-                stroke="#2563eb"
-                strokeWidth={2.5}
-                dot={{ r: 4 }}
-                label={(props: { x: number; y: number; index: number }) => (
-                  <text
-                    key={`cumulative-${props.index}`}
-                    x={props.x}
-                    y={props.y - 12}
-                    textAnchor="middle"
-                    fontSize={10}
-                    fontWeight={700}
-                    fill="#16a34a"
-                  >
-                    {`${series[props.index]?.cumulative.toFixed(2)}cr / ${totalBudgetCr.toFixed(2)}cr`}
-                  </text>
-                )}
-              />
-            </LineChart>
+            {chartView === "bar" ? (
+              <BarChart data={series} margin={{ left: -18, right: 8, top: 12, bottom: 0 }}>
+                <XAxis dataKey="week" axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
+                <YAxis
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fontSize: 11, fontWeight: 700 }}
+                  tickFormatter={(value: number) => value >= 1 ? `${value.toFixed(2)} Cr` : `${(value * 100).toFixed(2)} L`}
+                />
+                <Tooltip formatter={(value: number, name: string) => [formatCroreChartValue(value), name]} />
+                <Legend wrapperStyle={{ fontSize: 11, fontWeight: 700 }} />
+                <Bar dataKey="planned" name="Planned Disbursement" fill="#2563eb" radius={[5, 5, 0, 0]} maxBarSize={28} />
+                <Bar dataKey="disbursed" name="Actual Disbursement" fill="#16a34a" radius={[5, 5, 0, 0]} maxBarSize={28} />
+              </BarChart>
+            ) : (
+              <LineChart data={series} margin={{ left: -18, right: 8, top: 12, bottom: 0 }}>
+                <XAxis dataKey="week" axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
+                <YAxis
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fontSize: 11, fontWeight: 700 }}
+                  tickFormatter={(value: number) => value >= 1 ? `${value.toFixed(2)} Cr` : `${(value * 100).toFixed(2)} L`}
+                />
+                <Tooltip formatter={(value: number, name: string) => [formatCroreChartValue(value), name]} />
+                <Legend wrapperStyle={{ fontSize: 11, fontWeight: 700 }} />
+                <Line
+                  type="monotone"
+                  dataKey="planned"
+                  name="Planned Disbursement"
+                  stroke="#2563eb"
+                  strokeWidth={2.5}
+                  dot={{ r: 4 }}
+                  activeDot={{ r: 5 }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="disbursed"
+                  name="Actual Disbursement"
+                  stroke="#16a34a"
+                  strokeWidth={2.5}
+                  dot={{ r: 4 }}
+                  activeDot={{ r: 5 }}
+                />
+              </LineChart>
+            )}
           </ResponsiveContainer>
         )}
       </div>
       <div className="mt-3 grid grid-cols-3 gap-2 text-center">
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
-          <p className="text-lg font-black text-slate-950">Rs {totalBudgetCr.toFixed(2)}</p>
-          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Total Budget (Cr)</p>
+          <p className="text-lg font-black text-slate-950">{formatCroreChartValue(totalBudgetCr)}</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Total Budget</p>
         </div>
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
-          <p className="text-lg font-black text-slate-950">Rs {expectedTillNow.toFixed(2)}</p>
-          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Expected Disbursement Till Now (Cr)</p>
+          <p className="text-lg font-black text-slate-950">{formatCroreChartValue(expectedTillNow)}</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Expected Disbursement Till Now</p>
         </div>
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
-          <p className="text-lg font-black text-slate-950">Rs {utilizedCr.toFixed(2)}</p>
-          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Total Disbursed Till Now (Cr)</p>
+          <p className="text-lg font-black text-slate-950">{formatCroreChartValue(utilizedCr)}</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Total Disbursed Till Now</p>
         </div>
       </div>
     </Card>
@@ -765,6 +828,84 @@ type BudgetCategoryBifurcation = {
   categories: BudgetCategoryDetail[];
 };
 
+type BudgetMasterRecord = {
+  budget_id: string;
+  budget_name?: string;
+  status?: string;
+};
+
+const parseBudgetWorkbookCategories = (buffer: ArrayBuffer): BudgetCategoryDetail[] => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const workbook = (XLSX as any).read(new Uint8Array(buffer), { type: "array" });
+  const sheet = workbook.Sheets.budget ?? workbook.Sheets[workbook.SheetNames[0]];
+  if (!sheet) return [];
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rows: Record<string, any>[] = XLSX.utils.sheet_to_json(sheet, { defval: 0 });
+  const grouped = new Map<string, BudgetCategoryDetail>();
+  rows.forEach((row) => {
+    const category = String(row.category ?? "").trim();
+    if (!category) return;
+    const key = category.toLowerCase();
+    const current = grouped.get(key) ?? {
+      category,
+      total_budget: 0,
+      amount_in_pipeline: 0,
+      amount_utilized: 0,
+      remaining: 0,
+    };
+    current.total_budget += Number(row.total_value) || 0;
+    current.amount_in_pipeline += Number(row.amount_in_pipeline) || 0;
+    current.amount_utilized += Number(row.utilized_amount) || 0;
+    grouped.set(key, current);
+  });
+
+  return Array.from(grouped.values()).map((category) => ({
+    ...category,
+    remaining: Math.max(category.total_budget - category.amount_in_pipeline - category.amount_utilized, 0),
+  }));
+};
+
+const fetchCompleteCategoryBudgets = async (base: string): Promise<BudgetCategoryBifurcation[]> => {
+  const [categoryResponse, masterResponse] = await Promise.all([
+    fetch(`${base}/ceo_desk/get_category_wise_budget_utilization`),
+    fetch(`${base}/admin_accounts/get_budgets`),
+  ]);
+  const categoryBody = await categoryResponse.json().catch(() => null);
+  const masterBody = await masterResponse.json().catch(() => null);
+  const categoryBudgets: BudgetCategoryBifurcation[] = categoryResponse.ok && categoryBody?.success && Array.isArray(categoryBody?.data)
+    ? categoryBody.data
+    : [];
+  const masterBudgets: BudgetMasterRecord[] = masterResponse.ok && Array.isArray(masterBody?.data)
+    ? masterBody.data
+    : [];
+  const existingIds = new Set(categoryBudgets.map((budget) => budget.budget_id));
+  const missingBudgets = masterBudgets.filter((budget) => (
+    budget.budget_id && budget.status !== "inactive" && !existingIds.has(budget.budget_id)
+  ));
+
+  const fallbackBudgets = await Promise.all(missingBudgets.map(async (budget) => {
+    try {
+      const response = await fetch(`${base}/admin_accounts/get_budget/${budget.budget_id}`);
+      if (!response.ok) return null;
+      const categories = parseBudgetWorkbookCategories(await response.arrayBuffer());
+      if (categories.length === 0) return null;
+      return {
+        budget_id: budget.budget_id,
+        budget_name: budget.budget_name || budget.budget_id,
+        categories,
+      } satisfies BudgetCategoryBifurcation;
+    } catch {
+      return null;
+    }
+  }));
+
+  return [
+    ...categoryBudgets,
+    ...fallbackBudgets.filter((budget): budget is BudgetCategoryBifurcation => budget !== null),
+  ];
+};
+
 const CategoryBudgetCard = ({ budget }: { budget: BudgetCategoryBifurcation }) => {
   const totalBudget = budget.categories.reduce((sum, category) => sum + category.total_budget, 0);
 
@@ -773,36 +914,44 @@ const CategoryBudgetCard = ({ budget }: { budget: BudgetCategoryBifurcation }) =
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-black text-slate-950">{budget.budget_name}</h3>
-          <p className="mt-0.5 text-xs font-semibold text-slate-500">{formatCr(totalBudget)} Cr Total Budget</p>
+          <p className="mt-0.5 text-xs font-semibold text-slate-500">{formatFinancialAmount(totalBudget)} Total Budget</p>
         </div>
         <Pill tone="blue">{budget.categories.length} Categories</Pill>
       </div>
       <div className="max-h-[420px] overflow-y-auto pr-1">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {budget.categories.map((category) => {
-            const pipelinePct = category.total_budget > 0 ? Math.min((category.amount_in_pipeline / category.total_budget) * 100, 100) : 0;
-            const remainingPct =
-              category.total_budget > 0 ? Math.min((category.remaining / category.total_budget) * 100, 100 - pipelinePct) : 0;
+            const allocatedPct = category.total_budget > 0 ? Math.min((category.amount_in_pipeline / category.total_budget) * 100, 100) : 0;
+            const utilizedPct = category.total_budget > 0
+              ? Math.min((category.amount_utilized / category.total_budget) * 100, 100 - allocatedPct)
+              : 0;
+            const balancePct = category.total_budget > 0
+              ? Math.min((category.remaining / category.total_budget) * 100, 100 - allocatedPct - utilizedPct)
+              : 0;
 
             return (
               <div key={category.category} className="rounded-lg border border-slate-100 bg-slate-50 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="truncate text-xs font-black text-slate-800">{category.category.trim()}</span>
-                  <span className="shrink-0 text-xs font-bold text-slate-500">{formatCr(category.total_budget)} Cr</span>
-                </div>
+                <span className="block truncate text-xs font-black text-slate-800">{category.category.trim()}</span>
                 <div className="mt-2 flex h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
-                  <div className="h-full" style={{ width: `${pipelinePct}%`, backgroundColor: BUDGET_SEGMENT_COLORS.pipeline }} />
-                  <div className="h-full" style={{ width: `${remainingPct}%`, backgroundColor: BUDGET_SEGMENT_COLORS.remaining }} />
+                  <div className="h-full" style={{ width: `${allocatedPct}%`, backgroundColor: BUDGET_SEGMENT_COLORS.pipeline }} />
+                  <div className="h-full" style={{ width: `${utilizedPct}%`, backgroundColor: BUDGET_SEGMENT_COLORS.utilized }} />
+                  <div className="h-full" style={{ width: `${balancePct}%`, backgroundColor: BUDGET_SEGMENT_COLORS.remaining }} />
                 </div>
-                <div className="mt-1.5 flex items-center justify-between text-[10px] font-bold text-slate-500">
-                  <span className="flex items-center gap-1">
-                    <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: BUDGET_SEGMENT_COLORS.pipeline }} />
-                    Pipeline {formatCr(category.amount_in_pipeline)} Cr
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: BUDGET_SEGMENT_COLORS.remaining }} />
-                    Remaining {formatCr(category.remaining)} Cr
-                  </span>
+                <div className="mt-2 grid grid-cols-4 gap-2 border-t border-slate-200/80 pt-2">
+                  {[
+                    { label: "Total Budget", value: category.total_budget, color: "#0f172a" },
+                    { label: "Allocated", value: category.amount_in_pipeline, color: BUDGET_SEGMENT_COLORS.pipeline },
+                    { label: "Actual Utilized", value: category.amount_utilized, color: BUDGET_SEGMENT_COLORS.utilized },
+                    { label: "Balance", value: category.remaining, color: BUDGET_SEGMENT_COLORS.remaining },
+                  ].map((item) => (
+                    <div key={item.label} className="min-w-0">
+                      <p className="flex items-center gap-1 whitespace-nowrap text-[8px] font-black uppercase tracking-[0.02em] text-slate-500">
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
+                        {item.label}
+                      </p>
+                      <p className="mt-0.5 whitespace-nowrap text-[10px] font-black text-slate-700">{formatFinancialAmount(item.value)}</p>
+                    </div>
+                  ))}
                 </div>
               </div>
             );
@@ -828,7 +977,7 @@ const CategoryWiseBudgetSection = ({ budgets, loading }: { budgets: BudgetCatego
         <div className="flex h-40 items-center justify-center text-sm font-bold text-slate-400">No category data available</div>
       </Card>
     ) : (
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4">
         {budgets.map((budget) => (
           <CategoryBudgetCard key={budget.budget_id} budget={budget} />
         ))}
@@ -1422,17 +1571,70 @@ const CropActivitySummaryCard = ({
   calendarData,
   loading,
   selectedMonth,
+  farms,
+  farmerNames,
 }: {
   calendarData: CalendarDayMap;
   loading: boolean;
   selectedMonth: Date;
+  farms: Farm[];
+  farmerNames: Record<string, string>;
 }) => {
   const [cropFilter, setCropFilter] = useState<string | null>(null);
+  const [selectedActivity, setSelectedActivity] = useState<string | null>(null);
 
   const { summaries, totalTasks, totalAcres, cropOptions } = useMemo(
     () => buildActivitySummaries(calendarData, selectedMonth, cropFilter),
     [calendarData, selectedMonth, cropFilter],
   );
+
+  const activityLandDetails = useMemo(() => {
+    if (!selectedActivity) return [];
+    const prefix = `${selectedMonth.getFullYear()}-${pad2(selectedMonth.getMonth() + 1)}-`;
+    const farmsById = new Map(farms.map((farm) => [farm.farm_id, farm]));
+    const byFarm = new Map<string, {
+      farmId: string;
+      ownerName: string;
+      location: string;
+      crop: string;
+      planned: number;
+      workDone: number;
+      taskCount: number;
+    }>();
+
+    Object.entries(calendarData).forEach(([dateStr, rows]) => {
+      if (!dateStr.startsWith(prefix)) return;
+      rows.forEach((row) => {
+        const cropKey = normalizeCropKey(row.crop_type);
+        if (row.activity !== selectedActivity || (cropFilter && cropKey !== cropFilter)) return;
+        row.assignments.forEach((assignment) => {
+          if (!assignment.farm_id) return;
+          const farm = farmsById.get(assignment.farm_id);
+          const existing = byFarm.get(assignment.farm_id) ?? {
+            farmId: assignment.farm_id,
+            ownerName: farmerNames[assignment.farm_id] || "Land owner not recorded",
+            location: [farm?.land_data?.village, farm?.land_data?.district].filter(Boolean).join(", ") || "Location not recorded",
+            crop: cropLabel(cropKey),
+            planned: 0,
+            workDone: 0,
+            taskCount: 0,
+          };
+          const acres = Math.max(0, Number(assignment.assigned_area) || 0);
+          existing.planned += acres;
+          if (isCompletedAssignmentStatus(assignment.status)) existing.workDone += acres;
+          existing.taskCount += 1;
+          byFarm.set(assignment.farm_id, existing);
+        });
+      });
+    });
+
+    return Array.from(byFarm.values())
+      .map((land) => ({ ...land, balance: Math.max(0, land.planned - land.workDone) }))
+      .sort((first, second) => second.balance - first.balance || second.planned - first.planned || first.ownerName.localeCompare(second.ownerName));
+  }, [calendarData, cropFilter, farmerNames, farms, selectedActivity, selectedMonth]);
+
+  const selectedSummary = summaries.find((summary) => summary.activity === selectedActivity);
+  const formatAcres = (value: number) => `${value.toLocaleString("en-IN", { maximumFractionDigits: 2 })} ac`;
 
   return (
     <Card className="p-5">
@@ -1501,9 +1703,18 @@ const CropActivitySummaryCard = ({
                 return (
                   <div
                     key={item.activity}
-                    className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm transition-shadow hover:shadow-md"
+                    className="relative rounded-xl border border-slate-200 bg-white p-3 shadow-sm transition-shadow hover:shadow-md"
                   >
-                    <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedActivity(item.activity)}
+                      className="absolute right-2.5 top-2.5 z-10 flex h-7 w-7 items-center justify-center rounded-full border border-[#0D3A35]/15 bg-[#0D3A35]/5 text-[#0D3A35] transition hover:bg-[#0D3A35] hover:text-white"
+                      aria-label={`View land details for ${item.activity}`}
+                      title="View land-wise details"
+                    >
+                      <Info className="h-3.5 w-3.5" />
+                    </button>
+                    <div className="flex items-center gap-3 pr-7">
                       <KpiPieChart value={completion} color={tone.ring} trackColor={tone.track} />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
@@ -1538,6 +1749,74 @@ const CropActivitySummaryCard = ({
           )}
         </>
       )}
+
+      <Dialog open={!!selectedActivity} onOpenChange={(open) => { if (!open) setSelectedActivity(null); }}>
+        <DialogContent className="flex max-h-[88vh] w-[calc(100vw-2rem)] max-w-5xl flex-col overflow-hidden rounded-2xl border-0 p-0 shadow-2xl">
+          <DialogHeader className="shrink-0 bg-[#0D3A35] px-6 py-5 text-left text-white">
+            <DialogTitle className="text-xl font-black text-white">{selectedActivity || "Activity"} — Land Details</DialogTitle>
+            <p className="mt-1 text-sm font-medium text-white/70">
+              {selectedMonth.toLocaleDateString("en-IN", { month: "long", year: "numeric" })}
+              {cropFilter ? ` · ${cropLabel(cropFilter)}` : " · All Crops"}
+            </p>
+          </DialogHeader>
+
+          <div className="min-h-0 overflow-y-auto bg-slate-50 p-5">
+            <div className="grid grid-cols-3 gap-3">
+              {[
+                ["Planned", selectedSummary?.totalAcres ?? 0, "bg-amber-50 text-amber-800"],
+                ["Work Done", selectedSummary?.completedAcres ?? 0, "bg-emerald-50 text-emerald-800"],
+                ["Balance", Math.max(0, (selectedSummary?.totalAcres ?? 0) - (selectedSummary?.completedAcres ?? 0)), "bg-slate-200 text-slate-700"],
+              ].map(([label, value, style]) => (
+                <div key={String(label)} className={cn("rounded-xl px-4 py-3 text-center", String(style))}>
+                  <p className="text-[10px] font-black uppercase tracking-wider opacity-75">{label}</p>
+                  <p className="mt-1 text-lg font-black">{formatAcres(Number(value))}</p>
+                </div>
+              ))}
+            </div>
+
+            <section className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <div className="flex items-center justify-between border-b border-slate-200 bg-slate-100/80 px-4 py-3">
+                <div>
+                  <h3 className="text-sm font-black text-slate-900">Land-wise Progress</h3>
+                  <p className="mt-0.5 text-xs font-semibold text-slate-500">{activityLandDetails.length} land parcel{activityLandDetails.length === 1 ? "" : "s"}</p>
+                </div>
+              </div>
+              {activityLandDetails.length === 0 ? (
+                <div className="grid h-40 place-items-center text-sm font-bold text-slate-400">No land assignments recorded</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[820px] table-fixed text-left">
+                    <thead className="bg-[#0D3A35] text-[10px] uppercase tracking-wider text-white/80">
+                      <tr>
+                        <th className="w-[22%] px-4 py-3 text-center">Land Owner</th>
+                        <th className="w-[14%] px-4 py-3 text-center">Land ID</th>
+                        <th className="w-[18%] px-4 py-3 text-center">Location</th>
+                        <th className="w-[12%] px-4 py-3 text-center">Crop</th>
+                        <th className="w-[11%] px-4 py-3 text-center">Planned</th>
+                        <th className="w-[11%] px-4 py-3 text-center">Work Done</th>
+                        <th className="w-[12%] px-4 py-3 text-center">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {activityLandDetails.map((land) => (
+                        <tr key={land.farmId} className="hover:bg-slate-50">
+                          <td className="px-4 py-3 text-sm font-bold text-slate-900">{land.ownerName}</td>
+                          <td className="px-4 py-3 text-center text-xs font-bold text-[#0D3A35]">{land.farmId}</td>
+                          <td className="px-4 py-3 text-xs font-semibold text-slate-600">{land.location}</td>
+                          <td className="px-4 py-3 text-center text-xs font-bold text-slate-700">{land.crop}</td>
+                          <td className="px-4 py-3 text-center text-xs font-black text-amber-700">{formatAcres(land.planned)}</td>
+                          <td className="px-4 py-3 text-center text-xs font-black text-emerald-700">{formatAcres(land.workDone)}</td>
+                          <td className="px-4 py-3 text-center text-xs font-black text-slate-700">{formatAcres(land.balance)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </div>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 };
@@ -2377,9 +2656,8 @@ const FinancialAnalysisView = ({
               {loading || !kpis ? (
                 <p className="text-3xl font-black tracking-normal text-slate-300">--</p>
               ) : (
-                <p className={cn("text-3xl font-black tracking-normal", stat.tone)}>{formatCr(kpis[stat.key])}</p>
+                <p className={cn("text-3xl font-black tracking-normal", stat.tone)}>{formatFinancialAmount(kpis[stat.key])}</p>
               )}
-              <p className="pb-1 text-sm font-bold text-slate-600">Cr</p>
             </div>
           </Card>
         ))}
@@ -2713,7 +2991,13 @@ const CultivationTrackerView = ({
         }
       />
 
-      <CropActivitySummaryCard calendarData={calendarData} loading={calendarLoading} selectedMonth={activeMonth} />
+      <CropActivitySummaryCard
+        calendarData={calendarData}
+        loading={calendarLoading}
+        selectedMonth={activeMonth}
+        farms={farms}
+        farmerNames={farmerNames}
+      />
     </section>
 
     <TaskTimelineSection tasks={monthTasks} farmsById={farmsById} assignmentByFarm={assignmentByFarm} loading={calendarLoading} />
@@ -2840,28 +3124,57 @@ const CeosDesk = () => {
       const budgetBifPromise = fetch(`${base}/ceo_desk/budget_wise_utilization_bifurcation`)
         .then((res) => res.json())
         .then((data: { success?: boolean; data?: BudgetBifurcation[] }) => {
-          if (!cancelled) setBudgetBifurcation(data?.success && Array.isArray(data?.data) ? data.data : []);
+          const rows = data?.success && Array.isArray(data?.data) ? data.data : [];
+          if (!cancelled) setBudgetBifurcation(rows);
+          return rows;
         })
         .catch(() => {
           if (!cancelled) setBudgetBifurcation([]);
+          return [] as BudgetBifurcation[];
         })
         .finally(() => {
           if (!cancelled) setBudgetBifurcationLoading(false);
         });
 
-      const categoryPromise = fetch(`${base}/ceo_desk/get_category_wise_budget_utilization`)
-        .then((res) => res.json())
-        .then((data: { success?: boolean; data?: BudgetCategoryBifurcation[] }) => {
-          if (!cancelled) setCategoryBudgets(data?.success && Array.isArray(data?.data) ? data.data : []);
+      const categoryPromise = fetchCompleteCategoryBudgets(base)
+        .then((rows) => {
+          if (!cancelled) setCategoryBudgets(rows);
+          return rows;
         })
         .catch(() => {
           if (!cancelled) setCategoryBudgets([]);
+          return [] as BudgetCategoryBifurcation[];
         })
         .finally(() => {
           if (!cancelled) setCategoryBudgetsLoading(false);
         });
 
-      await Promise.all([kpiPromise, budgetBifPromise, categoryPromise]);
+      const [, budgetRows, categoryRows] = await Promise.all([kpiPromise, budgetBifPromise, categoryPromise]);
+      if (!cancelled) {
+        const existingBudgetIds = new Set(budgetRows.map((budget) => budget.budget_id));
+        const missingBudgetRows = categoryRows
+          .filter((budget) => !existingBudgetIds.has(budget.budget_id))
+          .map((budget) => {
+            const totals = budget.categories.reduce(
+              (sum, category) => ({
+                totalBudget: sum.totalBudget + category.total_budget,
+                pipeline: sum.pipeline + category.amount_in_pipeline,
+                utilized: sum.utilized + category.amount_utilized,
+                remaining: sum.remaining + category.remaining,
+              }),
+              { totalBudget: 0, pipeline: 0, utilized: 0, remaining: 0 }
+            );
+            return {
+              budget_id: budget.budget_id,
+              budget_name: budget.budget_name,
+              total_budget: totals.totalBudget,
+              amount_in_pipeline: totals.pipeline,
+              amount_utilized: totals.utilized,
+              remaining: totals.remaining,
+            } satisfies BudgetBifurcation;
+          });
+        setBudgetBifurcation([...budgetRows, ...missingBudgetRows]);
+      }
     };
 
     (async () => {
