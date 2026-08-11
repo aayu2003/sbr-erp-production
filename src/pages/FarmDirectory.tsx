@@ -5,7 +5,7 @@ import {
   LayoutGrid, Layers,
   RefreshCw, Video, Crosshair,
   TrendingUp, BookOpen, X, Filter, ChevronDown, ChevronLeft, ChevronRight, Ruler, IndianRupee, Settings, Eye,
-  Droplets, Zap, Activity, Clock, Check,
+  Droplets, Zap, Activity, Clock, Check, Printer, Loader2,
 } from 'lucide-react';
 import { MapContainer, TileLayer, Polygon, Polyline, CircleMarker, Tooltip, useMap } from 'react-leaflet';
 import L from 'leaflet';
@@ -20,6 +20,13 @@ import PlotMarkingModal from '@/components/farm/PlotMarkingModal';
 import { FarmActivityEntry } from '@/components/farm/FarmActivityModal';
 import PremiumPlotterModal from '@/components/farm/PremiumPlotterModal';
 import { loadGlobalMapColors, saveGlobalMapColors } from '@/lib/mapColorSettings';
+import {
+  printLandDetailsAsPdf,
+  printLandDirectoryAsPdf,
+  type LandDetailsPdfRecord,
+  type LandDirectoryPdfRecord,
+} from '@/lib/landDirectoryPdf';
+import { readUserProfile } from '@/lib/signatureDiary';
 
 const BASE_URL = getBaseUrl().replace(/\/$/, '');
 
@@ -371,6 +378,8 @@ const fmtDate = (iso: string) => {
 const FarmDirectory = () => {
   const [farms, setFarms]     = useState<Farm[]>([]);
   const [loading, setLoading] = useState(false);
+  const [pdfPrinting, setPdfPrinting] = useState(false);
+  const [landDetailsPdfPrinting, setLandDetailsPdfPrinting] = useState(false);
   const [error, setError]     = useState<string | null>(null);
   const [search, setSearch]   = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -546,6 +555,126 @@ const FarmDirectory = () => {
     return colors;
   }, {});
   const activeFilterCount = [stateFilter !== 'all', cropFilter !== 'all', farmingFilter !== 'all'].filter(Boolean).length;
+  const ownerDetailsLoading = farms.some(farm => !(farm.farm_id in farmerNames));
+
+  const printLandDirectory = async () => {
+    if (!farms.length) {
+      toast.error('No land parcel records are available to print.');
+      return;
+    }
+
+    const records: LandDirectoryPdfRecord[] = farms.map(farm => ({
+      parcelId: farm.farm_id,
+      ownerName: farmerNames[farm.farm_id] || 'Unknown owner',
+      location: [farm.land_data?.village, farm.land_data?.district, farm.land_data?.state].filter(Boolean).join(', '),
+      crop: farm.crop_type,
+      areaAcres: Number(farm.area || 0),
+      plotCount: farm.land_plots?.length ?? 0,
+      investment: (farm.farm_investment_ledger ?? []).reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0),
+    }));
+
+    setPdfPrinting(true);
+    try {
+      await printLandDirectoryAsPdf(records, {
+        generatedBy: readUserProfile().name?.trim() || 'System User',
+      });
+    } catch (printError: any) {
+      toast.error(String(printError?.message || 'Failed to generate the Land Directory PDF.'));
+    } finally {
+      setPdfPrinting(false);
+    }
+  };
+
+  const printLandDetails = async (farm: Farm) => {
+    const describeMapping = (mapping: AdditionalMapping) => {
+      const sources = [mapping.details, mapping.point_details].filter(Boolean) as Array<Record<string, unknown>>;
+      const details = sources.flatMap(source => Object.entries(source))
+        .filter(([, value]) => value != null && String(value).trim() !== '')
+        .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${String(value)}`);
+      return details.join(' | ');
+    };
+    const mappingCoordinates = (mapping: AdditionalMapping): [number, number][] =>
+      (mapping.mapping_coordinates ?? []).map((coordinate) => {
+        const [lat, lng] = String(coordinate).split(',').map(Number);
+        return [lat, lng] as [number, number];
+      }).filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng));
+    const scopeHistory = Object.values(farm.scope_of_work ?? {}).flatMap(scope =>
+      (scope.activities ?? []).map(activity => ({
+        type: 'Scope Activity',
+        title: activity,
+        date: scope.start_date || '',
+        status: scope.end_date ? `Scheduled to ${fmtDate(scope.end_date)}` : 'Scheduled',
+        description: scope.vendor_details?.vendor_name ? `Vendor: ${scope.vendor_details.vendor_name}` : '',
+      }))
+    );
+    const activityHistory = (farm.activities ?? []).map((activity, index) => {
+      const rawActivity = activity as FarmActivityEntry & Record<string, any>;
+      return {
+        type: 'Activity',
+        title: String(rawActivity.activity_name ?? rawActivity.name ?? rawActivity.title ?? rawActivity.item_description?.item_name ?? `Activity ${index + 1}`),
+        date: String(rawActivity.date ?? rawActivity.completed_at ?? rawActivity.created_at ?? ''),
+        status: String(rawActivity.status ?? 'Recorded'),
+        description: String(rawActivity.description ?? rawActivity.remarks ?? ''),
+      };
+    });
+    const record: LandDetailsPdfRecord = {
+      parcelId: farm.farm_id,
+      ownerName: farmerNames[farm.farm_id] || 'Unknown owner',
+      ownerId: farmerIds[farm.farm_id] || farm.farmer_id || '',
+      blockId: farm.block_id,
+      farmingType: farm.land_data?.farming_option,
+      crop: farm.crop_type,
+      areaAcres: Number(farm.area || 0),
+      priority: farm.priority ? `P${farm.priority}` : '',
+      village: farm.land_data?.village,
+      district: farm.land_data?.district,
+      state: farm.land_data?.state,
+      createdAt: farm.created_at,
+      boundary: (farm.land_data?.land_coordinates ?? []).filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng)),
+      plots: (farm.land_plots ?? []).map(plot => ({
+        id: plot.plot_id,
+        name: plot.plot_name,
+        crop: plot.crop_type || '',
+        areaAcres: Number(plot.plot_area || 0),
+        coordinates: (plot.plot_coordinates ?? []).filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng)),
+        createdAt: plot.created_at || '',
+      })),
+      mappings: (farm.additional_mappings ?? []).map(mapping => ({
+        name: mapping.mapping_name,
+        type: mapping.mapping_type,
+        shape: mapping.shape_details,
+        coordinates: mappingCoordinates(mapping),
+        details: describeMapping(mapping),
+      })),
+      supervisor: configurationStaff.supervisorName,
+      supervisorContact: configurationStaff.supervisorContact,
+      fieldManagers: configurationStaff.fieldManagers.map(manager => manager.name).join(', '),
+      fieldManagerContacts: configurationStaff.fieldManagers.map(manager => manager.contact).filter(Boolean).join(', '),
+      imageCount: (farm.land_data?.land_media?.images ?? []).filter(Boolean).length,
+      hasVideo: Boolean(farm.land_data?.land_media?.video),
+      history: [...activityHistory, ...scopeHistory],
+      investments: (farm.farm_investment_ledger ?? []).map(entry => ({
+        date: entry.date,
+        voucher: entry.voucher_number,
+        item: entry.item_description?.item_name || entry.description || '',
+        code: entry.item_description?.item_code || '',
+        quantity: `${Number(entry.input || 0).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${entry.item_description?.item_unit || entry.unit || ''}`.trim(),
+        description: entry.description,
+        amount: Number(entry.amount || 0),
+      })),
+    };
+
+    setLandDetailsPdfPrinting(true);
+    try {
+      await printLandDetailsAsPdf(record, {
+        generatedBy: readUserProfile().name?.trim() || 'System User',
+      });
+    } catch (printError: any) {
+      toast.error(String(printError?.message || 'Failed to generate the Land Details PDF.'));
+    } finally {
+      setLandDetailsPdfPrinting(false);
+    }
+  };
 
   // KPIs
   const totalArea      = farms.reduce((s, f) => s + (f.area ?? 0), 0);
@@ -556,11 +685,11 @@ const FarmDirectory = () => {
     const plots = farm.land_plots ?? [];
     if (plots.length > 0) {
       plots.forEach(plot => {
-        const crop = String(plot.crop_type || 'Unassigned').trim() || 'Unassigned';
+        const crop = String(plot.crop_type || 'Non-cultivable').trim() || 'Non-cultivable';
         summary[crop] = (summary[crop] ?? 0) + Number(plot.plot_area ?? 0);
       });
     } else {
-      const crop = String(farm.crop_type || 'Unassigned').trim() || 'Unassigned';
+      const crop = String(farm.crop_type || 'Non-cultivable').trim() || 'Non-cultivable';
       summary[crop] = (summary[crop] ?? 0) + Number(farm.area ?? 0);
     }
     return summary;
@@ -568,7 +697,7 @@ const FarmDirectory = () => {
     .map(([crop, area]) => ({ crop, area }))
     .sort((first, second) => second.area - first.area);
   const assignedCropArea = cropWiseArea
-    .filter(item => item.crop.trim().toLowerCase() !== 'unassigned')
+    .filter(item => item.crop.trim().toLowerCase() !== 'non-cultivable')
     .reduce((sum, item) => sum + item.area, 0);
 
   const kpis: Array<{
@@ -589,7 +718,7 @@ const FarmDirectory = () => {
       chart: cropWiseArea.map(item => ({
         label: item.crop.charAt(0).toUpperCase() + item.crop.slice(1),
         value: item.area,
-        color: item.crop.trim().toLowerCase() === 'unassigned'
+        color: item.crop.trim().toLowerCase() === 'non-cultivable'
           ? '#94a3b8'
           : directoryCropColors[item.crop.trim().toLowerCase()] ?? '#0D3A35',
       })),
@@ -606,13 +735,24 @@ const FarmDirectory = () => {
   return (
     <div className="min-h-screen space-y-8 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="text-sm font-bold text-emerald-700">Land Records</p>
           <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">Land Directory</h1>
           <p className="mt-3 text-base font-medium text-slate-600">Manage and view all registered land parcels</p>
         </div>
-        <div className="shrink-0">
+        <div className="flex shrink-0 items-center gap-2 self-start sm:self-auto">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void printLandDirectory()}
+            disabled={loading || pdfPrinting || farms.length === 0 || ownerDetailsLoading}
+            className="h-11 gap-2 rounded-xl border-[#0D3A35]/20 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5 disabled:opacity-60"
+            title={ownerDetailsLoading ? 'Waiting for land-owner names' : 'Print Land Directory Summary'}
+          >
+            {pdfPrinting || ownerDetailsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Printer className="h-4 w-4" />}
+            {pdfPrinting ? 'Preparing Print...' : ownerDetailsLoading ? 'Loading Details...' : 'Print Summary'}
+          </Button>
           <button
             type="button"
             onClick={() => setMapColorSettingsOpen(true)}
@@ -1174,14 +1314,26 @@ const FarmDirectory = () => {
                 <h2 className="text-lg font-bold text-white">Land Details</h2>
                 <p className="mt-1 text-xs font-semibold text-white/70">{landConfigurationFarm.farm_id}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => setLandConfigurationFarm(null)}
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-white/5 text-white/80 transition hover:bg-white/10 hover:text-white"
-                aria-label="Close land details"
-              >
-                <X className="h-4 w-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void printLandDetails(landConfigurationFarm)}
+                  disabled={landDetailsPdfPrinting}
+                  className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/25 bg-white/10 px-3 text-xs font-bold text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  title="Print complete land details and mapping"
+                >
+                  {landDetailsPdfPrinting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Printer className="h-4 w-4" />}
+                  {landDetailsPdfPrinting ? 'Preparing...' : 'Print'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLandConfigurationFarm(null)}
+                  className="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-white/5 text-white/80 transition hover:bg-white/10 hover:text-white"
+                  aria-label="Close land details"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
             </div>
             <div className="flex shrink-0 items-end gap-8 overflow-x-auto border-b border-slate-200 px-6">
               {([
@@ -2015,15 +2167,26 @@ const FarmDirectory = () => {
                         <TrendingUp className="h-4 w-4 text-emerald-700" />
                         <h3 className="text-sm font-bold text-slate-900">Investment Ledger</h3>
                       </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full min-w-[1250px] text-left">
+                      <div className="w-full overflow-hidden">
+                        <table className="w-full table-fixed text-left">
+                          <colgroup>
+                            <col className="w-[9%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[12%]" />
+                            <col className="w-[9%]" />
+                            <col className="w-[11%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[13%]" />
+                            <col className="w-[15%]" />
+                            <col className="w-[11%]" />
+                          </colgroup>
                           <thead>
                             <tr className="border-b border-slate-100 bg-slate-50/40">
                               {[
                                 'Date', 'Voucher No.', 'Item', 'Item Code', 'Quantity / Unit',
-                                'Rate / Unit', 'Vendor / Paid To', 'Payment Mode', 'Description', 'Amount',
+                                'Rate / Unit', 'Vendor / Paid To', 'Description', 'Amount',
                               ].map(heading => (
-                                <th key={heading} className="px-4 py-3 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                                <th key={heading} className="break-words px-2.5 py-3 text-[9px] font-bold uppercase leading-tight tracking-wide text-slate-500">
                                   {heading}
                                 </th>
                               ))}
@@ -2039,24 +2202,21 @@ const FarmDirectory = () => {
                                   const rate = quantity > 0 ? amount / quantity : Number(entry.investment ?? 0);
                                   return (
                                     <>
-                                <td className="whitespace-nowrap px-4 py-3 text-xs font-semibold text-slate-600">{fmtDate(entry.date)}</td>
-                                <td className="px-4 py-3 text-xs font-mono font-semibold text-slate-600">{entry.voucher_number || 'N/A'}</td>
-                                <td className="px-4 py-3 text-xs font-bold text-slate-800">{entry.item_description?.item_name?.trim() || 'N/A'}</td>
-                                <td className="px-4 py-3 text-xs font-semibold text-slate-600">{entry.item_description?.item_code || 'N/A'}</td>
-                                <td className="px-4 py-3 text-xs font-semibold text-slate-600">
+                                <td className="break-words px-2.5 py-3 text-[11px] font-semibold text-slate-600">{fmtDate(entry.date)}</td>
+                                <td className="break-all px-2.5 py-3 text-[11px] font-mono font-semibold text-slate-600">{entry.voucher_number || 'N/A'}</td>
+                                <td className="break-words px-2.5 py-3 text-[11px] font-bold text-slate-800">{entry.item_description?.item_name?.trim() || 'N/A'}</td>
+                                <td className="break-all px-2.5 py-3 text-[11px] font-semibold text-slate-600">{entry.item_description?.item_code || 'N/A'}</td>
+                                <td className="break-words px-2.5 py-3 text-[11px] font-semibold text-slate-600">
                                   {entry.input || 'N/A'} {entry.item_description?.item_unit || entry.unit || ''}
                                 </td>
-                                <td className="whitespace-nowrap px-4 py-3 text-xs font-semibold text-slate-600">
+                                <td className="break-words px-2.5 py-3 text-[11px] font-semibold text-slate-600">
                                   {rate > 0 ? `₹${rate.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : 'N/A'}
                                 </td>
-                                <td className="px-4 py-3 text-xs font-semibold text-slate-600">
+                                <td className="break-words px-2.5 py-3 text-[11px] font-semibold text-slate-600">
                                   {rawEntry.vendor_name ?? rawEntry.supplier_name ?? rawEntry.paid_to ?? 'N/A'}
                                 </td>
-                                <td className="px-4 py-3 text-xs font-semibold capitalize text-slate-600">
-                                  {rawEntry.payment_mode ?? rawEntry.payment_method ?? 'N/A'}
-                                </td>
-                                <td className="max-w-[260px] px-4 py-3 text-xs text-slate-500">{entry.description || 'N/A'}</td>
-                                <td className="whitespace-nowrap px-4 py-3 text-right text-xs font-extrabold text-[#0D3A35]">
+                                <td className="break-words px-2.5 py-3 text-[11px] text-slate-500">{entry.description || 'N/A'}</td>
+                                <td className="break-words px-2.5 py-3 text-right text-[11px] font-extrabold text-[#0D3A35]">
                                   ₹{Number(entry.amount ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
                                 </td>
                                     </>
@@ -2065,7 +2225,7 @@ const FarmDirectory = () => {
                               </tr>
                             )) : (
                               <tr>
-                                <td colSpan={10} className="px-5 py-16 text-center text-sm font-semibold text-slate-400">
+                                <td colSpan={9} className="px-5 py-16 text-center text-sm font-semibold text-slate-400">
                                   No investment entries recorded yet
                                 </td>
                               </tr>
@@ -2074,8 +2234,8 @@ const FarmDirectory = () => {
                           {ledger.length > 0 && (
                             <tfoot>
                               <tr className="border-t-2 border-slate-200 bg-emerald-50/50">
-                                <td colSpan={9} className="px-4 py-3 text-sm font-bold text-slate-800">Total Investment</td>
-                                <td className="whitespace-nowrap px-4 py-3 text-right text-sm font-extrabold text-[#0D3A35]">
+                                <td colSpan={8} className="px-2.5 py-3 text-sm font-bold text-slate-800">Total Investment</td>
+                                <td className="break-words px-2.5 py-3 text-right text-sm font-extrabold text-[#0D3A35]">
                                   ₹{totalInvestment.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
                                 </td>
                               </tr>
