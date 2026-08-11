@@ -83,6 +83,8 @@ import WebApp from "./pages/webapp/WebApp";
 import Inbox from "./pages/Inbox";
 import WccApprovalInbox from "./pages/WccApprovalInbox";
 import GRNModule from "./pages/GRNModule";
+import InspectionReport from "./pages/InspectionReport";
+import InspectionReportApprovals from "./pages/InspectionReportApprovals";
 import GrnApprovalInbox from "./pages/GrnApprovalInbox";
 import GateEntryModule from "./pages/GateEntryModule";
 import LabourManagement from "./pages/LabourManagement";
@@ -157,6 +159,7 @@ const App = () => (
           <Route path="/on-demand-task/:taskId" element={<AppLayout><TaskDetailPage /></AppLayout>} />
           <Route path="/on-demand-task-legacy" element={<AppLayout><OnDemandTask /></AppLayout>} />
           <Route path="/finance-admin-ops-indents" element={<AppLayout><FinanceAdminOpsIndent /></AppLayout>} />
+          <Route path="/finance/inspection-report-approvals" element={<AppLayout><InspectionReportApprovals stage="finance_admin_ops" /></AppLayout>} />
           <Route
             path="/purchase-requisition"
             element={
@@ -286,6 +289,8 @@ const App = () => (
 
           {/* GRN Module + GRN Approval workflow */}
           <Route path="/grn-module"            element={<AppLayout><GRNModule /></AppLayout>} />
+          <Route path="/inspection-report"     element={<AppLayout><InspectionReport /></AppLayout>} />
+          <Route path="/admin/inspection-report-approvals" element={<AppLayout><InspectionReportApprovals stage="admin_ops" /></AppLayout>} />
           <Route path="/admin/grn-approval"    element={<AppLayout><GrnApprovalInbox stage="verification" /></AppLayout>} />
           <Route path="/director/grn-approval" element={<AppLayout><GrnApprovalInbox stage="approval" /></AppLayout>} />
 

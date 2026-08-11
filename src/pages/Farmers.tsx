@@ -1,5 +1,5 @@
 ﻿import { useMemo, useState, useEffect, useRef } from 'react';
-import { Search, Filter, Users, MapPin, Phone, Mail, FileText, ShieldCheck, NotebookText, Wallet, Check, Flag, Leaf, Wheat, Sprout, Image as ImageIcon, Map, Pencil, Trash2, KeyRound, IdCard, BookOpen, FileBadge2, Landmark, Info, Navigation, Loader2, UploadCloud, X, Camera, Save, UserRound, Home, Banknote, Eye, FileUp, ArrowRight, ChevronDown, Droplets, Zap, Ruler, Layers3, IndianRupee, CalendarDays, Timer, Plus } from 'lucide-react';
+import { Search, Filter, Users, MapPin, Phone, Mail, FileText, ShieldCheck, NotebookText, Wallet, Check, Flag, Leaf, Wheat, Sprout, Image as ImageIcon, Map, Pencil, Trash2, KeyRound, IdCard, BookOpen, FileBadge2, Landmark, Info, Navigation, Loader2, UploadCloud, X, Camera, Save, UserRound, Home, Banknote, Eye, FileUp, ArrowRight, ChevronDown, Droplets, Zap, Ruler, Layers3, IndianRupee, CalendarDays, Timer, Plus, Printer } from 'lucide-react';
 import { Fragment } from 'react';
 import { MapContainer, TileLayer, Polygon, Marker, Popup, Tooltip, FeatureGroup, useMap } from 'react-leaflet';
 import { EditControl } from 'react-leaflet-draw';
@@ -37,6 +37,8 @@ import {
 import getBaseUrl from '@/lib/config';
 import { parseKmlFile } from '@/lib/kmlParser';
 import { useToast } from '@/hooks/use-toast';
+import { printLandOwnerDirectoryAsPdf, printLandOwnerProfileAsPdf, type LandOwnerPdfRecord } from '@/lib/landOwnerDirectoryPdf';
+import { readUserProfile } from '@/lib/signatureDiary';
 
 type CropValue = 'napier' | 'paddy' | 'ragi' | '';
 type CropSelectValue = Exclude<CropValue, ''> | 'none';
@@ -92,6 +94,24 @@ const normalizeProfilePhotoUrl = (value?: string | null) => {
     }
   } catch {
     // Keep blob URLs, relative paths and other browser-supported sources unchanged.
+  }
+  return source;
+};
+
+const normalizeFarmerDocumentUrl = (value?: string | null) => {
+  const source = String(value || '').trim();
+  if (!source) return '';
+  try {
+    const url = new URL(source);
+    // Farmer documents in this bucket are readable at their stable object URL.
+    // Stored upload-time signatures expire and make S3 reject the same object.
+    if (url.hostname === 'sbr-farmer-documents-prod.s3.amazonaws.com') {
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+  } catch {
+    // Preserve blob URLs, relative URLs and other browser-supported sources.
   }
   return source;
 };
@@ -237,20 +257,51 @@ const FlyToBounds = ({ coords }: { coords: { lat: number; lng: number }[] | null
 
   useEffect(() => {
     if (!coordinatesKey) return;
-    // The parcels grid stays mounted but CSS-hidden (`hidden` class) while land data is still
-    // loading — a map inside a display:none container has zero rendered size, and Leaflet's
-    // flyTo animation does projection math that divides by that size, producing NaN and
-    // crashing with no error boundary to catch it. Skip the fly-to until the map actually
-    // has pixels to animate within; AutoResizeMap's ResizeObserver will fix the view once
-    // the container becomes visible and gets a real size.
     const container = map.getContainer();
-    if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) return;
     const latLngs = coordinatesKey.split('|').map((pair) => {
       const [lat, lng] = pair.split(',').map(Number);
       return L.latLng(lat, lng);
     });
     if (latLngs.length === 0) return;
-    map.flyToBounds(L.latLngBounds(latLngs), { padding: [40, 40], duration: 1.4, animate: true });
+
+    const bounds = L.latLngBounds(latLngs);
+    let animationFrame: number | null = null;
+    const retryTimers: number[] = [];
+
+    // This map is rendered inside a tabbed modal. On its first render the container can still
+    // be display:none (or mid-layout), so Leaflet calculates the parcel against a zero-sized
+    // viewport and leaves the boundary clipped in a corner. Refit after every real container
+    // resize so the complete parcel remains centred when the tab/modal becomes visible.
+    const fitParcelInView = () => {
+      if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) return;
+      map.stop();
+      map.invalidateSize({ pan: false, animate: false });
+      map.fitBounds(bounds, {
+        padding: [32, 32],
+        maxZoom: 18,
+        animate: false,
+      });
+    };
+
+    const scheduleFit = () => {
+      if (animationFrame != null) window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(fitParcelInView);
+    };
+
+    const observer = new ResizeObserver(scheduleFit);
+    observer.observe(container);
+    scheduleFit();
+    // Cover modal/tab layout transitions that do not always emit a ResizeObserver callback
+    // at the moment Leaflet first receives its final dimensions.
+    [80, 240, 500].forEach((delay) => {
+      retryTimers.push(window.setTimeout(scheduleFit, delay));
+    });
+
+    return () => {
+      observer.disconnect();
+      retryTimers.forEach((timer) => window.clearTimeout(timer));
+      if (animationFrame != null) window.cancelAnimationFrame(animationFrame);
+    };
   }, [coordinatesKey, map]);
   return null;
 };
@@ -399,6 +450,8 @@ const Farmers = () => {
   // --- Existing State & Logic ---
   const [farmers, setFarmers] = useState<FarmerRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [pdfPrinting, setPdfPrinting] = useState(false);
+  const [profilePdfPrintingId, setProfilePdfPrintingId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'disputed'>('all');
@@ -1023,11 +1076,172 @@ const Farmers = () => {
     });
   };
 
+  const landOwnerPdfRecords = (): LandOwnerPdfRecord[] => farmers.map((farmer) => {
+    const rawFarms = Array.isArray(farmer.farms) ? farmer.farms : [];
+    const farmCards = getFarmCards(farmer);
+    const agreements = Array.isArray(farmer.agreements)
+      ? farmer.agreements
+      : farmer.agreements
+        ? [farmer.agreements]
+        : [];
+    const bankAccounts = getAllBankDetails(farmer).filter((account) => (
+      [account.holderName, account.bankName, account.accountNumber, account.ifsc]
+        .some((value) => value && String(value).toLowerCase() !== 'n/a')
+    ));
+    const embeddedCoOwners = rawFarms.flatMap((farm: any, farmIndex: number) => {
+      const parcelId = String(farm?.farm_id ?? farm?.id ?? farmCards[farmIndex]?.id ?? '');
+      return normalizeLandCoOwners(farm).map((coOwner) => ({
+        parcelId,
+        name: coOwner.fullName,
+        relationship: coOwner.relationship,
+        contact: coOwner.phoneNumber,
+        aadhaar: coOwner.aadhaarNumber,
+        pan: coOwner.panNumber,
+        ownershipShare: coOwner.ownershipShare,
+      }));
+    });
+    const ownerLevelCoOwner = farmer.coOwner && Object.values(farmer.coOwner).some(Boolean)
+      ? [{
+          parcelId: '',
+          name: String(farmer.coOwner.fullName ?? ''),
+          relationship: String(farmer.coOwner.relationship ?? ''),
+          contact: String(farmer.coOwner.phoneNumber ?? ''),
+          aadhaar: String(farmer.coOwner.aadhaarNumber ?? ''),
+          pan: String(farmer.coOwner.panNumber ?? ''),
+          ownershipShare: '',
+        }]
+      : [];
+    const authoritativeCoOwners = rawFarms.flatMap((farm: any, farmIndex: number) => {
+      const parcelId = String(farm?.farm_id ?? farm?.id ?? farmCards[farmIndex]?.id ?? '');
+      return (parcelCoOwners[parcelId]?.items ?? []).map((coOwner) => ({
+        parcelId,
+        name: coOwner.co_owner_name,
+        relationship: '',
+        contact: coOwner.co_owner_contact,
+        aadhaar: coOwner.co_owner_adhar_number,
+        pan: coOwner.co_owner_pan_number,
+        ownershipShare: Number.isFinite(coOwner.co_owner_share_percentage)
+          ? `${coOwner.co_owner_share_percentage} ac`
+          : '',
+      }));
+    });
+    const createdAt = farmer.createdAt instanceof Date && !Number.isNaN(farmer.createdAt.getTime())
+      ? farmer.createdAt.toISOString()
+      : '';
+    const formatLeaseRate = (value: unknown) => {
+      const amount = Number(value);
+      return Number.isFinite(amount) && amount > 0
+        ? `Rs. ${amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
+        : String(value ?? '');
+    };
+
+    return {
+      id: farmer.id,
+      name: farmer.fullName,
+      status: flagged[farmer.id] ? 'Disputed' : 'Active',
+      farmingOption: farmer.farmingOption || 'Land Owner',
+      phone: farmer.phoneNumber,
+      alternatePhone: farmer.alternatePhone || '',
+      email: farmer.email || '',
+      address: farmer.farmerAddress || [farmer.village, farmer.taluka, farmer.district, farmer.state].filter(Boolean).join(', '),
+      village: farmer.village,
+      taluka: farmer.taluka || '',
+      district: farmer.district,
+      state: farmer.state,
+      cluster: farmer.clusterAssigned || '',
+      zone: farmer.zoneAssigned || '',
+      block: farmer.blockAssigned || '',
+      aadhaar: getKycValue(farmer, 'adhar_number') || getKycValue(farmer, 'aadhaar_number'),
+      pan: getKycValue(farmer, 'pan_numnber') || getKycValue(farmer, 'pan_number'),
+      createdAt,
+      totalAreaAcres: Number(farmer.landMapping?.totalArea ?? 0),
+      parcels: farmCards.map((farm, farmIndex) => {
+        const rawFarm = rawFarms[farmIndex] ?? {};
+        return {
+          parcelId: String(rawFarm?.farm_id ?? rawFarm?.id ?? farm.id),
+          location: farm.location,
+          crop: getCropOption(farm.cropType)?.label || String(rawFarm?.crop_type ?? farmer.crop ?? ''),
+          areaAcres: Number(farm.acres || 0),
+          cluster: String(farm.cluster ?? ''),
+          zone: String(farm.zone ?? ''),
+          block: String(farm.block ?? ''),
+          leaseStart: String(farm.leaseStart ?? ''),
+          leaseEnd: String(farm.leaseEnd ?? ''),
+          leaseRate: formatLeaseRate(farm.leaseRate),
+          lockInStart: String(farm.lockInStart ?? ''),
+          lockInEnd: String(farm.lockInEnd ?? ''),
+        };
+      }),
+      agreements: agreements.map((agreement: any) => ({
+        startDate: String(agreement?.agreement_start_date ?? agreement?.agreementStart ?? ''),
+        endDate: String(agreement?.agreement_end_date ?? agreement?.agreementEnd ?? ''),
+        leaseRate: formatLeaseRate(agreement?.lease_rate ?? agreement?.lease_rent ?? agreement?.leaseRent),
+        lockInStart: String(agreement?.lock_in_start_date ?? agreement?.lockin_start_date ?? ''),
+        lockInEnd: String(agreement?.lock_in_end_date ?? agreement?.lockin_end_date ?? ''),
+      })),
+      bankAccounts: bankAccounts.map((account) => ({
+        holderName: account.holderName,
+        bankName: account.bankName,
+        accountNumber: account.accountNumber,
+        ifsc: account.ifsc,
+      })),
+      coOwners: authoritativeCoOwners.length ? authoritativeCoOwners : [...embeddedCoOwners, ...ownerLevelCoOwner],
+      documents: [
+        { label: 'Aadhaar Card', available: Boolean(farmer.documents?.adhar_card?.url), url: normalizeFarmerDocumentUrl(farmer.documents?.adhar_card?.url) },
+        { label: 'PAN Card', available: Boolean(farmer.documents?.pand_card?.url), url: normalizeFarmerDocumentUrl(farmer.documents?.pand_card?.url) },
+        { label: 'Kisan Book', available: Boolean(farmer.documents?.kisan_book?.url), url: normalizeFarmerDocumentUrl(farmer.documents?.kisan_book?.url) },
+        { label: 'B1 Record', available: Boolean(farmer.documents?.B1_record?.url), url: normalizeFarmerDocumentUrl(farmer.documents?.B1_record?.url) },
+        { label: 'Agreement', available: Boolean(farmer.documents?.agreement?.url), url: normalizeFarmerDocumentUrl(farmer.documents?.agreement?.url) },
+        { label: 'Bank Passbook', available: Boolean(farmer.documents?.bank_passbook?.url), url: normalizeFarmerDocumentUrl(farmer.documents?.bank_passbook?.url) },
+      ],
+    };
+  });
+
+  const printLandOwnerDirectory = async () => {
+    if (!farmers.length) {
+      toast({ title: 'Nothing to print', description: 'No land-owner records are available.', variant: 'destructive' });
+      return;
+    }
+    setPdfPrinting(true);
+    try {
+      await printLandOwnerDirectoryAsPdf(landOwnerPdfRecords(), {
+        generatedBy: readUserProfile().name?.trim() || 'System User',
+      });
+    } catch (error: any) {
+      toast({
+        title: 'Unable to print directory',
+        description: String(error?.message || 'Failed to generate the Land Owner Directory PDF.'),
+        variant: 'destructive',
+      });
+    } finally {
+      setPdfPrinting(false);
+    }
+  };
+
+  const printLandOwnerProfile = async (farmer: FarmerRow) => {
+    const record = landOwnerPdfRecords().find((entry) => entry.id === farmer.id);
+    if (!record) return;
+    setProfilePdfPrintingId(farmer.id);
+    try {
+      await printLandOwnerProfileAsPdf(record, {
+        generatedBy: readUserProfile().name?.trim() || 'System User',
+      });
+    } catch (error: any) {
+      toast({
+        title: 'Unable to print land-owner profile',
+        description: String(error?.message || 'Failed to generate the Land Owner Profile PDF.'),
+        variant: 'destructive',
+      });
+    } finally {
+      setProfilePdfPrintingId(null);
+    }
+  };
+
   type FarmerDocumentKey = 'adhar_card' | 'pand_card' | 'kisan_book' | 'B1_record' | 'agreement' | 'bank_passbook' | 'profile_photo';
 
   const getDocumentUrl = (farmer: FarmerRow, key: FarmerDocumentKey) => {
     const docs = farmer.documents ?? {};
-    return docs?.[key]?.url || '';
+    return normalizeFarmerDocumentUrl(docs?.[key]?.url);
   };
 
   const normalizeUploadedDocument = (body: any, documentType: FarmerDocumentKey) => {
@@ -1046,9 +1260,10 @@ const Farmers = () => {
 
   const fetchFarmerDetailSnapshot = async (farmerId: string) => {
     const base = getBaseUrl().replace(/\/$/, '');
-    const resp = await fetch(`${base}/farmer_managment/farmer_details/${farmerId}`, {
+    const resp = await fetch(`${base}/farmer_managment/farmer_details/${farmerId}?refresh=${Date.now()}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
     });
     if (!resp.ok) return null;
     return resp.json().catch(() => null);
@@ -1385,8 +1600,18 @@ const Farmers = () => {
 
   // Document card used in the "View Profile" popup — mirrors the Employee Directory
   // profile modal's document tiles (thumbnail/icon + label + Uploaded/Pending state).
-  const ProfileDocumentCard = ({ title, url, Icon }: { title: string; url: string; Icon: typeof FileText }) => {
-    const isImage = /\.(png|jpg|jpeg|webp|gif)(\?|$)/i.test(url.toLowerCase());
+  const ProfileDocumentCard = ({
+    title,
+    url,
+    Icon,
+  }: {
+    title: string;
+    url: string;
+    Icon: typeof FileText;
+  }) => {
+    const stableUrl = normalizeFarmerDocumentUrl(url);
+    const isImage = /\.(png|jpg|jpeg|webp|gif)(\?|$)/i.test(stableUrl.toLowerCase());
+    const isPdf = /\.pdf(\?|$)/i.test(stableUrl.toLowerCase());
 
     return (
       <Dialog>
@@ -1394,16 +1619,24 @@ const Farmers = () => {
           <button
             type="button"
             disabled={!url}
-            className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white text-left shadow-sm transition hover:border-emerald-200 hover:shadow-md disabled:cursor-not-allowed"
+            className="flex h-[312px] w-[228px] shrink-0 flex-col overflow-hidden rounded-xl border border-[#0D3A35] bg-white text-left shadow-sm transition hover:-translate-y-0.5 hover:border-[#0D3A35] hover:shadow-lg disabled:cursor-not-allowed disabled:hover:translate-y-0"
           >
-            <div className="flex h-24 items-center justify-center bg-slate-50">
-              {url && isImage ? (
-                <img src={url} alt={title} className="h-full w-full object-cover" />
+            <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-slate-50">
+              {stableUrl && isImage ? (
+                <img src={stableUrl} alt={title} loading="lazy" className="h-full w-full bg-white object-contain" />
+              ) : stableUrl && isPdf ? (
+                <iframe
+                  src={`${stableUrl}#page=1&toolbar=0&navpanes=0&scrollbar=0&view=FitH`}
+                  title={`${title} preview`}
+                  loading="lazy"
+                  tabIndex={-1}
+                  className="pointer-events-none h-full w-full border-0 bg-white"
+                />
               ) : (
                 <Icon className="h-8 w-8 text-slate-300" />
               )}
             </div>
-            <div className="p-3">
+            <div className="shrink-0 border-t border-slate-100 bg-white px-3.5 py-3">
               <p className="text-sm font-bold text-slate-900">{title}</p>
               <p className={`mt-0.5 text-xs font-bold ${url ? 'text-emerald-600' : 'text-slate-400'}`}>
                 {url ? 'Uploaded' : 'Pending'}
@@ -1415,17 +1648,25 @@ const Farmers = () => {
           <DialogHeader>
             <DialogTitle>{title}</DialogTitle>
           </DialogHeader>
-          {!url ? (
+          {!stableUrl ? (
             <div className="h-56 flex items-center justify-center text-sm text-muted-foreground">
               No document uploaded
             </div>
           ) : isImage ? (
             <div className="max-h-[70vh] overflow-auto rounded-md border bg-muted/10 p-2">
-              <img src={url} alt={title} className="w-full h-auto rounded" />
+              <img src={stableUrl} alt={title} className="w-full h-auto rounded" />
             </div>
           ) : (
-            <div className="h-[70vh] rounded-md border overflow-hidden">
-              <iframe src={url} title={title} className="h-full w-full" />
+            <div className="relative h-[70vh] overflow-hidden rounded-md border bg-slate-100">
+              <iframe src={`${stableUrl}#toolbar=1&navpanes=0&view=FitH`} title={title} className="h-full w-full border-0 bg-white" />
+              <a
+                href={stableUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="absolute bottom-3 right-3 rounded-lg bg-[#0D3A35] px-3 py-2 text-xs font-bold text-white shadow-lg hover:bg-[#092b27]"
+              >
+                Open in new tab
+              </a>
             </div>
           )}
         </DialogContent>
@@ -2606,12 +2847,27 @@ const Farmers = () => {
     <>
     <div className="min-h-screen space-y-8 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="text-sm font-bold text-emerald-700">Land Records</p>
           <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">Land Owner Directory</h1>
           <p className="mt-3 text-base font-medium text-slate-600">Manage and view all land owner records</p>
         </div>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => void printLandOwnerDirectory()}
+          disabled={loading || pdfPrinting || farmers.length === 0 || farmers.some((farmer) => !farmer.detailsLoaded)}
+          className="h-11 shrink-0 gap-2 self-start rounded-xl border-[#0D3A35]/20 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5 disabled:opacity-60 sm:self-auto"
+          title={farmers.some((farmer) => !farmer.detailsLoaded) ? 'Waiting for complete land-owner details' : 'Print Land Owner Directory Summary'}
+        >
+          {pdfPrinting || farmers.some((farmer) => !farmer.detailsLoaded) ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Printer className="h-4 w-4" />
+          )}
+          {pdfPrinting ? 'Preparing Print...' : farmers.some((farmer) => !farmer.detailsLoaded) ? 'Loading Details...' : 'Print Summary'}
+        </Button>
       </div>
 
       {/* Stats */}
@@ -2874,7 +3130,7 @@ const Farmers = () => {
         }
       }}
     >
-      <DialogContent className="h-[85vh] w-[calc(100vw-2rem)] max-w-6xl overflow-hidden rounded-3xl border-0 p-0">
+      <DialogContent className={`${profilePopupTab === 'documents' ? 'h-[680px]' : 'h-[85vh]'} max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-6xl overflow-hidden rounded-3xl border-0 p-0`}>
         {viewProfileFarmer && (
           <div className="flex h-full min-h-0 flex-col sm:flex-row">
             {/* Sidebar */}
@@ -2953,8 +3209,8 @@ const Farmers = () => {
             </div>
 
             {/* Right panel */}
-            <div className="relative min-h-0 min-w-0 flex-1 overflow-y-auto bg-white p-5 sm:p-8">
-              <div className="mb-6 flex w-full items-end gap-8 overflow-x-auto border-b border-slate-200 pr-12">
+            <div className={`relative min-h-0 min-w-0 flex-1 bg-white p-5 sm:p-8 ${profilePopupTab === 'documents' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'}`}>
+              <div className="mb-6 flex w-full shrink-0 items-end gap-8 overflow-x-auto border-b border-slate-200 pr-12">
                 <button
                   type="button"
                   onClick={() => setProfilePopupTab('details')}
@@ -3012,6 +3268,17 @@ const Farmers = () => {
                     </>
                   ) : (
                     <>
+                      <Button
+                        onClick={() => void printLandOwnerProfile(viewProfileFarmer)}
+                        disabled={profilePdfPrintingId === viewProfileFarmer.id || !viewProfileFarmer.detailsLoaded}
+                        className="h-9 w-9 rounded-full border border-[#0D3A35]/20 bg-white p-0 text-[#0D3A35] shadow-sm hover:bg-emerald-50"
+                        title="Print land-owner profile with document photographs"
+                        aria-label="Print land-owner profile"
+                      >
+                        {profilePdfPrintingId === viewProfileFarmer.id
+                          ? <Loader2 className="h-4 w-4 animate-spin" />
+                          : <Printer className="h-4 w-4" />}
+                      </Button>
                       <Button
                         onClick={() => {
                           openEditModal(viewProfileFarmer, false);
@@ -3312,15 +3579,15 @@ const Farmers = () => {
               )}
 
               {profilePopupTab === 'documents' && (
-                <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                  <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-3">
+                <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
+                  <div className="flex shrink-0 items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-5 py-3">
                     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50">
                       <FileText className="h-4 w-4 text-emerald-700" />
                     </div>
                     <h4 className="text-sm font-bold text-slate-900">Documents</h4>
                   </div>
                   {inlineProfileEditing ? (
-                    <div className="grid grid-cols-1 gap-3 p-5 lg:grid-cols-2">
+                    <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-5 lg:grid-cols-2">
                       {([
                         { key: 'aadhaarCardFile', title: 'Aadhaar Card', Icon: IdCard, docKey: 'adhar_card' },
                         { key: 'panCardFile', title: 'PAN Card', Icon: FileBadge2, docKey: 'pand_card' },
@@ -3341,7 +3608,7 @@ const Farmers = () => {
                       ))}
                     </div>
                   ) : (
-                    <div className="grid grid-cols-2 gap-4 p-5 sm:grid-cols-3">
+                    <div className="grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,228px)] items-start justify-start gap-4 overflow-x-hidden overflow-y-scroll overscroll-y-contain p-5 pr-6 [scrollbar-color:#64748b_#e2e8f0] [scrollbar-gutter:stable] [scrollbar-width:auto]">
                       <ProfileDocumentCard title="Aadhaar Card" url={getDocumentUrl(viewProfileFarmer, 'adhar_card')} Icon={IdCard} />
                       <ProfileDocumentCard title="PAN Card" url={getDocumentUrl(viewProfileFarmer, 'pand_card')} Icon={FileBadge2} />
                       <ProfileDocumentCard title="Kisan Book" url={getDocumentUrl(viewProfileFarmer, 'kisan_book')} Icon={BookOpen} />

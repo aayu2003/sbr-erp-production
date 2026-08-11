@@ -367,7 +367,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
 
     (async () => {
       try {
-        const res = await fetch(`${baseUrl}/purchase_flow/get_purchase_orders/`, {
+        const res = await fetch(`${baseUrl}/purchase_flow/get_purchase_orders`, {
           method: 'POST',
           headers: {
             Accept: 'application/json',
