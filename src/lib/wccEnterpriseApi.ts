@@ -68,7 +68,7 @@ const collectLineArrays = (value: unknown, depth = 0): Record<string, unknown>[]
 export const loadOrderServiceLines = async (order: WccOrderReference, signal?: AbortSignal): Promise<{ lines: WccServiceLine[]; orderValue: number; raw: unknown }> => {
   let data: any = null;
   if (order.prNumber) {
-    try { data = await fetchJson(`${BASE_URL}/purchase_flow/get_purchase_orders/`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pr_number: order.prNumber }), signal }); }
+    try { data = await fetchJson(`${BASE_URL}/purchase_flow/get_purchase_orders`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pr_number: order.prNumber }), signal }); }
     catch { data = null; }
   }
   const orderList = Array.isArray(data?.purchase_orders) ? data.purchase_orders : Array.isArray(data?.orders) ? data.orders : [];
