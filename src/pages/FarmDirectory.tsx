@@ -938,7 +938,7 @@ const FarmDirectory = () => {
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,360px),1fr))] items-stretch gap-6">
           {filtered.map(farm => {
-            const ld           = farm.land_data;
+            const ld           = farm.land_data ?? {};
             const coords       = ld.land_coordinates ?? [];
             const images       = ld.land_media?.images ?? [];
             const cardImages   = images.filter(Boolean).slice(0, 3);

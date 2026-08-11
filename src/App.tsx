@@ -71,6 +71,7 @@ import {
   TaskTemplatesPage,
   TaskWorkspacePage,
 } from "./features/on-demand-tasks/on_demand_task_new";
+import OnDemandTask from "./pages/OnDemandTask";
 import FarmDirectory from "./pages/FarmDirectory";
 import FuelsAndConsumables from "./pages/FuelsAndConsumables";
 import AdminOpsFuelRequest from "./pages/AdminOpsFuelRequest";
@@ -156,6 +157,7 @@ const App = () => (
           <Route path="/on-demand-task/settings" element={<AppLayout><TaskSettingsPage /></AppLayout>} />
           <Route path="/on-demand-task/:taskId/edit" element={<AppLayout><TaskFormPage /></AppLayout>} />
           <Route path="/on-demand-task/:taskId" element={<AppLayout><TaskDetailPage /></AppLayout>} />
+          <Route path="/on-demand-task-legacy" element={<AppLayout><OnDemandTask /></AppLayout>} />
           <Route path="/finance-admin-ops-indents" element={<AppLayout><FinanceAdminOpsIndent /></AppLayout>} />
           <Route path="/finance/inspection-report-approvals" element={<AppLayout><InspectionReportApprovals stage="finance_admin_ops" /></AppLayout>} />
           <Route
