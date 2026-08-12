@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowRight, ArrowUp, Boxes, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FileText, Lock, Phone, Plus, Receipt, SendHorizonal, Upload, User, X } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowDown, ArrowRight, ArrowUp, Boxes, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, CircleCheckBig, ClipboardList, FileText, GitBranch, Lock, Phone, Plus, Receipt, RefreshCw, Search, SendHorizonal, Upload, User, X } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
 import { Button } from '@/components/ui/button';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
-import { GenerateFromRecordPopup } from '@/components/purchase/GenerateFromRecordPopup';
-import { formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
+import { formatDateDDMMYYYY, formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
+import { markPoForwardedToPurchaseFlow, readPoApprovals } from '@/lib/poApprovalStore';
+import { getGrnsByOrder, type GRNRecord } from '@/lib/grnApi';
+import { buildGrnPdfBlob } from '@/lib/grnPdf';
 
 type LeftPanelInfo = {
   pr_number?: string;
@@ -45,6 +46,19 @@ type LeftPanelInfo = {
   } | null;
 };
 
+type PurchaseOrderDetails = {
+  poNumber: string;
+  poDate: string;
+  amendmentNo: string;
+  project: string;
+  deliveryDate: string;
+  paymentTerms: string;
+  shipToAddress: string;
+  preparedBy: string;
+  requiredDocuments: string[];
+  itemDetails: Array<{ name: string; uom: string; quantity: number }>;
+};
+
 type ApiPurchaseFlowStageEntry = {
   document?: unknown;
   status?: unknown;
@@ -69,15 +83,60 @@ type PurchaseFlowStep = {
   key: string;
   index: number;
   document: string;
+  displayLabel?: string;
   status: string;
   docLink: string;
   isLocal?: boolean; // true for user-inserted invoice steps (not from API)
+  isRequired?: boolean; // derived from the document requirements saved on the PO
+  documentType?: string;
+  externalGrn?: GRNRecord;
+  isExternal?: boolean;
+};
+
+const REQUIRED_PURCHASE_DOCUMENT_OPTIONS = [
+  'PO Acceptance',
+  'Proforma Invoice',
+  'Delivery Challan',
+  'GRN',
+  'Tax Invoice',
+] as const;
+
+const normalizeDocumentName = (value: unknown) => safeTrim(value).toLowerCase().replace(/\s+/g, ' ');
+
+const documentTypeKey = (value: unknown) => {
+  const normalized = normalizeDocumentName(value);
+  if (normalized === 'invoice' || normalized === 'tax invoice') return 'tax invoice';
+  if (normalized.startsWith('grn') || normalized.includes('goods receipt note')) return 'grn';
+  if (normalized.startsWith('proforma invoice')) return 'proforma invoice';
+  if (normalized.startsWith('delivery challan')) return 'delivery challan';
+  return normalized;
+};
+
+const normalizeRequiredPurchaseDocuments = (value: unknown): string[] => {
+  const supplied = Array.isArray(value) ? value.map(normalizeDocumentName) : [];
+  return REQUIRED_PURCHASE_DOCUMENT_OPTIONS.filter(
+    (document) => document === 'PO Acceptance' || supplied.includes(normalizeDocumentName(document)),
+  );
 };
 
 const safeTrim = (v: unknown) => String(v ?? '').trim();
 
 const asRecord = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+
+const normalizePoItemDetails = (...sources: unknown[]): Array<{ name: string; uom: string; quantity: number }> => {
+  const source = sources.find((candidate) => Array.isArray(candidate) && candidate.length) as unknown[] | undefined;
+  if (!source) return [];
+  return source.map((entry) => {
+    const item = asRecord(entry);
+    const quantity = Number(item.quantity ?? item.qty ?? item.ordered_quantity ?? 0);
+    return {
+      name: safeTrim(item.name ?? item.item_name ?? item.partName ?? item.part_name ?? item.description) || 'Item not recorded',
+      uom: safeTrim(item.uom ?? item.UoM ?? item.unit),
+      quantity: Number.isFinite(quantity) ? quantity : 0,
+    };
+  });
+};
 
 const parseStepIndex = (key: string): number | null => {
   const m = String(key).match(/step_(\d+)/i);
@@ -105,6 +164,7 @@ const parseSteps = (stageUnknown: unknown): PurchaseFlowStep[] => {
 };
 
 const isUploaded = (s: PurchaseFlowStep) => {
+  if (s.externalGrn) return true;
   const st = safeTrim(s.status).toLowerCase();
   if (s.docLink) return true;
   if (!st) return false;
@@ -159,6 +219,59 @@ const formatDateTime = (raw?: string) => {
   if (!v) return '';
   return formatDateTimeDDMMYYYY(v, v);
 };
+
+function PdfFirstPagePreview({ url, label }: { url: string; label: string }) {
+  return (
+    <div className="relative h-full w-full overflow-hidden bg-white">
+      <iframe
+        src={`${url}#page=1&zoom=page-width&toolbar=0&navpanes=0&scrollbar=0&pagemode=none`}
+        title={`${label} first page preview`}
+        loading="lazy"
+        tabIndex={-1}
+        className="pointer-events-none absolute left-1/2 top-0 h-[86%] w-[116%] -translate-x-1/2 border-0 bg-white"
+      />
+    </div>
+  );
+}
+
+function InlineDocumentPreview({
+  url,
+  label,
+  interactive = false,
+  mimeType = '',
+}: {
+  url: string;
+  label: string;
+  interactive?: boolean;
+  mimeType?: string;
+}) {
+  const cleanUrl = safeTrim(url);
+  const path = cleanUrl.split(/[?#]/)[0].toLowerCase();
+  const isImage = mimeType.toLowerCase().startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg)$/.test(path);
+
+  if (isImage) {
+    return (
+      <img
+        src={cleanUrl}
+        alt={`${label} preview`}
+        loading="lazy"
+        className="h-full w-full object-contain"
+      />
+    );
+  }
+
+  if (!interactive) return <PdfFirstPagePreview url={cleanUrl} label={label} />;
+
+  return (
+    <iframe
+      src={`${cleanUrl}#page=1&toolbar=${interactive ? '1' : '0'}&navpanes=0&scrollbar=${interactive ? '1' : '0'}&view=FitH`}
+      title={`${label} preview`}
+      loading="lazy"
+      tabIndex={-1}
+      className={`${interactive ? '' : 'pointer-events-none'} h-full w-full border-0 bg-white`}
+    />
+  );
+}
 
 async function fetchPurchaseFlows(signal?: AbortSignal): Promise<ApiPurchaseFlow[]> {
   const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
@@ -1115,7 +1228,6 @@ function AddToInventoryPopup({
 }
 
 export default function PurchaseFlow() {
-  const navigate = useNavigate();
   const [flows, setFlows] = useState<ApiPurchaseFlow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1123,71 +1235,117 @@ export default function PurchaseFlow() {
     flow: ApiPurchaseFlow;
     step: PurchaseFlowStep;
   } | null>(null);
-  const [generateTarget, setGenerateTarget] = useState<{
-    flow: ApiPurchaseFlow;
-    step: PurchaseFlowStep;
+  const [documentPreview, setDocumentPreview] = useState<{
+    title: string;
+    url: string;
+    sourceUrl?: string;
+    mimeType?: string;
+    revokeOnClose?: boolean;
+    loading?: boolean;
+    error?: string;
   } | null>(null);
   const [addToInventoryFor, setAddToInventoryFor] = useState<{ poNumber: string } | null>(null);
   const [createFlowOpen, setCreateFlowOpen] = useState(false);
   const [flowRefreshNonce, setFlowRefreshNonce] = useState(0);
   const [forwardingSteps, setForwardingSteps] = useState<Set<string>>(new Set());
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'in-progress' | 'completed'>('all');
+  const reconciliationAttemptsRef = useRef<Set<string>>(new Set());
+  const autoSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const poRequirementLoadsRef = useRef<Set<string>>(new Set());
+  const documentPreviewRequestRef = useRef(0);
 
-  // Per-flow merged step lists (API steps + locally inserted invoice steps)
+  // Per-flow merged step lists (API steps + PO-selected document placeholders)
   const [flowStepOverrides, setFlowStepOverrides] = useState<Record<string, PurchaseFlowStep[]>>({});
-  // Which flow's "+ Add Invoice" dropdown is open
-  const [addMenuOpenFor, setAddMenuOpenFor] = useState<string | null>(null);
+  const [requiredDocsByFlowId, setRequiredDocsByFlowId] = useState<Record<string, string[]>>({});
+  const [poDetailsByFlowId, setPoDetailsByFlowId] = useState<Record<string, PurchaseOrderDetails>>({});
+  const [accountDocsByFlowId, setAccountDocsByFlowId] = useState<Record<string, PurchaseFlowStep[]>>({});
+  const [grnsByFlowId, setGrnsByFlowId] = useState<Record<string, GRNRecord[]>>({});
+  const [grnPreviewUrlsByKey, setGrnPreviewUrlsByKey] = useState<Record<string, string>>({});
 
-  const getFlowSteps = (flowId: string, flow: ApiPurchaseFlow): PurchaseFlowStep[] =>
-    flowStepOverrides[flowId] ?? parseSteps((flow as any)?.purchase_flow_stage);
-
-  const toggleLocalStepDone = (flowId: string, flow: ApiPurchaseFlow, stepKey: string) => {
-    const current = getFlowSteps(flowId, flow);
-    setFlowStepOverrides((prev) => ({
-      ...prev,
-      [flowId]: current.map((s) =>
-        s.key === stepKey ? { ...s, status: s.status === 'completed' ? 'empty' : 'completed' } : s
-      ),
-    }));
+  const getFlowSteps = (flowId: string, flow: ApiPurchaseFlow): PurchaseFlowStep[] => {
+    const current = flowStepOverrides[flowId] ?? parseSteps((flow as any)?.purchase_flow_stage);
+    const missingRequired = (requiredDocsByFlowId[flowId] || []).filter(
+      (document) => {
+        const requiredType = documentTypeKey(document);
+        if (requiredType === 'grn') return false;
+        return !current.some((step) =>
+          documentTypeKey(step.documentType || step.document) === requiredType
+          && !step.docLink
+          && !isUploaded(step),
+        );
+      },
+    );
+    if (!missingRequired.length) return current;
+    return [
+      ...current,
+      ...missingRequired.map((document, index) => ({
+        key: `required-${normalizeDocumentName(document).replace(/[^a-z0-9]+/g, '-')}`,
+        index: current.length + index + 1,
+        document,
+        documentType: document,
+        status: 'empty',
+        docLink: '',
+        isLocal: true,
+        isRequired: true,
+      })),
+    ];
   };
 
-  const addInvoiceStep = (flowId: string, flow: ApiPurchaseFlow, docType: 'Proforma Invoice' | 'Invoice' | 'PRR (for payment)' | 'PRR (for accounting)') => {
-    const current = getFlowSteps(flowId, flow);
-    const newStep: PurchaseFlowStep = {
-      key: `local-${Date.now()}`,
-      index: current.length + 1,
-      document: docType,
-      status: 'empty',
-      docLink: '',
-      isLocal: true,
-    };
-    setFlowStepOverrides((prev) => ({ ...prev, [flowId]: [...current, newStep] }));
-    setAddMenuOpenFor(null);
-  };
+  const getDisplaySteps = (flowId: string, flow: ApiPurchaseFlow): PurchaseFlowStep[] => {
+    // GRNs are system records, not manually attached Purchase Flow steps.
+    // Hide any legacy GRN stage and render every GRN returned for this PO below.
+    const flowSteps = getFlowSteps(flowId, flow).filter(
+      (step) => documentTypeKey(step.documentType || step.document) !== 'grn',
+    );
+    const linkedUrlCounts = flowSteps.reduce<Record<string, number>>((counts, step) => {
+      if (step.docLink) counts[step.docLink] = (counts[step.docLink] || 0) + 1;
+      return counts;
+    }, {});
+    const accountDocs = (accountDocsByFlowId[flowId] || [])
+      .filter((step) => documentTypeKey(step.documentType || step.document) !== 'grn')
+      .filter((step) => {
+        if (!step.docLink || !linkedUrlCounts[step.docLink]) return true;
+        linkedUrlCounts[step.docLink] -= 1;
+        return false;
+      });
+    const grnDocs = (grnsByFlowId[flowId] || []).map((grn, index) => {
+      const previewKey = `${flowId}:${safeTrim(grn.grnNo) || 'record'}:${index}`;
+      return {
+        key: `external-grn-${grn.grnNo || 'record'}-${index}`,
+        index: flowSteps.length + accountDocs.length + index + 1,
+        document: 'GRN',
+        documentType: 'GRN',
+        status: 'uploaded',
+        docLink: grnPreviewUrlsByKey[previewKey] || '',
+        externalGrn: grn,
+        isExternal: true,
+      };
+    });
+    const combined = [...flowSteps, ...accountDocs, ...grnDocs];
+    const totals = combined.reduce<Record<string, number>>((result, step) => {
+      const type = documentTypeKey(step.documentType || step.document);
+      result[type] = (result[type] || 0) + 1;
+      return result;
+    }, {});
+    const positions: Record<string, number> = {};
 
-  const moveStep = (flowId: string, flow: ApiPurchaseFlow, stepKey: string, dir: 'left' | 'right') => {
-    const current = getFlowSteps(flowId, flow);
-    const idx = current.findIndex((s) => s.key === stepKey);
-    if (idx === -1) return;
-    const target = dir === 'left' ? idx - 1 : idx + 1;
-    if (target < 0 || target >= current.length) return;
-    const next = [...current];
-    [next[idx], next[target]] = [next[target], next[idx]];
-    setFlowStepOverrides((prev) => ({ ...prev, [flowId]: next }));
-    // Mark this flow as having an unsaved reorder — blocks uploads until saved
-    setPendingReorderSet((prev) => new Set([...prev, flowId]));
-  };
-
-  const removeLocalStep = (flowId: string, flow: ApiPurchaseFlow, stepKey: string) => {
-    const current = getFlowSteps(flowId, flow);
-    setFlowStepOverrides((prev) => ({ ...prev, [flowId]: current.filter((s) => s.key !== stepKey) }));
+    return combined.map((step, index) => {
+      const type = documentTypeKey(step.documentType || step.document);
+      positions[type] = (positions[type] || 0) + 1;
+      const repeated = totals[type] > 1;
+      const sequence = repeated ? ` ${positions[type]}` : '';
+      const grnNumber = step.externalGrn?.grnNo ? ` — ${step.externalGrn.grnNo}` : '';
+      return {
+        ...step,
+        index: index + 1,
+        displayLabel: `${step.document}${sequence}${grnNumber}`,
+      };
+    });
   };
 
   // Per-flow save loading state
   const [savingFlows, setSavingFlows] = useState<Record<string, boolean>>({});
-
-  // Tracks flows whose steps have been reordered but not yet saved.
-  // Upload is blocked for these flows until the user saves.
-  const [pendingReorderSet, setPendingReorderSet] = useState<Set<string>>(new Set());
 
   // Left panel enriched data — fetched per-row after the list renders
   const [leftPanelInfoMap, setLeftPanelInfoMap] = useState<Record<string, LeftPanelInfo>>({});
@@ -1206,7 +1364,12 @@ export default function PurchaseFlow() {
     return result;
   };
 
-  const saveCurrentFlow = async (flowId: string, flow: ApiPurchaseFlow, stepsOverride?: PurchaseFlowStep[]) => {
+  const saveCurrentFlow = async (
+    flowId: string,
+    flow: ApiPurchaseFlow,
+    stepsOverride?: PurchaseFlowStep[],
+    silent = false,
+  ) => {
     const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
     if (!baseUrl) return toast.error('Missing API base URL');
     setSavingFlows((prev) => ({ ...prev, [flowId]: true }));
@@ -1220,24 +1383,12 @@ export default function PurchaseFlow() {
       });
       const data: any = await res.json().catch(() => null);
       if (!res.ok || !data?.success) throw new Error(data?.message || 'Failed to save flow');
-      // Clear the pending-reorder flag so uploads are unblocked
-      setPendingReorderSet((prev) => { const s = new Set(prev); s.delete(flowId); return s; });
-      toast.success('Purchase flow saved');
+      if (!silent) toast.success('Purchase flow saved');
     } catch (e: any) {
       toast.error(e?.message || 'Failed to save purchase flow');
     } finally {
       setSavingFlows((prev) => { const c = { ...prev }; delete c[flowId]; return c; });
     }
-  };
-
-  const openHoInboxView = (prNumberRaw: string, tab: 'po' | 'indent' | 'comparative') => {
-    const prNumber = safeTrim(prNumberRaw);
-    if (!prNumber) {
-      toast.error('Missing PR number');
-      return;
-    }
-    const qs = new URLSearchParams({ open: prNumber, tab }).toString();
-    navigate(`/ho?${qs}`);
   };
 
   useEffect(() => {
@@ -1267,6 +1418,118 @@ export default function PurchaseFlow() {
     copy.sort((a, b) => safeTrim((b as any)?.timestamp).localeCompare(safeTrim((a as any)?.timestamp)));
     return copy;
   }, [flows]);
+  const poApprovalRecords = useMemo(() => readPoApprovals(), [flowRefreshNonce]);
+
+  useEffect(() => {
+    Object.entries(flowStepOverrides).forEach(([flowId, steps]) => {
+      const flow = rows.find((candidate) =>
+        (safeTrim(candidate.flow_id) || safeTrim(candidate.comparison_id)) === flowId,
+      );
+      if (!flow) return;
+
+      const existingTimer = autoSaveTimersRef.current[flowId];
+      if (existingTimer) clearTimeout(existingTimer);
+      autoSaveTimersRef.current[flowId] = setTimeout(() => {
+        delete autoSaveTimersRef.current[flowId];
+        void saveCurrentFlow(flowId, flow, steps, true);
+      }, 600);
+    });
+
+    return () => {
+      Object.values(autoSaveTimersRef.current).forEach(clearTimeout);
+      autoSaveTimersRef.current = {};
+    };
+  }, [flowStepOverrides, rows]);
+
+  // Repair the hand-off for POs created through the newer PO Creation screen.
+  // A saved PO must enter Purchase Flow immediately; finance approval remains
+  // a separate review state and must not prevent the operational flow record.
+  useEffect(() => {
+    if (loading) return;
+
+    const liveOrderNumbers = new Set(rows.map((flow) => safeTrim(flow.order_number)).filter(Boolean));
+    const missingApprovals = readPoApprovals().filter((record) =>
+      record.status !== 'rejected'
+      && Boolean(record.poNumber && record.prNumber && record.comparisonId)
+      && !liveOrderNumbers.has(record.poNumber)
+      && !reconciliationAttemptsRef.current.has(record.poNumber),
+    );
+    if (!missingApprovals.length) return;
+
+    const controller = new AbortController();
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return;
+    missingApprovals.forEach((record) => reconciliationAttemptsRef.current.add(record.poNumber));
+
+    const reconcile = async () => {
+      let forwardedCount = 0;
+      await Promise.all(missingApprovals.map(async (record) => {
+        try {
+          const ordersResponse = await fetch(`${baseUrl}/purchase_flow/get_purchase_orders`, {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pr_number: record.prNumber }),
+            signal: controller.signal,
+          });
+          const orderData: any = ordersResponse.ok ? await ordersResponse.json().catch(() => null) : null;
+          const orders: any[] = Array.isArray(orderData?.purchase_orders)
+            ? orderData.purchase_orders
+            : Array.isArray(orderData?.items)
+              ? orderData.items
+              : Array.isArray(orderData?.orders)
+                ? orderData.orders
+                : Array.isArray(orderData)
+                  ? orderData
+                  : [];
+          const matchingOrder = orders.find((order) => {
+            const quote = asRecord(order?.purchase_quote);
+            return [order?.order_number, quote.order_number, quote.poNo, quote.po_no]
+              .some((candidate) => safeTrim(candidate) === record.poNumber);
+          });
+          const quote = asRecord(matchingOrder?.purchase_quote);
+          const documents = normalizeRequiredPurchaseDocuments(
+            quote.requiredPurchaseDocuments ?? quote.required_purchase_documents,
+          );
+          const purchaseFlowStage = Object.fromEntries(documents.map((document, index) => [
+            `step_${index + 1}`,
+            { document: document.toLowerCase() === 'tax invoice' ? 'invoice' : document.toLowerCase(), status: 'empty', doc_link: '' },
+          ]));
+
+          const forwardResponse = await fetch(`${baseUrl}/purchase_flow/forward_purchase_order`, {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              order_number: record.poNumber,
+              pr_number: record.prNumber,
+              comparison_id: record.comparisonId,
+              purchase_flow_stage: purchaseFlowStage,
+            }),
+            signal: controller.signal,
+          });
+          const result: any = await forwardResponse.json().catch(() => null);
+          const success = result?.success === true || String(result?.success ?? '').toLowerCase() === 'true';
+          if (!forwardResponse.ok || !success) {
+            throw new Error(result?.message || result?.error || `HTTP ${forwardResponse.status}`);
+          }
+
+          markPoForwardedToPurchaseFlow(record.poNumber);
+          forwardedCount += 1;
+        } catch (error: any) {
+          if (error?.name === 'AbortError') return;
+          reconciliationAttemptsRef.current.delete(record.poNumber);
+          toast.error(`Could not add ${record.poNumber} to Purchase Flow: ${error?.message || 'Forwarding failed'}`);
+        }
+      }));
+
+      if (!controller.signal.aborted && forwardedCount > 0) {
+        toast.success(`${forwardedCount} approved PO${forwardedCount === 1 ? '' : 's'} added to Purchase Flow`);
+        setFlowRefreshNonce((value) => value + 1);
+      }
+    };
+
+    void reconcile();
+    return () => controller.abort();
+  }, [loading, rows]);
 
   // After all rows are in view, fetch left-panel info row by row (in parallel)
   useEffect(() => {
@@ -1300,6 +1563,229 @@ export default function PurchaseFlow() {
     return () => ac.abort();
   }, [rows]);
 
+  // Read the document requirements saved in each PO. These are intentionally
+  // separate from the commercial "Documents Required" clause and become
+  // uploadable Purchase Flow steps only.
+  useEffect(() => {
+    if (rows.length === 0) return;
+    const ac = new AbortController();
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return;
+
+    const loadRequirements = async () => {
+      const entries = await Promise.all(rows.map(async (flow) => {
+        const flowId = safeTrim((flow as any)?.flow_id) || safeTrim((flow as any)?.comparison_id);
+        const prNumber = safeTrim((flow as any)?.pr_number) || safeTrim(leftPanelInfoMap[flowId]?.pr_number);
+        if (!prNumber || !flowId || poRequirementLoadsRef.current.has(flowId)) return null;
+        poRequirementLoadsRef.current.add(flowId);
+        try {
+          const res = await fetch(`${baseUrl}/purchase_flow/get_purchase_orders`, {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pr_number: prNumber }),
+            signal: ac.signal,
+          });
+          if (!res.ok) {
+            poRequirementLoadsRef.current.delete(flowId);
+            return null;
+          }
+          const data: any = await res.json().catch(() => null);
+          const orders: any[] = Array.isArray(data?.purchase_orders)
+            ? data.purchase_orders
+            : Array.isArray(data?.items)
+              ? data.items
+              : Array.isArray(data?.orders)
+                ? data.orders
+                : Array.isArray(data)
+                  ? data
+                  : [];
+          if (!orders.length) {
+            poRequirementLoadsRef.current.delete(flowId);
+            return null;
+          }
+
+          const orderNumber = safeTrim((flow as any)?.order_number);
+          const matching = orders.find((order) => {
+            const quote = asRecord(order?.purchase_quote);
+            return [order?.order_number, quote?.order_number, quote?.poNo, quote?.po_no]
+              .some((candidate) => safeTrim(candidate) === orderNumber);
+          });
+          const latest = [...orders].sort((left, right) => {
+            const leftDate = Date.parse(safeTrim(left?.updated_at || left?.created_at || left?.saved_at)) || 0;
+            const rightDate = Date.parse(safeTrim(right?.updated_at || right?.created_at || right?.saved_at)) || 0;
+            return rightDate - leftDate;
+          })[0];
+          const selectedOrder = matching || latest;
+          const quote = asRecord(selectedOrder?.purchase_quote);
+          const purchaseOrder = asRecord(selectedOrder?.purchase_order);
+          const terms = asRecord(selectedOrder?.other_terms_and_condition);
+          const selected = quote.requiredPurchaseDocuments
+            ?? quote.required_purchase_documents
+            ?? purchaseOrder.requiredPurchaseDocuments
+            ?? purchaseOrder.required_purchase_documents;
+          const requiredDocuments = normalizeRequiredPurchaseDocuments(selected);
+          const details: PurchaseOrderDetails = {
+            poNumber: safeTrim(selectedOrder?.order_number || quote.order_number || quote.poNo || quote.po_no || orderNumber),
+            poDate: safeTrim(quote.poDate || selectedOrder?.created_at),
+            amendmentNo: safeTrim(quote.amendmentNo ?? quote.amendment_no),
+            project: safeTrim(quote.coverProject || quote.clusterId || quote.project),
+            deliveryDate: safeTrim(quote.deliveryDate || quote.delivery_date),
+            paymentTerms: safeTrim(quote.paymentTerms || terms.paymentTerms || terms.payment_terms),
+            shipToAddress: safeTrim(quote.shipToAddress || quote.ship_to_address),
+            preparedBy: safeTrim(quote.preparedBy || quote.prepared_by),
+            requiredDocuments,
+            itemDetails: normalizePoItemDetails(
+              selectedOrder?.itemDetails,
+              selectedOrder?.item_details,
+              selectedOrder?.item_row,
+              selectedOrder?.items,
+              quote.itemDetails,
+              quote.item_details,
+              quote.item_row,
+              quote.items,
+            ),
+          };
+          return { flowId, requiredDocuments, details };
+        } catch (error: any) {
+          poRequirementLoadsRef.current.delete(flowId);
+          if (error?.name === 'AbortError') return null;
+          return null;
+        }
+      }));
+
+      if (ac.signal.aborted) return;
+      setRequiredDocsByFlowId((previous) => {
+        const next = { ...previous };
+        entries.forEach((entry) => {
+          if (entry) next[entry.flowId] = entry.requiredDocuments;
+        });
+        return next;
+      });
+      setPoDetailsByFlowId((previous) => {
+        const next = { ...previous };
+        entries.forEach((entry) => {
+          if (entry) next[entry.flowId] = entry.details;
+        });
+        return next;
+      });
+    };
+
+    loadRequirements();
+    return () => ac.abort();
+  }, [rows, leftPanelInfoMap]);
+
+  // Aggregate every document already associated with each PO. Purchase Flow
+  // stages can contain repeated document types, Accounts can contain multiple
+  // invoice records, and GRN can contain multiple receipts for the same PO.
+  useEffect(() => {
+    if (!rows.length) return;
+    const controller = new AbortController();
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return;
+
+    const loadAllPoDocuments = async () => {
+      const paymentResponse = await fetch(`${baseUrl}/admin_accounts/get_payment_flow`, {
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      }).catch(() => null);
+      const paymentPayload: any = paymentResponse?.ok ? await paymentResponse.json().catch(() => null) : null;
+      const payments: any[] = Array.isArray(paymentPayload?.data) ? paymentPayload.data : [];
+
+      const results = await Promise.all(rows.map(async (flow, flowIndex) => {
+        const flowId = safeTrim(flow.flow_id) || safeTrim(flow.comparison_id) || `row-${flowIndex}`;
+        const orderNumber = safeTrim(flow.order_number);
+        if (!orderNumber) return { flowId, grns: [] as GRNRecord[], documents: [] as PurchaseFlowStep[] };
+
+        const [grns, supportingPayload] = await Promise.all([
+          getGrnsByOrder(orderNumber).catch(() => [] as GRNRecord[]),
+          fetch(`${baseUrl}/admin_accounts/get_supporting_documents/${encodeURIComponent(orderNumber)}`, {
+            headers: { Accept: 'application/json' },
+            signal: controller.signal,
+          }).then((response) => response.ok ? response.json().catch(() => null) : null).catch(() => null),
+        ]);
+
+        const supportingDocs: any[] = Array.isArray(supportingPayload?.data) ? supportingPayload.data : [];
+        const invoiceDocs = payments
+          .filter((payment) => safeTrim(payment?.order_number) === orderNumber && safeTrim(payment?.invoice_doc_url))
+          .map((payment, index) => {
+            const rawType = normalizeDocumentName(payment?.invoice_type);
+            const document = rawType.includes('proforma') ? 'Proforma Invoice' : 'Tax Invoice';
+            return {
+              key: `accounts-${safeTrim(payment?.payment_id) || 'record'}-${index}`,
+              index: index + 1,
+              document,
+              documentType: document,
+              status: safeTrim(payment?.director_approval_status || payment?.admin_ops_approval_status) || 'uploaded',
+              docLink: safeTrim(payment?.invoice_doc_url),
+              isExternal: true,
+            } satisfies PurchaseFlowStep;
+          });
+        const supporting = supportingDocs
+          .filter((document) => safeTrim(document?.doc_link))
+          .map((document, index) => ({
+            key: `supporting-${flowId}-${index}`,
+            index: invoiceDocs.length + index + 1,
+            document: safeTrim(document?.document) || 'Supporting Document',
+            documentType: safeTrim(document?.document),
+            status: 'uploaded',
+            docLink: safeTrim(document?.doc_link),
+            isExternal: true,
+          } satisfies PurchaseFlowStep));
+        // Preserve every invoice/payment record, even when several records have
+        // the same document type. Supporting-documents may mirror an invoice
+        // record, so suppress only that exact same file URL across the sources.
+        const invoiceUrls = new Set(invoiceDocs.map((document) => document.docLink).filter(Boolean));
+        const documents = [
+          ...invoiceDocs,
+          ...supporting.filter((document) => !invoiceUrls.has(document.docLink)),
+        ];
+        return { flowId, grns, documents };
+      }));
+
+      if (controller.signal.aborted) return;
+      setGrnsByFlowId(Object.fromEntries(results.map((result) => [result.flowId, result.grns])));
+      setAccountDocsByFlowId(Object.fromEntries(results.map((result) => [result.flowId, result.documents])));
+    };
+
+    void loadAllPoDocuments();
+    return () => controller.abort();
+  }, [rows]);
+
+  // Build the same official GRN PDF used by the full-screen preview for every
+  // GRN card. Object URLs stay browser-local and are released on refresh.
+  useEffect(() => {
+    let cancelled = false;
+    const createdUrls: string[] = [];
+
+    const buildPreviews = async () => {
+      const entries = Object.entries(grnsByFlowId).flatMap(([flowId, grns]) =>
+        grns.map((grn, index) => ({ flowId, grn, index })),
+      );
+      const previews = await Promise.all(entries.map(async ({ flowId, grn, index }) => {
+        try {
+          const { blob } = await buildGrnPdfBlob(grn);
+          const url = URL.createObjectURL(blob);
+          createdUrls.push(url);
+          return [`${flowId}:${safeTrim(grn.grnNo) || 'record'}:${index}`, url] as const;
+        } catch {
+          return null;
+        }
+      }));
+
+      if (cancelled) {
+        createdUrls.forEach((url) => URL.revokeObjectURL(url));
+        return;
+      }
+      setGrnPreviewUrlsByKey(Object.fromEntries(previews.filter(Boolean) as Array<readonly [string, string]>));
+    };
+
+    void buildPreviews();
+    return () => {
+      cancelled = true;
+      createdUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [grnsByFlowId]);
+
   const handleUploadStep = async (flow: ApiPurchaseFlow, step: PurchaseFlowStep, file: File) => {
     const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
     if (!baseUrl) throw new Error('Missing API base URL');
@@ -1309,6 +1795,26 @@ export default function PurchaseFlow() {
 
     const flowId = safeTrim((flow as any)?.flow_id) || safeTrim((flow as any)?.comparison_id);
     if (!flowId) throw new Error('Missing flow ID');
+
+    const currentSteps = getFlowSteps(flowId, flow);
+    const selectedStepIndex = currentSteps.findIndex((candidate) => candidate.key === step.key);
+    if (selectedStepIndex < 0) throw new Error('Document step could not be resolved');
+
+    // A PO-required document is initially derived from the saved PO. Persist
+    // the expanded flow first so the upload can be linked to a real step_N key.
+    let serverStepKey = step.key;
+    if (step.isLocal) {
+      const persistRes = await fetch(`${baseUrl}/purchase_flow/update_purchase_flow_stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ flow_id: flowId, step_json: buildStepJson(currentSteps) }),
+      });
+      const persistData: any = await persistRes.json().catch(() => null);
+      if (!persistRes.ok || !persistData?.success) {
+        throw new Error(persistData?.message || 'Failed to add the required document to Purchase Flow');
+      }
+      serverStepKey = `step_${selectedStepIndex + 1}`;
+    }
 
     // ── API 1: upload file, receive file_url ─────────────────────────────────
     const formData = new FormData();
@@ -1326,29 +1832,30 @@ export default function PurchaseFlow() {
     if (!fileUrl) throw new Error('Upload succeeded but no file URL was returned');
 
     // ── API 2: link file_url to the correct step ─────────────────────────────
-    // Local steps (added via "+ Add Invoice") don't have a server-side step key.
-    // Only call API 2 for steps that came from the server (key matches step_N).
-    if (!step.isLocal) {
-      const linkRes = await fetch(`${baseUrl}/purchase_flow/update_doc_link_for_step`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          flow_id: flowId,
-          document_url: fileUrl,
-          step: step.key,          // e.g. "step_1", "step_2", …
-        }),
-      });
-      const linkData: any = await linkRes.json().catch(() => null);
-      if (!linkRes.ok || !linkData?.success)
-        throw new Error(linkData?.message || 'Failed to link document to step');
-    }
+    const linkRes = await fetch(`${baseUrl}/purchase_flow/update_doc_link_for_step`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        flow_id: flowId,
+        document_url: fileUrl,
+        step: serverStepKey,
+      }),
+    });
+    const linkData: any = await linkRes.json().catch(() => null);
+    if (!linkRes.ok || !linkData?.success)
+      throw new Error(linkData?.message || 'Failed to link document to step');
 
     // ── Update local state so the step shows as uploaded immediately ─────────
-    const updatedSteps = getFlowSteps(flowId, flow).map((s) =>
-      s.key === step.key
-        ? { ...s, docLink: fileUrl, status: isInvoiceDocType(step.document) ? 'uploaded+accounts_pending' : 'uploaded' }
-        : s
-    );
+    const updatedSteps = currentSteps.map((candidate, index) => ({
+      ...candidate,
+      key: step.isLocal ? `step_${index + 1}` : candidate.key,
+      index: index + 1,
+      isLocal: step.isLocal ? false : candidate.isLocal,
+      isRequired: candidate.isRequired,
+      ...(candidate.key === step.key
+        ? { docLink: fileUrl, status: isInvoiceDocType(step.document) ? 'uploaded+accounts_pending' : 'uploaded' }
+        : {}),
+    }));
     setFlowStepOverrides((prev) => ({ ...prev, [flowId]: updatedSteps }));
     toast.success('Document uploaded successfully');
   };
@@ -1481,23 +1988,91 @@ export default function PurchaseFlow() {
     }
   };
 
+  const closeDocumentPreview = () => {
+    documentPreviewRequestRef.current += 1;
+    setDocumentPreview((current) => {
+      if (current?.revokeOnClose && current.url) URL.revokeObjectURL(current.url);
+      return null;
+    });
+  };
+
+  const previewDocument = (title: string, remoteUrl: string) => {
+    const sourceUrl = safeTrim(remoteUrl);
+    if (!sourceUrl) return;
+
+    setDocumentPreview((current) => {
+      if (current?.revokeOnClose && current.url) URL.revokeObjectURL(current.url);
+      return { title, url: sourceUrl, sourceUrl };
+    });
+  };
+
+  const previewGrn = async (grn: GRNRecord) => {
+    const title = grn.grnNo ? `GRN — ${grn.grnNo}` : 'Goods Receipt Note';
+    const requestId = documentPreviewRequestRef.current + 1;
+    documentPreviewRequestRef.current = requestId;
+    setDocumentPreview((current) => {
+      if (current?.revokeOnClose && current.url) URL.revokeObjectURL(current.url);
+      return { title, url: '', loading: true };
+    });
+
+    try {
+      const { blob } = await buildGrnPdfBlob(grn);
+      const previewUrl = URL.createObjectURL(blob);
+      if (documentPreviewRequestRef.current !== requestId) {
+        URL.revokeObjectURL(previewUrl);
+        return;
+      }
+      setDocumentPreview({
+        title,
+        url: previewUrl,
+        mimeType: 'application/pdf',
+        revokeOnClose: true,
+      });
+    } catch (error: any) {
+      if (documentPreviewRequestRef.current === requestId) setDocumentPreview(null);
+      toast.error(error?.message || `Unable to preview ${grn.grnNo || 'GRN'}`);
+    }
+  };
+
+  const flowProgress = (flow: ApiPurchaseFlow, index: number) => {
+    const flowId = safeTrim(flow.flow_id) || safeTrim(flow.comparison_id) || `row-${index}`;
+    const steps = getDisplaySteps(flowId, flow);
+    const completed = steps.filter(isUploaded).length;
+    const percentage = steps.length ? Math.round((completed / steps.length) * 100) : 0;
+    return { flowId, steps, completed, percentage, isCompleted: steps.length > 0 && completed === steps.length };
+  };
+
+  const flowSummaries = rows.map((flow, index) => ({ flow, ...flowProgress(flow, index) }));
+  const completedFlowCount = flowSummaries.filter((entry) => entry.isCompleted).length;
+  const pendingDocumentCount = flowSummaries.reduce(
+    (total, entry) => total + Math.max(entry.steps.length - entry.completed, 0),
+    0,
+  );
+  const visibleRows = flowSummaries.filter(({ flow, isCompleted }) => {
+    if (statusFilter === 'completed' && !isCompleted) return false;
+    if (statusFilter === 'in-progress' && isCompleted) return false;
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return true;
+    const flowId = safeTrim(flow.flow_id) || safeTrim(flow.comparison_id);
+    const info = leftPanelInfoMap[flowId];
+    return [
+      flow.pr_number,
+      flow.order_number,
+      flow.order_type,
+      flow.comparison_id,
+      info?.pr_number,
+      info?.approved_vendor_id,
+      info?.vendor_details?.vendor_name,
+    ].some((value) => safeTrim(value).toLowerCase().includes(query));
+  });
+
   return (
-    <div className="min-h-screen bg-background text-foreground p-6">
+    <div className="min-h-screen space-y-6 bg-slate-50/70 p-4 text-foreground sm:p-6 lg:p-8">
       {uploadTarget ? (
         <UploadStepDocPopup
           title={uploadTarget.step.document}
           onClose={() => setUploadTarget(null)}
           onUpload={(file) => handleUploadStep(uploadTarget.flow, uploadTarget.step, file)}
-        />
-      ) : null}
-
-      {generateTarget ? (
-        <GenerateFromRecordPopup
-          orderNumber={safeTrim(generateTarget.flow.order_number)}
-          orderType={safeTrim(generateTarget.flow.order_type)}
-          stepLabel={generateTarget.step.document}
-          onClose={() => setGenerateTarget(null)}
-          onGenerate={(file) => handleUploadStep(generateTarget.flow, generateTarget.step, file)}
         />
       ) : null}
 
@@ -1515,44 +2090,195 @@ export default function PurchaseFlow() {
         />
       ) : null}
 
-      <div className="mb-6">
-        <div className="text-2xl font-bold">Purchase Flow</div>
-        <div className="text-xs text-muted-foreground mt-0.5">
-          Each purchase flow is a row. Steps come from the API as step_1, step_2, … — upload the required document in the empty step.
+      {documentPreview ? (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm sm:p-6"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeDocumentPreview();
+          }}
+        >
+          <div className="flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/20 bg-white shadow-2xl">
+            <div className="flex shrink-0 items-center justify-between gap-4 bg-[#0D3A35] px-5 py-4 text-white">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/10">
+                  <FileText className="h-5 w-5" />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/60">Document Preview</p>
+                  <h2 className="truncate text-base font-bold text-white">{documentPreview.title}</h2>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeDocumentPreview}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/20 bg-white/10 text-white transition hover:bg-white/20"
+                aria-label="Close document preview"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 bg-slate-100 p-3 sm:p-4">
+              <div className="h-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-inner">
+                {documentPreview.loading ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-3 text-[#0D3A35]">
+                    <RefreshCw className="h-8 w-8 animate-spin" />
+                    <p className="text-sm font-bold">Loading document preview…</p>
+                  </div>
+                ) : documentPreview.error ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
+                    <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-red-50 text-red-600">
+                      <FileText className="h-7 w-7" />
+                    </span>
+                    <div>
+                      <p className="font-bold text-slate-900">This document could not be displayed</p>
+                      <p className="mt-1 text-sm text-slate-500">{documentPreview.error}</p>
+                    </div>
+                    {documentPreview.sourceUrl ? (
+                      <a
+                        href={documentPreview.sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded-xl bg-[#0D3A35] px-5 py-2.5 text-sm font-bold text-white transition hover:bg-[#092d29]"
+                      >
+                        Open original document
+                      </a>
+                    ) : null}
+                  </div>
+                ) : documentPreview.url ? (
+                  <InlineDocumentPreview
+                    url={documentPreview.url}
+                    label={documentPreview.title}
+                    interactive
+                    mimeType={documentPreview.mimeType}
+                  />
+                ) : null}
+              </div>
+            </div>
+          </div>
         </div>
-        <Button type="button" onClick={() => setCreateFlowOpen(true)} className="mt-3 gap-2">
-          <Plus className="w-4 h-4" />
-          Create Flow
-        </Button>
-      </div>
+      ) : null}
 
-      <div className="space-y-4">
+      <header className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex items-center gap-4">
+          <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#0D3A35] text-white shadow-lg">
+            <GitBranch className="h-7 w-7" />
+          </span>
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Purchase &amp; Procurement</p>
+            <h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Purchase Flow</h1>
+            <p className="mt-1 text-sm text-slate-500">Track purchase documents from order acceptance through inventory and accounts.</p>
+          </div>
+        </div>
+        <div className="flex self-start gap-2 lg:self-auto">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setFlowRefreshNonce((value) => value + 1)}
+            disabled={loading}
+            className="h-11 gap-2 rounded-xl border-[#0D3A35]/20 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
+          </Button>
+          <Button
+            type="button"
+            onClick={() => setCreateFlowOpen(true)}
+            className="h-11 gap-2 rounded-xl bg-[#0D3A35] px-5 font-bold text-white shadow-sm hover:bg-[#092e2a]"
+          >
+            <Plus className="h-4 w-4" /> Create Flow
+          </Button>
+        </div>
+      </header>
+
+      <section className="grid overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          { label: 'Total Purchase Flows', value: rows.length, icon: GitBranch },
+          { label: 'Flows In Progress', value: Math.max(rows.length - completedFlowCount, 0), icon: ClipboardList },
+          { label: 'Completed Flows', value: completedFlowCount, icon: CircleCheckBig },
+          { label: 'Pending Documents', value: pendingDocumentCount, icon: FileText },
+        ].map(({ label, value, icon: Icon }, index) => (
+          <div
+            key={label}
+            className={`flex items-center justify-between px-5 py-5 ${index ? 'border-t border-slate-200' : ''} ${index === 1 ? 'sm:border-l sm:border-t-0' : ''} ${index === 2 ? 'sm:border-t sm:border-l-0' : ''} ${index === 3 ? 'sm:border-l sm:border-t' : ''} ${index ? 'xl:border-l xl:border-t-0' : ''}`}
+          >
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-slate-400">{label}</p>
+              <p className="mt-1 text-2xl font-black text-slate-950">{value}</p>
+            </div>
+            <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#edf5f2] text-[#0D3A35]">
+              <Icon className="h-5 w-5" />
+            </span>
+          </div>
+        ))}
+      </section>
+
+      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-col gap-4 border-b border-slate-200 px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
+          <div>
+            <h2 className="font-bold text-slate-900">Purchase Flow Register</h2>
+            <p className="mt-0.5 text-xs text-slate-500">Complete documents in sequence and save any changes before uploading.</p>
+          </div>
+          <div className="flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
+            <label className="relative block w-full xl:w-[340px]">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search PR, PO, vendor or flow"
+                className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm outline-none transition focus:border-[#0D3A35] focus:bg-white"
+              />
+            </label>
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
+              className="h-11 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35] focus:bg-white"
+            >
+              <option value="all">All flows</option>
+              <option value="in-progress">In progress</option>
+              <option value="completed">Completed</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="space-y-4 bg-slate-50/60 p-4 sm:p-5">
         {loading ? (
-          <div className="rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground text-center">
+          <div className="rounded-xl border border-slate-200 bg-white p-12 text-center text-sm text-slate-500">
             Loading purchase flows…
           </div>
         ) : error ? (
-          <div className="rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground text-center">
+          <div className="rounded-xl border border-red-200 bg-red-50 p-12 text-center text-sm text-red-700">
             {error}
           </div>
-        ) : rows.length === 0 ? (
-          <div className="rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground text-center">
-            No purchase flows found.
+        ) : visibleRows.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-300 bg-white p-12 text-center text-sm text-slate-500">
+            {rows.length === 0 ? 'No purchase flows found.' : 'No purchase flows match the selected filters.'}
           </div>
         ) : (
-          rows.map((flow, idx) => {
-            const flowId = safeTrim((flow as any)?.flow_id) || safeTrim((flow as any)?.comparison_id) || `row-${idx}`;
+          visibleRows.map(({ flow, flowId, isCompleted }) => {
             const prNumber = safeTrim((flow as any)?.pr_number);
             const orderNumber = safeTrim((flow as any)?.order_number);
             const orderType = safeTrim((flow as any)?.order_type);
             const comparisonId = safeTrim((flow as any)?.comparison_id);
             const ts = safeTrim((flow as any)?.timestamp);
-            const steps = getFlowSteps(flowId, flow);
-            const isMenuOpen = addMenuOpenFor === flowId;
-
+            const steps = getDisplaySteps(flowId, flow);
             return (
-              <div key={flowId} className="rounded-xl border border-border bg-card overflow-hidden">
-                <div className="flex items-stretch gap-0 flex-wrap">
+              <div key={flowId} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition-shadow hover:shadow-md">
+                <div className="flex flex-col gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#edf5f2] text-[#0D3A35]">
+                      <GitBranch className="h-4 w-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-bold uppercase tracking-[0.08em] text-slate-400">Flow ID</p>
+                      <p className="truncate text-sm font-bold text-slate-800">{flowId}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-wide ${isCompleted ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+                      {isCompleted ? 'Completed' : 'In Progress'}
+                    </span>
+                  </div>
+                </div>
+                <div className="grid items-stretch lg:grid-cols-[360px_minmax(0,1fr)]">
                   {(() => {
                     const info = leftPanelInfoMap[flowId];
                     const isLoading = leftPanelLoadingSet.has(flowId);
@@ -1562,88 +2288,119 @@ export default function PurchaseFlow() {
                     const indentType = orderType || undefined;
                     const vendor = info?.vendor_details;
                     const approvedVendorId = info?.approved_vendor_id;
+                    const poDetails = poDetailsByFlowId[flowId];
+                    const approvalRecord = poApprovalRecords.find((record) =>
+                      (displayOrder !== '—' && record.poNumber === displayOrder) || record.prNumber === effectivePrNumber,
+                    );
+                    const itemDetails = poDetails?.itemDetails?.length ? poDetails.itemDetails : approvalRecord?.itemDetails || [];
+                    const approvedVendorName = vendor?.vendor_name || approvalRecord?.vendorName || approvedVendorId || 'Not recorded';
 
                     return (
-                  <div className="w-[280px] shrink-0 border-r border-border px-4 py-4 bg-muted/30 flex flex-col gap-3">
+                  <div className="flex w-full min-w-0 flex-col gap-3 border-b border-slate-200 bg-[#f7faf9] px-4 py-4 lg:border-b-0 lg:border-r">
 
-                    {/* PR number + indent type badge */}
-                    <div>
-                      <div className="flex items-start gap-2">
-                        <span className="font-semibold text-sm leading-snug break-all">{displayPr}</span>
+                    {/* Purchase order details */}
+                    <div className="overflow-hidden rounded-xl border border-[#0D3A35]/15 bg-white">
+                      <div className="flex items-center justify-between bg-[#0D3A35] px-3 py-2 text-white">
+                        <div className="flex items-center gap-2">
+                          <Receipt className="h-3.5 w-3.5" />
+                          <span className="text-[10px] font-bold uppercase tracking-[0.12em]">Purchase Order Details</span>
+                        </div>
                         {indentType && (
-                          <span className={`shrink-0 mt-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${
+                          <span className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${
                             indentType === 'SPR'
-                              ? 'bg-purple-50 text-purple-700 border-purple-200'
-                              : 'bg-blue-50 text-blue-700 border-blue-200'
+                              ? 'border-purple-200 bg-purple-50 text-purple-700'
+                              : 'border-blue-200 bg-blue-50 text-blue-700'
                           }`}>
                             {indentType}
                           </span>
                         )}
                       </div>
-                      <div className="text-xs text-muted-foreground mt-1 break-all">{displayOrder}</div>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-2 px-3 py-3">
+                        {[
+                          ['PO Number', poDetails?.poNumber || displayOrder],
+                          ['PO Date', poDetails?.poDate ? formatDateDDMMYYYY(poDetails.poDate) : '—'],
+                          ['PR Number', displayPr],
+                          ['Comparison ID', comparisonId || '—'],
+                          ['Amendment', poDetails?.amendmentNo || '0'],
+                          ['Delivery Date', poDetails?.deliveryDate ? formatDateDDMMYYYY(poDetails.deliveryDate) : '—'],
+                          ['Project / Cluster', poDetails?.project || '—'],
+                          ['Prepared By', poDetails?.preparedBy || '—'],
+                        ].map(([label, value]) => (
+                          <div key={label} className="min-w-0">
+                            <p className="text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400">{label}</p>
+                            <p className="mt-0.5 break-words text-[11px] font-semibold leading-snug text-slate-700">{value}</p>
+                          </div>
+                        ))}
+                      </div>
+                      {(poDetails?.paymentTerms || poDetails?.shipToAddress) && (
+                        <div className="space-y-2 border-t border-slate-100 px-3 py-3">
+                          {poDetails.paymentTerms && (
+                            <div>
+                              <p className="text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400">Payment Terms</p>
+                              <p className="mt-0.5 line-clamp-3 text-[10px] leading-relaxed text-slate-600">{poDetails.paymentTerms}</p>
+                            </div>
+                          )}
+                          {poDetails.shipToAddress && (
+                            <div>
+                              <p className="text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400">Ship To</p>
+                              <p className="mt-0.5 line-clamp-3 text-[10px] leading-relaxed text-slate-600">{poDetails.shipToAddress}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
 
-                    {/* Vendor details */}
-                    {vendor ? (
-                      <div className="rounded-lg border border-border bg-background px-3 py-2.5 space-y-1">
-                        <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">Vendor</div>
-                        {vendor.vendor_name && (
-                          <div className="text-xs font-semibold text-foreground">{vendor.vendor_name}</div>
-                        )}
-                        {approvedVendorId && (
-                          <div className="text-[11px] text-muted-foreground">{approvedVendorId}</div>
-                        )}
-                        {vendor.vendor_contact && (
-                          <div className="text-[11px] text-muted-foreground">{vendor.vendor_contact}</div>
-                        )}
-                        {vendor.e_mail_id && (
-                          <div className="text-[11px] text-muted-foreground">{vendor.e_mail_id}</div>
-                        )}
-                        {vendor.vendor_address && (
-                          <div className="text-[11px] text-muted-foreground">{vendor.vendor_address}</div>
-                        )}
-                        {vendor.gst_number && (
-                          <div className="text-[11px] text-muted-foreground">GST: {vendor.gst_number}</div>
-                        )}
+                    {/* Approved vendor name only */}
+                    {vendor || approvalRecord || approvedVendorId ? (
+                      <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
+                        <div className="text-[10px] font-bold uppercase tracking-widest text-[#0D3A35]">Approved Vendor</div>
+                        <div className="mt-1 text-xs font-bold leading-relaxed text-slate-800">{approvedVendorName}</div>
                       </div>
                     ) : isLoading ? (
                       <div className="space-y-2 rounded-lg border border-border bg-background px-3 py-2.5">
                         <div className="h-2.5 w-2/3 rounded bg-muted animate-pulse" />
-                        <div className="h-2.5 w-1/2 rounded bg-muted animate-pulse" />
-                        <div className="h-2.5 w-3/4 rounded bg-muted animate-pulse" />
                       </div>
-                    ) : null}
-
-                    {/* Timestamp */}
-                    {ts && (
-                      <div className="text-[11px] text-muted-foreground">Updated: {formatDateTime(ts)}</div>
+                    ) : (
+                      <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
+                        <div className="text-[10px] font-bold uppercase tracking-widest text-[#0D3A35]">Approved Vendor</div>
+                        <div className="mt-1 text-xs font-bold text-slate-800">Not recorded</div>
+                      </div>
                     )}
 
-                    <div className="flex items-stretch gap-2">
-                      <button
-                        disabled={!!savingFlows[flowId]}
-                        onClick={() => saveCurrentFlow(flowId, flow)}
-                        className="flex flex-1 flex-col items-center justify-center gap-1 rounded-lg bg-green-600 hover:bg-green-700 disabled:opacity-60 text-white px-2 py-2.5 text-[11px] font-medium transition-colors"
-                      >
-                        <Check className="w-4 h-4" />
-                        {savingFlows[flowId] ? 'Saving…' : 'Save Current'}
-                      </button>
-                      <button
-                        disabled={!effectivePrNumber}
-                        onClick={() => openHoInboxView(effectivePrNumber, 'po')}
-                        className="flex flex-1 flex-col items-center justify-center gap-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-40 text-gray-700 px-2 py-2.5 text-[11px] font-medium transition-colors"
-                      >
-                        <Receipt className="w-4 h-4" />
-                        View Order
-                      </button>
-                      <button
-                        disabled={!effectivePrNumber}
-                        onClick={() => openHoInboxView(effectivePrNumber, 'indent')}
-                        className="flex flex-1 flex-col items-center justify-center gap-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-40 text-gray-700 px-2 py-2.5 text-[11px] font-medium transition-colors"
-                      >
-                        <FileText className="w-4 h-4" />
-                        View Indent
-                      </button>
+                    {/* Item details */}
+                    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                      <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-3 py-2">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-[#0D3A35]">Item Details</span>
+                        <span className="rounded-full bg-[#e7f3ef] px-2 py-0.5 text-[9px] font-bold text-[#0D3A35]">
+                          {itemDetails.length} {itemDetails.length === 1 ? 'Item' : 'Items'}
+                        </span>
+                      </div>
+                      {itemDetails.length ? (
+                        <div className="divide-y divide-slate-100">
+                          {itemDetails.map((item, itemIndex) => (
+                            <div key={`${item.name}-${itemIndex}`} className="grid grid-cols-[24px_minmax(0,1fr)_auto] items-start gap-2 px-3 py-2.5">
+                              <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#edf5f2] text-[9px] font-black text-[#0D3A35]">{itemIndex + 1}</span>
+                              <span className="text-[11px] font-semibold leading-snug text-slate-800">{item.name}</span>
+                              <span className="whitespace-nowrap text-[10px] font-bold text-slate-500">
+                                {new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 }).format(item.quantity)} {item.uom || ''}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="px-3 py-4 text-center text-[10px] text-slate-500">No item details recorded for this PO.</div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 text-[10px] text-slate-500">
+                      <span>{ts ? `Updated: ${formatDateTime(ts)}` : ''}</span>
+                      <span className="flex items-center gap-1 font-bold text-[#0D3A35]">
+                        {savingFlows[flowId] ? (
+                          <><RefreshCw className="h-3 w-3 animate-spin" /> Saving…</>
+                        ) : (
+                          <><Check className="h-3 w-3" /> Auto-saved</>
+                        )}
+                      </span>
                     </div>
 
                     {indentType === 'PR' && (
@@ -1660,22 +2417,13 @@ export default function PurchaseFlow() {
                     );
                   })()}
 
-                  <div className="flex-1 px-4 py-4 overflow-x-auto">
+                  <div className="flex min-h-[360px] min-w-0 flex-col overflow-x-auto px-4 py-5 lg:min-h-0">
                     {steps.length === 0 ? (
                       <div className="text-sm text-muted-foreground">No steps found for this flow.</div>
                     ) : null}
 
-                    {/* Warning banner when step order has been changed but not saved */}
-                    {pendingReorderSet.has(flowId) && (
-                      <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 font-medium">
-                        <Lock className="w-3.5 h-3.5 shrink-0 text-amber-600" />
-                        Step order changed — save first before uploading any documents.
-                      </div>
-                    )}
-
-                    <div className="min-w-max flex items-center gap-3">
+                    <div className="flex min-w-max flex-1 items-stretch gap-3">
                       {(() => {
-                        const hasReorderPending = pendingReorderSet.has(flowId);
                         // Index of the first step that is eligible to be uploaded next
                         // (not yet uploaded AND all previous steps are uploaded)
                         const firstUploadableIdx = steps.findIndex(
@@ -1683,24 +2431,16 @@ export default function PurchaseFlow() {
                         );
                         return steps.map((s, stepIdx) => {
                         const uploaded = isUploaded(s);
-                        const canOpen = Boolean(s.docLink);
-                        const isFirst = stepIdx === 0;
-                        const isLast = stepIdx === steps.length - 1;
-
+                        const canOpen = Boolean(s.docLink || s.externalGrn);
                         // A step is blocked for upload when:
                         // 1. The order was changed and not saved yet, OR
                         // 2. A previous step hasn't been uploaded yet
-                        const blocked = !uploaded && (
-                          hasReorderPending ||
-                          (firstUploadableIdx !== -1 && stepIdx > firstUploadableIdx)
-                        );
+                        const blocked = !uploaded && firstUploadableIdx !== -1 && stepIdx > firstUploadableIdx;
 
-                        const blockReason = hasReorderPending
-                          ? 'Save the current order before uploading'
-                          : (() => {
-                              const blocking = steps.slice(0, stepIdx).find(prev => !isUploaded(prev));
-                              return blocking ? `Upload "${blocking.document}" first` : '';
-                            })();
+                        const blockReason = (() => {
+                          const blocking = steps.slice(0, stepIdx).find(prev => !isUploaded(prev));
+                          return blocking ? `Upload "${blocking.document}" first` : '';
+                        })();
 
                         const invoiceAccountsStatus = (() => {
                           const st = s.status.toLowerCase();
@@ -1711,149 +2451,73 @@ export default function PurchaseFlow() {
                         })();
 
                         return (
-                          <div key={s.key} className="flex items-center gap-3">
+                          <div key={s.key} className="flex h-full items-center gap-3">
                             {/* Step node */}
-                            <div className="flex flex-col items-center gap-1">
+                            <div className="flex h-full flex-col items-center gap-1">
                               <button
                                 type="button"
                                 onClick={() => {
-                                  if (s.isLocal && s.status !== 'completed') return;
-                                  if (canOpen) { window.open(s.docLink, '_blank'); return; }
+                                  if (s.externalGrn) { void previewGrn(s.externalGrn); return; }
+                                  if (s.docLink) {
+                                    void previewDocument(s.displayLabel || s.document, s.docLink);
+                                    return;
+                                  }
                                   if (blocked) { toast.error(blockReason); return; }
                                   setUploadTarget({ flow, step: s });
                                 }}
-                                className={`group flex flex-col items-center gap-1 ${blocked ? 'cursor-not-allowed' : ''}`}
+                                className={`group flex min-h-[300px] w-[328px] flex-1 flex-col items-center gap-1 rounded-xl border bg-white p-3 text-left shadow-sm transition lg:min-h-0 ${blocked ? 'cursor-not-allowed border-slate-200 opacity-70' : 'border-slate-200 hover:-translate-y-0.5 hover:border-[#0D3A35]/30 hover:shadow-md'}`}
                                 title={
                                   blocked
                                     ? blockReason
-                                    : s.isLocal && s.status !== 'completed'
-                                      ? s.document
-                                      : canOpen ? 'Open document' : 'Upload document'
+                                    : canOpen ? 'Preview document' : 'Upload document'
                                 }
                               >
-                                <div className={
-                                  'w-20 h-20 rounded-full border-2 flex flex-col items-center justify-center transition-colors ' +
-                                  (uploaded
-                                    ? invoiceAccountsStatus === 'pending'
-                                      ? 'border-yellow-400 bg-yellow-50'
-                                      : invoiceAccountsStatus === 'sent'
-                                        ? 'border-blue-400 bg-blue-50'
-                                        : 'border-green-500 bg-green-50'
-                                    : blocked
-                                      ? 'border-gray-200 bg-gray-50 opacity-50'
-                                      : s.isLocal && s.status !== 'completed'
-                                        ? 'border-blue-400 bg-blue-50'
-                                        : !s.isLocal && !s.docLink && s.status === 'completed'
-                                          ? 'border-green-500 bg-green-50'
-                                          : 'border-dashed border-border bg-background hover:bg-muted')
-                                }>
-                                  {uploaded ? (
-                                    invoiceAccountsStatus === 'pending' ? (
-                                      <FileText className="w-5 h-5 text-yellow-600" />
-                                    ) : invoiceAccountsStatus === 'sent' ? (
-                                      <FileText className="w-5 h-5 text-blue-600" />
-                                    ) : (
-                                      <FileText className="w-5 h-5 text-green-700" />
-                                    )
-                                  ) : blocked ? (
-                                    <Lock className="w-5 h-5 text-gray-400" />
-                                  ) : s.isLocal && s.status !== 'completed' ? (
-                                    <Receipt className="w-5 h-5 text-blue-600" />
-                                  ) : !s.isLocal && !s.docLink && s.status === 'completed' ? (
-                                    <Check className="w-5 h-5 text-green-600" />
-                                  ) : (
-                                    <Plus className="w-7 h-7 text-muted-foreground group-hover:text-foreground" />
-                                  )}
-                                  <div className="text-[10px] mt-1 font-semibold text-muted-foreground">
-                                    {uploaded
-                                      ? invoiceAccountsStatus === 'pending'
-                                        ? 'Pending'
-                                        : invoiceAccountsStatus === 'sent'
-                                          ? 'Sent'
-                                          : invoiceAccountsStatus === 'approved'
-                                            ? 'Approved'
-                                            : 'Uploaded'
-                                      : blocked
-                                        ? 'Locked'
-                                        : s.isLocal && s.status !== 'completed'
-                                          ? 'New'
-                                          : !s.isLocal && !s.docLink && s.status === 'completed'
-                                            ? 'Done'
-                                            : 'Upload'}
-                                  </div>
-                                </div>
-                                <div className={
-                                  'text-[10px] font-medium text-center max-w-[88px] leading-tight ' +
-                                  (blocked
-                                    ? 'text-gray-400'
-                                    : s.isLocal && s.status !== 'completed'
-                                      ? 'text-blue-700 font-semibold'
-                                      : !s.isLocal && !s.docLink && s.status === 'completed'
-                                        ? 'text-green-700 font-semibold'
-                                        : '')
-                                }>
-                                  {s.document}
-                                </div>
+                                {canOpen ? (
+                                  <>
+                                    <div className={`min-h-20 w-full flex-1 overflow-hidden rounded-lg border ${invoiceAccountsStatus === 'pending' ? 'border-amber-200 bg-amber-50' : invoiceAccountsStatus === 'sent' ? 'border-blue-200 bg-blue-50' : 'border-emerald-200 bg-emerald-50'}`}>
+                                      {s.docLink ? (
+                                        <InlineDocumentPreview url={s.docLink} label={s.displayLabel || s.document} />
+                                      ) : s.externalGrn ? (
+                                        <div className="flex h-full min-h-[260px] flex-col bg-white text-slate-700">
+                                          <div className="bg-[#0D3A35] px-4 py-3 text-center text-xs font-black uppercase tracking-[0.14em] text-white">Goods Receipt Note</div>
+                                          <div className="grid grid-cols-2 border-b border-slate-200 text-[10px]">
+                                            <div className="border-r border-slate-200 p-3"><span className="block font-bold uppercase text-slate-400">GRN No.</span><span className="mt-1 block font-bold text-slate-800">{s.externalGrn.grnNo || '—'}</span></div>
+                                            <div className="p-3"><span className="block font-bold uppercase text-slate-400">GRN Date</span><span className="mt-1 block font-bold text-slate-800">{formatDateDDMMYYYY(s.externalGrn.grnDate)}</span></div>
+                                          </div>
+                                          <div className="grid grid-cols-2 border-b border-slate-200 text-[10px]">
+                                            <div className="border-r border-slate-200 p-3"><span className="block font-bold uppercase text-slate-400">Invoice No.</span><span className="mt-1 block font-semibold">{s.externalGrn.invNo || '—'}</span></div>
+                                            <div className="p-3"><span className="block font-bold uppercase text-slate-400">Status</span><span className="mt-1 block font-semibold capitalize">{safeTrim(s.externalGrn.status).replace(/_/g, ' ')}</span></div>
+                                          </div>
+                                          <div className="flex-1 p-3 text-left">
+                                            <span className="block text-[9px] font-bold uppercase tracking-wide text-slate-400">Items</span>
+                                            {(s.externalGrn.items || []).slice(0, 5).map((item, itemIndex) => (
+                                              <div key={`${s.externalGrn?.grnNo}-${itemIndex}`} className="mt-2 flex justify-between gap-2 border-b border-slate-100 pb-1.5 text-[10px]">
+                                                <span className="line-clamp-1 font-semibold">{item.description || item.itemCode || `Item ${itemIndex + 1}`}</span>
+                                                <span className="whitespace-nowrap font-bold">{item.receivedQty} {item.uom}</span>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                    <div className="w-full pt-1.5">
+                                      <p className="text-sm font-bold capitalize leading-tight text-slate-800">{s.displayLabel || s.document}</p>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <>
+                                    <div className={`flex min-h-20 w-full flex-1 items-center justify-center rounded-lg border border-dashed ${blocked ? 'border-slate-200 bg-slate-50' : 'border-[#0D3A35]/25 bg-[#f7faf9] group-hover:bg-[#edf5f2]'}`}>
+                                      <span className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-bold ${blocked ? 'bg-slate-100 text-slate-400' : 'bg-[#0D3A35] text-white shadow-sm'}`}>
+                                        {blocked ? <Lock className="h-3.5 w-3.5" /> : <Upload className="h-3.5 w-3.5" />}
+                                        Upload
+                                      </span>
+                                    </div>
+                                    <div className="w-full pt-1.5">
+                                      <p className={`text-sm font-bold capitalize leading-tight ${blocked ? 'text-slate-400' : 'text-slate-800'}`}>{s.displayLabel || s.document}</p>
+                                    </div>
+                                  </>
+                                )}
                               </button>
-
-                              {/* Move + remove controls — shown on any step without a doc_link */}
-                              {!s.docLink && (
-                                <div className="flex items-center gap-1 mt-0.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => moveStep(flowId, flow, s.key, 'left')}
-                                    disabled={isFirst}
-                                    title="Move left"
-                                    className="h-5 w-5 rounded flex items-center justify-center border border-gray-200 bg-white text-gray-500 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                                  >
-                                    <ChevronLeft className="w-3 h-3" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleLocalStepDone(flowId, flow, s.key)}
-                                    title={s.status === 'completed' ? 'Mark as pending' : 'Mark as done'}
-                                    className={
-                                      'h-5 w-5 rounded flex items-center justify-center border transition-colors ' +
-                                      (s.status === 'completed'
-                                        ? 'border-green-400 bg-green-100 text-green-700 hover:bg-green-50'
-                                        : 'border-gray-200 bg-white text-gray-400 hover:bg-green-50 hover:border-green-300 hover:text-green-600')
-                                    }
-                                  >
-                                    <Check className="w-3 h-3" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => removeLocalStep(flowId, flow, s.key)}
-                                    title="Remove"
-                                    className="h-5 w-5 rounded flex items-center justify-center border border-red-200 bg-white text-red-400 hover:bg-red-50 transition-colors"
-                                  >
-                                    <X className="w-3 h-3" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => moveStep(flowId, flow, s.key, 'right')}
-                                    disabled={isLast}
-                                    title="Move right"
-                                    className="h-5 w-5 rounded flex items-center justify-center border border-gray-200 bg-white text-gray-500 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                                  >
-                                    <ChevronRight className="w-3 h-3" />
-                                  </button>
-                                </div>
-                              )}
-
-                              {/* GRN (PO) / Completion certificate (WO) step — offer to auto-generate
-                                  the document from an already-approved GRN or WCC certificate,
-                                  instead of only accepting a manually uploaded file. */}
-                              {!s.docLink && s.document.trim().toLowerCase() === 'grn' && (
-                                <button
-                                  type="button"
-                                  onClick={() => setGenerateTarget({ flow, step: s })}
-                                  title="Generate from an approved GRN or WCC certificate"
-                                  className="mt-1 px-2 py-1 text-[10px] font-semibold rounded-md border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors whitespace-nowrap"
-                                >
-                                  Generate from GRN/WCC
-                                </button>
-                              )}
 
                               {/* Accounts status actions — only for invoice / proforma invoice steps */}
                               {uploaded && isInvoiceDocType(s.document) && (
@@ -1889,57 +2553,6 @@ export default function PurchaseFlow() {
                       });
                     })()}
 
-                      {/* Arrow before add button when steps exist */}
-                      {steps.length > 0 && (
-                        <div className="text-muted-foreground">
-                          <ArrowRight className="w-4 h-4" />
-                        </div>
-                      )}
-
-                      {/* + Add Invoice button with dropdown */}
-                      <div className="relative">
-                        <button
-                          type="button"
-                          onClick={() => setAddMenuOpenFor(isMenuOpen ? null : flowId)}
-                          className="flex flex-col items-center gap-1 group"
-                          title="Add invoice step"
-                        >
-                          <div className="w-20 h-20 rounded-full border-2 border-dashed border-blue-300 bg-blue-50/50 hover:bg-blue-50 flex flex-col items-center justify-center transition-colors">
-                            <Plus className="w-6 h-6 text-blue-500 group-hover:text-blue-700" />
-                            <div className="text-[10px] mt-1 font-semibold text-blue-500 group-hover:text-blue-700">Add</div>
-                          </div>
-                          <div className="text-[10px] font-medium text-blue-600 text-center max-w-[88px] leading-tight">
-                            Invoice Step
-                          </div>
-                        </button>
-
-                        {/* Dropdown */}
-                        {isMenuOpen && (
-                          <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 z-30 w-44 rounded-lg border border-border bg-card shadow-lg overflow-hidden">
-                            <div className="px-3 py-2 border-b border-border bg-muted/30">
-                              <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Choose type</p>
-                            </div>
-                            {(['Proforma Invoice', 'Invoice', 'PRR (for payment)', 'PRR (for accounting)'] as const).map((type) => (
-                              <button
-                                key={type}
-                                type="button"
-                                onClick={() => addInvoiceStep(flowId, flow, type)}
-                                className="w-full flex items-center gap-2 px-3 py-2.5 text-sm font-medium text-foreground hover:bg-muted transition-colors"
-                              >
-                                <Receipt className="w-4 h-4 text-blue-500 shrink-0" />
-                                {type}
-                              </button>
-                            ))}
-                            <button
-                              type="button"
-                              onClick={() => setAddMenuOpenFor(null)}
-                              className="w-full flex items-center justify-center px-3 py-2 text-xs text-muted-foreground hover:bg-muted border-t border-border transition-colors"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        )}
-                      </div>
                     </div>
                   </div>
                 </div>
@@ -1947,7 +2560,8 @@ export default function PurchaseFlow() {
             );
           })
         )}
-      </div>
+        </div>
+      </section>
     </div>
   );
 }

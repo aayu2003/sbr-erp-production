@@ -51,15 +51,11 @@
           "label": "Indents and Request",
           "enabled": true,
           "items": [
-            { "key": "admin-ops-indents",     "label": "Admin Ops Indents",           "path": "/admin-ops-indents",          "icon": "FileText",      "enabled": true  },
             { "key": "fuel-requests-admin",   "label": "Fuel Requests",               "path": "/admin-ops-fuel-requests",    "icon": "Fuel",          "enabled": true  },
             { "key": "on-demand-task",        "label": "On Demand Task & Allocation", "path": "/on-demand-task",             "icon": "ClipboardCheck","enabled": true  },
             { "key": "on-demand-task-legacy", "label": "On Demand Task (Legacy)",     "path": "/on-demand-task-legacy",      "icon": "ClipboardCheck","enabled": true  },
             { "key": "admin-request",         "label": "Admin Ops Request",           "path": "/admin-request",              "icon": "ClipboardCheck","enabled": true },
-            { "key": "admin-mrf-approvals",   "label": "Admin MRF Approvals",         "path": "/admin-mrf-approvals",        "icon": "FileText",      "enabled": true },
-            { "key": "admin-inbox",           "label": "Inbox",                       "path": "/admin/inbox",                "icon": "Mail",          "enabled": true  },
-            { "key": "admin-wcc-approval",    "label": "WCC Approval",                "path": "/admin/wcc-approval",         "icon": "FileCheck",     "enabled": true  },
-            { "key": "admin-grn-approval",    "label": "GRN Approval",                "path": "/admin/grn-approval",         "icon": "PackageCheck",  "enabled": true  }
+            { "key": "admin-inbox",           "label": "Inbox",                       "path": "/admin/inbox",                "icon": "Mail",          "enabled": true  }
           ]
         },
         {
@@ -81,6 +77,57 @@
       ]
     },
     {
+      "key": "approvals-section",
+      "label": "APPROVALS",
+      "description": "Central approval queues and review workflows",
+      "icon": "FileCheck",
+      "enabled": true,
+      "groups": [
+        {
+          "key": "admin-ops-approvals",
+          "label": "Admin Ops Approvals",
+          "enabled": true,
+          "items": [
+            { "key": "admin-ops-indents",     "label": "Indent Approval",              "path": "/admin-ops-indents",          "icon": "FileText",      "enabled": true },
+            { "key": "admin-mrf-approvals",  "label": "MRF Approval",                 "path": "/admin-mrf-approvals",        "icon": "FileText",      "enabled": true },
+            { "key": "admin-wcc-approval",   "label": "WCC Approval",                 "path": "/admin/wcc-approval",         "icon": "FileCheck",     "enabled": true },
+            { "key": "admin-grn-approval",   "label": "GRN Approval",                 "path": "/admin/grn-approval",         "icon": "PackageCheck",  "enabled": true },
+            { "key": "admin-inspection-approval", "label": "Inspection Approval",     "path": "/admin/inspection-report-approvals", "icon": "ClipboardCheck", "enabled": true }
+          ]
+        },
+        {
+          "key": "inventory-approval-group",
+          "label": "Inventory Approvals",
+          "enabled": true,
+          "items": [
+            { "key": "inventory-approvals", "label": "Stock Transfer Approval",       "path": "/inventory-approvals",        "icon": "FileCheck",     "enabled": true }
+          ]
+        },
+        {
+          "key": "purchase-finance-approvals",
+          "label": "Purchase & Finance Approvals",
+          "enabled": true,
+          "items": [
+            { "key": "ho-module",          "label": "Order Approval Flow",            "path": "/ho",                         "icon": "FileText",      "enabled": true },
+            { "key": "finance-admin-ops",  "label": "Finance Admin Ops Approval",     "path": "/finance-admin-ops-indents",  "icon": "FileText",      "enabled": true },
+            { "key": "finance-inspection-approval", "label": "Inspection Final Approval", "path": "/finance/inspection-report-approvals", "icon": "ClipboardCheck", "enabled": true }
+          ]
+        },
+        {
+          "key": "director-approvals",
+          "label": "Director Approvals",
+          "enabled": true,
+          "items": [
+            { "key": "director-fuel",         "label": "Fuel Request Approval", "path": "/director-fuel-requests", "icon": "Fuel",         "enabled": true },
+            { "key": "director-inbox",        "label": "Approval Inbox",        "path": "/director/inbox",         "icon": "Mail",         "enabled": true },
+            { "key": "director-wcc-approval", "label": "WCC Approval",          "path": "/director/wcc-approval",  "icon": "FileCheck",    "enabled": true },
+            { "key": "director-grn-approval", "label": "GRN Approval",          "path": "/director/grn-approval",  "icon": "PackageCheck", "enabled": true },
+            { "key": "director-prr-approval", "label": "PRR Approval",          "path": "/director/prr-approval",  "icon": "Receipt",      "enabled": true }
+          ]
+        }
+      ]
+    },
+    {
       "key": "inventory-section",
       "label": "INVENTORY",
       "description": "Inventory, stock, fuel, and goods receipt management",
@@ -93,10 +140,10 @@
           "enabled": true,
           "items": [
             { "key": "inventory",          "label": "Inventory",            "path": "/inventory",           "icon": "Box",          "enabled": true },
-            { "key": "inventory-approvals","label": "Inventory Approvals",  "path": "/inventory-approvals", "icon": "FileCheck",    "enabled": true },
             { "key": "inventory-indents",  "label": "Inventory Indents",    "path": "/inventory-indents",   "icon": "FileText",     "enabled": true },
             { "key": "fuels-consumables",  "label": "Fuels & Consumables",  "path": "/fuels-and-consumables","icon": "Fuel",         "enabled": true },
             { "key": "grn-module",         "label": "GRN Module",           "path": "/grn-module",          "icon": "PackageCheck", "enabled": true },
+            { "key": "inspection-report",  "label": "Inspection Report",    "path": "/inspection-report",   "icon": "ClipboardCheck", "enabled": true },
             { "key": "gate-entry",         "label": "Gate Entry",           "path": "/gate-entry",          "icon": "DoorOpen",     "enabled": true },
             { "key": "inventory-inbox",    "label": "Inbox",                "path": "/inventory/inbox",     "icon": "Mail",         "enabled": true }
           ]
@@ -115,11 +162,9 @@
           "label": "Purchase And Procurement",
           "enabled": true,
           "items": [
-            { "key": "finance-admin-ops",  "label": "Finance Admin Ops",          "path": "/finance-admin-ops-indents","icon": "FileText",      "enabled": true  },
-            { "key": "purchase-req",       "label": "Comparative Statement",      "path": "/purchase-requisition",     "icon": "FileText",      "enabled": true  },
-            { "key": "purchase-req-entry", "label": "Purchase Requisition",       "path": "/purchase-requisition-entry","icon": "FileText",      "enabled": true  },
             { "key": "vendor-directory",   "label": "Vendor Directory",           "path": "/vendor-directory",         "icon": "FileText",      "enabled": true  },
-            { "key": "ho-module",          "label": "Order Approval Flow",        "path": "/ho",                       "icon": "FileText",      "enabled": true  },
+            { "key": "purchase-req-entry", "label": "Purchase Requisition",       "path": "/purchase-requisition-entry","icon": "FileText",      "enabled": true  },
+            { "key": "purchase-req",       "label": "Comparative Statement",      "path": "/purchase-requisition",     "icon": "FileText",      "enabled": true  },
             { "key": "po-creation",        "label": "PO Creation",                "path": "/po-creation",              "icon": "ShoppingCart",  "enabled": true  },
             { "key": "purchase-flow",      "label": "Purchase Flow",              "path": "/purchase-flow",            "icon": "FileText",      "enabled": true  },
             { "key": "work-order",         "label": "Work Order",                 "path": "/work-order",               "icon": "ClipboardCheck","enabled": true  },
@@ -186,27 +231,6 @@
             { "key": "weighment",           "label": "Weighment & QC",        "path": "/weighment",           "icon": "Scale",   "enabled": true },
             { "key": "rental-rate-card",    "label": "Rental Rate Card",      "path": "/rental-rate-card",    "icon": "Tractor", "enabled": true },
             { "key": "service-requests",    "label": "Service Request",       "path": "/service-requests",    "icon": "FileText","enabled": true }
-          ]
-        }
-      ]
-    },
-    {
-      "key": "director",
-      "label": "DIRECTOR",
-      "description": "Strategic finance and oversight modules",
-      "icon": "Landmark",
-      "enabled": true,
-      "groups": [
-        {
-          "key": "approvals",
-          "label": "Approvals",
-          "enabled": true,
-          "items": [
-            { "key": "director-fuel",         "label": "Fuel Requests", "path": "/director-fuel-requests",  "icon": "Fuel",         "enabled": true  },
-            { "key": "director-inbox",        "label": "Inbox",         "path": "/director/inbox",          "icon": "Mail",         "enabled": true  },
-            { "key": "director-wcc-approval", "label": "WCC Approval",  "path": "/director/wcc-approval",   "icon": "FileCheck",    "enabled": true  },
-            { "key": "director-grn-approval", "label": "GRN Approval",  "path": "/director/grn-approval",   "icon": "PackageCheck", "enabled": true  },
-            { "key": "director-prr-approval", "label": "PRR Approval",  "path": "/director/prr-approval",   "icon": "Receipt",      "enabled": true  }
           ]
         }
       ]

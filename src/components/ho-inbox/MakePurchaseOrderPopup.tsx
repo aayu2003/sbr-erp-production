@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { ChevronLeft, ChevronRight, Download, FileText, Printer, X } from 'lucide-react';
 import { toast } from 'sonner';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,10 +19,15 @@ type Props = {
   open: boolean;
   comparative: ComparativeModel | null;
   vendorId?: string; // defaults to comparative.hoSelectedVendorId
+  poNumber?: string; // persisted PO number used when an older API draft omits order_number
+  amendmentNumber?: number;
   onClose: () => void;
   onConfirm?: (payload: { indentId: string; vendorId: string; createdAt: string; poNo: string }) => void;
   variant?: 'modal' | 'inline';
   inlineSimulatePrint?: boolean;
+  reviewOnly?: boolean;
+  revisionMode?: boolean;
+  documentStatus?: 'draft' | 'pending' | 'approved' | 'rejected';
 };
 
 const safe = (v: unknown) => String(v ?? '').trim();
@@ -47,6 +54,126 @@ const sanitizeAnnexureHtml = (value: unknown) => {
   });
   template.content.querySelectorAll('.annexure-selected-cell').forEach((node) => node.classList.remove('annexure-selected-cell'));
   return template.innerHTML;
+};
+
+const annexureWordCount = (value: unknown) => {
+  const text = String(value ?? '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;|&#160;|&#xA0;/gi, ' ')
+    .replace(/&[a-z]+;|&#\d+;|&#x[\da-f]+;/gi, ' ');
+  return text.match(/[\p{L}\p{N}]+/gu)?.length || 0;
+};
+
+const ANNEXURE_PAGE_LINE_CAPACITY = 52;
+const ANNEXURE_CHARS_PER_LINE = 88;
+
+const estimateAnnexureNodeLines = (node: Node): number => {
+  const text = safe(node.textContent);
+  if (node.nodeType === Node.TEXT_NODE) return Math.max(1, Math.ceil(text.length / ANNEXURE_CHARS_PER_LINE));
+  const element = node as HTMLElement;
+  const tag = element.tagName?.toLowerCase();
+  if (tag === 'h1') return Math.max(4, Math.ceil(text.length / 48) + 2);
+  if (tag === 'h2') return Math.max(3, Math.ceil(text.length / 58) + 2);
+  if (tag === 'h3') return Math.max(3, Math.ceil(text.length / 68) + 1);
+  if (tag === 'hr') return 2;
+  if (tag === 'ul' || tag === 'ol') {
+    return Math.max(2, Array.from(element.children).reduce((sum, child) => sum + estimateAnnexureNodeLines(child), 0) + 1);
+  }
+  return Math.max(2, Math.ceil(text.length / ANNEXURE_CHARS_PER_LINE) + 1);
+};
+
+const annexureTableFragments = (container: HTMLElement): Array<{ html: string; lines: number }> => {
+  const sourceTable = container.matches('table') ? container as HTMLTableElement : container.querySelector('table');
+  if (!sourceTable) return [{ html: container.outerHTML, lines: estimateAnnexureNodeLines(container) }];
+
+  const headerRows = Array.from(sourceTable.querySelectorAll(':scope > thead > tr'));
+  const bodyRows = Array.from(sourceTable.querySelectorAll(':scope > tbody > tr'));
+  const rows = bodyRows.length ? bodyRows : Array.from(sourceTable.querySelectorAll(':scope > tr'));
+  if (!rows.length) return [{ html: container.outerHTML, lines: 4 }];
+
+  const headerLines = headerRows.reduce((sum, row) => sum + Math.max(2, estimateAnnexureNodeLines(row)), 0) + 1;
+  const fragments: Array<{ html: string; lines: number }> = [];
+  let chunk: Element[] = [];
+  let used = headerLines;
+
+  const commit = () => {
+    if (!chunk.length) return;
+    const tableClone = sourceTable.cloneNode(true) as HTMLTableElement;
+    tableClone.querySelectorAll(':scope > tbody, :scope > tr').forEach((node) => node.remove());
+    const tbody = document.createElement('tbody');
+    chunk.forEach((row) => tbody.appendChild(row.cloneNode(true)));
+    tableClone.appendChild(tbody);
+    if (container === sourceTable) {
+      fragments.push({ html: tableClone.outerHTML, lines: used });
+    } else {
+      const wrapper = container.cloneNode(false) as HTMLElement;
+      wrapper.appendChild(tableClone);
+      fragments.push({ html: wrapper.outerHTML, lines: used });
+    }
+    chunk = [];
+    used = headerLines;
+  };
+
+  rows.forEach((row) => {
+    const cells = Array.from(row.querySelectorAll(':scope > th, :scope > td'));
+    const perCellWidth = Math.max(18, Math.floor(ANNEXURE_CHARS_PER_LINE / Math.max(1, cells.length)));
+    const rowLines = Math.max(
+      2,
+      ...cells.map((cell) => Math.ceil(safe(cell.textContent).length / perCellWidth) + 1)
+    );
+    if (chunk.length && used + rowLines > ANNEXURE_PAGE_LINE_CAPACITY) commit();
+    chunk.push(row);
+    used += rowLines;
+  });
+  commit();
+  return fragments;
+};
+
+const paginateAnnexureHtml = (value: unknown): string[] => {
+  const html = sanitizeAnnexureHtml(value);
+  if (typeof document === 'undefined') return [html];
+  try {
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const tokens: Array<{ html: string; lines: number }> = [];
+
+    Array.from(template.content.childNodes).forEach((node) => {
+      if (node.nodeType === 3 && !safe(node.textContent)) return;
+      if (node.nodeType === 1 && (node as HTMLElement).querySelector('table')) {
+        tokens.push(...annexureTableFragments(node as HTMLElement));
+        return;
+      }
+      if (node.nodeType === 1 && (node as HTMLElement).matches('table')) {
+        tokens.push(...annexureTableFragments(node as HTMLElement));
+        return;
+      }
+      tokens.push({
+        html: node.nodeType === 3 ? `<p>${safe(node.textContent)}</p>` : (node as HTMLElement).outerHTML,
+        lines: estimateAnnexureNodeLines(node),
+      });
+    });
+
+    const pages: string[] = [];
+    let page: string[] = [];
+    let used = 0;
+    const commit = () => {
+      if (page.length) pages.push(page.join(''));
+      page = [];
+      used = 0;
+    };
+    tokens.forEach((token) => {
+      if (page.length && used + token.lines > ANNEXURE_PAGE_LINE_CAPACITY) commit();
+      page.push(token.html);
+      used += Math.min(token.lines, ANNEXURE_PAGE_LINE_CAPACITY);
+    });
+    commit();
+    return pages.length ? pages : [''];
+  } catch (error) {
+    console.error('Unable to paginate annexure content:', error);
+    return [html];
+  }
 };
 
 const extractAfterColon = (v: unknown) => {
@@ -85,6 +212,40 @@ const inr = (n: number) => {
   } catch {
     return `₹${n.toFixed(2)}`;
   }
+};
+
+const integerToIndianWords = (value: number): string => {
+  const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+  const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+  const belowHundred = (number: number) => number < 20
+    ? ones[number]
+    : `${tens[Math.floor(number / 10)]}${number % 10 ? ` ${ones[number % 10]}` : ''}`;
+  const parts: string[] = [];
+  let remaining = Math.max(0, Math.floor(value));
+
+  const appendScale = (divisor: number, label: string) => {
+    const count = Math.floor(remaining / divisor);
+    if (!count) return;
+    parts.push(`${integerToIndianWords(count)} ${label}`);
+    remaining %= divisor;
+  };
+
+  appendScale(10000000, 'Crore');
+  appendScale(100000, 'Lakh');
+  appendScale(1000, 'Thousand');
+  if (remaining >= 100) {
+    parts.push(`${ones[Math.floor(remaining / 100)]} Hundred`);
+    remaining %= 100;
+  }
+  if (remaining) parts.push(belowHundred(remaining));
+  return parts.join(' ') || 'Zero';
+};
+
+const amountInIndianWords = (value: number) => {
+  const normalized = Number.isFinite(value) ? Math.max(0, value) : 0;
+  const rupees = Math.floor(normalized);
+  const paise = Math.round((normalized - rupees) * 100);
+  return `Rupees ${integerToIndianWords(rupees)}${paise ? ` and ${integerToIndianWords(paise)} Paise` : ''} Only.`;
 };
 
 const numOr0 = (v: unknown) => {
@@ -131,6 +292,7 @@ const DUMMY_COMPANY = {
   line1: 'Khasra No.121/1, Amrit Dairy Farm',
   line2: 'Kachandur Dhour Road, Village Jeora, Durg, Chhattisgarh - 491001',
   gst: 'GST No: 22ARPCS5442R1ZM',
+  pan: 'ARPCS5442R',
 };
 
 const DUMMY_VENDOR = {
@@ -170,6 +332,23 @@ const selectedDocsFromText = (text: string) => {
 
 const formatDocsList = (docs: readonly string[]) => docs.map((d, i) => `${i + 1}) ${d}`).join('\n');
 
+const PURCHASE_FLOW_DOCUMENT_OPTIONS = [
+  { value: 'PO Acceptance', label: 'PO Acceptance', mandatory: true },
+  { value: 'Proforma Invoice', label: 'Proforma Invoice', mandatory: false },
+  { value: 'Delivery Challan', label: 'Delivery Challan', mandatory: false },
+  { value: 'GRN', label: 'GRN', mandatory: false },
+  { value: 'Tax Invoice', label: 'Tax Invoice', mandatory: false },
+] as const;
+
+const MANDATORY_PURCHASE_FLOW_DOCUMENT = PURCHASE_FLOW_DOCUMENT_OPTIONS[0].value;
+
+const normalizePurchaseFlowDocuments = (value: unknown): string[] => {
+  const supplied = Array.isArray(value) ? value.map(normalizeDocText) : [];
+  return PURCHASE_FLOW_DOCUMENT_OPTIONS
+    .filter((option) => option.mandatory || supplied.includes(normalizeDocText(option.value)))
+    .map((option) => option.value);
+};
+
 const formatTaxTermsText = (gstPct: number, otherPct: number) => {
   const gst = `${gstPct.toFixed(gstPct % 1 === 0 ? 0 : 2)}%`;
   const other = otherPct > 0 ? `${otherPct.toFixed(otherPct % 1 === 0 ? 0 : 2)}%` : '';
@@ -190,6 +369,95 @@ type CustomPoField = {
   id: string;
   label: string;
   value: string;
+};
+
+type CommercialDraftRow = {
+  no: number;
+  particular: string;
+  details: string;
+  continued?: boolean;
+};
+
+// Calibrated for the 11px / 20px-leading Commercial Terms table inside the
+// usable A4 portrait area (after the report header and fixed footer).
+const COMMERCIAL_PAGE_LINE_CAPACITY = 62;
+const COMMERCIAL_ESTIMATED_CHARS_PER_LINE = 90;
+
+const estimatedCommercialLines = (value: string) => {
+  const paragraphs = String(value || '—').split(/\r?\n/);
+  return Math.max(
+    1,
+    paragraphs.reduce(
+      (total, paragraph) => total + Math.max(1, Math.ceil(paragraph.length / COMMERCIAL_ESTIMATED_CHARS_PER_LINE)),
+      0
+    )
+  );
+};
+
+const wrapCommercialText = (value: string) => {
+  const wrapped: string[] = [];
+  String(value || '—').split(/\r?\n/).forEach((paragraph) => {
+    const words = paragraph.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      wrapped.push('');
+      return;
+    }
+    let line = '';
+    words.forEach((word) => {
+      const candidate = line ? `${line} ${word}` : word;
+      if (candidate.length > COMMERCIAL_ESTIMATED_CHARS_PER_LINE && line) {
+        wrapped.push(line);
+        line = word;
+      } else {
+        line = candidate;
+      }
+    });
+    if (line) wrapped.push(line);
+  });
+  return wrapped.length ? wrapped : ['—'];
+};
+
+const paginateCommercialRows = (rows: CommercialDraftRow[]) => {
+  const pages: CommercialDraftRow[][] = [];
+  let page: CommercialDraftRow[] = [];
+  let usedLines = 0;
+
+  const commitPage = () => {
+    if (page.length) pages.push(page);
+    page = [];
+    usedLines = 0;
+  };
+
+  rows.forEach((row) => {
+    const rowLines = estimatedCommercialLines(row.details) + 2;
+    if (rowLines <= COMMERCIAL_PAGE_LINE_CAPACITY) {
+      if (page.length && usedLines + rowLines > COMMERCIAL_PAGE_LINE_CAPACITY) commitPage();
+      page.push(row);
+      usedLines += rowLines;
+      return;
+    }
+
+    const detailLines = wrapCommercialText(row.details);
+    let cursor = 0;
+    let continuation = false;
+    while (cursor < detailLines.length) {
+      if (COMMERCIAL_PAGE_LINE_CAPACITY - usedLines < 4) commitPage();
+      const availableDetailLines = Math.max(1, COMMERCIAL_PAGE_LINE_CAPACITY - usedLines - 2);
+      const fragmentLines = detailLines.slice(cursor, cursor + availableDetailLines);
+      page.push({
+        ...row,
+        details: fragmentLines.join('\n'),
+        continued: continuation,
+      });
+      usedLines += fragmentLines.length + 2;
+      cursor += fragmentLines.length;
+      continuation = true;
+      if (cursor < detailLines.length) commitPage();
+    }
+  });
+
+  commitPage();
+  return pages.length ? pages : [[]];
 };
 
 const newCustomPoField = (): CustomPoField => ({
@@ -242,6 +510,7 @@ const formatLdPenaltyText = (perWeekPct: number, maxPct: number) => {
 
 type Page1State = {
   poNo: string;
+  amendmentNo: number;
   poDate: string;
   vendorCode: string;
   vatRegnNo: string;
@@ -254,13 +523,17 @@ type Page1State = {
   vendorPinCode: string;
   vendorState: string;
   vendorPlaceOfBusiness: string;
+  vendorContactName: string;
   vendorMobile: string;
   vendorEmail: string;
   vendorVatRegnNo: string;
+  vendorPan: string;
+  vendorLegalConstitution: string;
   paymentTerms: string;
   incoTerms: string;
   deliveryDate: string;
   shipToGstNo: string;
+  buyerPan: string;
   shipToContactName: string;
   shipToTel: string;
   shipToFax: string;
@@ -273,15 +546,23 @@ type Page1State = {
   buyerVillage: string;
   buyerDistrict: string;
   buyerPinCode: string;
+  coverKindAttention: string;
+  coverProject: string;
+  coverSubject: string;
+  coverSalutation: string;
+  coverOrderIntroduction: string;
+  coverCommercialReference: string;
   notes: string;
   preparedBy: string;
   verifiedBy: string;
   approvedBy: string;
+  requiredPurchaseDocuments: string[];
   customFields: CustomPoField[];
 };
 
 const defaultPage1 = (): Page1State => ({
   poNo: '',
+  amendmentNo: 0,
   poDate: formatYmd(new Date().toISOString()),
   vendorCode: '',
   vatRegnNo: DUMMY_COMPANY.gst,
@@ -294,13 +575,17 @@ const defaultPage1 = (): Page1State => ({
   vendorPinCode: '',
   vendorState: '',
   vendorPlaceOfBusiness: '',
+  vendorContactName: '',
   vendorMobile: '',
   vendorEmail: '',
   vendorVatRegnNo: DUMMY_VENDOR.vatRegnNo,
+  vendorPan: '',
+  vendorLegalConstitution: '',
   paymentTerms: 'Due within 30 Days',
   incoTerms: 'FOB',
   deliveryDate: formatYmd(new Date().toISOString()),
   shipToGstNo: extractAfterColon(DUMMY_COMPANY.gst),
+  buyerPan: DUMMY_COMPANY.pan,
   shipToContactName: DUMMY_SHIP_TO.contactName,
   shipToTel: DUMMY_SHIP_TO.tel,
   shipToFax: DUMMY_SHIP_TO.fax,
@@ -313,11 +598,18 @@ const defaultPage1 = (): Page1State => ({
   buyerVillage: 'Jeora',
   buyerDistrict: 'Durg',
   buyerPinCode: '491001',
+  coverKindAttention: '',
+  coverProject: '',
+  coverSubject: '',
+  coverSalutation: 'Dear Sir,',
+  coverOrderIntroduction: '',
+  coverCommercialReference: '',
   notes:
     'The Delay penalty is applicable once the delivery period will be one week exceeded\nPlease send the original invoice to finance department along with a copy of purchase order\nAny Shipment and invoice without PO no will not be accepted.',
   preparedBy: '',
   verifiedBy: '',
   approvedBy: '',
+  requiredPurchaseDocuments: [MANDATORY_PURCHASE_FLOW_DOCUMENT],
   customFields: [],
 });
 
@@ -345,6 +637,16 @@ type Page2State = {
   remarks: string;
   siteBillingAddress: string;
   documentsRequired: string;
+  correspondenceCompanyName: string;
+  correspondenceStreet: string;
+  correspondenceArea: string;
+  correspondenceCity: string;
+  correspondenceState: string;
+  correspondencePin: string;
+  correspondenceContactPerson: string;
+  correspondencePhone: string;
+  correspondenceAcknowledgement: string;
+  correspondenceAcceptance: string;
 };
 
 const defaultPage2 = (): Page2State => ({
@@ -380,11 +682,23 @@ const defaultPage2 = (): Page2State => ({
   ldPerWeekPercent: '1',
   ldMaxPercent: '10',
   remarks:
-    '1) Price breakup Annexure-1\n2) All the other terms are as per attached General terms and conditions Annexure 3.',
+    '1) Price breakup Annexure-1\n2) All the other terms are as per attached General terms and conditions Annexure 2.',
   siteBillingAddress:
     'SITE & BILLING ADDRESS:\n\nName of the Company: SAI BIORESOURCES PRIVATE LIMITED\nBuilding. No/Flat. No: Khasra No.121/1, Amrit Dairy Farm\nRoad/Street: Kachandur Dhour Road;\nVillage: Jeora,\nDistrict: Durg\nPin code: 491001\nGST No: 22ARPCS5442R1ZM\nName: Rajendra Shriringarpulate\nMobile Number: +91 79748 97686\nEmail: rajendra.s@saiobioenergy.com',
   documentsRequired:
     '1) Invoice\n2) Packing List\n3) Manufacturer\'s Guarantee Certificate\n4) Inspection Release Note\n5) Any Other Documents as may be needed at the time of supply & Handover.',
+  correspondenceCompanyName: 'SAI BIORESOURCES PRIVATE LIMITED',
+  correspondenceStreet: 'Trendz Green, Plot No 80, Shilpi Valley',
+  correspondenceArea: 'Madhapur, Hitech City',
+  correspondenceCity: 'Hyderabad',
+  correspondenceState: 'Telangana',
+  correspondencePin: '500081',
+  correspondenceContactPerson: 'Mr. V. Sharan Preeth',
+  correspondencePhone: '+91-7013492364',
+  correspondenceAcknowledgement:
+    'Please acknowledge the receipt of this PO and send us a signed & Stamped copy of this PO as a token of acceptance within 2 working days from the date of the PO.',
+  correspondenceAcceptance:
+    "If acceptance is not received in 2 working days, this PO shall be deemed to be accepted by the supplier in totality and shall strictly be adhered to. The buyer may withdraw this at any point of time, at their own discretion. All the T&C shall be as per the buyer's standard. There shall be no deviations acceptable unless confirmed in writing by the buyer. In case of any ambiguity between terms and conditions mentioned in the purchase order vis-a-vis the general terms and conditions of the buyer, terms based on the buyer's discretion shall prevail and shall be adhered to, accepted by the supplier.",
 });
 
 type Page3State = {
@@ -406,10 +720,11 @@ type PoDraft = {
   indentId: string;
   vendorId: string;
   savedAt: string;
-  page: 1 | 2 | 3 | 4;
+  page: number;
   p1: Page1State;
   p2: Page2State;
   p3: Page3State;
+  additionalAnnexures?: Page3State[];
   p4?: Page4State;
   authorizedSealAttachedAt?: string;
 };
@@ -447,20 +762,35 @@ const writePoDraftStore = (s: PoDraftStore) => {
   }
 };
 
-const DEFAULT_ANNEXURE3_TERMS = annexure2TermsRaw
+const DEFAULT_ANNEXURE2_TERMS = annexure2TermsRaw
   .replace(/^\s*GENERAL TERMS AND CONDITIONS\s*[–—-]\s*ANNEXURE 2\s*/i, '')
   .trim();
 
 const defaultPage3 = (): Page3State => ({
-  annexureTitle: 'ANNEXURE - 2',
+  annexureTitle: 'ANNEXURE - 1',
   contentHtml: '<h2>Annexure Title</h2><p>Start creating your annexure here.</p>',
   marginPreset: 'normal',
 });
 
 const defaultPage4 = (): Page4State => ({
-  annexureTitle: 'GENERAL TERMS AND CONDITIONS — ANNEXURE - 3',
-  termsText: DEFAULT_ANNEXURE3_TERMS,
+  annexureTitle: 'GENERAL TERMS AND CONDITIONS — ANNEXURE - 2',
+  termsText: DEFAULT_ANNEXURE2_TERMS,
 });
+
+const normalizeAnnexureNumber = (value: unknown, fallback: string, previousNumber: number, nextNumber: number) => {
+  const title = safe(value) || fallback;
+  return title.replace(
+    new RegExp(`ANNEXURE\\s*[-–—]?\\s*${previousNumber}\\b`, 'i'),
+    `ANNEXURE - ${nextNumber}`
+  );
+};
+
+const withAnnexureNumber = (value: unknown, fallback: string, annexureNumber: number) => {
+  const title = safe(value) || fallback;
+  return /ANNEXURE\s*[-–—]?\s*\d+/i.test(title)
+    ? title.replace(/ANNEXURE\s*[-–—]?\s*\d+/i, `ANNEXURE - ${annexureNumber}`)
+    : `${title} — ANNEXURE - ${annexureNumber}`;
+};
 
 const ANNEXURE_RICH_TEXT_CSS = `
   .annexure-rich-editor h1, .annexure-rich-content h1 { margin: 0 0 12px; font-size: 24px; line-height: 1.2; font-weight: 800; }
@@ -479,23 +809,38 @@ const ANNEXURE_RICH_TEXT_CSS = `
   .annexure-rich-content .annexure-table-resizer { overflow: visible; padding: 0; }
   .annexure-rich-editor .annexure-selected-cell { outline: 3px solid #0D3A35; outline-offset: -3px; background: #e7f3ef !important; }
   .annexure-rich-content { overflow-wrap: anywhere; }
+  .po-report-sheet .annexure-rich-content,
+  .po-report-sheet .annexure-rich-content * { font-family: inherit !important; }
+  .po-draft-font-11 .annexure-rich-content,
+  .po-draft-font-11 .annexure-rich-content p,
+  .po-draft-font-11 .annexure-rich-content li,
+  .po-draft-font-11 .annexure-rich-content td,
+  .po-draft-font-11 .annexure-rich-content th,
+  .po-draft-font-11 .annexure-rich-content blockquote { font-size: 11px !important; }
 `;
 
 export function MakePurchaseOrderPopup({
   open,
   comparative,
   vendorId,
+  poNumber,
+  amendmentNumber = 0,
   onClose,
   onConfirm,
   variant = 'modal',
   inlineSimulatePrint = true,
+  reviewOnly = false,
+  revisionMode = false,
+  documentStatus = 'draft',
 }: Props) {
   const printRef = useRef<HTMLDivElement>(null);
   const [workflowStep, setWorkflowStep] = useState<'details' | 'draft'>('details');
-  const [page, setPage] = useState<1 | 2 | 3 | 4>(1);
+  const [page, setPage] = useState(1);
   const [p1, setP1] = useState<Page1State>(() => defaultPage1());
   const [p2, setP2] = useState<Page2State>(() => defaultPage2());
   const [p3, setP3] = useState<Page3State>(() => defaultPage3());
+  const [additionalAnnexures, setAdditionalAnnexures] = useState<Page3State[]>([]);
+  const [selectedAnnexureIndex, setSelectedAnnexureIndex] = useState(0);
   const [p4, setP4] = useState<Page4State>(() => defaultPage4());
   const annexureEditorRef = useRef<HTMLDivElement>(null);
   const [annexureFieldLabel, setAnnexureFieldLabel] = useState('');
@@ -513,25 +858,44 @@ export function MakePurchaseOrderPopup({
   const [annexureFontSize, setAnnexureFontSize] = useState('12');
   const [annexureZoom, setAnnexureZoom] = useState(100);
 
-  // Older saved PO drafts pre-date Annexure 3 and may still store the legal
-  // text under Annexure 2. Keep one defensive value so no clause is lost.
-  const effectiveAnnexureTerms = safe(p4?.termsText) || DEFAULT_ANNEXURE3_TERMS;
+  // Keep a defensive default so older saved drafts never lose the legal clauses.
+  const effectiveAnnexureTerms = safe(p4?.termsText) || DEFAULT_ANNEXURE2_TERMS;
   const annexureTermLines = useMemo(
     () => effectiveAnnexureTerms.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
     [effectiveAnnexureTerms]
   );
-  const effectiveAnnexure2Html = useMemo(
-    () => sanitizeAnnexureHtml(p3.contentHtml || defaultPage3().contentHtml),
-    [p3.contentHtml]
+  const customAnnexures = useMemo(() => [p3, ...additionalAnnexures], [p3, additionalAnnexures]);
+  const printableCustomAnnexures = useMemo(
+    () => customAnnexures.filter(
+      (annexure): annexure is Page3State => Boolean(annexure) && annexureWordCount(annexure?.contentHtml) > 0
+    ),
+    [customAnnexures]
   );
-  const annexureWordCount = useMemo(() => {
+  const activeCustomAnnexure = customAnnexures[selectedAnnexureIndex] || p3;
+  const legalAnnexureNumber = printableCustomAnnexures.length + 1;
+
+  useEffect(() => {
+    setP2((current) => {
+      const nextRemarks = current.remarks.replace(
+        /(General terms and conditions Annexure)\s*\d+/i,
+        `$1 ${legalAnnexureNumber}`
+      );
+      return nextRemarks === current.remarks ? current : { ...current, remarks: nextRemarks };
+    });
+  }, [legalAnnexureNumber]);
+
+  const effectiveAnnexure2Html = useMemo(
+    () => sanitizeAnnexureHtml(activeCustomAnnexure.contentHtml || defaultPage3().contentHtml),
+    [activeCustomAnnexure.contentHtml]
+  );
+  const activeAnnexureWordCount = useMemo(() => {
     if (typeof document === 'undefined') return 0;
     const wrapper = document.createElement('div');
     wrapper.innerHTML = effectiveAnnexure2Html;
     const words = safe(wrapper.textContent).match(/\S+/g);
     return words?.length || 0;
   }, [effectiveAnnexure2Html]);
-  const annexurePagePadding = p3.marginPreset === 'narrow' ? '38px 42px' : p3.marginPreset === 'wide' ? '96px 106px' : '72px 76px';
+  const annexurePagePadding = activeCustomAnnexure.marginPreset === 'narrow' ? '38px 42px' : activeCustomAnnexure.marginPreset === 'wide' ? '96px 106px' : '72px 76px';
 
   const [printing, setPrinting] = useState(false);
 
@@ -557,9 +921,33 @@ export function MakePurchaseOrderPopup({
     setP2((p) => ({ ...p, [k]: v }));
   };
 
-  // (optional) helper
   const setP3Field = <K extends keyof Page3State>(k: K, v: Page3State[K]) => {
-    setP3((p) => ({ ...p, [k]: v }));
+    if (selectedAnnexureIndex === 0) {
+      setP3((current) => ({ ...current, [k]: v }));
+      return;
+    }
+    setAdditionalAnnexures((current) => current.map((annexure, index) => (
+      index === selectedAnnexureIndex - 1 ? { ...annexure, [k]: v } : annexure
+    )));
+  };
+
+  const addCustomAnnexure = () => {
+    syncAnnexureEditor();
+    const nextNumber = customAnnexures.length + 1;
+    setAdditionalAnnexures((current) => [
+      ...current,
+      { ...defaultPage3(), annexureTitle: `ANNEXURE - ${nextNumber}` },
+    ]);
+    setSelectedAnnexureIndex(nextNumber - 1);
+    savedAnnexureRangeRef.current = null;
+  };
+
+  const removeSelectedAnnexure = () => {
+    if (selectedAnnexureIndex === 0) return;
+    setAdditionalAnnexures((current) => current.filter((_, index) => index !== selectedAnnexureIndex - 1));
+    setSelectedAnnexureIndex((current) => Math.max(0, current - 1));
+    savedAnnexureRangeRef.current = null;
+    toast.success('Annexure removed');
   };
 
   const setP4Field = <K extends keyof Page4State>(k: K, v: Page4State[K]) => {
@@ -584,10 +972,10 @@ export function MakePurchaseOrderPopup({
   useEffect(() => {
     const editor = annexureEditorRef.current;
     if (!editor || document.activeElement === editor) return;
-    const nextHtml = sanitizeAnnexureHtml(p3.contentHtml || defaultPage3().contentHtml);
+    const nextHtml = sanitizeAnnexureHtml(activeCustomAnnexure.contentHtml || defaultPage3().contentHtml);
     if (editor.innerHTML !== nextHtml) editor.innerHTML = nextHtml;
     editor.querySelectorAll<HTMLTableElement>('table').forEach(ensureAnnexureTableResizer);
-  }, [p3.contentHtml, workflowStep]);
+  }, [activeCustomAnnexure.contentHtml, selectedAnnexureIndex, workflowStep]);
 
   const syncAnnexureEditor = () => {
     const editor = annexureEditorRef.current;
@@ -654,7 +1042,7 @@ export function MakePurchaseOrderPopup({
     const editor = annexureEditorRef.current;
     const sourceRange = savedAnnexureRangeRef.current;
     if (!editor || !sourceRange || sourceRange.collapsed || !editor.contains(sourceRange.commonAncestorContainer)) {
-      showTemporaryError('Select text in Annexure 2 before applying colour');
+      showTemporaryError('Select text in Annexure 1 before applying colour');
       return;
     }
 
@@ -688,7 +1076,7 @@ export function MakePurchaseOrderPopup({
     });
 
     if (!styledSpans.length) {
-      showTemporaryError('Select text in Annexure 2 before applying colour');
+      showTemporaryError('Select text in Annexure 1 before applying colour');
       return;
     }
 
@@ -860,11 +1248,11 @@ export function MakePurchaseOrderPopup({
     return safe((comparative as any)?.comparisonId) || safe((comparative as any)?.comparison_id) || safe((comparative as any)?.comparision_id);
   }, [comparative]);
 
-  const fetchLatestPurchaseOrderDraft = async (prNo: string, signal?: AbortSignal): Promise<ApiPurchaseOrder | null> => {
+  const fetchLatestPurchaseOrderDraft = async (prNo: string, signal?: AbortSignal, preferredPoNumber?: string): Promise<ApiPurchaseOrder | null> => {
     const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
     if (!baseUrl) throw new Error('Missing API base URL');
 
-    const url = `${baseUrl}/purchase_flow/get_purchase_orders/`;
+    const url = `${baseUrl}/purchase_flow/get_purchase_orders`;
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -897,7 +1285,15 @@ export function MakePurchaseOrderPopup({
       return Number.isFinite(t) ? t : 0;
     };
 
-    const latest = [...list].sort((a, b) => ts(b) - ts(a))[0] ?? null;
+    const requestedPoNumber = safe(preferredPoNumber);
+    const matchingOrders = requestedPoNumber
+      ? list.filter((order: any) => {
+          const purchaseQuote = order?.purchase_quote && typeof order.purchase_quote === 'object' ? order.purchase_quote : {};
+          const candidate = safe(order?.order_number) || safe(purchaseQuote?.order_number) || safe(purchaseQuote?.poNo) || safe(purchaseQuote?.po_no);
+          return candidate === requestedPoNumber;
+        })
+      : [];
+    const latest = [...(matchingOrders.length ? matchingOrders : list)].sort((a, b) => ts(b) - ts(a))[0] ?? null;
     return latest as ApiPurchaseOrder | null;
   };
 
@@ -939,6 +1335,9 @@ export function MakePurchaseOrderPopup({
       return;
     }
 
+    if (reviewOnly) setWorkflowStep('draft');
+    else if (revisionMode) setWorkflowStep('details');
+
     setShipToEditing(false);
 
     const indentId = safe((comparative as any)?.indentId);
@@ -954,7 +1353,7 @@ export function MakePurchaseOrderPopup({
     (async () => {
       // 1) Server draft (source of truth)
       try {
-        const draft = await fetchLatestPurchaseOrderDraft(prNo, ac.signal);
+        const draft = await fetchLatestPurchaseOrderDraft(prNo, ac.signal, poNumber);
         if (draft) {
           const pq = draft.purchase_quote && typeof draft.purchase_quote === 'object' && !Array.isArray(draft.purchase_quote)
             ? (draft.purchase_quote as any)
@@ -965,10 +1364,19 @@ export function MakePurchaseOrderPopup({
             !Array.isArray(draft.other_terms_and_condition)
               ? (draft.other_terms_and_condition as any)
               : {};
+          const annexure1 = otc?.annexure1 && typeof otc.annexure1 === 'object' ? otc.annexure1 : {};
           const annexure2 = otc?.annexure2 && typeof otc.annexure2 === 'object' ? otc.annexure2 : {};
           const annexure3 = otc?.annexure3 && typeof otc.annexure3 === 'object' ? otc.annexure3 : {};
+          const storedAnnexures = Object.entries(otc)
+            .filter(([key, value]) => /^annexure\d+$/i.test(key) && value && typeof value === 'object' && !Array.isArray(value))
+            .sort(([left], [right]) => Number(left.match(/\d+/)?.[0] || 0) - Number(right.match(/\d+/)?.[0] || 0))
+            .map(([, value]) => value as any);
+          const customStoredAnnexures = storedAnnexures.filter((value) => safe(value?.contentHtml));
+          const customAnnexure = customStoredAnnexures[0] || (safe(annexure1?.contentHtml) ? annexure1 : annexure2);
+          const legalAnnexure = [...storedAnnexures].reverse().find((value) => safe(value?.termsText)) || (safe(annexure1?.contentHtml) ? annexure2 : annexure3);
+          const baseTerms = Object.fromEntries(Object.entries(otc).filter(([key]) => !/^annexure\d+$/i.test(key)));
 
-          const orderNo = safe((draft as any)?.order_number) || safe(pq?.order_number) || safe(pq?.poNo) || safe(pq?.po_no);
+          const orderNo = safe((draft as any)?.order_number) || safe(pq?.order_number) || safe(pq?.poNo) || safe(pq?.po_no) || safe(poNumber);
 
           setDraftStatus('idle');
           setPage(1);
@@ -976,18 +1384,30 @@ export function MakePurchaseOrderPopup({
             ...defaultPage1(),
             ...(pq as any),
             poNo: orderNo,
+            requiredPurchaseDocuments: normalizePurchaseFlowDocuments(
+              (pq as any)?.requiredPurchaseDocuments ?? (pq as any)?.required_purchase_documents,
+            ),
             customFields: Array.isArray((pq as any)?.customFields) ? (pq as any).customFields : [],
           } as Page1State);
-          setP2({ ...defaultPage2(), ...(otc as any) } as Page2State);
+          setP2({ ...defaultPage2(), ...(baseTerms as any) } as Page2State);
           setP3({
             ...defaultPage3(),
-            ...(safe(annexure2?.contentHtml) ? annexure2 : {}),
-            contentHtml: safe(annexure2?.contentHtml) || defaultPage3().contentHtml,
+            ...(safe(customAnnexure?.contentHtml) ? customAnnexure : {}),
+            annexureTitle: normalizeAnnexureNumber(customAnnexure?.annexureTitle, defaultPage3().annexureTitle, 2, 1),
+            contentHtml: safe(customAnnexure?.contentHtml) || defaultPage3().contentHtml,
           });
+          setAdditionalAnnexures(customStoredAnnexures.slice(1).map((annexure, index) => ({
+            ...defaultPage3(),
+            ...annexure,
+            annexureTitle: withAnnexureNumber(annexure?.annexureTitle, `ANNEXURE - ${index + 2}`, index + 2),
+            contentHtml: safe(annexure?.contentHtml) || defaultPage3().contentHtml,
+          })));
+          setSelectedAnnexureIndex(0);
           setP4({
             ...defaultPage4(),
-            ...annexure3,
-            termsText: safe(annexure3?.termsText) || safe(annexure2?.termsText) || DEFAULT_ANNEXURE3_TERMS,
+            ...legalAnnexure,
+            annexureTitle: withAnnexureNumber(legalAnnexure?.annexureTitle, defaultPage4().annexureTitle, Math.max(1, customStoredAnnexures.length) + 1),
+            termsText: safe(legalAnnexure?.termsText) || safe(annexure2?.termsText) || DEFAULT_ANNEXURE2_TERMS,
           });
           setAuthorizedSealAttachedAt(safe((pq as any)?.authorizedSealAttachedAt) || safe((draft as any)?.authorizedSealAttachedAt));
           return;
@@ -1005,6 +1425,8 @@ export function MakePurchaseOrderPopup({
       if (!d) {
         setDraftStatus('idle');
         setAuthorizedSealAttachedAt('');
+        setAdditionalAnnexures([]);
+        setSelectedAnnexureIndex(0);
         return;
       }
 
@@ -1013,25 +1435,31 @@ export function MakePurchaseOrderPopup({
       setP1({
         ...defaultPage1(),
         ...(d.p1 || {}),
+        poNo: safe(d.p1?.poNo) || safe(poNumber),
+        requiredPurchaseDocuments: normalizePurchaseFlowDocuments(d.p1?.requiredPurchaseDocuments),
         customFields: Array.isArray(d.p1?.customFields) ? d.p1.customFields : [],
       });
-      setP2(d.p2 || defaultPage2());
+      setP2({ ...defaultPage2(), ...(d.p2 || {}) });
       const legacyPage3 = d.p3 as any;
       setP3({
         ...defaultPage3(),
         ...(safe(legacyPage3?.contentHtml) ? legacyPage3 : {}),
+        annexureTitle: normalizeAnnexureNumber(legacyPage3?.annexureTitle, defaultPage3().annexureTitle, 2, 1),
         contentHtml: safe(legacyPage3?.contentHtml) || defaultPage3().contentHtml,
       });
+      setAdditionalAnnexures(Array.isArray(d.additionalAnnexures) ? d.additionalAnnexures : []);
+      setSelectedAnnexureIndex(0);
       setP4({
         ...defaultPage4(),
         ...(d.p4 || {}),
-        termsText: safe(d.p4?.termsText) || safe(legacyPage3?.termsText) || DEFAULT_ANNEXURE3_TERMS,
+        annexureTitle: withAnnexureNumber(d.p4?.annexureTitle, defaultPage4().annexureTitle, (Array.isArray(d.additionalAnnexures) ? d.additionalAnnexures.length : 0) + 2),
+        termsText: safe(d.p4?.termsText) || safe(legacyPage3?.termsText) || DEFAULT_ANNEXURE2_TERMS,
       });
       setAuthorizedSealAttachedAt(safe(d.authorizedSealAttachedAt));
     })();
 
     return () => ac.abort();
-  }, [open, comparative, resolvedVendorId, prNumber]);
+  }, [open, comparative, resolvedVendorId, prNumber, reviewOnly, revisionMode, poNumber]);
 
   useEffect(() => {
     return () => {
@@ -1155,6 +1583,9 @@ export function MakePurchaseOrderPopup({
   };
 
   useEffect(() => {
+    // Approved/revision views must preserve the exact PO snapshot. Directory
+    // and cluster masters may have changed since the order was approved.
+    if (reviewOnly || revisionMode) return;
     if (!selectedCluster) return;
     const addr = extractClusterShipAddress(selectedCluster);
     const gstNo = extractClusterShipGstNo(selectedCluster);
@@ -1185,7 +1616,7 @@ export function MakePurchaseOrderPopup({
 
       return Object.keys(patch).length ? ({ ...prev, ...patch } as Page1State) : prev;
     });
-  }, [selectedCluster]);
+  }, [selectedCluster, reviewOnly, revisionMode]);
 
   const selectedVendorFromComparative = useMemo(() => {
     const vendors = Array.isArray(comparative?.vendors) ? comparative!.vendors : [];
@@ -1203,6 +1634,7 @@ export function MakePurchaseOrderPopup({
   );
 
   useEffect(() => {
+    if (reviewOnly || revisionMode) return;
     if (!selectedVendorFromComparative) return;
     setP1((current) => {
       const vendorAddress = safe(selectedVendorFromComparative?.address) || safe(selectedVendorFromComparative?.location);
@@ -1212,14 +1644,21 @@ export function MakePurchaseOrderPopup({
         ...current,
         vendorName: safe(current.vendorName) || safe(selectedVendorFromComparative?.name),
         vendorAddr1: safe(current.vendorAddr1) || vendorAddress,
+        vendorContactName: safe(current.vendorContactName) || safe(selectedVendorFromComparative?.contactName) || safe(selectedVendorFromComparative?.representativeName),
         vendorMobile: safe(current.vendorMobile) || vendorMobile,
         vendorEmail: safe(current.vendorEmail) || vendorEmail,
         vendorPlaceOfBusiness: safe(current.vendorPlaceOfBusiness) || safe(selectedVendorFromComparative?.location),
+        vendorLegalConstitution:
+          safe(current.vendorLegalConstitution) ||
+          safe(selectedVendorFromComparative?.legalConstitution) ||
+          safe(selectedVendorFromComparative?.legal_constitution) ||
+          safe(selectedVendorFromComparative?.vendor_entity_type),
       };
     });
-  }, [selectedVendorFromComparative]);
+  }, [selectedVendorFromComparative, reviewOnly, revisionMode]);
 
   useEffect(() => {
+    if (reviewOnly || revisionMode) return;
     if (!open || !supplierDirectoryVendorId) return;
     const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
     if (!baseUrl) return;
@@ -1283,9 +1722,25 @@ export function MakePurchaseOrderPopup({
           safe(address?.district) ||
           safe(address?.state) ||
           current.vendorPlaceOfBusiness,
+        vendorContactName:
+          safe(details?.contact_person_name) ||
+          safe(details?.contact_name) ||
+          safe(details?.authorized_person_name) ||
+          safe(details?.representative_name) ||
+          current.vendorContactName,
         vendorMobile: safe(details?.vendor_contact) || safe(details?.contact_number) || current.vendorMobile,
         vendorEmail: safe(details?.e_mail_id) || safe(details?.email) || current.vendorEmail,
         vendorVatRegnNo: safe(details?.gst_number) || current.vendorVatRegnNo,
+        vendorPan:
+          safe(details?.income_tax_pan) ||
+          safe(details?.pan_number) ||
+          safe(details?.pan_no) ||
+          safe(details?.pan) ||
+          current.vendorPan,
+        vendorLegalConstitution:
+          safe(details?.legal_constitution) ||
+          safe(details?.vendor_entity_type) ||
+          current.vendorLegalConstitution,
       }));
     };
 
@@ -1293,7 +1748,7 @@ export function MakePurchaseOrderPopup({
       if (!controller.signal.aborted) setSupplierDetailsLoading(false);
     });
     return () => controller.abort();
-  }, [open, supplierDirectoryVendorId, vendorNameFromComparative]);
+  }, [open, supplierDirectoryVendorId, vendorNameFromComparative, reviewOnly, revisionMode]);
 
   const computedTotals = useMemo(() => {
     if (!comparative || !resolvedVendorId) return null;
@@ -1361,7 +1816,98 @@ export function MakePurchaseOrderPopup({
     return { perWeekPct, maxPct, perWeekAmt, maxAmt };
   }, [p2.ldPerWeekPercent, p2.ldMaxPercent, computedTotals?.base]);
 
-  const effectivePoNo = p1.poNo.trim();
+  const commercialDraftRows: CommercialDraftRow[] = [
+    {
+      no: 1,
+      particular: 'Reference',
+      details: [
+        `Supplier's final quotation No.: ${safe(p2.supplierFinalQuotationNo) || 'Not Recorded'}`,
+        `Quotation Date: ${safe(p2.supplierFinalQuotationDate) || 'Not Recorded'}`,
+      ].join('\n'),
+    },
+    { no: 2, particular: 'Scope of Work', details: safe(p2.scopeOfWork) || '—' },
+    { no: 3, particular: 'Basis of Price', details: safe(p2.basisOfPrice) || '—' },
+    { no: 4, particular: 'Taxes', details: safe(p2.taxAutoCalcEnabled ? taxesAutoText : p2.taxes) || '—' },
+    { no: 5, particular: 'Delivery Timelines', details: safe(p2.deliveryTimelines) || '—' },
+    { no: 6, particular: 'Documents', details: safe(p2.documents) || '—' },
+    { no: 7, particular: 'Payment Terms', details: safe(p2.paymentAutoEnabled ? paymentAutoText : p2.paymentTerms) || '—' },
+    { no: 8, particular: 'Installation Support', details: safe(p2.installationSupport) || '—' },
+    { no: 9, particular: 'Inspection', details: safe(p2.inspection) || '—' },
+    { no: 10, particular: 'Warranty / Guarantee', details: safe(p2.warranty) || '—' },
+    { no: 11, particular: 'LD / Penalty', details: safe(p2.ldAutoEnabled ? ldAutoText : p2.ldPenalty) || '—' },
+    { no: 12, particular: 'Remarks', details: safe(p2.remarks) || '—' },
+    { no: 13, particular: 'Site & Billing Address', details: safe(p2.siteBillingAddress) || '—' },
+    { no: 14, particular: 'Documents Required', details: safe(p2.documentsRequired) || '—' },
+    ...(Array.isArray(p1.customFields) ? p1.customFields : [])
+      .filter((field) => safe(field.label) || safe(field.value))
+      .map((field, index) => ({
+        no: 15 + index,
+        particular: safe(field.label) || 'Additional Term',
+        details: safe(field.value) || '—',
+      })),
+  ];
+  const correspondenceReservedLines = Math.min(
+    46,
+    Math.max(
+      24,
+      24
+        + estimatedCommercialLines(p2.correspondenceAcknowledgement)
+        + estimatedCommercialLines(p2.correspondenceAcceptance)
+    )
+  );
+  const correspondenceSpaceMarker: CommercialDraftRow = {
+    no: -1,
+    particular: '__CORRESPONDENCE_SPACE__',
+    details: 'x'.repeat(Math.max(1, correspondenceReservedLines - 2) * COMMERCIAL_ESTIMATED_CHARS_PER_LINE),
+  };
+  const commercialTermPages = paginateCommercialRows([...commercialDraftRows, correspondenceSpaceMarker]).map((rows) =>
+    rows.filter((row) => row.no !== correspondenceSpaceMarker.no)
+  );
+  const commercialTermPageCount = commercialTermPages.length;
+  const annexureReportPages = printableCustomAnnexures.flatMap((annexure, annexureIndex) =>
+    paginateAnnexureHtml(annexure.contentHtml || defaultPage3().contentHtml).map((contentHtml, pageIndex, pages) => ({
+      annexure,
+      annexureIndex,
+      annexureNumber: annexureIndex + 1,
+      contentHtml,
+      pageIndex,
+      pageCount: pages.length,
+    }))
+  );
+  const customAnnexureStartPage = 2 + commercialTermPageCount;
+  const totalReportPages = commercialTermPageCount + annexureReportPages.length + 2;
+  const legalReportPage = totalReportPages;
+
+  // Review, print and download must share one physical A4 layout. Fit any page
+  // whose content is taller than the A4 frame inside that same visible frame,
+  // rather than applying a different scale only at print time.
+  useLayoutEffect(() => {
+    if (workflowStep !== 'draft') return;
+    const frameId = globalThis.requestAnimationFrame(() => {
+      const frames = Array.from(
+        printRef.current?.querySelectorAll<HTMLElement>('[data-po-page-frame="true"]') || []
+      );
+      frames.forEach((frame) => {
+        const sheet = frame.querySelector<HTMLElement>('.po-report-sheet');
+        if (!sheet) return;
+        sheet.style.transform = 'none';
+        sheet.style.transformOrigin = 'top center';
+        const availableHeight = frame.clientHeight || 1123;
+        // offsetHeight represents the actual visible sheet box. scrollHeight
+        // can include hidden descendants and previously caused the page to be
+        // over-shrunk, leaving a large blank area below the footer.
+        const contentHeight = sheet.offsetHeight || availableHeight;
+        const scaleY = Math.min(1, availableHeight / contentHeight);
+        sheet.style.transform = scaleY < 0.999 ? `scaleY(${scaleY})` : 'none';
+      });
+    });
+    return () => globalThis.cancelAnimationFrame(frameId);
+  }, [workflowStep, totalReportPages, p1, p2, p3, p4, customAnnexures]);
+
+  const effectivePoNo = safe(p1.poNo) || safe(poNumber);
+  const effectiveAmendmentNo = Math.max(0, numOr0(p1.amendmentNo), numOr0(amendmentNumber));
+  const amendmentLabel = effectiveAmendmentNo > 0 ? `Amendment - ${effectiveAmendmentNo}` : '';
+  const poReferenceLabel = `PO No. · ${effectivePoNo || 'Draft'}${amendmentLabel ? ` · ${amendmentLabel}` : ''}`;
 
   const sanitizeForFilename = (name: string) =>
     String(name ?? '')
@@ -1372,7 +1918,10 @@ export function MakePurchaseOrderPopup({
   const openPrintWindowAndAppendPages = (opts?: { title?: string }) => {
     const title = sanitizeForFilename(opts?.title || 'Purchase Order');
 
-    const w = window.open('', '_blank', 'noopener,noreferrer');
+    // Keep a live reference to the generated document. Passing `noopener` here
+    // makes some browsers return `null`, which prevents the print flow from
+    // writing the PO pages or opening the print dialog.
+    const w = window.open('', '_blank');
     if (!w) return null;
 
     w.document.open();
@@ -1395,16 +1944,77 @@ export function MakePurchaseOrderPopup({
     const extra = w.document.createElement('style');
     extra.textContent = `
       @page { size: A4 portrait; margin: 10mm; }
-      html, body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      html, body {
+        width: 190mm;
+        margin: 0 !important;
+        padding: 0 !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
       .no-print { display: none !important; }
       .print-only { display: none !important; }
       @media print {
+        html, body { width: 190mm !important; }
         .no-print { display: none !important; }
         .print-only { display: block !important; }
         input, textarea { border: none !important; box-shadow: none !important; outline: none !important; }
+        .po-page .shadow-sm { box-shadow: none !important; }
       }
-      .po-page { break-after: page; page-break-after: always; }
+      .po-page {
+        box-sizing: border-box;
+        width: 190mm;
+        min-height: 277mm;
+        margin: 0 auto;
+        break-after: page;
+        page-break-after: always;
+      }
       .po-page:last-child { break-after: auto; page-break-after: auto; }
+      .po-page [data-po-page="true"] {
+        box-sizing: border-box;
+        width: 190mm;
+        min-height: 277mm;
+        margin: 0;
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+      .po-page .po-report-sheet {
+        box-sizing: border-box;
+        width: 190mm !important;
+        min-height: 277mm !important;
+        max-width: 190mm !important;
+        margin: 0 !important;
+      }
+      .po-page .po-draft-font-11 {
+        font-size: 11px !important;
+      }
+      .po-page .po-draft-font-11 input,
+      .po-page .po-draft-font-11 textarea,
+      .po-page .po-draft-font-11 table {
+        font-size: 11px !important;
+      }
+      .po-page:has(.po-terms-report-sheet),
+      .po-page .po-terms-report-sheet {
+        height: 277mm !important;
+        min-height: 277mm !important;
+        max-height: 277mm !important;
+        overflow: hidden !important;
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+      }
+      .po-page .po-terms-report-sheet .po-terms-table {
+        break-inside: auto !important;
+        page-break-inside: auto !important;
+      }
+      .po-page .po-terms-report-sheet .po-terms-table thead {
+        display: table-header-group;
+      }
+      .po-page .po-terms-report-sheet .po-terms-table tr {
+        break-inside: avoid-page;
+        page-break-inside: avoid;
+      }
+      .po-page .po-terms-report-sheet .po-terms-table tfoot {
+        display: table-footer-group;
+      }
       .po-page > [data-po-page-number="4"] {
         border: 0 !important;
         border-radius: 0 !important;
@@ -1437,7 +2047,7 @@ export function MakePurchaseOrderPopup({
     } else {
       // Fallback retained for inline/legacy preview use.
       const currentPage = page;
-      const pageNums: Array<1 | 2 | 3 | 4> = [1, 2, 3, 4];
+      const pageNums = Array.from({ length: totalReportPages }, (_, index) => index + 1);
       for (const pageNumber of pageNums) {
         flushSync(() => setPage(pageNumber));
         const pageRoot = printRef.current?.firstElementChild as HTMLElement | null;
@@ -1467,14 +2077,123 @@ export function MakePurchaseOrderPopup({
     );
   };
 
+  const waitForStylesheets = async (doc: Document) => {
+    const links = Array.from(doc.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]'));
+    await Promise.all(
+      links.map(
+        (link) =>
+          link.sheet
+            ? Promise.resolve()
+            : new Promise<void>((resolve) => {
+                link.addEventListener('load', () => resolve(), { once: true });
+                link.addEventListener('error', () => resolve(), { once: true });
+                globalThis.setTimeout(resolve, 3000);
+              })
+      )
+    );
+  };
+
+  const capturePoPageCanvases = async () => {
+    const pageRoots = Array.from(
+      printRef.current?.querySelectorAll<HTMLElement>('[data-po-page="true"]') || []
+    );
+    if (!pageRoots.length) throw new Error('Purchase Order pages are not ready.');
+    if (document.fonts?.ready) await document.fonts.ready;
+
+    const canvases: HTMLCanvasElement[] = [];
+    for (const pageRoot of pageRoots) {
+      const reportSheet = pageRoot.querySelector<HTMLElement>('[data-po-page-frame="true"]')
+        || pageRoot.querySelector<HTMLElement>('.po-report-sheet')
+        || pageRoot;
+      const captureWidth = reportSheet.clientWidth || 794;
+      const captureHeight = reportSheet.clientHeight || 1123;
+      const captured = await html2canvas(reportSheet, {
+          scale: 2,
+          backgroundColor: '#ffffff',
+          useCORS: true,
+          logging: false,
+          width: captureWidth,
+          height: captureHeight,
+          // Preserve the live layout viewport. Using the A4 width as the clone
+          // viewport triggered responsive max-width rules inside the modal,
+          // shrinking the sheet to the left and leaving a blank strip on the
+          // right side of every printed page.
+          windowWidth: Math.max(document.documentElement.clientWidth, window.innerWidth, captureWidth),
+          windowHeight: Math.max(document.documentElement.clientHeight, window.innerHeight, captureHeight),
+        });
+
+      // Every on-screen sheet is intended to be A4. Some content can increase
+      // its DOM scroll height beyond 1123 px; sending that tall bitmap to the
+      // browser makes Chrome shrink the whole page and creates the large white
+      // margins seen in print preview. Normalize each capture to the exact A4
+      // ratio before it reaches either the printer or jsPDF.
+      const normalized = document.createElement('canvas');
+      normalized.width = captured.width;
+      normalized.height = Math.round(captured.width * (297 / 210));
+      const context = normalized.getContext('2d');
+      if (!context) throw new Error('Unable to prepare the A4 Purchase Order page.');
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, normalized.width, normalized.height);
+      context.drawImage(captured, 0, 0, normalized.width, normalized.height);
+      canvases.push(normalized);
+    }
+    return canvases;
+  };
+
   const handlePrint = async (opts?: { title?: string }) => {
     if (printing) return;
     setPrinting(true);
+    // Open immediately while the click still counts as a user gesture. This
+    // avoids popup blockers while the A4 page images are being prepared.
+    const w = window.open('', '_blank');
     try {
-      const w = openPrintWindowAndAppendPages({ title: opts?.title || 'Purchase Order' });
-      if (!w) return;
+      if (!w) {
+        showTemporaryError('Please allow pop-ups to print the Purchase Order.');
+        return;
+      }
 
-      // Ensure images (logo/seal) are loaded before printing.
+      w.document.open();
+      w.document.write('<!doctype html><html><head><title>Preparing Purchase Order…</title></head><body style="font-family:Arial,sans-serif;padding:24px">Preparing A4 pages…</body></html>');
+      w.document.close();
+
+      const canvases = await capturePoPageCanvases();
+      const title = sanitizeForFilename(opts?.title || effectivePoNo || 'Purchase Order');
+      const pageImages = canvases
+        .map((canvas) => `<section class="print-page"><img src="${canvas.toDataURL('image/png')}" alt="Purchase Order page" /></section>`)
+        .join('');
+
+      w.document.open();
+      w.document.write(`<!doctype html><html><head><meta charset="utf-8" /><title>${title}</title><style>
+        @page { size: A4 portrait; margin: 0; }
+        * { box-sizing: border-box; }
+        html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
+        body { display: flex; flex-direction: column; align-items: center; }
+        .print-page {
+          position: relative;
+          flex: 0 0 auto;
+          width: 210mm;
+          height: 297mm;
+          margin: 0 auto;
+          overflow: hidden;
+          background: #fff;
+          break-after: page;
+          page-break-after: always;
+        }
+        .print-page:last-child { break-after: auto; page-break-after: auto; }
+        .print-page img {
+          position: absolute;
+          inset: 0;
+          display: block;
+          width: 100%;
+          height: 100%;
+          object-fit: fill;
+        }
+        @media print {
+          body { display: block; width: 100%; }
+          .print-page { margin-right: auto; margin-left: auto; }
+        }
+      </style></head><body>${pageImages}</body></html>`);
+      w.document.close();
       await waitForImages(w.document);
 
       w.focus();
@@ -1488,16 +2207,45 @@ export function MakePurchaseOrderPopup({
         }
       };
       w.onafterprint = closer;
-
-      w.print();
+      globalThis.setTimeout(() => w.print(), 100);
+    } catch (error) {
+      console.error('Failed to prepare Purchase Order print', error);
+      try {
+        w?.close();
+      } catch {
+        // ignore
+      }
+      showTemporaryError('Failed to prepare the Purchase Order for printing.');
     } finally {
       setPrinting(false);
     }
   };
 
-  const handleDownloadPdf = () => {
-    const t = sanitizeForFilename(effectivePoNo || 'purchase-order');
-    void handlePrint({ title: t ? `${t}.pdf` : 'purchase-order.pdf' });
+  const handleDownloadPdf = async () => {
+    if (printing) return;
+    setPrinting(true);
+    try {
+      const canvases = await capturePoPageCanvases();
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+
+      for (let index = 0; index < canvases.length; index += 1) {
+        const canvas = canvases[index];
+        if (index > 0) pdf.addPage('a4', 'portrait');
+        const imageData = canvas.toDataURL('image/png');
+        pdf.addImage(imageData, 'PNG', 0, 0, pageWidth, pageHeight, undefined, 'FAST');
+      }
+
+      const filename = sanitizeForFilename(effectivePoNo || 'purchase-order') || 'purchase-order';
+      pdf.save(`${filename}.pdf`);
+      toast.success('Purchase Order PDF downloaded.');
+    } catch (error) {
+      console.error('Failed to generate Purchase Order PDF', error);
+      showTemporaryError('Failed to generate the Purchase Order PDF.');
+    } finally {
+      setPrinting(false);
+    }
   };
 
   const handleSaveDraft = async () => {
@@ -1519,6 +2267,7 @@ export function MakePurchaseOrderPopup({
       p1,
       p2,
       p3,
+      additionalAnnexures,
       p4: { ...p4, termsText: effectiveAnnexureTerms },
       authorizedSealAttachedAt: authorizedSealAttachedAt || '',
     };
@@ -1546,7 +2295,8 @@ export function MakePurchaseOrderPopup({
     setP4((current) => ({
       ...defaultPage4(),
       ...current,
-      termsText: safe(current?.termsText) || DEFAULT_ANNEXURE3_TERMS,
+      annexureTitle: withAnnexureNumber(current?.annexureTitle, defaultPage4().annexureTitle, legalAnnexureNumber),
+      termsText: safe(current?.termsText) || DEFAULT_ANNEXURE2_TERMS,
     }));
     setPage(1);
     setWorkflowStep('draft');
@@ -1566,28 +2316,61 @@ export function MakePurchaseOrderPopup({
 
     setSavingPo(true);
     try {
+      const annexurePayload = customAnnexures.reduce<Record<string, Page3State>>((result, annexure, index) => {
+        const annexureNumber = index + 1;
+        result[`annexure${annexureNumber}`] = {
+          ...annexure,
+          annexureTitle: withAnnexureNumber(annexure.annexureTitle, `ANNEXURE - ${annexureNumber}`, annexureNumber),
+        };
+        return result;
+      }, {});
+      (annexurePayload as Record<string, Page3State | Page4State>)[`annexure${legalAnnexureNumber}`] = {
+        ...p4,
+        annexureTitle: withAnnexureNumber(p4.annexureTitle, defaultPage4().annexureTitle, legalAnnexureNumber),
+        termsText: effectiveAnnexureTerms,
+      };
       const payload: any = {
         comparison_id: comparisonId,
         pr_number: prNo,
         purchase_quote: {
           ...(p1 as any),
+          amendmentNo: effectiveAmendmentNo,
+          required_purchase_documents: normalizePurchaseFlowDocuments(p1.requiredPurchaseDocuments),
           vendor_id: safe(resolvedVendorId),
           vendor_name: vendorNameFromComparative,
           authorizedSealAttachedAt: authorizedSealAttachedAt || '',
         },
         other_terms_and_condition: {
           ...(p2 as any),
-          annexure2: p3,
-          annexure3: { ...p4, termsText: effectiveAnnexureTerms },
+          ...annexurePayload,
         },
       };
 
-      const existingOrderNo = safe(p1.poNo);
+      const existingOrderNo = effectivePoNo;
       if (existingOrderNo) payload.order_number = existingOrderNo;
 
       const apiRes: any = await savePurchaseOrderToApi(payload);
-      const orderNo = safe(apiRes?.order_number) || safe(apiRes?.orderNo) || safe(apiRes?.poNo) || safe(p1.poNo);
+      const orderNo = safe(apiRes?.order_number) || safe(apiRes?.orderNo) || safe(apiRes?.poNo) || effectivePoNo;
       if (orderNo && orderNo !== safe(p1.poNo)) setP1Field('poNo', orderNo as any);
+
+      // Keep the exact created/approved content locally as a resilient
+      // amendment snapshot. Revision mode can restore every editable field
+      // even when an older server response omits part of the purchase quote.
+      const snapshotKey = poDraftKey(prNo, resolvedVendorId);
+      const snapshotStore = readPoDraftStore();
+      const snapshot: PoDraft = {
+        indentId: prNo,
+        vendorId: resolvedVendorId,
+        savedAt: new Date().toISOString(),
+        page: 1,
+        p1: { ...p1, poNo: orderNo || effectivePoNo, amendmentNo: effectiveAmendmentNo },
+        p2,
+        p3,
+        additionalAnnexures,
+        p4: { ...p4, termsText: effectiveAnnexureTerms },
+        authorizedSealAttachedAt: authorizedSealAttachedAt || '',
+      };
+      writePoDraftStore({ drafts: { ...(snapshotStore.drafts || {}), [snapshotKey]: snapshot } });
 
       const createdAt = safe(apiRes?.created_at) || safe(apiRes?.updated_at) || new Date().toISOString();
       onConfirm?.({ indentId: safe(comparative.indentId), vendorId: resolvedVendorId, createdAt, poNo: orderNo });
@@ -1664,9 +2447,100 @@ export function MakePurchaseOrderPopup({
   const formLabelClass = 'mb-1.5 block text-[11px] font-bold uppercase tracking-[0.09em] text-slate-500';
   const formTextareaClass = 'min-h-[84px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#0D3A35] focus:ring-1 focus:ring-[#0D3A35]';
 
+  const editClauseTextarea = <K extends keyof Page2State>(field: K, value: string, placeholder: string, minHeight = 72) => (
+    <textarea
+      value={value}
+      onChange={(event) => setP2Field(field, event.target.value as Page2State[K])}
+      placeholder={placeholder}
+      className="w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none focus:border-[#0D3A35] focus:ring-1 focus:ring-[#0D3A35]"
+      style={{ minHeight }}
+    />
+  );
+
+  const editCommercialClauseRows = [
+    {
+      no: 1,
+      particular: 'Reference',
+      detail: (
+        <div className="grid gap-3 md:grid-cols-2">
+          <div><label className={formLabelClass}>Supplier Quotation No.</label><Input value={p2.supplierFinalQuotationNo} onChange={(event) => setP2Field('supplierFinalQuotationNo', event.target.value)} className={formInputClass} /></div>
+          <div><label className={formLabelClass}>Supplier Quotation Date</label><Input type="date" value={p2.supplierFinalQuotationDate} onChange={(event) => setP2Field('supplierFinalQuotationDate', event.target.value)} className={formInputClass} /></div>
+        </div>
+      ),
+    },
+    { no: 2, particular: 'Scope of Work', detail: editClauseTextarea('scopeOfWork', p2.scopeOfWork, 'Enter scope of work...') },
+    { no: 3, particular: 'Basis of Price', detail: editClauseTextarea('basisOfPrice', p2.basisOfPrice, 'Enter basis of price...') },
+    {
+      no: 4,
+      particular: 'Taxes',
+      detail: (
+        <div className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div><label className={formLabelClass}>GST %</label><Input inputMode="decimal" value={p2.taxGstPercent} onChange={(event) => setP2Field('taxGstPercent', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Other Tax %</label><Input inputMode="decimal" value={p2.taxOtherPercent} onChange={(event) => setP2Field('taxOtherPercent', event.target.value)} className={formInputClass} /></div>
+          </div>
+          <label className="flex items-center gap-2 text-xs font-semibold text-slate-600"><Checkbox checked={p2.taxAutoCalcEnabled} onCheckedChange={(checked) => setP2Field('taxAutoCalcEnabled', Boolean(checked))} />Automatically calculate tax text</label>
+          {editClauseTextarea('taxes', p2.taxAutoCalcEnabled ? taxesAutoText : p2.taxes, 'Enter tax terms...', 64)}
+        </div>
+      ),
+    },
+    { no: 5, particular: 'Delivery Timelines', detail: editClauseTextarea('deliveryTimelines', p2.deliveryTimelines, 'Enter delivery timelines...', 92) },
+    { no: 6, particular: 'Documents', detail: editClauseTextarea('documents', p2.documents, 'Enter documents / approval requirements...', 92) },
+    {
+      no: 7,
+      particular: 'Payment Terms',
+      detail: (
+        <div className="space-y-3">
+          <label className="flex items-center gap-2 text-xs font-semibold text-slate-600"><Checkbox checked={p2.paymentAutoEnabled} onCheckedChange={(checked) => setP2Field('paymentAutoEnabled', Boolean(checked))} />Use payment schedule</label>
+          {p2.paymentAutoEnabled ? (
+            <div className="space-y-2">
+              {p2.paymentInstallments.map((installment, index) => (
+                <div key={installment.id} className="grid gap-2 sm:grid-cols-[90px_1fr_auto]">
+                  <Input inputMode="decimal" value={installment.percent} onChange={(event) => updateInstallment(installment.id, { percent: event.target.value })} placeholder="%" className={formInputClass} />
+                  <Input value={installment.label} onChange={(event) => updateInstallment(installment.id, { label: event.target.value })} placeholder={`Payment milestone ${index + 1}`} className={formInputClass} />
+                  <Button type="button" variant="outline" onClick={() => removeInstallment(installment.id)} disabled={p2.paymentInstallments.length === 1} className="h-11 rounded-xl">Remove</Button>
+                </div>
+              ))}
+              <Button type="button" variant="outline" onClick={addInstallment} className="rounded-xl border-[#0D3A35] text-[#0D3A35]">Add Payment Milestone</Button>
+              <textarea value={paymentAutoText} readOnly className={`${formTextareaClass} bg-slate-50`} />
+            </div>
+          ) : editClauseTextarea('paymentTerms', p2.paymentTerms, 'Enter payment terms...', 110)}
+        </div>
+      ),
+    },
+    { no: 8, particular: 'Installation Support', detail: editClauseTextarea('installationSupport', p2.installationSupport, 'Enter installation / support terms...') },
+    { no: 9, particular: 'Inspection', detail: editClauseTextarea('inspection', p2.inspection, 'Enter inspection terms...') },
+    { no: 10, particular: 'Warranty / Guarantee', detail: editClauseTextarea('warranty', p2.warranty, 'Enter warranty / guarantee terms...') },
+    {
+      no: 11,
+      particular: 'LD / Penalty',
+      detail: (
+        <div className="space-y-3">
+          <label className="flex items-center gap-2 text-xs font-semibold text-slate-600"><Checkbox checked={p2.ldAutoEnabled} onCheckedChange={(checked) => setP2Field('ldAutoEnabled', Boolean(checked))} />Generate standard LD clause</label>
+          {p2.ldAutoEnabled ? <div className="grid gap-3 sm:grid-cols-2"><div><label className={formLabelClass}>Penalty per Week %</label><Input inputMode="decimal" value={p2.ldPerWeekPercent} onChange={(event) => setP2Field('ldPerWeekPercent', event.target.value)} className={formInputClass} /></div><div><label className={formLabelClass}>Maximum Penalty %</label><Input inputMode="decimal" value={p2.ldMaxPercent} onChange={(event) => setP2Field('ldMaxPercent', event.target.value)} className={formInputClass} /></div></div> : null}
+          {p2.ldAutoEnabled ? <textarea value={ldAutoText} readOnly className={`${formTextareaClass} bg-slate-50`} /> : editClauseTextarea('ldPenalty', p2.ldPenalty, 'Enter LD / penalty terms...', 92)}
+        </div>
+      ),
+    },
+    { no: 12, particular: 'Remarks', detail: editClauseTextarea('remarks', p2.remarks, 'Enter remarks...') },
+    { no: 13, particular: 'Site & Billing Address', detail: editClauseTextarea('siteBillingAddress', p2.siteBillingAddress, 'Enter site & billing address...', 180) },
+    {
+      no: 14,
+      particular: 'Documents Required',
+      detail: (
+        <div className="space-y-3">
+          <div className="grid gap-2 sm:grid-cols-2">
+            {DOCUMENT_REQUIRED_OPTIONS.map((doc) => <label key={doc} className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-xs font-medium text-slate-700"><Checkbox checked={selectedDocsFromText(p2.documentsRequired).has(doc)} onCheckedChange={(checked) => toggleRequiredDoc(doc, Boolean(checked))} />{doc}</label>)}
+          </div>
+          {editClauseTextarea('documentsRequired', p2.documentsRequired, 'Enter documents required...', 92)}
+        </div>
+      ),
+    },
+  ];
+
   const detailsForm = (
-    <div className="mx-auto max-w-6xl space-y-5">
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+    <div className="mx-auto flex max-w-6xl flex-col gap-5">
+      <section style={{ order: 1 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <style>{ANNEXURE_RICH_TEXT_CSS}</style>
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
           <h3 className="font-bold text-slate-900">Order Reference</h3>
@@ -1715,9 +2589,119 @@ export function MakePurchaseOrderPopup({
             <Input value={p1.incoTerms} onChange={(event) => setP1Field('incoTerms', event.target.value)} className={formInputClass} />
           </div>
         </div>
+        <div className="border-t border-slate-200 px-5 py-5">
+          <div className="mb-3">
+            <h4 className="text-sm font-bold text-slate-900">Required Purchase Documents</h4>
+            <p className="mt-1 text-xs text-slate-500">
+              Selected documents will be available as upload steps in Purchase Flow. PO Acceptance is mandatory.
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {PURCHASE_FLOW_DOCUMENT_OPTIONS.map((option) => {
+              const selectedDocuments = normalizePurchaseFlowDocuments(p1.requiredPurchaseDocuments);
+              const checked = selectedDocuments.includes(option.value);
+              return (
+                <label
+                  key={option.value}
+                  className={`flex items-center gap-3 rounded-xl border px-3.5 py-3 text-sm font-semibold transition-colors ${
+                    checked
+                      ? 'border-[#0D3A35] bg-[#eef7f4] text-[#0D3A35]'
+                      : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                  }`}
+                >
+                  <Checkbox
+                    checked={checked}
+                    disabled={option.mandatory}
+                    onCheckedChange={(nextChecked) => {
+                      const next = new Set(selectedDocuments);
+                      if (nextChecked) next.add(option.value);
+                      else next.delete(option.value);
+                      setP1Field('requiredPurchaseDocuments', normalizePurchaseFlowDocuments([...next]));
+                    }}
+                  />
+                  <span className="flex-1">{option.label}</span>
+                  {option.mandatory ? (
+                    <span className="rounded-full bg-[#0D3A35] px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white">
+                      Mandatory
+                    </span>
+                  ) : null}
+                </label>
+              );
+            })}
+          </div>
+        </div>
       </section>
 
-      <section className="grid gap-5 lg:grid-cols-2">
+      <section style={{ order: 4 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-5 py-4">
+          <div>
+            <h3 className="font-bold text-slate-900">Item Details</h3>
+            <p className="mt-0.5 text-xs text-slate-500">Items and approved rates carried forward from the comparative statement.</p>
+          </div>
+          <span className="rounded-full bg-[#e7f3ef] px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-[#0D3A35]">
+            {(comparative.items || []).length} {(comparative.items || []).length === 1 ? 'Item' : 'Items'}
+          </span>
+        </div>
+        {(comparative.items || []).length ? (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] border-collapse text-sm">
+              <thead className="bg-[#0D3A35] text-white">
+                <tr>
+                  <th className="w-16 border-r border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">S. No.</th>
+                  <th className="px-4 py-3 text-center text-[11px] font-bold uppercase tracking-wider">Item Description</th>
+                  <th className="w-28 border-l border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">Qty</th>
+                  <th className="w-28 border-l border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">UOM</th>
+                  <th className="w-36 border-l border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">Unit Rate</th>
+                  <th className="w-40 border-l border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(comparative.items || []).map((item: any, index: number) => {
+                  const quantity = numOr0(item?.qty);
+                  const unitRate = numOr0((qForVendor as any)?.unitRateByItemId?.[item?.id]);
+                  const lineAmount = quantity * unitRate;
+                  return (
+                    <tr key={safe(item?.id) || index} className="border-b border-slate-200 last:border-b-0">
+                      <td className="border-r border-slate-200 px-3 py-3 text-center font-semibold text-slate-500">{index + 1}</td>
+                      <td className="px-4 py-3">
+                        <div className="font-semibold text-slate-900">{safe(item?.partName) || safe(item?.itemName) || 'Item not recorded'}</div>
+                        {safe(item?.description) || safe(item?.specification) ? <div className="mt-1 whitespace-pre-line text-xs leading-5 text-slate-500">{safe(item?.description) || safe(item?.specification)}</div> : null}
+                      </td>
+                      <td className="border-l border-slate-200 px-3 py-3 text-center font-semibold tabular-nums text-slate-900">{quantity}</td>
+                      <td className="border-l border-slate-200 px-3 py-3 text-center font-medium text-slate-700">{safe(item?.uom) || '—'}</td>
+                      <td className="border-l border-slate-200 px-3 py-3 text-center font-semibold tabular-nums text-slate-900">{unitRate ? inr(unitRate) : '—'}</td>
+                      <td className="border-l border-slate-200 px-3 py-3 text-center font-bold tabular-nums text-[#0D3A35]">{unitRate ? inr(lineAmount) : '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot className="border-t-2 border-[#0D3A35] bg-[#f0f6f4]">
+                <tr>
+                  <td colSpan={5} className="border-b border-r border-slate-300 px-4 py-2 text-left text-xs font-bold text-slate-700">Basic Order Value</td>
+                  <td className="border-b border-slate-300 px-3 py-2 text-center font-bold tabular-nums text-slate-900">{computedTotals ? inr(computedTotals.base) : '—'}</td>
+                </tr>
+                <tr>
+                  <td colSpan={5} className="border-b border-r border-slate-300 px-4 py-2 text-left text-xs font-bold text-slate-700">GST</td>
+                  <td className="border-b border-slate-300 px-3 py-2 text-center font-bold tabular-nums text-slate-900">{computedTotals ? inr(computedTotals.tax) : '—'}</td>
+                </tr>
+                <tr>
+                  <td colSpan={5} className="border-r border-slate-300 px-4 py-2 text-left text-xs font-black text-[#0D3A35]">Total Order Value</td>
+                  <td className="px-3 py-2 text-center font-black tabular-nums text-[#0D3A35]">{computedTotals ? inr(computedTotals.gross) : '—'}</td>
+                </tr>
+                <tr className="bg-white">
+                  <td colSpan={6} className="px-4 py-2.5 text-center text-xs font-semibold italic text-slate-700">
+                    Amount - {amountInIndianWords(computedTotals?.gross || 0)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        ) : (
+          <div className="px-5 py-8 text-center text-sm text-slate-500">No approved item details were found in this comparative statement.</div>
+        )}
+      </section>
+
+      <section style={{ order: 2 }} className="grid gap-5 lg:grid-cols-2">
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
             <div className="flex items-center justify-between gap-3">
@@ -1730,11 +2714,14 @@ export function MakePurchaseOrderPopup({
           <div className="grid gap-4 p-5 sm:grid-cols-2">
             <div className="sm:col-span-2"><label className={formLabelClass}>Supplier’s Name</label><Input value={p1.vendorName} onChange={(event) => setP1Field('vendorName', event.target.value)} placeholder={vendorNameFromComparative} className={formInputClass} /></div>
             <div className="sm:col-span-2"><label className={formLabelClass}>Registered Address</label><textarea value={p1.vendorAddr1} onChange={(event) => setP1Field('vendorAddr1', event.target.value)} className={formTextareaClass} /></div>
-            <div><label className={formLabelClass}>Pin Code</label><Input value={p1.vendorPinCode} onChange={(event) => setP1Field('vendorPinCode', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Name</label><Input value={p1.vendorContactName} onChange={(event) => setP1Field('vendorContactName', event.target.value)} placeholder="Supplier contact person" className={formInputClass} /></div>
             <div><label className={formLabelClass}>State / UT</label><Input value={p1.vendorState} onChange={(event) => setP1Field('vendorState', event.target.value)} className={formInputClass} /></div>
             <div className="sm:col-span-2"><label className={formLabelClass}>Place of Business</label><Input value={p1.vendorPlaceOfBusiness} onChange={(event) => setP1Field('vendorPlaceOfBusiness', event.target.value)} className={formInputClass} /></div>
             <div><label className={formLabelClass}>Mobile Number</label><Input value={p1.vendorMobile} onChange={(event) => setP1Field('vendorMobile', event.target.value)} className={formInputClass} /></div>
             <div><label className={formLabelClass}>Email</label><Input type="email" value={p1.vendorEmail} onChange={(event) => setP1Field('vendorEmail', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>GSTIN</label><Input value={p1.vendorVatRegnNo} onChange={(event) => setP1Field('vendorVatRegnNo', event.target.value.toUpperCase())} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>PAN</label><Input value={p1.vendorPan || ''} onChange={(event) => setP1Field('vendorPan', event.target.value.toUpperCase())} className={formInputClass} /></div>
+            <div className="sm:col-span-2"><label className={formLabelClass}>Vendor Legal Constitution</label><Input value={p1.vendorLegalConstitution || ''} onChange={(event) => setP1Field('vendorLegalConstitution', event.target.value)} placeholder="Individual, Partnership Firm, Company, etc." className={formInputClass} /></div>
           </div>
         </div>
 
@@ -1749,7 +2736,8 @@ export function MakePurchaseOrderPopup({
             <div><label className={formLabelClass}>Village</label><Input value={p1.buyerVillage} onChange={(event) => setP1Field('buyerVillage', event.target.value)} className={formInputClass} /></div>
             <div><label className={formLabelClass}>District</label><Input value={p1.buyerDistrict} onChange={(event) => setP1Field('buyerDistrict', event.target.value)} className={formInputClass} /></div>
             <div><label className={formLabelClass}>Pin Code</label><Input value={p1.buyerPinCode} onChange={(event) => setP1Field('buyerPinCode', event.target.value)} className={formInputClass} /></div>
-            <div><label className={formLabelClass}>GST No.</label><Input value={p1.shipToGstNo} onChange={(event) => setP1Field('shipToGstNo', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>GSTIN</label><Input value={p1.shipToGstNo} onChange={(event) => setP1Field('shipToGstNo', event.target.value.toUpperCase())} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>PAN</label><Input value={p1.buyerPan || ''} onChange={(event) => setP1Field('buyerPan', event.target.value.toUpperCase())} className={formInputClass} /></div>
             <div><label className={formLabelClass}>Contact Name</label><Input value={p1.shipToContactName} onChange={(event) => setP1Field('shipToContactName', event.target.value)} className={formInputClass} /></div>
             <div><label className={formLabelClass}>Mobile Number</label><Input value={p1.shipToTel} onChange={(event) => setP1Field('shipToTel', event.target.value)} className={formInputClass} /></div>
             <div><label className={formLabelClass}>Email</label><Input type="email" value={p1.shipToEmail} onChange={(event) => setP1Field('shipToEmail', event.target.value)} className={formInputClass} /></div>
@@ -1757,21 +2745,21 @@ export function MakePurchaseOrderPopup({
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <section style={{ order: 6 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
           <h3 className="font-bold text-slate-900">Commercial Terms</h3>
           <p className="mt-0.5 text-xs text-slate-500">These details will appear in the PO and its annexures.</p>
         </div>
-        <div className="grid gap-4 p-5 md:grid-cols-2">
+        <div className="hidden">
           <div><label className={formLabelClass}>Supplier Quotation No. *</label><Input value={p2.supplierFinalQuotationNo} onChange={(event) => setP2Field('supplierFinalQuotationNo', event.target.value)} className={formInputClass} /></div>
           <div><label className={formLabelClass}>Supplier Quotation Date</label><Input type="date" value={p2.supplierFinalQuotationDate} onChange={(event) => setP2Field('supplierFinalQuotationDate', event.target.value)} className={formInputClass} /></div>
-          <div className="md:col-span-2"><label className={formLabelClass}>Scope of Supply / Work</label><textarea value={p2.scopeOfWork} onChange={(event) => setP2Field('scopeOfWork', event.target.value)} className={formTextareaClass} /></div>
+          <div className="md:col-span-2"><label className={formLabelClass}>Scope of Work</label><textarea value={p2.scopeOfWork} onChange={(event) => setP2Field('scopeOfWork', event.target.value)} className={formTextareaClass} /></div>
           <div className="md:col-span-2"><label className={formLabelClass}>Basis of Price</label><textarea value={p2.basisOfPrice} onChange={(event) => setP2Field('basisOfPrice', event.target.value)} className={formTextareaClass} /></div>
           <div><label className={formLabelClass}>GST %</label><Input inputMode="decimal" value={p2.taxGstPercent} onChange={(event) => { setP2Field('taxGstPercent', event.target.value); setP2Field('taxAutoCalcEnabled', true); }} className={formInputClass} /></div>
           <div><label className={formLabelClass}>Other Tax %</label><Input inputMode="decimal" value={p2.taxOtherPercent} onChange={(event) => { setP2Field('taxOtherPercent', event.target.value); setP2Field('taxAutoCalcEnabled', true); }} className={formInputClass} /></div>
           <div className="md:col-span-2"><label className={formLabelClass}>Tax Terms</label><textarea value={p2.taxAutoCalcEnabled ? taxesAutoText : p2.taxes} onChange={(event) => setP2Field('taxes', event.target.value)} readOnly={p2.taxAutoCalcEnabled} className={`${formTextareaClass} ${p2.taxAutoCalcEnabled ? 'bg-slate-50' : ''}`} /></div>
-          <div className="md:col-span-2"><label className={formLabelClass}>Delivery Timeline</label><textarea value={p2.deliveryTimelines} onChange={(event) => setP2Field('deliveryTimelines', event.target.value)} className={formTextareaClass} /></div>
-          <div className="md:col-span-2"><label className={formLabelClass}>Documents / Approval Requirements</label><textarea value={p2.documents} onChange={(event) => setP2Field('documents', event.target.value)} className={formTextareaClass} /></div>
+          <div className="md:col-span-2"><label className={formLabelClass}>Delivery Timelines</label><textarea value={p2.deliveryTimelines} onChange={(event) => setP2Field('deliveryTimelines', event.target.value)} className={formTextareaClass} /></div>
+          <div className="md:col-span-2"><label className={formLabelClass}>Documents</label><textarea value={p2.documents} onChange={(event) => setP2Field('documents', event.target.value)} className={formTextareaClass} /></div>
 
           <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -1804,11 +2792,10 @@ export function MakePurchaseOrderPopup({
           <div><label className={formLabelClass}>Installation Support</label><textarea value={p2.installationSupport} onChange={(event) => setP2Field('installationSupport', event.target.value)} className={formTextareaClass} /></div>
           <div><label className={formLabelClass}>Inspection</label><textarea value={p2.inspection} onChange={(event) => setP2Field('inspection', event.target.value)} className={formTextareaClass} /></div>
           <div><label className={formLabelClass}>Warranty / Guarantee</label><textarea value={p2.warranty} onChange={(event) => setP2Field('warranty', event.target.value)} className={formTextareaClass} /></div>
-          <div><label className={formLabelClass}>Remarks</label><textarea value={p2.remarks} onChange={(event) => setP2Field('remarks', event.target.value)} className={formTextareaClass} /></div>
 
           <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-              <div><label className={formLabelClass}>LD / Delay Penalty</label><p className="text-xs text-slate-500">Enter custom terms or generate the standard penalty clause.</p></div>
+              <div><label className={formLabelClass}>LD / Penalty</label><p className="text-xs text-slate-500">Enter custom terms or generate the standard penalty clause.</p></div>
               <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><Checkbox checked={p2.ldAutoEnabled} onCheckedChange={(checked) => setP2Field('ldAutoEnabled', Boolean(checked))} />Generate clause</label>
             </div>
             {p2.ldAutoEnabled && (
@@ -1820,76 +2807,162 @@ export function MakePurchaseOrderPopup({
             <textarea value={p2.ldAutoEnabled ? ldAutoText : p2.ldPenalty} onChange={(event) => setP2Field('ldPenalty', event.target.value)} readOnly={p2.ldAutoEnabled} className={`${formTextareaClass} ${p2.ldAutoEnabled ? 'bg-white' : ''}`} />
           </div>
 
-          <div className="md:col-span-2 overflow-hidden rounded-xl border border-slate-200 bg-white">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3">
-              <div>
-                <h4 className="font-bold text-slate-900">Additional PO Fields</h4>
-                <p className="mt-0.5 text-xs text-slate-500">Add any project-specific information not covered by the standard fields.</p>
-              </div>
-              <Button type="button" variant="outline" onClick={addCustomField} className="rounded-xl border-[#0D3A35] text-[#0D3A35] hover:bg-[#0D3A35] hover:text-white">
-                + Add New Field
-              </Button>
+          <div className="md:col-span-2"><label className={formLabelClass}>Remarks</label><textarea value={p2.remarks} onChange={(event) => setP2Field('remarks', event.target.value)} className={formTextareaClass} /></div>
+
+          <div className="md:col-span-2"><label className={formLabelClass}>Site &amp; Billing Address</label><textarea value={p2.siteBillingAddress} onChange={(event) => setP2Field('siteBillingAddress', event.target.value)} className={`${formTextareaClass} min-h-[150px]`} /></div>
+
+          <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <label className={formLabelClass}>Documents Required</label>
+            <div className="mb-3 grid gap-2 sm:grid-cols-2">
+              {DOCUMENT_REQUIRED_OPTIONS.map((doc) => (
+                <label key={doc} className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs font-medium text-slate-700">
+                  <Checkbox checked={selectedDocsFromText(p2.documentsRequired).has(doc)} onCheckedChange={(checked) => toggleRequiredDoc(doc, Boolean(checked))} />
+                  {doc}
+                </label>
+              ))}
             </div>
-            <div className="p-4">
-              {(Array.isArray(p1.customFields) ? p1.customFields : []).length ? (
-                <div className="space-y-3">
-                  {(Array.isArray(p1.customFields) ? p1.customFields : []).map((field, index) => (
-                    <div key={field.id} className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-[minmax(180px,0.7fr)_minmax(260px,1.3fr)_auto]">
-                      <div>
-                        <label className={formLabelClass}>Field Name {index + 1}</label>
-                        <Input value={field.label} onChange={(event) => updateCustomField(field.id, { label: event.target.value })} placeholder="e.g. Project Reference" className={formInputClass} />
-                      </div>
-                      <div>
-                        <label className={formLabelClass}>Field Value</label>
-                        <Input value={field.value} onChange={(event) => updateCustomField(field.id, { value: event.target.value })} placeholder="Enter field value" className={formInputClass} />
-                      </div>
-                      <Button type="button" variant="outline" onClick={() => removeCustomField(field.id)} className="self-end rounded-xl border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700">Remove</Button>
+            <textarea value={p2.documentsRequired} onChange={(event) => setP2Field('documentsRequired', event.target.value)} className={formTextareaClass} />
+          </div>
+
+        </div>
+
+        <div className="overflow-x-auto p-5">
+          <table className="w-full min-w-[760px] table-auto border-collapse text-sm">
+            <colgroup><col className="w-[9%]" /><col className="w-[24%]" /><col className="w-[67%]" /></colgroup>
+            <thead>
+              <tr className="bg-[#0D3A35] text-white">
+                <th className="border-r border-white/20 px-3 py-3 text-center text-xs font-bold uppercase tracking-wider">S. No.</th>
+                <th className="border-r border-white/20 px-3 py-3 text-center text-xs font-bold uppercase tracking-wider">Particulars</th>
+                <th className="px-3 py-3 text-center text-xs font-bold uppercase tracking-wider">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {editCommercialClauseRows.map((row) => (
+                <tr key={row.no} className="border-b border-slate-200 bg-white last:border-b-0">
+                  <td className="border-r border-slate-200 bg-slate-50 px-3 py-4 text-center align-middle font-bold text-slate-500">{row.no})</td>
+                  <td className="border-r border-slate-200 bg-slate-50 px-4 py-4 align-middle font-bold text-slate-700">{row.particular}</td>
+                  <td className="px-4 py-4 align-top">{row.detail}</td>
+                </tr>
+              ))}
+              {(Array.isArray(p1.customFields) ? p1.customFields : []).map((field, index) => (
+                <tr key={field.id} className="border-b border-slate-200 bg-white last:border-b-0">
+                  <td className="border-r border-slate-200 bg-slate-50 px-3 py-3 text-center align-middle font-bold text-slate-500">{15 + index})</td>
+                  <td className="border-r border-slate-200 bg-slate-50 px-3 py-3 align-middle">
+                    <Input
+                      value={field.label}
+                      onChange={(event) => updateCustomField(field.id, { label: event.target.value })}
+                      placeholder="Enter particulars"
+                      className={`${formInputClass} h-11 bg-white font-semibold`}
+                    />
+                  </td>
+                  <td className="px-3 py-3 align-top">
+                    <div className="flex items-start gap-3">
+                      <textarea
+                        value={field.value}
+                        onChange={(event) => updateCustomField(field.id, { value: event.target.value })}
+                        placeholder="Enter commercial term details"
+                        className={`${formTextareaClass} min-h-[72px] flex-1`}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => removeCustomField(field.id)}
+                        className="mt-0 shrink-0 rounded-xl border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                      >
+                        Remove
+                      </Button>
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <button type="button" onClick={addCustomField} className="w-full rounded-xl border border-dashed border-slate-300 px-4 py-5 text-sm font-medium text-slate-500 transition-colors hover:border-[#0D3A35] hover:bg-emerald-50/40 hover:text-[#0D3A35]">
-                  No additional fields added. Click here to add one.
-                </button>
-              )}
-            </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="mt-4 flex justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={addCustomField}
+              className="rounded-xl border-[#0D3A35] text-[#0D3A35] hover:bg-[#0D3A35] hover:text-white"
+            >
+              + Add Commercial Term Row
+            </Button>
+          </div>
+        </div>
+
+        <div className="border-t border-slate-200 bg-slate-50 p-5">
+          <div className="mb-4">
+            <h3 className="font-bold text-slate-900">Delivery of Documents Correspondence</h3>
+            <p className="mt-0.5 text-xs text-slate-500">This correspondence is printed immediately after the Commercial Terms table.</p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div><label className={formLabelClass}>Name of the Company</label><Input value={p2.correspondenceCompanyName} onChange={(event) => setP2Field('correspondenceCompanyName', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Street</label><Input value={p2.correspondenceStreet} onChange={(event) => setP2Field('correspondenceStreet', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Area</label><Input value={p2.correspondenceArea} onChange={(event) => setP2Field('correspondenceArea', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>City</label><Input value={p2.correspondenceCity} onChange={(event) => setP2Field('correspondenceCity', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>State</label><Input value={p2.correspondenceState} onChange={(event) => setP2Field('correspondenceState', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Pin</label><Input value={p2.correspondencePin} onChange={(event) => setP2Field('correspondencePin', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Contact Person</label><Input value={p2.correspondenceContactPerson} onChange={(event) => setP2Field('correspondenceContactPerson', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Phone No.</label><Input value={p2.correspondencePhone} onChange={(event) => setP2Field('correspondencePhone', event.target.value)} className={formInputClass} /></div>
+            <div className="md:col-span-2"><label className={formLabelClass}>Acknowledgement</label><textarea value={p2.correspondenceAcknowledgement} onChange={(event) => setP2Field('correspondenceAcknowledgement', event.target.value)} className={`${formTextareaClass} min-h-[96px]`} /></div>
+            <div className="md:col-span-2"><label className={formLabelClass}>Acceptance Terms</label><textarea value={p2.correspondenceAcceptance} onChange={(event) => setP2Field('correspondenceAcceptance', event.target.value)} className={`${formTextareaClass} min-h-[150px]`} /></div>
           </div>
         </div>
       </section>
 
-      <section className="grid gap-5 lg:grid-cols-2">
+      <section style={{ order: 3 }}>
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="border-b border-slate-200 bg-slate-50 px-5 py-4"><h3 className="font-bold text-slate-900">Billing & Required Documents</h3></div>
-          <div className="space-y-4 p-5">
-            <div><label className={formLabelClass}>Site & Billing Address</label><textarea value={p2.siteBillingAddress} onChange={(event) => setP2Field('siteBillingAddress', event.target.value)} className={`${formTextareaClass} min-h-[170px]`} /></div>
-            <div>
-              <label className={formLabelClass}>Documents Required</label>
-              <div className="mb-3 grid gap-2 sm:grid-cols-2">
-                {DOCUMENT_REQUIRED_OPTIONS.map((doc) => (
-                  <label key={doc} className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-xs font-medium text-slate-700">
-                    <Checkbox checked={selectedDocsFromText(p2.documentsRequired).has(doc)} onCheckedChange={(checked) => toggleRequiredDoc(doc, Boolean(checked))} />
-                    {doc}
-                  </label>
-                ))}
-              </div>
-              <textarea value={p2.documentsRequired} onChange={(event) => setP2Field('documentsRequired', event.target.value)} className={formTextareaClass} />
-            </div>
+          <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
+            <h3 className="font-bold text-slate-900">PO Covering Letter</h3>
+            <p className="mt-0.5 text-xs text-slate-500">Enter the attention, project, subject and formal order communication shown on the Purchase Order.</p>
           </div>
-        </div>
-
-        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="border-b border-slate-200 bg-slate-50 px-5 py-4"><h3 className="font-bold text-slate-900">PO Notes & Authorization</h3></div>
           <div className="grid gap-4 p-5 sm:grid-cols-2">
-            <div className="sm:col-span-2"><label className={formLabelClass}>PO Notes</label><textarea value={p1.notes} onChange={(event) => setP1Field('notes', event.target.value)} className={`${formTextareaClass} min-h-[130px]`} /></div>
-            <div><label className={formLabelClass}>Prepared By</label><Input value={p1.preparedBy} onChange={(event) => setP1Field('preparedBy', event.target.value)} className={formInputClass} /></div>
-            <div><label className={formLabelClass}>Verified By</label><Input value={p1.verifiedBy} onChange={(event) => setP1Field('verifiedBy', event.target.value)} className={formInputClass} /></div>
-            <div className="sm:col-span-2"><label className={formLabelClass}>Approved By</label><Input value={p1.approvedBy} onChange={(event) => setP1Field('approvedBy', event.target.value)} className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Kind Attention</label><Input value={p1.coverKindAttention || ''} onChange={(event) => setP1Field('coverKindAttention', event.target.value)} placeholder="Mr. / Ms. and designation" className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Project</label><Input value={p1.coverProject || ''} onChange={(event) => setP1Field('coverProject', event.target.value)} placeholder="Project name" className={formInputClass} /></div>
+            <div className="sm:col-span-2"><label className={formLabelClass}>Subject</label><Input value={p1.coverSubject || ''} onChange={(event) => setP1Field('coverSubject', event.target.value)} placeholder="Purchase Order for supply of..." className={formInputClass} /></div>
+            <div className="sm:col-span-2"><label className={formLabelClass}>Salutation</label><Input value={p1.coverSalutation || ''} onChange={(event) => setP1Field('coverSalutation', event.target.value)} placeholder="Dear Sir," className={formInputClass} /></div>
+            <div className="sm:col-span-2"><label className={formLabelClass}>Order Introduction</label><textarea value={p1.coverOrderIntroduction || ''} onChange={(event) => setP1Field('coverOrderIntroduction', event.target.value)} placeholder="Kindly consider this as our official order..." className={`${formTextareaClass} min-h-[100px]`} /></div>
+            <div className="sm:col-span-2"><label className={formLabelClass}>Commercial Reference / Order Paragraph</label><textarea value={p1.coverCommercialReference || ''} onChange={(event) => setP1Field('coverCommercialReference', event.target.value)} placeholder="With reference to various discussions held with the supplier..." className={`${formTextareaClass} min-h-[130px]`} /></div>
           </div>
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-2xl border border-slate-300 bg-[#252827] shadow-xl">
+      <section style={{ order: 5 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
+          <h3 className="font-bold text-slate-900">Authorization</h3>
+          <p className="mt-0.5 text-xs text-slate-500">Signatory details shown after the item table in the Draft PO.</p>
+        </div>
+        <div className="grid gap-4 p-5 md:grid-cols-3">
+          <div><label className={formLabelClass}>Prepared By</label><Input value={p1.preparedBy} onChange={(event) => setP1Field('preparedBy', event.target.value)} className={formInputClass} /></div>
+          <div><label className={formLabelClass}>Vendor Authorized Signatory</label><Input value={p1.verifiedBy} onChange={(event) => setP1Field('verifiedBy', event.target.value)} className={formInputClass} /></div>
+          <div><label className={formLabelClass}>Buyer Authorized Signatory</label><Input value={p1.approvedBy} onChange={(event) => setP1Field('approvedBy', event.target.value)} className={formInputClass} /></div>
+        </div>
+      </section>
+
+      <section style={{ order: 7 }} className="overflow-hidden rounded-2xl border border-slate-300 bg-[#252827] shadow-xl">
         <style>{ANNEXURE_RICH_TEXT_CSS}</style>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-2.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {customAnnexures.map((_, index) => (
+              <button
+                key={index}
+                type="button"
+                onClick={() => {
+                  syncAnnexureEditor();
+                  setSelectedAnnexureIndex(index);
+                  savedAnnexureRangeRef.current = null;
+                }}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-bold ${selectedAnnexureIndex === index ? 'border-[#0D3A35] bg-[#0D3A35] text-white' : 'border-slate-200 bg-slate-50 text-slate-600 hover:border-[#7fa89e]'}`}
+              >
+                Annexure {index + 1}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            {selectedAnnexureIndex > 0 ? <Button type="button" size="sm" variant="outline" onClick={removeSelectedAnnexure} className="h-8 border-red-200 text-xs text-red-600 hover:bg-red-50">Remove Annexure</Button> : null}
+            <Button type="button" size="sm" onClick={addCustomAnnexure} className="h-8 bg-[#0D3A35] text-xs text-white hover:bg-[#174f48]">+ Add Annexure</Button>
+          </div>
+        </div>
 
         <div className="flex items-center justify-between gap-4 border-b border-white/10 bg-[#202322] px-4 py-2 text-white">
           <div className="flex items-center gap-1 text-xs">
@@ -1898,7 +2971,7 @@ export function MakePurchaseOrderPopup({
           </div>
           <div className="flex min-w-0 flex-1 items-center justify-center gap-2">
             <span className="rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-black">W</span>
-            <Input value={p3.annexureTitle} onChange={(event) => setP3Field('annexureTitle', event.target.value)} className="h-8 max-w-lg border-white/10 bg-transparent text-center text-sm font-semibold text-white shadow-none focus-visible:ring-white/30" />
+            <Input value={activeCustomAnnexure.annexureTitle} onChange={(event) => setP3Field('annexureTitle', event.target.value)} className="h-8 max-w-lg border-white/10 bg-transparent text-center text-sm font-semibold text-white shadow-none focus-visible:ring-white/30" />
           </div>
           <div className="text-[11px] text-white/60">Annexure document editor</div>
         </div>
@@ -1960,7 +3033,7 @@ export function MakePurchaseOrderPopup({
               <div className="text-center text-[9px] font-bold uppercase tracking-wider text-[#0D3A35]">Layout</div>
               <div className="flex flex-wrap items-center justify-center gap-1">
                 <Button type="button" variant="outline" onMouseDown={(event) => { event.preventDefault(); runAnnexureCommand('removeFormat'); }} className="h-8 px-3 text-xs">Clear Style</Button>
-                {(['normal', 'narrow', 'wide'] as const).map((margin) => <button key={margin} type="button" title={`${margin} page margins`} onClick={() => setP3Field('marginPreset', margin)} className={`h-8 rounded border px-3 text-[10px] font-semibold capitalize ${p3.marginPreset === margin ? 'border-[#0D3A35] bg-emerald-50 text-[#0D3A35]' : 'border-slate-300 bg-white'}`}>{margin}</button>)}
+                {(['normal', 'narrow', 'wide'] as const).map((margin) => <button key={margin} type="button" title={`${margin} page margins`} onClick={() => setP3Field('marginPreset', margin)} className={`h-8 rounded border px-3 text-[10px] font-semibold capitalize ${activeCustomAnnexure.marginPreset === margin ? 'border-[#0D3A35] bg-emerald-50 text-[#0D3A35]' : 'border-slate-300 bg-white'}`}>{margin}</button>)}
               </div>
             </div>
 
@@ -1984,7 +3057,7 @@ export function MakePurchaseOrderPopup({
             suppressContentEditableWarning
             role="textbox"
             aria-multiline="true"
-            aria-label="Annexure 2 document editor"
+            aria-label="Annexure 1 document editor"
             onClick={(event) => { selectAnnexureTableCell(event.target); captureAnnexureSelection(); }}
             onMouseUp={() => { captureAnnexureSelection(); syncAnnexureEditor(); }}
             onPointerUp={() => { captureAnnexureSelection(); syncAnnexureEditor(); }}
@@ -1997,16 +3070,16 @@ export function MakePurchaseOrderPopup({
           />
         </div>
 
-        <div className="flex items-center justify-between border-t border-white/10 bg-[#202322] px-4 py-2 text-[11px] text-white/70"><div className="flex gap-5"><span>Page 1</span><span>{annexureWordCount} words</span><span>English (India)</span><span>Accessibility: Good to go</span></div><div className="flex items-center gap-2"><button type="button" onClick={() => setAnnexureZoom((value) => Math.max(60, value - 10))} className="h-6 w-6 rounded hover:bg-white/10">−</button><input type="range" min={60} max={140} step={10} value={annexureZoom} onChange={(event) => setAnnexureZoom(Number(event.target.value))} className="w-28 accent-emerald-500" /><button type="button" onClick={() => setAnnexureZoom((value) => Math.min(140, value + 10))} className="h-6 w-6 rounded hover:bg-white/10">+</button><span className="w-10 text-right">{annexureZoom}%</span></div></div>
+        <div className="flex items-center justify-between border-t border-white/10 bg-[#202322] px-4 py-2 text-[11px] text-white/70"><div className="flex gap-5"><span>Page 1</span><span>{activeAnnexureWordCount} words</span><span>English (India)</span><span>Accessibility: Good to go</span></div><div className="flex items-center gap-2"><button type="button" onClick={() => setAnnexureZoom((value) => Math.max(60, value - 10))} className="h-6 w-6 rounded hover:bg-white/10">−</button><input type="range" min={60} max={140} step={10} value={annexureZoom} onChange={(event) => setAnnexureZoom(Number(event.target.value))} className="w-28 accent-emerald-500" /><button type="button" onClick={() => setAnnexureZoom((value) => Math.min(140, value + 10))} className="h-6 w-6 rounded hover:bg-white/10">+</button><span className="w-10 text-right">{annexureZoom}%</span></div></div>
       </section>
 
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <section style={{ order: 8 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
-          <h3 className="font-bold text-slate-900">Annexure - 3</h3>
+          <h3 className="font-bold text-slate-900">Annexure - {legalAnnexureNumber}</h3>
           <p className="mt-0.5 text-xs text-slate-500">Complete General Terms and Conditions attached to the Purchase Order.</p>
         </div>
         <div className="grid gap-4 p-5">
-          <div><label className={formLabelClass}>Annexure Title</label><Input value={p4.annexureTitle} onChange={(event) => setP4Field('annexureTitle', event.target.value)} className={formInputClass} /></div>
+          <div><label className={formLabelClass}>Annexure Title</label><Input value={withAnnexureNumber(p4.annexureTitle, defaultPage4().annexureTitle, legalAnnexureNumber)} onChange={(event) => setP4Field('annexureTitle', event.target.value)} className={formInputClass} /></div>
           <div>
             <label className={formLabelClass}>General Terms and Conditions</label>
             <textarea value={effectiveAnnexureTerms} onChange={(event) => setP4Field('termsText', event.target.value)} className={`${formTextareaClass} min-h-[520px] font-serif leading-5`} />
@@ -2016,230 +3089,294 @@ export function MakePurchaseOrderPopup({
     </div>
   );
 
-  const renderPageContent = (p: 1 | 2 | 3 | 4) =>
-    p === 1 ? (
-      <div className="max-w-4xl mx-auto">
+  const renderPoReportHeader = (title: string, subtitle?: string, compact = false) => (
+    <div className={compact ? 'mb-2' : 'mb-4'}>
+      <div className={compact ? 'px-3 pb-1.5 text-center' : 'px-4 pb-3 pt-1 text-center'}>
+        <img src={logoUrl} alt="Sai Bioresources" className={`mx-auto object-contain ${compact ? 'h-8 w-8' : 'h-14 w-14'}`} />
+        <div className={`mt-1 font-black uppercase tracking-[0.03em] text-slate-900 ${compact ? 'text-[12px]' : 'text-[18px]'}`}>{DUMMY_COMPANY.name}</div>
+        <div className={`mt-0.5 text-slate-600 ${compact ? 'text-[6px] leading-3' : 'text-[9px] leading-4'}`}>{DUMMY_COMPANY.line1}</div>
+        <div className={`text-slate-600 ${compact ? 'text-[6px] leading-3' : 'text-[9px] leading-4'}`}>{DUMMY_COMPANY.line2}</div>
+      </div>
+      <div className={compact ? 'h-[2px] bg-[#0D3A35]' : 'h-[3px] bg-[#0D3A35]'} />
+      <div className={`bg-[#0D3A35] text-center font-extrabold uppercase text-white ${compact ? 'mt-1 px-3 py-1.5 text-[9px] tracking-[0.14em]' : 'mt-2 px-4 py-2.5 text-[13px] tracking-[0.22em]'}`}>{title}</div>
+      {subtitle ? <div className={`border-x border-b border-slate-300 bg-slate-50 text-center font-semibold uppercase tracking-[0.1em] text-slate-500 ${compact ? 'px-2 py-1 text-[6px]' : 'px-3 py-1.5 text-[9px]'}`}>{subtitle}</div> : null}
+    </div>
+  );
 
-        {/* ── LETTERHEAD ── */}
-        <div className="mb-0 border-b-[3px] border-[#0D3A35] pb-3">
-          <div className="flex items-start gap-3">
-            {/* Logo */}
-            <img
-              src={logoUrl}
-              alt="3F Logo"
-              width={64}
-              height={64}
-              className="shrink-0"
-              style={{
-                width: 64,
-                height: 64,
-                objectFit: 'contain',
-                border: '1px solid #d1d5db',
-                borderRadius: 6,
-                padding: 4,
-                backgroundColor: '#fff',
-              }}
-            />
-
-            {/* Company identity */}
-            <div className="flex-1">
-              <div className="text-[17px] font-black tracking-wide text-gray-900 uppercase leading-tight">
-                {DUMMY_COMPANY.name}
-              </div>
-              <div className="mt-1 text-[11px] text-gray-600 leading-4">
-                <div>{DUMMY_COMPANY.line1}</div>
-                <div>{DUMMY_COMPANY.line2}</div>
-                <div className="font-semibold text-gray-700 mt-0.5">{DUMMY_COMPANY.gst}</div>
-              </div>
-            </div>
-          </div>
+  const renderPoSectionHeader = (title: string, subtitle?: string, compact = false) => (
+    <div className={compact ? 'mb-2' : 'mb-4'}>
+      <div className={`bg-[#0D3A35] text-center font-extrabold uppercase text-white ${compact ? 'px-3 py-1.5 text-[9px] tracking-[0.14em]' : 'px-4 py-2.5 text-[13px] tracking-[0.22em]'}`}>
+        {title}
+      </div>
+      {subtitle ? (
+        <div className={`border-x border-b border-slate-300 bg-slate-50 text-center font-semibold uppercase tracking-[0.1em] text-slate-500 ${compact ? 'px-2 py-1 text-[6px]' : 'px-3 py-1.5 text-[9px]'}`}>
+          {subtitle}
         </div>
+      ) : null}
+    </div>
+  );
 
-        {/* ── PO TITLE BAR ── */}
-        <div className="mb-4 bg-[#0D3A35] py-2.5 text-center text-[13px] font-extrabold tracking-[0.22em] text-white">
-          PURCHASE ORDER
-        </div>
+  const renderPoReportFooter = (pageNumber: number, label: string) => (
+    <div className="mt-5 grid grid-cols-3 border-t border-slate-300 pt-2 text-[8px] text-slate-500">
+      <span>System-generated Purchase Order</span>
+      <span className="text-center">PO No.: {effectivePoNo || 'Draft'}{amendmentLabel ? ` · ${amendmentLabel}` : ''}</span>
+      <span className="text-right">{label} · Page {pageNumber} of {totalReportPages}</span>
+    </div>
+  );
 
-        {/* ── PO REFERENCE BLOCK ── */}
-        <div className="border border-gray-300 mb-4">
-          <table className="w-full text-[11px] border-collapse">
+  const renderCommercialTermsPage = (reportPageNumber: number) => {
+    const termsPageIndex = Math.max(0, reportPageNumber - 2);
+    const rows = commercialTermPages[termsPageIndex] || [];
+    const continued = termsPageIndex > 0;
+    const isFinalTermsPage = termsPageIndex === commercialTermPages.length - 1;
+    return (
+      <div className="po-report-sheet po-terms-report-sheet po-draft-font-11 mx-auto flex h-[1123px] min-h-[1123px] max-h-[1123px] w-[794px] max-w-full flex-col overflow-hidden border border-slate-300 bg-white p-5 font-sans text-[11px] shadow-sm">
+        {renderPoSectionHeader(
+          continued ? 'Purchase Order — Terms & Conditions (Continued)' : 'Purchase Order — Terms & Conditions',
+          poReferenceLabel
+        )}
+        {rows.length ? <div className="border border-gray-300">
+          <table className="po-terms-table w-full table-fixed border-collapse text-[11px]">
+            <colgroup>
+              <col className="w-[8%]" />
+              <col className="w-[24%]" />
+              <col className="w-[68%]" />
+            </colgroup>
+            <thead>
+              <tr className="bg-[#0D3A35] text-white">
+                <th className="border-r border-[#315d58] px-3 py-2 text-center font-bold">S. No.</th>
+                <th className="border-r border-[#315d58] px-3 py-2 text-center font-bold">Particulars</th>
+                <th className="px-3 py-2 text-center font-bold">Details</th>
+              </tr>
+            </thead>
             <tbody>
-              <tr>
-                <td className="bg-gray-100 font-semibold text-gray-600 px-3 py-1.5 w-[160px] border-r border-b border-gray-300">
-                  Purchase Order No.
-                </td>
-                <td className="px-3 py-1.5 border-r border-b border-gray-300 font-mono font-semibold text-gray-900">
-                  {effectivePoNo || '—'}
-                </td>
-                <td className="bg-gray-100 font-semibold text-gray-600 px-3 py-1.5 w-[140px] border-r border-b border-gray-300">
-                  Date
-                </td>
-                <td className="px-3 py-1.5 border-b border-gray-300 text-gray-900">
-                  {p1.poDate || '—'}
-                </td>
-              </tr>
-              <tr>
-                <td className="bg-gray-100 font-semibold text-gray-600 px-3 py-1.5 border-r border-gray-300">
-                  Vendor Code
-                </td>
-                <td className="px-3 py-1.5 border-r border-gray-300 font-mono text-gray-900">
-                  {resolvedVendorId || '—'}
-                </td>
-                <td className="bg-gray-100 font-semibold text-gray-600 px-3 py-1.5 border-r border-gray-300">
-                  Cluster
-                </td>
-                <td className="px-3 py-1.5 text-gray-900">
-                  <div className="no-print">
-                    <Select value={p1.clusterId} onValueChange={(v) => setP1Field('clusterId', v)}>
-                      <SelectTrigger className="h-7 text-[11px] rounded-none border-0 bg-transparent shadow-none px-0 py-0 focus:ring-0 focus:ring-offset-0">
-                        <SelectValue placeholder={clustersLoading ? 'Loading…' : 'Select cluster'} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(Array.isArray(clusters) ? clusters : [])
-                          .map((c: any) => ({
-                            id: safe(c?.cluster_id) || safe(c?.id),
-                            label: safe(c?.cluster_name) || safe(c?.name) || safe(c?.cluster_id) || safe(c?.id),
-                          }))
-                          .filter((x) => x.id)
-                          .map((opt) => (
-                            <SelectItem key={opt.id} value={opt.id}>
-                              {opt.label}
-                            </SelectItem>
-                          ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="print-only hidden">
-                    {selectedCluster
-                      ? safe(selectedCluster?.cluster_name) ||
-                        safe(selectedCluster?.name) ||
-                        safe(selectedCluster?.cluster_id) ||
-                        safe(selectedCluster?.id)
-                      : '—'}
-                  </div>
-                </td>
-              </tr>
+              {rows.map((row, index) => (
+                <tr key={`${row.no}-${termsPageIndex}-${index}`} className="bg-white">
+                  <td className="border-r border-t border-gray-300 bg-gray-100 px-3 py-2 text-center align-middle font-semibold text-gray-600">
+                    {row.no})
+                  </td>
+                  <td className="border-r border-t border-gray-300 bg-gray-100 px-3 py-2 align-middle font-semibold text-gray-600">
+                    {row.particular}{row.continued ? ' (Continued)' : ''}
+                  </td>
+                  <td className="whitespace-pre-wrap border-t border-gray-300 px-3 py-2 align-top leading-5 text-gray-900">
+                    {row.details}
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
-        </div>
+        </div> : null}
+        {isFinalTermsPage ? renderDocumentCorrespondenceBlock() : null}
+        <div className="mt-auto">{renderPoReportFooter(reportPageNumber, continued ? 'Terms & Conditions — Continued' : 'Terms & Conditions')}</div>
+      </div>
+    );
+  };
 
-        {(Array.isArray(p1.customFields) ? p1.customFields : []).some((field) => safe(field.label) || safe(field.value)) && (
-          <div className="mb-4 border border-gray-300">
-            <div className="bg-[#0D3A35] px-3 py-1.5 text-[10px] font-bold tracking-widest text-white">ADDITIONAL PO DETAILS</div>
-            <div className="grid grid-cols-2">
-              {(Array.isArray(p1.customFields) ? p1.customFields : [])
-                .filter((field) => safe(field.label) || safe(field.value))
-                .map((field) => (
-                  <div key={field.id} className="grid grid-cols-[42%_58%] border-b border-r border-gray-300 text-[11px] last:border-b-0">
-                    <div className="bg-gray-100 px-3 py-2 font-semibold text-gray-600">{safe(field.label) || 'Additional Field'}</div>
-                    <div className="px-3 py-2 text-gray-900">{safe(field.value) || '—'}</div>
-                  </div>
-                ))}
-            </div>
+  const renderDocumentCorrespondenceBlock = () => {
+    const correspondenceRows = [
+      ['Name of the Company', p2.correspondenceCompanyName],
+      ['Street', p2.correspondenceStreet],
+      ['Area', p2.correspondenceArea],
+      ['City', p2.correspondenceCity],
+      ['State', p2.correspondenceState],
+      ['Pin', p2.correspondencePin],
+      ['Contact Person', p2.correspondenceContactPerson],
+      ['Phone No.', p2.correspondencePhone],
+    ];
+
+    return (
+      <Fragment>
+        <div className="mt-4 border border-slate-300 px-5 py-4 text-[11px] text-slate-900">
+          <h3 className="mb-3 text-[12px] font-extrabold uppercase underline underline-offset-2">
+            Delivery of Documents Correspondence:
+          </h3>
+          <div className="grid grid-cols-[145px_12px_minmax(0,1fr)] gap-y-1 leading-5">
+            {correspondenceRows.map(([label, value]) => (
+              <Fragment key={label}>
+                <span className="font-semibold">{label}</span>
+                <span className="text-center">:</span>
+                <span className="break-words">{safe(value) || 'Not Recorded'}</span>
+              </Fragment>
+            ))}
           </div>
-        )}
+          <p className="mt-6 whitespace-pre-wrap text-justify leading-5">
+            {safe(p2.correspondenceAcknowledgement) || 'Not Recorded'}
+          </p>
+          <p className="mt-6 whitespace-pre-wrap text-justify italic leading-5">
+            {safe(p2.correspondenceAcceptance) || 'Not Recorded'}
+          </p>
+        </div>
+        <div className="ml-auto mt-5 w-[46%] text-right text-[11px] text-slate-900">
+          <div className="mb-2 flex h-[58px] items-end justify-end gap-2">
+            {authorizedSealAttachedAt ? (
+              <>
+                <img src={authorizedSealUrl} alt="Buyer seal" className="h-14 w-14 object-contain" />
+                <img
+                  src={signatureSvgDataUri(authorizedSignatureText)}
+                  alt="Buyer digital signature"
+                  className="h-10 w-auto max-w-[220px] object-contain"
+                />
+              </>
+            ) : null}
+          </div>
+          <div className="mb-1 font-bold">For, {p1.buyerCompanyName || DUMMY_COMPANY.name}</div>
+          <div className="border-t border-slate-400 pt-1 font-semibold">
+            {safe(p1.approvedBy) || 'Authorized Signatory'}
+          </div>
+        </div>
+      </Fragment>
+    );
+  };
+
+  const reportPageLabel = (pageNumber: number) => {
+    if (pageNumber === 1) return 'Purchase Order';
+    if (pageNumber < customAnnexureStartPage) {
+      return pageNumber === 2 ? 'Terms & Conditions' : 'Terms & Conditions — Continued';
+    }
+    if (pageNumber === legalReportPage) return `Annexure - ${legalAnnexureNumber}`;
+    const annexurePage = annexureReportPages[pageNumber - customAnnexureStartPage];
+    if (!annexurePage) return 'Annexure';
+    return `Annexure - ${annexurePage.annexureNumber}${annexurePage.pageIndex ? ' — Continued' : ''}`;
+  };
+
+  const renderPageContent = (p: number) =>
+    p === 1 ? (
+      <div className="po-report-sheet po-draft-font-11 mx-auto min-h-[1123px] w-[794px] max-w-full border border-slate-300 bg-white p-5 font-sans text-[11px] shadow-sm">
+        {renderPoReportHeader(effectiveAmendmentNo > 0 ? `Purchase Order — ${amendmentLabel}` : 'Purchase Order', 'Commercial order and supply details')}
+
+        {/* ── PO REFERENCE BLOCK ── */}
+        <div className="mb-4 grid grid-cols-2 border-l border-t border-slate-300 sm:grid-cols-4">
+          {[
+            ['PO Number', `${effectivePoNo || 'Draft'}${amendmentLabel ? ` · ${amendmentLabel}` : ''}`],
+            ['PO Date', p1.poDate || '—'],
+            ['Vendor Code', resolvedVendorId || '—'],
+            ['Cluster', selectedCluster ? safe(selectedCluster?.cluster_name) || safe(selectedCluster?.name) || safe(selectedCluster?.cluster_id) || safe(selectedCluster?.id) : p1.clusterId || '—'],
+          ].map(([label, value]) => (
+            <div key={label} className="border-b border-r border-slate-300 px-3 py-2.5">
+              <div className="text-[8px] font-bold uppercase tracking-[0.1em] text-slate-500">{label}</div>
+              <div className="mt-1 break-words text-[11px] font-bold text-slate-900">{value}</div>
+            </div>
+          ))}
+        </div>
 
         {/* ── SUPPLIER / BUYER REGISTERED DETAILS ── */}
         <div className="grid grid-cols-2 gap-0 border border-gray-300 mb-4">
           <div className="border-r border-gray-300">
             <div className="bg-[#0D3A35] py-1.5 text-center text-[10px] font-bold tracking-widest text-white">
-              SUPPLIER’S REGISTERED DETAILS
+              SUPPLIER DETAILS
             </div>
-            <div className="min-h-[210px] space-y-1 p-3 text-[11px] leading-5 text-gray-900">
-              <div><span className="font-semibold text-gray-700">Supplier’s Name: </span>{p1.vendorName || vendorNameFromComparative || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Address: </span><span className="whitespace-pre-wrap">{p1.vendorAddr1 || '—'}</span></div>
-              <div><span className="font-semibold text-gray-700">Pin Code: </span>{p1.vendorPinCode || '—'}</div>
-              <div><span className="font-semibold text-gray-700">State / UT: </span>{p1.vendorState || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Place of Business: </span>{p1.vendorPlaceOfBusiness || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Mobile Number: </span>{p1.vendorMobile || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Email: </span>{p1.vendorEmail || '—'}</div>
+            <div className="min-h-[210px] p-3 text-[11px] leading-5 text-gray-900">
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">Supplier’s Name:</span><span>{p1.vendorName || vendorNameFromComparative || '—'}</span></div>
+              <div className="grid min-h-[42px] grid-cols-[92px_minmax(0,1fr)] items-start gap-x-2"><span className="font-semibold text-gray-700">Address:</span><span className="whitespace-pre-wrap">{p1.vendorAddr1 || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">GSTIN:</span><span>{p1.vendorVatRegnNo || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">PAN:</span><span>{p1.vendorPan || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">Name:</span><span>{p1.vendorContactName || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">Mobile Number:</span><span>{p1.vendorMobile || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">Email:</span><span className="break-all">{p1.vendorEmail || '—'}</span></div>
             </div>
           </div>
 
           <div>
             <div className="bg-[#0D3A35] py-1.5 text-center text-[10px] font-bold tracking-widest text-white">
-              BUYER’S PLACE OF BUSINESS / BILLING ADDRESS
+              BUYER DETAILS
             </div>
-            <div className="min-h-[210px] space-y-1 p-3 text-[11px] leading-5 text-gray-900">
-              <div><span className="font-semibold text-gray-700">Name: </span>{p1.buyerCompanyName || DUMMY_COMPANY.name}</div>
-              <div><span className="font-semibold text-gray-700">Registered Office — Building No. / Flat No.: </span>{p1.buyerBuildingNo || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Road / Street: </span>{p1.buyerRoadStreet || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Village: </span>{p1.buyerVillage || '—'}</div>
-              <div><span className="font-semibold text-gray-700">District: </span>{p1.buyerDistrict || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Pin Code: </span>{p1.buyerPinCode || '—'}</div>
-              <div><span className="font-semibold text-gray-700">GST No.: </span>{p1.shipToGstNo || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Name: </span>{p1.shipToContactName || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Mobile Number: </span>{p1.shipToTel || '—'}</div>
-              <div><span className="font-semibold text-gray-700">Email: </span>{p1.shipToEmail || '—'}</div>
+            <div className="min-h-[210px] p-3 text-[11px] leading-5 text-gray-900">
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">Buyer’s Name:</span><span>{p1.buyerCompanyName || DUMMY_COMPANY.name}</span></div>
+              <div className="grid min-h-[42px] grid-cols-[92px_minmax(0,1fr)] items-start gap-x-2">
+                <span className="font-semibold text-gray-700">Address:</span>
+                <span className="whitespace-pre-wrap">
+                  {[p1.buyerBuildingNo, p1.buyerRoadStreet, p1.buyerVillage, p1.buyerDistrict, p1.buyerPinCode]
+                    .map(safe)
+                    .filter(Boolean)
+                    .join(', ') || '—'}
+                </span>
+              </div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">GSTIN:</span><span>{p1.shipToGstNo || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">PAN:</span><span>{p1.buyerPan || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">Name:</span><span>{p1.shipToContactName || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">Mobile Number:</span><span>{p1.shipToTel || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">Email:</span><span className="break-all">{p1.shipToEmail || '—'}</span></div>
             </div>
           </div>
+        </div>
+
+        {/* ── PO COVERING LETTER ── */}
+        <div className="mb-4 border border-gray-300 bg-white p-4 text-[11px] leading-[1.55] text-gray-900">
+          <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-2">
+            <span className="font-bold">Kind Attention:</span>
+            <span className="font-semibold">{p1.coverKindAttention || ''}</span>
+            <span className="font-bold">Project:</span>
+            <span className="font-semibold">{p1.coverProject || ''}</span>
+            <span className="font-bold">Sub:</span>
+            <span>{p1.coverSubject || ''}</span>
+          </div>
+          <div className="mt-4 font-bold">{p1.coverSalutation || 'Dear Sir,'}</div>
+          <div className="mt-4 whitespace-pre-wrap text-justify">{p1.coverOrderIntroduction || '—'}</div>
+          <div className="mt-4 whitespace-pre-wrap text-justify">{p1.coverCommercialReference || '—'}</div>
         </div>
 
         {/* ── ITEM TABLE ── */}
         <div className="border border-gray-300 mb-4">
           <table className="w-full text-[11px] border-collapse">
+            <colgroup>
+              <col className="w-16" />
+              <col />
+              <col className="w-20" />
+              <col className="w-16" />
+              <col className="w-24" />
+              <col className="w-28" />
+            </colgroup>
             <thead>
-              <tr className="bg-[#0D3A35] text-white">
-                <th className="px-2 py-1.5 text-center font-semibold border-r border-gray-600 w-10">#</th>
-                <th className="px-2 py-1.5 text-center font-semibold border-r border-gray-600 w-16">Material</th>
-                <th className="px-2 py-1.5 text-left font-semibold border-r border-gray-600">Description / Short Text</th>
-                <th className="px-2 py-1.5 text-center font-semibold border-r border-gray-600 w-14">UOM</th>
-                <th className="px-2 py-1.5 text-right font-semibold border-r border-gray-600 w-16">Qty</th>
-                <th className="px-2 py-1.5 text-right font-semibold w-28">Net Price / Unit</th>
+              <tr className="h-10 bg-[#0D3A35] text-white">
+                <th className="whitespace-nowrap border-r border-gray-600 px-2 py-1 text-center align-middle font-semibold">S. No.</th>
+                <th className="border-r border-gray-600 px-3 py-1 text-center align-middle font-semibold">Item Description</th>
+                <th className="border-r border-gray-600 px-2 py-1 text-center align-middle font-semibold">Qty</th>
+                <th className="border-r border-gray-600 px-2 py-1 text-center align-middle font-semibold">UOM</th>
+                <th className="whitespace-nowrap border-r border-gray-600 px-2 py-1 text-center align-middle font-semibold">Unit Rate</th>
+                <th className="px-2 py-1 text-center align-middle font-semibold">Total</th>
               </tr>
             </thead>
             <tbody>
               {(comparative.items || []).map((it: any, idx: number) => {
                 const unit = numOr0((qForVendor as any)?.unitRateByItemId?.[it.id]);
+                const quantity = numOr0(it.qty);
+                const total = quantity * unit;
+                const description = safe(it.description) || safe(it.specification);
                 return (
                   <tr key={it.id || idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                    <td className="px-2 py-1.5 text-center border-r border-t border-gray-300">{idx + 1}</td>
-                    <td className="px-2 py-1.5 border-r border-t border-gray-300" />
-                    <td className="px-2 py-1.5 border-r border-t border-gray-300">{safe(it.partName) || '—'}</td>
-                    <td className="px-2 py-1.5 text-center border-r border-t border-gray-300">{safe(it.uom) || '—'}</td>
-                    <td className="px-2 py-1.5 text-right border-r border-t border-gray-300 tabular-nums">{numOr0(it.qty) || 0}</td>
-                    <td className="px-2 py-1.5 text-right border-t border-gray-300 tabular-nums">{unit ? inr(unit) : '—'}</td>
+                    <td className="border-r border-t border-gray-300 px-2 py-2 text-center align-middle">{idx + 1}</td>
+                    <td className="border-r border-t border-gray-300 px-3 py-2 align-top">
+                      <div className="font-bold text-gray-900">{safe(it.partName) || safe(it.itemName) || '—'}</div>
+                      {description ? <div className="mt-1 whitespace-pre-line leading-4 text-gray-600">{description}</div> : null}
+                    </td>
+                    <td className="border-r border-t border-gray-300 px-2 py-2 text-center align-top tabular-nums">{quantity}</td>
+                    <td className="border-r border-t border-gray-300 px-2 py-2 text-center align-top">{safe(it.uom) || '—'}</td>
+                    <td className="border-r border-t border-gray-300 px-2 py-2 text-right align-top tabular-nums">{unit ? inr(unit) : '—'}</td>
+                    <td className="border-t border-gray-300 px-2 py-2 text-right align-top font-semibold tabular-nums">{unit ? inr(total) : '—'}</td>
                   </tr>
                 );
               })}
             </tbody>
+            <tfoot>
+              <tr className="border-t border-gray-300 bg-gray-50 font-semibold">
+                <td colSpan={5} className="border-r border-gray-300 px-3 py-1.5 text-left">Basic Order Value</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{computedTotals ? inr(computedTotals.base) : '—'}</td>
+              </tr>
+              <tr className="border-t border-gray-300 bg-gray-50 font-semibold">
+                <td colSpan={5} className="border-r border-gray-300 px-3 py-1.5 text-left">GST</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{computedTotals ? inr(computedTotals.tax) : '—'}</td>
+              </tr>
+              <tr className="border-t border-gray-300 bg-[#e7f3ef] font-black text-[#0D3A35]">
+                <td colSpan={5} className="border-r border-gray-300 px-3 py-1.5 text-left">Total Order Value</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{computedTotals ? inr(computedTotals.gross) : '—'}</td>
+              </tr>
+              <tr className="border-t border-gray-300 bg-white">
+                <td colSpan={6} className="px-3 py-2 text-center font-semibold italic text-gray-800">
+                  Amount - {amountInIndianWords(computedTotals?.gross || 0)}
+                </td>
+              </tr>
+            </tfoot>
           </table>
-          <div className="border-t border-gray-300 flex justify-end">
-            <table className="text-[11px] border-collapse w-64">
-              <tbody>
-                {[
-                  ['Base Value', computedTotals ? inr(computedTotals.base) : '—'],
-                  ['Discount', '—'],
-                  ['Net Total', computedTotals ? inr(computedTotals.base) : '—'],
-                  [p2.taxAutoCalcEnabled ? 'Tax (Auto)' : 'GST / VAT', computedTotals ? inr(computedTotals.tax) : '—'],
-                ].map(([label, value]) => (
-                  <tr key={label}>
-                    <td className="px-3 py-1 text-gray-600 border-b border-r border-gray-300 w-36">{label}</td>
-                    <td className="px-3 py-1 text-right tabular-nums border-b border-gray-300">{value}</td>
-                  </tr>
-                ))}
-                <tr className="bg-[#0D3A35] font-bold text-white">
-                  <td className="px-3 py-1.5 border-r border-gray-600">Gross Total</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{computedTotals ? inr(computedTotals.gross) : '—'}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* ── NOTES & INSTRUCTIONS ── */}
-        <div className="border border-gray-300 mb-6">
-          <div className="bg-[#0D3A35] px-3 py-1.5 text-[10px] font-bold tracking-widest text-white">
-            NOTES AND INSTRUCTIONS
-          </div>
-          <div className="p-3">
-            <textarea
-              value={p1.notes}
-              onChange={(e) => setP1Field('notes', e.target.value)}
-              className="w-full min-h-[80px] text-[11px] text-gray-900 outline-none resize-none leading-5"
-            />
-          </div>
         </div>
 
         {/* ── AUTHORISATION ── */}
@@ -2249,13 +3386,26 @@ export function MakePurchaseOrderPopup({
           </div>
           <div className="grid grid-cols-2">
             {([
-              ['Authorized Signatory', p1.approvedBy, (v: string) => setP1Field('approvedBy', v)],
-              ['Vendor Signature', p1.verifiedBy, (v: string) => setP1Field('verifiedBy', v)],
-            ] as [string, string, (v: string) => void][]).map(([label, val, setter], i) => (
+              [
+                'Authorized Signatory of Vendor',
+                p1.verifiedBy,
+                (v: string) => setP1Field('verifiedBy', v),
+                safe(p1.vendorLegalConstitution).toLowerCase() === 'individual'
+                  ? `Mr. ${p1.vendorName || vendorNameFromComparative || p1.vendorContactName || '—'}`
+                  : `For, ${p1.vendorName || vendorNameFromComparative || '—'}`,
+                false,
+              ],
+              [
+                'Authorized Signatory of Buyer',
+                p1.approvedBy,
+                (v: string) => setP1Field('approvedBy', v),
+                `For, ${p1.buyerCompanyName || DUMMY_COMPANY.name}`,
+                true,
+              ],
+            ] as [string, string, (v: string) => void, string, boolean][]).map(([label, val, setter, partyLine, isBuyer], i) => (
               <div key={label} className={`p-3 ${i === 0 ? 'border-r border-gray-300' : ''}`}>
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">{label}</div>
-                  {i === 0 ? (
+                <div className="mb-2 flex min-h-[23px] items-center justify-end">
+                  {isBuyer ? (
                     <button
                       type="button"
                       className="no-print text-[10px] font-semibold tracking-normal px-2 py-0.5 rounded border border-gray-300 text-gray-700 hover:text-gray-900 hover:border-gray-400"
@@ -2266,8 +3416,8 @@ export function MakePurchaseOrderPopup({
                   ) : null}
                 </div>
 
-                <div className="h-[72px] flex items-end justify-end gap-2 mb-2">
-                  {i === 0 && authorizedSealAttachedAt ? (
+                <div className="h-[60px] flex items-end justify-end gap-2 mb-2">
+                  {isBuyer && authorizedSealAttachedAt ? (
                     <>
                       <img src={authorizedSealUrl} alt="Seal" className="h-16 w-16 object-contain" />
                       <img
@@ -2279,82 +3429,80 @@ export function MakePurchaseOrderPopup({
                   ) : null}
                 </div>
 
+                <div className="mb-1 text-right text-[11px] font-bold text-gray-900">{partyLine}</div>
                 <div className="border-t border-gray-400 pt-1">
                   <input
                     type="text"
                     value={val}
                     onChange={(e) => setter(e.target.value)}
-                    placeholder="Name / Designation"
-                    className="w-full text-[11px] outline-none border-none bg-transparent text-gray-900 placeholder:text-gray-400"
+                    placeholder="Authorized Signatory"
+                    className="w-full border-none bg-transparent text-right text-[11px] text-gray-900 outline-none placeholder:text-right placeholder:text-gray-400"
                   />
                 </div>
               </div>
             ))}
           </div>
         </div>
-
+        {renderPoReportFooter(1, 'Purchase Order')}
       </div>
-    ) : p === 2 ? (
-      <div className="max-w-4xl mx-auto">
-        {/* ── LETTERHEAD (same as Page 1) ── */}
-        <div className="mb-0 border-b-[3px] border-[#0D3A35] pb-3">
-          <div className="flex items-start gap-3">
-            <img
-              src={logoUrl}
-              alt="3F Logo"
-              width={64}
-              height={64}
-              className="shrink-0"
-              style={{
-                width: 64,
-                height: 64,
-                objectFit: 'contain',
-                border: '1px solid #d1d5db',
-                borderRadius: 6,
-                padding: 4,
-                backgroundColor: '#fff',
-              }}
-            />
-
-            <div className="flex-1">
-              <div className="text-[17px] font-black tracking-wide text-gray-900 uppercase leading-tight">{DUMMY_COMPANY.name}</div>
-              <div className="mt-1 text-[11px] text-gray-600 leading-4">
-                <div>{DUMMY_COMPANY.line1}</div>
-                <div>{DUMMY_COMPANY.line2}</div>
-                <div className="font-semibold text-gray-700 mt-0.5">{DUMMY_COMPANY.gst}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ── PO TITLE BAR (same as Page 1) ── */}
-        <div className="mb-4 bg-[#0D3A35] py-2.5 text-center text-[13px] font-extrabold tracking-[0.22em] text-white">PURCHASE ORDER</div>
+    ) : p >= 2 && p < customAnnexureStartPage ? (
+      renderCommercialTermsPage(p)
+    ) : p === -1 ? (
+      <div className="po-report-sheet po-terms-report-sheet po-draft-font-11 mx-auto min-h-[1123px] w-[794px] max-w-full overflow-visible border border-slate-300 bg-white p-5 font-sans text-[11px] shadow-sm">
+        {renderPoSectionHeader(`Purchase Order${amendmentLabel ? ` — ${amendmentLabel}` : ''} — Terms & Conditions`, poReferenceLabel)}
 
         <div className="border border-gray-300">
-          <div className="bg-[#0D3A35] px-3 py-1.5 text-[10px] font-bold tracking-widest text-white">OTHER TERMS &amp; CONDITIONS</div>
-          <div className="px-3 py-2 text-[11px] text-gray-700 border-b border-gray-300">
-            <span className="font-semibold text-gray-900">Other Terms &amp; Conditions</span> governing this order shall be as follows:
-          </div>
-
-          <table className="w-full text-[11px] border-collapse">
+          <style>{`
+            .po-terms-table textarea {
+              box-sizing: border-box;
+              field-sizing: content;
+              height: auto;
+              width: 100%;
+              max-width: 100%;
+              min-height: 24px !important;
+              overflow: hidden;
+              white-space: pre-wrap;
+            }
+            .po-terms-table tbody td {
+              vertical-align: top;
+            }
+            .po-terms-table tbody td:first-child,
+            .po-terms-table tbody td:nth-child(2) {
+              vertical-align: middle;
+            }
+          `}</style>
+          <table className="po-terms-table w-full table-auto border-collapse text-[11px]">
+            <colgroup>
+              <col className="w-[8%]" />
+              <col className="w-[24%]" />
+              <col className="w-[68%]" />
+            </colgroup>
+            <thead>
+              <tr className="bg-[#0D3A35] text-white">
+                <th className="border-r border-[#315d58] px-3 py-2 text-center font-bold">S. No.</th>
+                <th className="border-r border-[#315d58] px-3 py-2 text-center font-bold">Particulars</th>
+                <th className="px-3 py-2 text-center font-bold">Details</th>
+              </tr>
+            </thead>
             <tbody>
               <tr className="bg-white">
-                <td className="px-3 py-1.5 text-center border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600 w-10">1)</td>
-                <td className="px-3 py-1.5 border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600 w-44">Reference</td>
-                <td className="px-3 py-1.5 border-t border-gray-300">
-                  <div className="text-[11px] mb-2">Supplier’s final quotation No-</div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <td className="border-r border-t border-gray-300 bg-gray-100 px-3 py-2.5 text-center font-semibold text-gray-600">1)</td>
+                <td className="border-r border-t border-gray-300 bg-gray-100 px-3 py-2.5 font-semibold text-gray-600">Reference</td>
+                <td className="border-t border-gray-300 px-3 py-2.5">
+                  <div className="grid grid-cols-[78px_minmax(0,1fr)_32px_132px] items-center gap-2">
+                    <span className="font-medium text-gray-600">Quotation No.</span>
                     <Input
                       value={p2.supplierFinalQuotationNo}
                       onChange={(e) => setP2Field('supplierFinalQuotationNo', e.target.value)}
-                      className="h-7 text-[11px] rounded-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 px-0"
+                      className="h-8 rounded-md border border-gray-300 bg-white px-2 text-[11px] shadow-none focus-visible:ring-1 focus-visible:ring-[#0D3A35] focus-visible:ring-offset-0 md:text-[11px]"
                       placeholder="e.g. SABCO/20225-26/37"
                     />
+                    <span className="font-medium text-gray-600">Date</span>
                     <Input
                       type="date"
                       value={p2.supplierFinalQuotationDate}
                       onChange={(e) => setP2Field('supplierFinalQuotationDate', e.target.value)}
-                      className="h-7 text-[11px] rounded-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 px-0"
+                      className="h-8 rounded-md border border-gray-300 bg-white px-2 text-[11px] shadow-none focus-visible:ring-1 focus-visible:ring-[#0D3A35] focus-visible:ring-offset-0 md:text-[11px]"
                     />
                   </div>
                 </td>
@@ -2362,7 +3510,7 @@ export function MakePurchaseOrderPopup({
 
               <tr className="bg-white">
                 <td className="px-3 py-1.5 text-center border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600">2)</td>
-                <td className="px-3 py-1.5 border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600">Scope Of Work</td>
+                <td className="px-3 py-1.5 border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600">Scope of Work</td>
                 <td className="px-3 py-1.5 border-t border-gray-300">
                   <textarea
                     value={p2.scopeOfWork}
@@ -2520,7 +3668,7 @@ export function MakePurchaseOrderPopup({
 
               <tr className="bg-white">
                 <td className="px-3 py-1.5 text-center border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600">10)</td>
-                <td className="px-3 py-1.5 border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600">Warranty</td>
+                <td className="px-3 py-1.5 border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600">Warranty / Guarantee</td>
                 <td className="px-3 py-1.5 border-t border-gray-300">
                   <textarea
                     value={p2.warranty}
@@ -2582,31 +3730,41 @@ export function MakePurchaseOrderPopup({
                   />
                 </td>
               </tr>
+              {(Array.isArray(p1.customFields) ? p1.customFields : [])
+                .filter((field) => safe(field.label) || safe(field.value))
+                .map((field, index) => (
+                  <tr key={field.id} className="bg-white">
+                    <td className="border-r border-t border-gray-300 bg-gray-100 px-3 py-1.5 text-center font-semibold text-gray-600">{15 + index})</td>
+                    <td className="border-r border-t border-gray-300 bg-gray-100 px-3 py-1.5 font-semibold text-gray-600">{safe(field.label) || 'Additional Term'}</td>
+                    <td className="whitespace-pre-wrap border-t border-gray-300 px-3 py-1.5 text-gray-900">{safe(field.value) || '—'}</td>
+                  </tr>
+                ))}
             </tbody>
           </table>
         </div>
+        {renderPoReportFooter(2, 'Terms & Conditions')}
       </div>
-    ) : p === 3 ? (
-      <div
-        className="annexure-2-custom-sheet mx-auto min-h-[1123px] w-[794px] max-w-full bg-white text-gray-950"
-        style={{ padding: annexurePagePadding, fontFamily: annexureFontName }}
-      >
-        <style>{ANNEXURE_RICH_TEXT_CSS}</style>
-        <div className="mb-3 flex items-center justify-between border-b-[3px] border-[#0D3A35] pb-2">
-          <div>
-            <div className="text-[15px] font-black uppercase tracking-wide">{DUMMY_COMPANY.name}</div>
-            <div className="mt-0.5 text-[8px] text-slate-500">{DUMMY_COMPANY.line1} · {DUMMY_COMPANY.line2}</div>
-          </div>
-          <img src={logoUrl} alt="3F Logo" className="h-10 w-10 object-contain" />
+    ) : p < legalReportPage ? (() => {
+      const reportPage = annexureReportPages[Math.max(0, p - customAnnexureStartPage)];
+      const annexure = reportPage?.annexure || defaultPage3();
+      const annexureNumber = reportPage?.annexureNumber || 1;
+      const annexureTitle = withAnnexureNumber(annexure.annexureTitle, `ANNEXURE - ${annexureNumber}`, annexureNumber);
+      const annexureHtml = reportPage?.contentHtml || sanitizeAnnexureHtml(annexure.contentHtml || defaultPage3().contentHtml);
+      const continued = Boolean(reportPage?.pageIndex);
+      return (
+        <div className="po-report-sheet po-draft-font-11 annexure-2-custom-sheet mx-auto flex h-[1123px] min-h-[1123px] max-h-[1123px] w-[794px] max-w-full flex-col overflow-hidden border border-slate-300 bg-white p-5 font-sans text-[11px] text-gray-950 shadow-sm">
+          <style>{ANNEXURE_RICH_TEXT_CSS}</style>
+          {renderPoSectionHeader(
+            continued ? `${annexureTitle} (Continued)` : annexureTitle,
+            poReferenceLabel
+          )}
+          <div className="annexure-rich-content min-h-0 flex-1 overflow-hidden text-[11px] leading-[1.5]" dangerouslySetInnerHTML={{ __html: annexureHtml }} />
+          <div className="mt-auto">{renderPoReportFooter(p, `Annexure - ${annexureNumber}${continued ? ' — Continued' : ''}`)}</div>
         </div>
-        <h2 className="mb-4 bg-[#0D3A35] px-3 py-2 text-center text-[13px] font-extrabold uppercase tracking-[0.18em] text-white">{p3.annexureTitle || 'ANNEXURE - 2'}</h2>
-        <div className="annexure-rich-content text-[11px] leading-[1.5]" dangerouslySetInnerHTML={{ __html: effectiveAnnexure2Html }} />
-      </div>
-    ) : (
-      <div className="annexure-3-sheet mx-auto max-w-4xl bg-white px-3 py-2 font-serif text-gray-950">
-        <h2 className="mb-2 border-b border-gray-400 pb-1.5 text-center text-[12px] font-bold uppercase tracking-[0.03em]">
-          {p4.annexureTitle}
-        </h2>
+      );
+    })() : (
+      <div className="po-report-sheet annexure-3-sheet mx-auto min-h-[1123px] w-[794px] max-w-full border border-slate-300 bg-white p-5 font-sans text-gray-950 shadow-sm">
+        <div>{renderPoSectionHeader(withAnnexureNumber(p4.annexureTitle, defaultPage4().annexureTitle, legalAnnexureNumber), poReferenceLabel, true)}</div>
         <div
           className="annexure-3-columns text-justify text-[8px] leading-[1.12] [hyphens:auto]"
           style={{ columnCount: 3, columnGap: '12px', columnRule: '1px solid #cbd5e1' }}
@@ -2623,6 +3781,7 @@ export function MakePurchaseOrderPopup({
             );
           })}
         </div>
+        <div>{renderPoReportFooter(legalReportPage, `Annexure - ${legalAnnexureNumber}`)}</div>
       </div>
     );
 
@@ -2641,10 +3800,9 @@ export function MakePurchaseOrderPopup({
         ) : null}
 
         <div className="pointer-events-none">
-          <div className="fc-po-preview-page">{renderPageContent(1)}</div>
-          <div className="fc-po-preview-page">{renderPageContent(2)}</div>
-          <div className="fc-po-preview-page">{renderPageContent(3)}</div>
-          <div className="fc-po-preview-page">{renderPageContent(4)}</div>
+          {Array.from({ length: totalReportPages }, (_, index) => index + 1).map((pageNumber) => (
+            <div key={pageNumber} className="fc-po-preview-page">{renderPageContent(pageNumber)}</div>
+          ))}
         </div>
       </div>
     );
@@ -2657,7 +3815,7 @@ export function MakePurchaseOrderPopup({
       <div className="flex max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-[#d7e4e0] bg-white shadow-2xl">
         <div className="flex shrink-0 items-center justify-between border-b border-[#1b514a] bg-[#0D3A35] px-6 py-4 text-white">
           <div>
-            <div className="text-lg font-bold">Create Purchase Order</div>
+            <div className="text-lg font-bold">{reviewOnly ? (documentStatus === 'approved' ? 'Approved Purchase Order' : 'Purchase Order Review') : revisionMode ? 'Revise Purchase Order' : 'Create Purchase Order'}</div>
             <div className="mt-0.5 text-xs text-white/65">{prNumber || 'PR not recorded'} · {vendorNameFromComparative || resolvedVendorId}</div>
           </div>
           <div className="flex items-center gap-2">
@@ -2677,12 +3835,12 @@ export function MakePurchaseOrderPopup({
           </div>
         </div>
 
-        <div className="shrink-0 border-b border-slate-200 bg-white px-6 py-3">
+        {!reviewOnly && <div className="shrink-0 border-b border-slate-200 bg-white px-6 py-3">
           <div className="mx-auto flex max-w-xl items-center justify-center">
             {[
               { key: 'details', label: '1. Enter PO Details' },
               { key: 'draft', label: '2. Review Draft PO' },
-              { key: 'create', label: '3. Create PO' },
+              { key: 'create', label: revisionMode ? '3. Save Revision' : '3. Create PO' },
             ].map((step, index) => {
               const active = step.key === workflowStep;
               const completed = workflowStep === 'draft' && step.key === 'details';
@@ -2696,7 +3854,7 @@ export function MakePurchaseOrderPopup({
               );
             })}
           </div>
-        </div>
+        </div>}
 
         <div className={`min-h-0 flex-1 overflow-y-auto ${workflowStep === 'details' ? 'bg-slate-50 px-6 py-6' : 'bg-slate-100 px-8 py-8 text-black'}`} ref={printRef}>
           {workflowStep === 'details' ? detailsForm : (
@@ -2706,23 +3864,28 @@ export function MakePurchaseOrderPopup({
                 .fc-po-draft-preview .print-only.hidden { display: block !important; }
                 .fc-po-draft-preview input, .fc-po-draft-preview textarea { border: 0 !important; box-shadow: none !important; pointer-events: none !important; }
               `}</style>
-              <div className="mb-3 flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5">
-                <div><p className="text-sm font-bold text-amber-800">Draft Purchase Order</p><p className="text-xs text-amber-700">Review all details before creating the final PO.</p></div>
-                <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-black uppercase tracking-widest text-amber-800">Draft</span>
+              <div className={`mb-3 flex items-center justify-between rounded-xl border px-4 py-2.5 ${documentStatus === 'approved' ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+                <div><p className={`text-sm font-bold ${documentStatus === 'approved' ? 'text-emerald-800' : 'text-amber-800'}`}>{documentStatus === 'approved' ? 'Approved Purchase Order' : 'Draft Purchase Order'}{amendmentLabel ? ` · ${amendmentLabel}` : ''}</p><p className={`text-xs ${documentStatus === 'approved' ? 'text-emerald-700' : 'text-amber-700'}`}>{documentStatus === 'approved' ? `PO Number: ${effectivePoNo || 'Not recorded'}` : amendmentLabel ? `Review ${amendmentLabel} before saving and sending it for approval.` : 'Review all details before creating the final PO.'}</p></div>
+                <span className={`rounded-full px-3 py-1 text-xs font-black uppercase tracking-widest ${documentStatus === 'approved' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{documentStatus === 'approved' ? 'Approved' : 'Draft'}</span>
               </div>
               <div className="space-y-6">
-                {([1, 2, 3, 4] as const).map((pageNumber) => (
+                {Array.from({ length: totalReportPages }, (_, index) => index + 1).map((pageNumber) => (
                   <section
                     key={pageNumber}
                     data-po-page="true"
                     data-po-page-number={pageNumber}
-                    className={`pointer-events-none bg-white ${pageNumber === 4 ? 'rounded-xl border border-slate-200 p-3 shadow-sm' : 'rounded-xl border border-slate-200 p-7 shadow-sm'}`}
+                    className="pointer-events-none bg-transparent"
                   >
                     <div className="no-print mb-4 flex items-center justify-between border-b border-slate-200 pb-2 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400">
-                      <span>{pageNumber === 1 ? 'Purchase Order' : pageNumber === 2 ? 'Terms & Conditions' : pageNumber === 3 ? 'Annexure - 2' : 'Annexure - 3'}</span>
-                      <span>Page {pageNumber} of 4</span>
+                      <span>{reportPageLabel(pageNumber)}</span>
+                      <span>Page {pageNumber} of {totalReportPages}</span>
                     </div>
-                    {renderPageContent(pageNumber)}
+                    <div
+                      data-po-page-frame="true"
+                      className="mx-auto h-[1123px] w-[794px] max-w-full overflow-hidden bg-white"
+                    >
+                      {renderPageContent(pageNumber)}
+                    </div>
                   </section>
                 ))}
               </div>
@@ -2743,10 +3906,10 @@ export function MakePurchaseOrderPopup({
 
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={onClose} disabled={printing || savingPo}>
-              Cancel
+              {reviewOnly ? 'Close' : 'Cancel'}
             </Button>
 
-            {workflowStep === 'details' ? (
+            {!reviewOnly && (workflowStep === 'details' ? (
               <>
                 <Button type="button" variant="outline" onClick={() => void handleSaveDraft()} disabled={!resolvedVendorId || draftStatus === 'saving'} className="gap-1.5">
                   <FileText className="h-4 w-4" />
@@ -2762,10 +3925,10 @@ export function MakePurchaseOrderPopup({
                   <ChevronLeft className="h-4 w-4" /> Edit Details
                 </Button>
                 <Button onClick={() => void handleConfirm()} disabled={printing || savingPo || !resolvedVendorId} className="bg-[#0D3A35] px-6 text-white hover:bg-[#092e2a]">
-                  {savingPo ? 'Creating PO…' : 'Create PO'}
+                  {savingPo ? (revisionMode ? 'Saving Revision…' : 'Creating PO…') : (revisionMode ? 'Save Revision' : 'Create PO')}
                 </Button>
               </>
-            )}
+            ))}
           </div>
         </div>
       </div>

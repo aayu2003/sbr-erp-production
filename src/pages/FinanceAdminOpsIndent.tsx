@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { BookUser, ChevronDown, Eye, FileText, Loader2, Paperclip, Plus, Search, Send, Settings, Trash2, UserCircle } from 'lucide-react';
+import { BookUser, CheckCircle2, ChevronDown, Eye, FileText, Loader2, MessageCircleQuestion, Paperclip, Plus, Search, Send, Settings, ShoppingCart, Trash2, UserCircle, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Accordion,
   AccordionContent,
@@ -33,6 +34,37 @@ import {
   type SignatureDiary,
 } from '@/lib/signatureDiary';
 import { PRPreview } from '@/components/purchase/PRPreview';
+import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
+import { type ComparativeModel } from '@/components/purchase/ComparativeStatementPreview';
+import {
+  addPoApprovalQuestion,
+  markPoForwardedToPurchaseFlow,
+  PO_APPROVALS_CHANGED_EVENT,
+  readPoApprovals,
+  reviewPoApproval,
+  type PoApprovalRecord,
+} from '@/lib/poApprovalStore';
+
+const normalizePurchaseFlowDocuments = (value: unknown): string[] => {
+  const source = Array.isArray(value) ? value : [];
+  const labels: Record<string, string> = {
+    'po acceptance': 'po acceptance',
+    'proforma invoice': 'proforma invoice',
+    'delivery challan': 'delivery challan',
+    grn: 'grn',
+    'tax invoice': 'invoice',
+  };
+  const documents = ['po acceptance', ...source.map((entry) => labels[String(entry ?? '').trim().toLowerCase()] || String(entry ?? '').trim().toLowerCase())]
+    .filter(Boolean);
+  return [...new Set(documents)];
+};
+
+const buildApprovedPoFlowStage = (documents: string[]) => Object.fromEntries(
+  documents.map((document, index) => [
+    `step_${index + 1}`,
+    { document, status: 'empty', doc_link: '' },
+  ]),
+);
 
 type NfaApiItemRow = {
   item_name?: string;
@@ -571,7 +603,12 @@ const AdminOpsIndent = () => {
   const [nfas, setNfas] = useState<NfaApiRow[]>([]);
   const [nfaApprovalsMap, setNfaApprovalsMap] = useState<Record<string, boolean>>({});
 
-  const [activeSection, setActiveSection] = useState<'indents' | 'nfa' | 'mrf'>('nfa');
+  const [activeSection, setActiveSection] = useState<'indents' | 'nfa' | 'mrf' | 'po-approvals'>('nfa');
+  const [poApprovals, setPoApprovals] = useState<PoApprovalRecord[]>(() => readPoApprovals());
+  const [previewPoApproval, setPreviewPoApproval] = useState<PoApprovalRecord | null>(null);
+  const [questionPoApproval, setQuestionPoApproval] = useState<PoApprovalRecord | null>(null);
+  const [poQuestion, setPoQuestion] = useState('');
+  const [forwardingPoNumber, setForwardingPoNumber] = useState<string | null>(null);
 
   // MRF state
   const [mrfRecords, setMrfRecords] = useState<any[]>([]);
@@ -582,6 +619,23 @@ const AdminOpsIndent = () => {
   useEffect(() => {
     setAttachments(readSignatureDiary());
     setDirectorsAttachedMap(readDirectorsAttachedMap());
+  }, []);
+
+  useEffect(() => {
+    const refreshPoApprovals = () => {
+      const approvals = readPoApprovals();
+      setPoApprovals(approvals);
+      setQuestionPoApproval((current) => current
+        ? approvals.find((record) => record.poNumber === current.poNumber) || null
+        : null);
+    };
+    refreshPoApprovals();
+    window.addEventListener(PO_APPROVALS_CHANGED_EVENT, refreshPoApprovals);
+    window.addEventListener('storage', refreshPoApprovals);
+    return () => {
+      window.removeEventListener(PO_APPROVALS_CHANGED_EVENT, refreshPoApprovals);
+      window.removeEventListener('storage', refreshPoApprovals);
+    };
   }, []);
 
   // Load NFA list from backend
@@ -853,6 +907,127 @@ const AdminOpsIndent = () => {
     });
   }, [nfas, search]);
 
+  const filteredPoApprovals = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return poApprovals
+      .filter((record) => record.status !== 'draft')
+      .filter((record) => !q || [
+        record.poNumber,
+        record.prNumber,
+        record.comparisonId,
+        record.vendorId,
+        record.vendorName,
+        ...record.itemDetails.flatMap((item) => [item.name, item.uom]),
+      ].some((value) => String(value ?? '').toLowerCase().includes(q)))
+      .sort((left, right) => String(right.sentAt ?? right.createdAt).localeCompare(String(left.sentAt ?? left.createdAt)));
+  }, [poApprovals, search]);
+
+  const forwardApprovedPoToPurchaseFlow = async (record: PoApprovalRecord) => {
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) {
+      toast.error('Missing API base URL');
+      return false;
+    }
+
+    setForwardingPoNumber(record.poNumber);
+    try {
+      // Avoid creating a duplicate when an older approval was already forwarded.
+      const flowsUrl = `${baseUrl}/purchase_flow/get_purchase_flows`;
+      let flowsResponse = await fetch(flowsUrl, { method: 'GET', headers: { Accept: 'application/json' } });
+      if (flowsResponse.status === 405) {
+        flowsResponse = await fetch(flowsUrl, { method: 'POST', headers: { Accept: 'application/json' } });
+      }
+      if (flowsResponse.ok) {
+        const flowData: any = await flowsResponse.json().catch(() => null);
+        const existingFlows = Array.isArray(flowData?.purchase_flows) ? flowData.purchase_flows : [];
+        if (existingFlows.some((flow: any) => String(flow?.order_number ?? '').trim() === record.poNumber)) {
+          markPoForwardedToPurchaseFlow(record.poNumber);
+          setPoApprovals(readPoApprovals());
+          toast.success(`PO ${record.poNumber} is already available in Purchase Flow`);
+          return true;
+        }
+      }
+
+      // The saved PO already carries the user's selected Purchase Flow documents.
+      const ordersResponse = await fetch(`${baseUrl}/purchase_flow/get_purchase_orders`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pr_number: record.prNumber }),
+      });
+      const orderData: any = ordersResponse.ok ? await ordersResponse.json().catch(() => null) : null;
+      const orders: any[] = Array.isArray(orderData?.purchase_orders)
+        ? orderData.purchase_orders
+        : Array.isArray(orderData?.items)
+          ? orderData.items
+          : Array.isArray(orderData?.orders)
+            ? orderData.orders
+            : Array.isArray(orderData)
+              ? orderData
+              : [];
+      const matchingOrder = orders.find((order) => {
+        const quote = order?.purchase_quote && typeof order.purchase_quote === 'object' ? order.purchase_quote : {};
+        return [order?.order_number, quote?.order_number, quote?.poNo, quote?.po_no]
+          .some((candidate) => String(candidate ?? '').trim() === record.poNumber);
+      });
+      const purchaseQuote = matchingOrder?.purchase_quote && typeof matchingOrder.purchase_quote === 'object'
+        ? matchingOrder.purchase_quote
+        : {};
+      const documents = normalizePurchaseFlowDocuments(
+        purchaseQuote.requiredPurchaseDocuments ?? purchaseQuote.required_purchase_documents,
+      );
+
+      const response = await fetch(`${baseUrl}/purchase_flow/forward_purchase_order`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          order_number: record.poNumber,
+          pr_number: record.prNumber,
+          comparison_id: record.comparisonId,
+          purchase_flow_stage: buildApprovedPoFlowStage(documents),
+        }),
+      });
+      const result: any = await response.json().catch(() => null);
+      const success = result?.success === true || String(result?.success ?? '').toLowerCase() === 'true';
+      if (!response.ok || !success) {
+        throw new Error(result?.message || result?.error || `Forwarding failed (HTTP ${response.status})`);
+      }
+
+      markPoForwardedToPurchaseFlow(record.poNumber);
+      setPoApprovals(readPoApprovals());
+      toast.success(`PO ${record.poNumber} forwarded to Purchase Flow`);
+      return true;
+    } catch (error: any) {
+      toast.error(error?.message || `Failed to forward PO ${record.poNumber} to Purchase Flow`);
+      return false;
+    } finally {
+      setForwardingPoNumber(null);
+    }
+  };
+
+  const previewPoComparative = useMemo<ComparativeModel | null>(() => {
+    if (!previewPoApproval) return null;
+    const vendorId = previewPoApproval.vendorId || 'vendor-not-recorded';
+    const items = previewPoApproval.itemDetails.map((item, index) => ({
+      id: `approval-item-${index + 1}`,
+      srNo: index + 1,
+      partName: item.name,
+      uom: item.uom,
+      qty: item.quantity,
+      gstPercent: 0,
+    }));
+    return {
+      indentId: previewPoApproval.prNumber,
+      comparisonId: previewPoApproval.comparisonId,
+      vendors: [{ id: vendorId, name: previewPoApproval.vendorName || vendorId, directoryVendorId: vendorId }],
+      items,
+      quotes: [{ vendorId, unitRateByItemId: Object.fromEntries(items.map((item) => [item.id, 0])) }],
+      hoSelectedVendorId: vendorId,
+      tcApprovedVendorId: vendorId,
+      indent_type: 'PR',
+      isDraft: false,
+    };
+  }, [previewPoApproval]);
+
   const markAttached = (id: string) => {
     setAttachedMap((prev) => ({ ...prev, [id]: true }));
     toast.success('Attachment added');
@@ -1116,6 +1291,154 @@ const AdminOpsIndent = () => {
             </tbody>
           </table>
         </div>
+        )}
+      </section>
+    );
+  } else if (activeSection === 'po-approvals') {
+    sectionContent = (
+      <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
+          <div>
+            <h2 className="flex items-center gap-2 text-lg font-bold text-slate-950">
+              <ShoppingCart className="h-5 w-5 text-[#0D3A35]" /> Purchase Order Approval Register
+            </h2>
+            <p className="mt-1 text-sm font-medium text-slate-500">Purchase orders sent to Admin Ops Finance for review</p>
+          </div>
+          <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-bold text-amber-700">
+            {poApprovals.filter((record) => record.status === 'pending').length} Pending
+          </span>
+        </div>
+
+        {filteredPoApprovals.length === 0 ? (
+          <div className="flex min-h-[300px] flex-col items-center justify-center px-6 py-12 text-center">
+            <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400"><ShoppingCart className="h-7 w-7" /></span>
+            <h3 className="mt-4 text-base font-bold text-slate-900">No purchase orders awaiting review</h3>
+            <p className="mt-1 text-sm text-slate-500">POs appear here after “Send for Approval” is selected during PO creation.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1180px] table-fixed border-collapse text-[13px] leading-5">
+              <thead className="bg-[#0D3A35] text-white">
+                <tr>
+                  {[
+                    ['PO Number', 'w-[14%]'], ['PR Number', 'w-[13%]'], ['Vendor', 'w-[18%]'],
+                    ['Item Details', 'w-[21%]'], ['Sent On', 'w-[11%]'], ['Status', 'w-[8%]'], ['Action', 'w-[16%]'],
+                  ].map(([label, width]) => (
+                    <th key={label} className={`${width} px-3 py-4 text-center text-[12px] font-bold uppercase tracking-[0.07em] text-white/90`}>{label}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredPoApprovals.map((record) => (
+                  <tr key={record.poNumber} className="transition-colors hover:bg-[#0D3A35]/[0.025]">
+                    <td className="px-3 py-4 font-bold text-[#0D3A35]">{record.poNumber}</td>
+                    <td className="px-3 py-4 text-center font-semibold text-slate-700">{record.prNumber || '—'}</td>
+                    <td className="px-3 py-4">
+                      <p className="line-clamp-2 font-semibold text-slate-800">{record.vendorName || 'Not Recorded'}</p>
+                      <p className="mt-1 text-[11px] font-medium text-slate-500">{record.vendorId || 'Vendor ID not recorded'}</p>
+                    </td>
+                    <td className="px-3 py-4">
+                      <div className="space-y-1">
+                        {record.itemDetails.slice(0, 3).map((item, index) => (
+                          <p key={`${record.poNumber}-${index}`} className="line-clamp-1 font-medium text-slate-700">
+                            {item.name} · {item.quantity.toLocaleString('en-IN')} {item.uom || ''}
+                          </p>
+                        ))}
+                        {record.itemDetails.length > 3 && <p className="text-[11px] font-bold text-slate-500">+{record.itemDetails.length - 3} more</p>}
+                      </div>
+                    </td>
+                    <td className="px-3 py-4 text-center font-semibold text-slate-700">{formatDateDDMMYYYY(record.sentAt || record.createdAt)}</td>
+                    <td className="px-3 py-4 text-center">
+                      <span className={`inline-flex rounded-full border px-2.5 py-1 text-[12px] font-bold capitalize ${
+                        record.status === 'approved'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                          : record.status === 'rejected'
+                            ? 'border-red-200 bg-red-50 text-red-700'
+                            : 'border-amber-200 bg-amber-50 text-amber-700'
+                      }`}>{record.status}</span>
+                    </td>
+                    <td className="px-3 py-4">
+                      <div className="flex items-center justify-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="h-9 w-9 rounded-xl border-slate-200 text-[#0D3A35] hover:bg-[#0D3A35]/5"
+                          title="View Draft PO"
+                          onClick={() => setPreviewPoApproval(record)}
+                        >
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="relative h-9 w-9 rounded-xl border-slate-200 text-[#0D3A35] hover:bg-[#0D3A35]/5"
+                          title="Raise Question"
+                          onClick={() => { setQuestionPoApproval(record); setPoQuestion(''); }}
+                        >
+                          <MessageCircleQuestion className="h-4 w-4" />
+                          {(record.questions?.length || 0) > 0 && <span className="absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-black text-white">{record.questions?.length}</span>}
+                        </Button>
+                        {record.status === 'pending' ? (
+                          <>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            className="h-9 w-9 rounded-xl border-red-200 text-red-600 hover:bg-red-50"
+                            title="Reject PO"
+                            onClick={() => {
+                              const reviewer = readUserProfile().name?.trim() || 'Admin Ops Finance';
+                              reviewPoApproval(record.poNumber, 'rejected', reviewer);
+                              setPoApprovals(readPoApprovals());
+                              toast.success(`PO ${record.poNumber} rejected`);
+                            }}
+                          >
+                            <XCircle className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            size="icon"
+                            className="h-9 w-9 rounded-xl bg-[#0D3A35] text-white hover:bg-[#092e2a]"
+                            title="Approve PO"
+                            disabled={forwardingPoNumber === record.poNumber}
+                            onClick={async () => {
+                              const reviewer = readUserProfile().name?.trim() || 'Admin Ops Finance';
+                              reviewPoApproval(record.poNumber, 'approved', reviewer);
+                              setPoApprovals(readPoApprovals());
+                              toast.success(`PO ${record.poNumber} approved`);
+                              await forwardApprovedPoToPurchaseFlow({ ...record, status: 'approved' });
+                            }}
+                          >
+                            {forwardingPoNumber === record.poNumber ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                          </Button>
+                          </>
+                        ) : record.status === 'approved' && !record.purchaseFlowForwardedAt ? (
+                          <Button
+                            type="button"
+                            size="icon"
+                            className="h-9 w-9 rounded-xl bg-[#0D3A35] text-white hover:bg-[#092e2a]"
+                            title="Forward to Purchase Flow"
+                            disabled={forwardingPoNumber === record.poNumber}
+                            onClick={() => void forwardApprovedPoToPurchaseFlow(record)}
+                          >
+                            {forwardingPoNumber === record.poNumber ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                          </Button>
+                        ) : null}
+                      </div>
+                      {record.status !== 'pending' && (
+                        <div className="mt-2 text-center text-[11px] font-medium text-slate-500">
+                          <p>{record.reviewedBy || 'Admin Ops Finance'} · {record.reviewedAt ? formatDateDDMMYYYY(record.reviewedAt) : ''}</p>
+                          {record.purchaseFlowForwardedAt ? <p className="mt-0.5 font-bold text-emerald-700">Forwarded to Purchase Flow</p> : null}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
     );
@@ -1387,6 +1710,13 @@ const AdminOpsIndent = () => {
           </button>
           <button
             type="button"
+            className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'po-approvals' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
+            onClick={() => setActiveSection('po-approvals')}
+          >
+            PO Approvals ({poApprovals.filter((record) => record.status === 'pending').length})
+          </button>
+          <button
+            type="button"
             className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'mrf' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('mrf')}
           >
@@ -1395,11 +1725,83 @@ const AdminOpsIndent = () => {
         </div>
         <div className="relative w-full lg:w-[390px]">
           <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-          <Input placeholder="Search PR no., project, item or requester" className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7] pl-10 shadow-none focus-visible:ring-[#0D3A35]/20" value={search} onChange={(event) => setSearch(event.target.value)} />
+          <Input placeholder={activeSection === 'po-approvals' ? 'Search PO, PR, vendor or item' : 'Search PR no., project, item or requester'} className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7] pl-10 shadow-none focus-visible:ring-[#0D3A35]/20" value={search} onChange={(event) => setSearch(event.target.value)} />
         </div>
       </section>
 
       {sectionContent}
+
+      <MakePurchaseOrderPopup
+        open={Boolean(previewPoApproval)}
+        comparative={previewPoComparative}
+        vendorId={previewPoApproval?.vendorId}
+        onClose={() => setPreviewPoApproval(null)}
+        reviewOnly
+      />
+
+      <Dialog open={Boolean(questionPoApproval)} onOpenChange={(open) => { if (!open) { setQuestionPoApproval(null); setPoQuestion(''); } }}>
+        <DialogContent className="max-w-xl overflow-hidden rounded-2xl border-0 p-0 shadow-2xl">
+          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left text-white">
+            <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><MessageCircleQuestion className="h-5 w-5" /></span>
+              Raise Question
+            </DialogTitle>
+            <p className="pl-[52px] text-sm text-white/70">PO {questionPoApproval?.poNumber || '—'} · Admin Ops Finance review</p>
+          </DialogHeader>
+          <div className="space-y-5 px-6 py-5">
+            {(questionPoApproval?.questions?.length || 0) > 0 && (
+              <div>
+                <p className="mb-2 text-xs font-bold uppercase tracking-[0.1em] text-slate-500">Questions Raised</p>
+                <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
+                  {questionPoApproval?.questions?.map((entry) => (
+                    <div key={entry.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <p className="text-sm font-semibold text-slate-800">{entry.question}</p>
+                      <p className="mt-1 text-[11px] font-medium text-slate-500">{entry.askedBy} · {formatDateDDMMYYYY(entry.askedAt)}</p>
+                      {entry.reply && (
+                        <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                          <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-emerald-700">Reply from PO Creator</p>
+                          <p className="mt-1 text-sm font-medium text-slate-800">{entry.reply}</p>
+                          <p className="mt-1 text-[11px] font-medium text-slate-500">{entry.repliedBy} · {entry.repliedAt ? formatDateDDMMYYYY(entry.repliedAt) : ''}</p>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div>
+              <label htmlFor="po-approval-question" className="mb-2 block text-sm font-bold text-slate-800">Question / Clarification Required</label>
+              <Textarea
+                id="po-approval-question"
+                value={poQuestion}
+                onChange={(event) => setPoQuestion(event.target.value)}
+                placeholder="Enter the clarification required before approving this PO"
+                className="min-h-28 resize-y rounded-xl border-slate-200 bg-[#fbfaf7] text-sm focus-visible:ring-[#0D3A35]/20"
+              />
+            </div>
+          </div>
+          <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+            <Button type="button" variant="outline" onClick={() => { setQuestionPoApproval(null); setPoQuestion(''); }}>Cancel</Button>
+            <Button
+              type="button"
+              className="gap-2 bg-[#0D3A35] text-white hover:bg-[#092e2a]"
+              disabled={!poQuestion.trim()}
+              onClick={() => {
+                if (!questionPoApproval || !poQuestion.trim()) return;
+                const askedBy = readUserProfile().name?.trim() || 'Admin Ops Finance';
+                addPoApprovalQuestion(questionPoApproval.poNumber, poQuestion, askedBy);
+                const refreshed = readPoApprovals();
+                setPoApprovals(refreshed);
+                setQuestionPoApproval(refreshed.find((record) => record.poNumber === questionPoApproval.poNumber) || null);
+                setPoQuestion('');
+                toast.success(`Question raised against PO ${questionPoApproval.poNumber}`);
+              }}
+            >
+              <Send className="h-4 w-4" /> Raise Question
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={Boolean(previewIndent)} onOpenChange={(v) => { if (!v) setPreviewIndent(null); }}>
         <DialogContent className="max-h-[92vh] max-w-[min(96vw,1280px)] overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">

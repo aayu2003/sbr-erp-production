@@ -249,7 +249,13 @@ const AppSidebar = () => {
             .map(g => ({
               ...g,
               visibleItems: g.items.filter(item =>
-                item.enabled && (isSuperAdmin || allowedModules.includes(item.key))
+                item.enabled && (
+                  isSuperAdmin ||
+                  allowedModules.includes(item.key) ||
+                  (item.key === 'inspection-report' && allowedModules.includes('grn-module')) ||
+                  (item.key === 'admin-inspection-approval' && (allowedModules.includes('admin-grn-approval') || allowedModules.includes('admin-ops-indents'))) ||
+                  (item.key === 'finance-inspection-approval' && allowedModules.includes('finance-admin-ops'))
+                )
               ),
             }))
             .filter(g => g.visibleItems.length > 0);
