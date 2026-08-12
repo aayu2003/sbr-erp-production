@@ -13,6 +13,7 @@ export type PoApprovalQuestion = {
 export type PoApprovalRecord = {
   id: string;
   poNumber: string;
+  orderType?: 'PR' | 'SPR';
   prNumber: string;
   comparisonId: string;
   vendorId: string;

@@ -379,8 +379,12 @@ function UploadStepDocPopup({
 function CreateFlowPopup({
   onClose,
   onCreate,
+  defaultOrderType = 'PR',
+  lockOrderType = false,
 }: {
   onClose: () => void;
+  defaultOrderType?: 'PR' | 'SPR';
+  lockOrderType?: boolean;
   onCreate: (payload: {
     orderType: 'PR' | 'SPR';
     orderNumber: string;
@@ -400,7 +404,7 @@ function CreateFlowPopup({
   const [submitting, setSubmitting] = useState(false);
 
   // ── Step 1: Order Details ─────────────────────────────────────────────────────
-  const [orderType, setOrderType] = useState<'PR' | 'SPR'>('PR');
+  const [orderType, setOrderType] = useState<'PR' | 'SPR'>(defaultOrderType);
   const [orderNumber, setOrderNumber] = useState('');
   const [prNumber, setPrNumber] = useState('');
   const [poFile, setPoFile] = useState<File | null>(null);
@@ -650,7 +654,8 @@ function CreateFlowPopup({
                     <button
                       key={type}
                       type="button"
-                      onClick={() => setOrderType(type)}
+                      onClick={() => { if (!lockOrderType) setOrderType(type); }}
+                      disabled={lockOrderType && orderType !== type}
                       className={`px-5 py-2 text-sm font-semibold transition-colors select-none ${
                         orderType === type
                           ? 'bg-foreground text-background'
@@ -1227,7 +1232,12 @@ function AddToInventoryPopup({
   );
 }
 
-export default function PurchaseFlow() {
+type PurchaseFlowProps = {
+  orderTypeFilter?: 'PR' | 'SPR';
+  title?: string;
+};
+
+export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowProps = {}) {
   const [flows, setFlows] = useState<ApiPurchaseFlow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1414,10 +1424,14 @@ export default function PurchaseFlow() {
   }, [flowRefreshNonce]);
 
   const rows = useMemo(() => {
-    const copy = [...flows];
+    const copy = flows.filter((flow) => {
+      if (!orderTypeFilter) return true;
+      const type = safeTrim(flow.order_type).toUpperCase();
+      return orderTypeFilter === 'SPR' ? type === 'SPR' || type === 'WO' : type === 'PR' || type === 'PO' || !type;
+    });
     copy.sort((a, b) => safeTrim((b as any)?.timestamp).localeCompare(safeTrim((a as any)?.timestamp)));
     return copy;
-  }, [flows]);
+  }, [flows, orderTypeFilter]);
   const poApprovalRecords = useMemo(() => readPoApprovals(), [flowRefreshNonce]);
 
   useEffect(() => {
@@ -1449,6 +1463,8 @@ export default function PurchaseFlow() {
 
     const liveOrderNumbers = new Set(rows.map((flow) => safeTrim(flow.order_number)).filter(Boolean));
     const missingApprovals = readPoApprovals().filter((record) =>
+      (!orderTypeFilter || (orderTypeFilter === 'PR' && (!record.orderType || record.orderType === 'PR')) || (orderTypeFilter === 'SPR' && record.orderType === 'SPR'))
+      &&
       record.status !== 'rejected'
       && Boolean(record.poNumber && record.prNumber && record.comparisonId)
       && !liveOrderNumbers.has(record.poNumber)
@@ -1529,7 +1545,7 @@ export default function PurchaseFlow() {
 
     void reconcile();
     return () => controller.abort();
-  }, [loading, rows]);
+  }, [loading, orderTypeFilter, rows]);
 
   // After all rows are in view, fetch left-panel info row by row (in parallel)
   useEffect(() => {
@@ -2087,6 +2103,8 @@ export default function PurchaseFlow() {
         <CreateFlowPopup
           onClose={() => setCreateFlowOpen(false)}
           onCreate={handleCreateFlow}
+          defaultOrderType={orderTypeFilter ?? 'PR'}
+          lockOrderType={Boolean(orderTypeFilter)}
         />
       ) : null}
 
@@ -2164,9 +2182,9 @@ export default function PurchaseFlow() {
             <GitBranch className="h-7 w-7" />
           </span>
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Purchase &amp; Procurement</p>
-            <h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Purchase Flow</h1>
-            <p className="mt-1 text-sm text-slate-500">Track purchase documents from order acceptance through inventory and accounts.</p>
+            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Procurement · {orderTypeFilter === 'SPR' ? 'Work Order' : 'Purchase Order'}</p>
+            <h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">{title || 'Purchase Flow'}</h1>
+            <p className="mt-1 text-sm text-slate-500">Track {orderTypeFilter === 'SPR' ? 'work-order' : 'purchase'} documents from order acceptance through completion, inventory and accounts.</p>
           </div>
         </div>
         <div className="flex self-start gap-2 lg:self-auto">
@@ -2191,7 +2209,7 @@ export default function PurchaseFlow() {
 
       <section className="grid overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: 'Total Purchase Flows', value: rows.length, icon: GitBranch },
+          { label: `Total ${orderTypeFilter === 'SPR' ? 'Work' : 'Purchase'} Flows`, value: rows.length, icon: GitBranch },
           { label: 'Flows In Progress', value: Math.max(rows.length - completedFlowCount, 0), icon: ClipboardList },
           { label: 'Completed Flows', value: completedFlowCount, icon: CircleCheckBig },
           { label: 'Pending Documents', value: pendingDocumentCount, icon: FileText },

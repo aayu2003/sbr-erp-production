@@ -233,14 +233,24 @@ const TAB_ORDER = ['all', 'PR', 'SPR', 'WO', 'PO'] as const;
 const TAB_META: Record<string, { label: string; full: string }> = {
   all: { label: 'All',             full: 'All Orders' },
   PR:  { label: 'PR',              full: 'Purchase Requisitions' },
-  SPR: { label: 'SPR',             full: 'Special Purchase Requisitions' },
+  SPR: { label: 'SPR',             full: 'Service Purchase Requisitions' },
   WO:  { label: 'Work Orders',     full: 'Work Orders' },
   PO:  { label: 'Purchase Orders', full: 'Purchase Orders' },
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function HOInbox() {
+type HOInboxProps = {
+  orderTypeFilter?: 'PR' | 'SPR';
+  view?: 'all' | 'approval' | 'creation';
+  title?: string;
+};
+
+const tcApproved = (item: ComparativeModel) =>
+  safeTrim(item.tcStatus).toLowerCase() === 'approved' || Boolean(safeTrim(item.tcApprovedVendorId));
+const nfaApproved = (item: ComparativeModel) => safeTrim(item.nfaStatus).toLowerCase() === 'approved';
+
+export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInboxProps = {}) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [all, setAll] = useState<Record<string, ComparativeModel>>({});
@@ -377,14 +387,21 @@ export default function HOInbox() {
   }, [comparativeRows]);
 
   // ── Tab counts ─────────────────────────────────────────────────────────────
+  const scopedInboxRows = useMemo(() => inboxRows.filter((row) => {
+    if (orderTypeFilter && safeTrim(row.item.indent_type).toUpperCase() !== orderTypeFilter) return false;
+    if (view === 'approval') return !nfaApproved(row.item);
+    if (view === 'creation') return nfaApproved(row.item);
+    return true;
+  }), [inboxRows, orderTypeFilter, view]);
+
   const tabCounts = useMemo(() => {
-    const counts: Record<string, number> = { all: inboxRows.length };
-    for (const r of inboxRows) {
+    const counts: Record<string, number> = { all: scopedInboxRows.length };
+    for (const r of scopedInboxRows) {
       const type = safeTrim(r.item.indent_type).toUpperCase() || 'OTHER';
       counts[type] = (counts[type] || 0) + 1;
     }
     return counts;
-  }, [inboxRows]);
+  }, [scopedInboxRows]);
 
   // Only show tabs that actually have items, in logical order
   const visibleTabs = useMemo(() => {
@@ -400,7 +417,7 @@ export default function HOInbox() {
   // Rows visible in the current tab
   const filteredRows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    return inboxRows.filter((row) => {
+    return scopedInboxRows.filter((row) => {
       const matchesTab = activeTab === 'all' || safeTrim(row.item.indent_type).toUpperCase() === activeTab;
       const matchesQuery = !normalizedQuery || [
         row.item.indentId,
@@ -412,22 +429,19 @@ export default function HOInbox() {
       ].some((value) => safeTrim(value).toLowerCase().includes(normalizedQuery));
       return matchesTab && matchesQuery;
     });
-  }, [inboxRows, activeTab, query]);
+  }, [scopedInboxRows, activeTab, query]);
 
   const metrics = useMemo(() => {
-    const isTcApproved = (item: ComparativeModel) =>
-      safeTrim(item.tcStatus).toLowerCase() === 'approved' || Boolean(safeTrim(item.tcApprovedVendorId));
-    const isNfaApproved = (item: ComparativeModel) => safeTrim(item.nfaStatus).toLowerCase() === 'approved';
     const hasOrder = (item: ComparativeModel) =>
       Boolean(safeTrim((item as any).poNo) || safeTrim((item as any).poCreatedAt));
 
     return {
-      total: inboxRows.length,
-      pendingTc: inboxRows.filter((row) => !isTcApproved(row.item)).length,
-      pendingNfa: inboxRows.filter((row) => isTcApproved(row.item) && !isNfaApproved(row.item)).length,
-      orders: inboxRows.filter((row) => hasOrder(row.item)).length,
+      total: scopedInboxRows.length,
+      pendingTc: scopedInboxRows.filter((row) => !tcApproved(row.item)).length,
+      pendingNfa: scopedInboxRows.filter((row) => tcApproved(row.item) && !nfaApproved(row.item)).length,
+      orders: scopedInboxRows.filter((row) => hasOrder(row.item)).length,
     };
-  }, [inboxRows]);
+  }, [scopedInboxRows]);
 
   const updateComparative = (indentId: string, patch: Partial<ComparativeModel>) => {
     setAll((prev) => {
@@ -456,9 +470,9 @@ export default function HOInbox() {
             <Building2 className="h-7 w-7" />
           </div>
           <div>
-            <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Purchase &amp; Procurement</p>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">Order Approval Flow</h1>
-            <p className="mt-1 max-w-3xl text-sm text-slate-500">Track every vendor comparative statement through TC approval, NFA approval and purchase order creation.</p>
+            <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Procurement · {orderTypeFilter === 'SPR' ? 'Work Order' : 'Purchase Order'}</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">{title || 'Order Approval Flow'}</h1>
+            <p className="mt-1 max-w-3xl text-sm text-slate-500">Track every {orderTypeFilter === 'SPR' ? 'service' : 'vendor'} comparative statement through TC approval, NFA approval and {orderTypeFilter === 'SPR' ? 'work' : 'purchase'} order creation.</p>
           </div>
         </div>
         <div className="rounded-xl border border-[#d7e4e0] bg-[#edf5f2] px-4 py-3 text-right">
@@ -472,7 +486,7 @@ export default function HOInbox() {
           { label: 'Comparative Statements', value: metrics.total, icon: FileText, tone: 'bg-slate-100 text-slate-700' },
           { label: 'Pending TC Approval', value: metrics.pendingTc, icon: ClipboardCheck, tone: 'bg-amber-50 text-amber-700' },
           { label: 'Pending NFA Approval', value: metrics.pendingNfa, icon: CheckCircle2, tone: 'bg-blue-50 text-blue-700' },
-          { label: 'Purchase Orders Created', value: metrics.orders, icon: ShoppingCart, tone: 'bg-[#edf5f2] text-[#0D3A35]' },
+          { label: `${orderTypeFilter === 'SPR' ? 'Work' : 'Purchase'} Orders Created`, value: metrics.orders, icon: ShoppingCart, tone: 'bg-[#edf5f2] text-[#0D3A35]' },
         ].map(({ label, value, icon: Icon, tone }, index) => (
           <div key={label} className={cn('flex items-center justify-between px-5 py-5', index > 0 && 'sm:border-l', index > 1 && 'sm:border-t xl:border-t-0', 'border-slate-200')}>
             <div><p className="text-[10px] font-bold uppercase tracking-[0.1em] text-slate-400">{label}</p><p className="mt-1 text-2xl font-black text-slate-950">{value}</p></div>
@@ -486,20 +500,20 @@ export default function HOInbox() {
           <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div>
               <h2 className="text-base font-bold text-slate-900">Vendor Comparative Statement Register</h2>
-              <p className="mt-0.5 text-xs text-slate-500">Comparative statement → TC approval → NFA approval → purchase order.</p>
+              <p className="mt-0.5 text-xs text-slate-500">Comparative statement → TC approval → NFA approval → {orderTypeFilter === 'SPR' ? 'work' : 'purchase'} order.</p>
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <label className="relative block min-w-[300px]">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                 <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PR, vendor, item or comparison" className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm font-medium text-slate-700 outline-none transition focus:border-[#0D3A35] focus:bg-white" />
               </label>
-              <div className="flex min-w-max items-center rounded-xl border border-slate-200 bg-slate-50 p-1">
+              {!orderTypeFilter && <div className="flex min-w-max items-center rounded-xl border border-slate-200 bg-slate-50 p-1">
                 {visibleTabs.map((tab) => {
                   const meta = TAB_META[tab] ?? { label: tab, full: tab };
                   const active = activeTab === tab;
                   return <button key={tab} type="button" title={meta.full} onClick={() => setActiveTab(tab)} className={cn('inline-flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-bold transition', active ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800')}><span>{meta.label}</span><span className={cn('rounded-full px-1.5 py-0.5 text-[10px]', active ? 'bg-white/15 text-white' : 'bg-slate-200/70 text-slate-500')}>{tabCounts[tab] ?? 0}</span></button>;
                 })}
-              </div>
+              </div>}
             </div>
           </div>
         </div>
@@ -511,7 +525,7 @@ export default function HOInbox() {
           <span>Qty.</span>
           <span>TC Approval</span>
           <span>NFA Approval</span>
-          <span>Purchase Order</span>
+          <span>{orderTypeFilter === 'SPR' ? 'Work Order' : 'Purchase Order'}</span>
           <span>Actions</span>
         </div>
 

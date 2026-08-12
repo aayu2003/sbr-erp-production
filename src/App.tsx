@@ -41,8 +41,9 @@ import FieldMonitoring from "./pages/FieldMonitoring";
 import LandAcquisition from "./pages/LandAcquisition";
 import LeaseMaster from "./pages/LeaseMaster";
 import Legal from "./pages/Legal";
-import AdminOpsIndent from "./pages/AdminOpsIndent";
 import FinanceAdminOpsIndent from "./pages/FinanceAdminOpsIndent";
+import PurchaseVerifier from "./pages/PurchaseVerifier";
+import WorkOrderVerifier from "./pages/WorkOrderVerifier";
 import PurchaseRequisition from "./pages/PurchaseRequisition";
 import PurchaseRequisitionEntry from "./pages/PurchaseRequisitionEntry";
 import VendorDirectory from "./pages/VendorDirectory";
@@ -140,6 +141,11 @@ const App = () => (
 
           {/* Management */}
           <Route path="/work-order" element={<AppLayout><WorkOrder /></AppLayout>} />
+          <Route path="/work-requisition" element={<AppLayout><WorkOrder /></AppLayout>} />
+          <Route path="/wo-creation" element={<AppLayout><HOInbox orderTypeFilter="SPR" view="creation" title="WO Creation" /></AppLayout>} />
+          <Route path="/work-verifier" element={<AppLayout><WorkOrderVerifier /></AppLayout>} />
+          <Route path="/work-approver" element={<AppLayout><HOInbox orderTypeFilter="SPR" view="approval" title="Work Approver" /></AppLayout>} />
+          <Route path="/work-flow" element={<AppLayout><PurchaseFlow orderTypeFilter="SPR" title="Work Flow" /></AppLayout>} />
           <Route path="/scope-of-work" element={<AppLayout><ScopeOfWork /></AppLayout>} />
           <Route path="/wcc-module" element={<AppLayout><WccModule /></AppLayout>} />
           <Route path="/inventory" element={<AppLayout><Inventory /></AppLayout>} />
@@ -148,7 +154,8 @@ const App = () => (
           <Route path="/fuels-and-consumables" element={<AppLayout><FuelsAndConsumables /></AppLayout>} />
           <Route path="/admin-ops-fuel-requests" element={<AppLayout><AdminOpsFuelRequest /></AppLayout>} />
           <Route path="/director-fuel-requests" element={<AppLayout><DirectorFuelRequest /></AppLayout>} />
-          <Route path="/admin-ops-indents" element={<AppLayout><AdminOpsIndent /></AppLayout>} />
+          <Route path="/purchase-verifier" element={<AppLayout><PurchaseVerifier /></AppLayout>} />
+          <Route path="/admin-ops-indents" element={<Navigate to="/purchase-verifier?tab=indents" replace />} />
           <Route path="/on-demand-task" element={<AppLayout><TaskWorkspacePage /></AppLayout>} />
           <Route path="/on-demand-task/new" element={<AppLayout><TaskFormPage /></AppLayout>} />
           <Route path="/on-demand-task/inbox" element={<AppLayout><TaskInboxPage /></AppLayout>} />
@@ -158,7 +165,7 @@ const App = () => (
           <Route path="/on-demand-task/:taskId/edit" element={<AppLayout><TaskFormPage /></AppLayout>} />
           <Route path="/on-demand-task/:taskId" element={<AppLayout><TaskDetailPage /></AppLayout>} />
           <Route path="/on-demand-task-legacy" element={<AppLayout><OnDemandTask /></AppLayout>} />
-          <Route path="/finance-admin-ops-indents" element={<AppLayout><FinanceAdminOpsIndent /></AppLayout>} />
+          <Route path="/finance-admin-ops-indents" element={<AppLayout><FinanceAdminOpsIndent orderTypeFilter="PR" /></AppLayout>} />
           <Route path="/finance/inspection-report-approvals" element={<AppLayout><InspectionReportApprovals stage="finance_admin_ops" /></AppLayout>} />
           <Route
             path="/purchase-requisition"
@@ -254,7 +261,7 @@ const App = () => (
             path="/purchase-flow"
             element={
               <AppLayout>
-                <PurchaseFlow />
+                <PurchaseFlow orderTypeFilter="PR" />
               </AppLayout>
             }
           />
@@ -284,14 +291,14 @@ const App = () => (
           <Route path="/director/inbox"  element={<AppLayout><Inbox department="Director" /></AppLayout>} />
 
           {/* WCC Approval workflow */}
-          <Route path="/admin/wcc-approval"    element={<AppLayout><WccApprovalInbox stage="verification" /></AppLayout>} />
+          <Route path="/admin/wcc-approval"    element={<Navigate to="/work-verifier?tab=wcc" replace />} />
           <Route path="/director/wcc-approval" element={<AppLayout><WccApprovalInbox stage="approval" /></AppLayout>} />
 
           {/* GRN Module + GRN Approval workflow */}
           <Route path="/grn-module"            element={<AppLayout><GRNModule /></AppLayout>} />
           <Route path="/inspection-report"     element={<AppLayout><InspectionReport /></AppLayout>} />
-          <Route path="/admin/inspection-report-approvals" element={<AppLayout><InspectionReportApprovals stage="admin_ops" /></AppLayout>} />
-          <Route path="/admin/grn-approval"    element={<AppLayout><GrnApprovalInbox stage="verification" /></AppLayout>} />
+          <Route path="/admin/inspection-report-approvals" element={<Navigate to="/purchase-verifier?tab=inspection" replace />} />
+          <Route path="/admin/grn-approval"    element={<Navigate to="/purchase-verifier?tab=grn" replace />} />
           <Route path="/director/grn-approval" element={<AppLayout><GrnApprovalInbox stage="approval" /></AppLayout>} />
 
           {/* Gate Entry */}

@@ -9,6 +9,7 @@ import {
   PackageSearch,
   Paperclip,
   Plus,
+  Printer,
   Search,
   Settings,
   Trash2,
@@ -38,6 +39,7 @@ import { getBaseUrl } from '@/lib/config';
 import { useAuth } from '@/context/AuthContext';
 import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 import logo3f from '@/Assets/3f-logo.png';
+import { printInventoryIndentPdf } from '@/lib/inventoryIndentPdf';
 
 type PRLineItem = {
   id: string;
@@ -464,83 +466,79 @@ const InventoryIndent = ({ pageVariant = 'inventory' }: InventoryIndentProps) =>
   const [indentApprovalsMap, setIndentApprovalsMap] = useState<Record<string, IndentApproval>>({});
   const [attachingApprovalMap, setAttachingApprovalMap] = useState<Record<string, boolean>>({});
 
+  const loadIndents = async () => {
+    try {
+      const BASE_URL = getBaseUrl().replace(/\/$/, '');
+      const res = await fetch(`${BASE_URL}/purchase_flow/get_indents`);
+      if (!res.ok) throw new Error(`Failed to fetch indents (HTTP ${res.status})`);
+      const data: any = await res.json();
+      const raw = Array.isArray(data?.indents) ? data.indents : [];
+
+      const mapped: Indent[] = raw.map((r: any, idx: number) => {
+        const items: PRLineItem[] = (r.indent_data?.item_row ?? []).map((row: any, i: number) => ({
+          id: genId(),
+          srNo: row.sr_no ?? i + 1,
+          category: row.category ?? '',
+          itemCode: row.item_code ?? row.itemCode ?? '',
+          partName: row.part_name ?? row.partName ?? '',
+          specification: row.specification ?? '',
+          uom: row.uom ?? 'No',
+          totalQtyRequired: row.total_qty_required ?? row.totalQtyRequired ?? 0,
+          lessQtyAvailableInStock: row.less_qty_available_in_stock ?? row.lessQtyAvailableInStock ?? 0,
+          procurementLeadTimeWeeks: row.procurement_lead_time_weeks ?? row.procurementLeadTimeWeeks ?? 0,
+          materialRequiredByDate: row.material_required_by_date ?? today(),
+          indigenousOrImported: (row.indigenous_or_imported ?? 'Indigenous') === 'Imported' ? 'Imported' : 'Indigenous',
+          ratePerItem: row.rate_per_item ?? row.ratePerItem ?? 0,
+          preferredVendorName: row.preferred_vendor_name ?? row.preferredVendorName ?? '',
+          validityOfWarrantyAndGuarantee: row.validity_of_warranty_and_guarantee ?? 'NA',
+          fullLifeHr: row.full_life_hr ?? 'NA',
+          actualLifeHr: row.actual_life_hr ?? 'NA',
+          reasonForReplacement: row.reason_for_replacement ?? 'NA',
+          repairingPossibility: row.repairing_possibility ?? 'NA',
+        }));
+
+        const indentedByDetails = signatureDetailsFrom(r.indented_by);
+        const forwardedByDetails = signatureDetailsFrom(r.forwarded_by);
+        const directorsApprovalDetails = signatureDetailsFrom(r.approved_by);
+
+        const derivedStatus: Indent['status'] =
+          directorsApprovalDetails?.signature
+            ? 'approved'
+            : forwardedByDetails?.signature || indentedByDetails?.signature
+              ? 'forwarded'
+              : 'open';
+
+        return {
+          id: r.pr_number ?? `${r.created_at ?? ''}-${idx}`,
+          project: r.indent_data?.project ?? '',
+          department: r.department ?? '',
+          prNo: r.pr_number ?? '',
+          date: r.created_at ? String(r.created_at).split('T')[0] : today(),
+          indentedBy: formatPersonDisplay(r.indented_by),
+          forwardedBy: formatPersonDisplay(r.forwarded_by),
+          directorsApproval: formatPersonDisplay(r.approved_by),
+          remarksNotes: r.notes ?? '',
+          budgetHead: formatBudgetHead(r.budget_head),
+          items,
+          indentedByDetails,
+          forwardedByDetails,
+          directorsApprovalDetails,
+          status: derivedStatus,
+        } as Indent;
+      });
+
+      const scopedIndents = mapped.filter((indent) => {
+        const department = String(indent.department || '').trim().toUpperCase();
+        return isPurchasePage ? department === 'PURCHASE' : department !== 'PURCHASE';
+      });
+      setIndents(scopedIndents);
+    } catch (err: any) {
+      toast.error(err?.message || 'Unable to load indents');
+    }
+  };
+
   useEffect(() => {
-    let mounted = true;
-    const loadIndents = async () => {
-      try {
-        const BASE_URL = getBaseUrl().replace(/\/$/, '');
-        const res = await fetch(`${BASE_URL}/purchase_flow/get_indents`);
-        if (!res.ok) throw new Error(`Failed to fetch indents (HTTP ${res.status})`);
-        const data: any = await res.json();
-        const raw = Array.isArray(data?.indents) ? data.indents : [];
-
-        const mapped: Indent[] = raw.map((r: any, idx: number) => {
-          const items: PRLineItem[] = (r.indent_data?.item_row ?? []).map((row: any, i: number) => ({
-            id: genId(),
-            srNo: row.sr_no ?? i + 1,
-            category: row.category ?? '',
-            itemCode: row.item_code ?? row.itemCode ?? '',
-            partName: row.part_name ?? row.partName ?? '',
-            specification: row.specification ?? '',
-            uom: row.uom ?? 'No',
-            totalQtyRequired: row.total_qty_required ?? row.totalQtyRequired ?? 0,
-            lessQtyAvailableInStock: row.less_qty_available_in_stock ?? row.lessQtyAvailableInStock ?? 0,
-            procurementLeadTimeWeeks: row.procurement_lead_time_weeks ?? row.procurementLeadTimeWeeks ?? 0,
-            materialRequiredByDate: row.material_required_by_date ?? today(),
-            indigenousOrImported: (row.indigenous_or_imported ?? 'Indigenous') === 'Imported' ? 'Imported' : 'Indigenous',
-            ratePerItem: row.rate_per_item ?? row.ratePerItem ?? 0,
-            preferredVendorName: row.preferred_vendor_name ?? row.preferredVendorName ?? '',
-            validityOfWarrantyAndGuarantee: row.validity_of_warranty_and_guarantee ?? 'NA',
-            fullLifeHr: row.full_life_hr ?? 'NA',
-            actualLifeHr: row.actual_life_hr ?? 'NA',
-            reasonForReplacement: row.reason_for_replacement ?? 'NA',
-            repairingPossibility: row.repairing_possibility ?? 'NA',
-          }));
-
-          const indentedByDetails = signatureDetailsFrom(r.indented_by);
-          const forwardedByDetails = signatureDetailsFrom(r.forwarded_by);
-          const directorsApprovalDetails = signatureDetailsFrom(r.approved_by);
-
-          const derivedStatus: Indent['status'] =
-            directorsApprovalDetails?.signature
-              ? 'approved'
-              : forwardedByDetails?.signature || indentedByDetails?.signature
-                ? 'forwarded'
-                : 'open';
-
-          return {
-            id: r.pr_number ?? `${r.created_at ?? ''}-${idx}`,
-            project: r.indent_data?.project ?? '',
-            department: r.department ?? '',
-            prNo: r.pr_number ?? '',
-            date: r.created_at ? String(r.created_at).split('T')[0] : today(),
-            indentedBy: formatPersonDisplay(r.indented_by),
-            forwardedBy: formatPersonDisplay(r.forwarded_by),
-            directorsApproval: formatPersonDisplay(r.approved_by),
-            remarksNotes: r.notes ?? '',
-            budgetHead: formatBudgetHead(r.budget_head),
-            items,
-            indentedByDetails,
-            forwardedByDetails,
-            directorsApprovalDetails,
-            status: derivedStatus,
-          } as Indent;
-        });
-
-        const scopedIndents = mapped.filter((indent) => {
-          const department = String(indent.department || '').trim().toUpperCase();
-          return isPurchasePage ? department === 'PURCHASE' : department !== 'PURCHASE';
-        });
-        if (mounted) setIndents(scopedIndents);
-      } catch (err: any) {
-        toast.error(err?.message || 'Unable to load indents');
-      }
-    };
-
-    loadIndents();
-    return () => {
-      mounted = false;
-    };
+    void loadIndents();
   }, [isPurchasePage]);
 
   useEffect(() => {
@@ -963,11 +961,13 @@ const InventoryIndent = ({ pageVariant = 'inventory' }: InventoryIndentProps) =>
         mode="create"
         pageVariant={pageVariant}
         initialData={prefillDraft}
-        onSave={(data) => {
-          setIndents((p) => [{ ...data, id: genId(), status: 'open' }, ...p]);
+        onSave={async (data) => {
           setPrefillDraft(null);
           setOpen(false);
-          toast.success('Indent created');
+          toast.success(data.prNo ? `Indent ${data.prNo} created` : 'Indent created');
+          // Refetch from the backend rather than trusting the create response's
+          // guessed field shape, so the auto-generated PR number is always correct.
+          await loadIndents();
         }}
       />
 
@@ -2065,6 +2065,19 @@ const IndentPreviewModal = ({
    onAttachApproval?: (indentRef: Pick<Indent, 'id' | 'prNo'>) => void;
  }) => {
    const alreadySigned = Boolean(indent?.indentedByDetails?.signature) || Boolean(approval);
+   const [printing, setPrinting] = useState(false);
+
+   const printIndent = async () => {
+     if (!indent) return;
+     setPrinting(true);
+     try {
+       await printInventoryIndentPdf(indent, approval);
+     } catch (error) {
+       toast.error(error instanceof Error ? error.message : 'Failed to generate indent PDF');
+     } finally {
+       setPrinting(false);
+     }
+   };
 
    return (
      <Dialog
@@ -2074,12 +2087,27 @@ const IndentPreviewModal = ({
        }}
      >
        <DialogContent className="max-h-[92vh] max-w-[min(96vw,1280px)] overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">
-         <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left">
-           <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white">
-             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><Eye className="h-5 w-5" /></span>
-             Indent Preview
-           </DialogTitle>
-           <p className="mt-1 pl-[52px] text-sm text-white/70">Review the complete purchase requisition and approval details.</p>
+         <DialogHeader className="bg-[#0D3A35] px-6 py-5 pr-14 text-left">
+           <div className="flex items-center justify-between gap-4">
+             <div>
+               <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white">
+                 <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><Eye className="h-5 w-5" /></span>
+                 Indent Preview
+               </DialogTitle>
+               <p className="mt-1 pl-[52px] text-sm text-white/70">Review the complete purchase requisition and approval details.</p>
+             </div>
+             {indent ? (
+               <Button
+                 type="button"
+                 onClick={() => void printIndent()}
+                 disabled={printing}
+                 className="h-10 shrink-0 rounded-xl bg-white px-5 font-bold text-[#0D3A35] hover:bg-emerald-50"
+               >
+                 {printing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
+                 Print Indent
+               </Button>
+             ) : null}
+           </div>
          </DialogHeader>
          {indent && (
            <div className="max-h-[calc(92vh-154px)] overflow-auto px-5 py-5 sm:px-6">

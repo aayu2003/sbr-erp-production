@@ -7,6 +7,7 @@ import {
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
   Car, Mail, Package, Scale, Truck, CheckSquare, PieChart,
   Settings,
+  ShieldCheck,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -19,7 +20,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
   Layers, Box, FileText, Map, AlertCircle, User,
   ClipboardCheck, Activity, FolderKanban, Landmark,
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
-  Car, Mail, Package, Scale, Truck, CheckSquare, PieChart,
+  Car, Mail, Package, Scale, Truck, CheckSquare, PieChart, ShieldCheck,
 };
 
 /* ---------------- NAV ITEM COMPONENT ---------------- */
@@ -252,6 +253,8 @@ const AppSidebar = () => {
                 item.enabled && (
                   isSuperAdmin ||
                   allowedModules.includes(item.key) ||
+                  (['wo-creation', 'work-verifier', 'work-approver', 'work-flow'].includes(item.key) && allowedModules.includes('work-order')) ||
+                  (item.key === 'purchase-verifier' && ['admin-ops-indents', 'admin-wcc-approval', 'admin-grn-approval', 'admin-inspection-approval'].some(key => allowedModules.includes(key))) ||
                   (item.key === 'inspection-report' && allowedModules.includes('grn-module')) ||
                   (item.key === 'admin-inspection-approval' && (allowedModules.includes('admin-grn-approval') || allowedModules.includes('admin-ops-indents'))) ||
                   (item.key === 'finance-inspection-approval' && allowedModules.includes('finance-admin-ops'))
@@ -268,7 +271,9 @@ const AppSidebar = () => {
           const renderItems = (items: typeof visibleGroups[number]['visibleItems']) =>
             items.map(item => {
               const ItemIcon = ICON_MAP[item.icon] ?? FileText;
-              const notif = (item as any).notificationStatus ?? 'none';
+              const notif: NavItemProps['notificationStatus'] = 'notificationStatus' in item
+                ? item.notificationStatus as NavItemProps['notificationStatus']
+                : 'none';
               return (
                 <NavItem
                   key={item.key}
@@ -326,7 +331,11 @@ const AppSidebar = () => {
                     </div>
                   )}
 
-                  {visibleGroups.map(group => (
+                  {visibleGroups.map(group => group.key === 'procurement-common' ? (
+                    <div key={group.key} className="space-y-1 px-1 py-1">
+                      {renderItems(group.visibleItems)}
+                    </div>
+                  ) : (
                     <NavGroup key={group.key} label={group.label} isSidebarCollapsed={isCollapsed}>
                       {renderItems(group.visibleItems)}
                     </NavGroup>
