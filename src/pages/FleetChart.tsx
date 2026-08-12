@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { 
   ChevronLeft, 
   ChevronRight, 
@@ -20,11 +21,15 @@ import {
   Lock,
   Unlock,
   Info,
-  HelpCircle
+  HelpCircle,
+  BookOpen,
+  Download
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
+import { downloadVehicleLogBookAsPdf, type VehicleLogBook } from '@/lib/vehicleLogBookPdf';
+import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 
 // --- MAP IMPORTS ---
 import { 
@@ -457,6 +462,14 @@ const FleetChart = () => {
   const [selectedCell, setSelectedCell] = useState<(TaskAssignment & { vehicle: string, date: string }) | null>(null);
   const [showHelpModal, setShowHelpModal] = useState(false);
 
+  // Log Book popup (generate + history) for the vehicle currently being acted on
+  const [logBookVehicle, setLogBookVehicle] = useState<ApiVehicle | null>(null);
+  const [logBookStartDate, setLogBookStartDate] = useState('');
+  const [logBookEndDate, setLogBookEndDate] = useState('');
+  const [isGeneratingLogBook, setIsGeneratingLogBook] = useState(false);
+  const [vehicleLogBooks, setVehicleLogBooks] = useState<VehicleLogBook[]>([]);
+  const [isLoadingLogBooks, setIsLoadingLogBooks] = useState(false);
+
   const lockFleetCard = async (payload: {
     vehicle_id: string;
     date: string;
@@ -489,6 +502,77 @@ const FleetChart = () => {
     }
 
     return data;
+  };
+
+  // Fetch a vehicle's past log books whenever the Log Book popup is opened for it
+  useEffect(() => {
+    if (!logBookVehicle) {
+      setVehicleLogBooks([]);
+      return;
+    }
+    let mounted = true;
+    setIsLoadingLogBooks(true);
+    const base = getBaseUrl().replace(/\/$/, '');
+    fetch(`${base}/admin_vehicles/get_log_books/${logBookVehicle.vehicle_id}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!mounted) return;
+        if (data?.success && Array.isArray(data.log_books)) {
+          setVehicleLogBooks(data.log_books as VehicleLogBook[]);
+        }
+      })
+      .catch(() => { if (mounted) setVehicleLogBooks([]); })
+      .finally(() => { if (mounted) setIsLoadingLogBooks(false); });
+    return () => { mounted = false; };
+  }, [logBookVehicle]);
+
+  const closeLogBookPopup = () => {
+    setLogBookVehicle(null);
+    setLogBookStartDate('');
+    setLogBookEndDate('');
+  };
+
+  const handleGenerateLogBook = async () => {
+    if (!logBookVehicle) return;
+    if (!logBookStartDate || !logBookEndDate) {
+      toast.error('Pick both a start and end date');
+      return;
+    }
+    if (logBookStartDate > logBookEndDate) {
+      toast.error('Start date must be on or before the end date');
+      return;
+    }
+    setIsGeneratingLogBook(true);
+    try {
+      const base = getBaseUrl().replace(/\/$/, '');
+      const res = await fetch(`${base}/admin_vehicles/generate_log_book`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vehicle_id: logBookVehicle.vehicle_id,
+          start_date: logBookStartDate,
+          end_date: logBookEndDate,
+        }),
+      });
+      const body: any = await res.json().catch(() => null);
+      if (!res.ok || body?.success !== true) throw new Error(body?.detail || body?.message || 'Failed to generate log book');
+      setVehicleLogBooks((prev) => [body.log_book as VehicleLogBook, ...prev]);
+      setLogBookStartDate('');
+      setLogBookEndDate('');
+      toast.success('Log book generated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to generate log book');
+    } finally {
+      setIsGeneratingLogBook(false);
+    }
+  };
+
+  const handleDownloadLogBook = async (book: VehicleLogBook) => {
+    try {
+      await downloadVehicleLogBookAsPdf(book);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to generate PDF');
+    }
   };
 
   // Keep a ref so websocket callbacks can access latest vehicles list
@@ -1189,6 +1273,19 @@ const FleetChart = () => {
                               </div>
                             </div>
                           )}
+
+                          {/* Log Book */}
+                          <div className="border-t border-gray-100 pt-2">
+                            <button
+                              type="button"
+                              onClick={() => setLogBookVehicle(vehicle)}
+                              className="flex w-full items-center justify-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-[10px] font-semibold text-gray-600 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 transition-colors"
+                              title="Generate / view log books"
+                            >
+                              <BookOpen className="w-3 h-3" />
+                              Log Book
+                            </button>
+                          </div>
                         </div>
                       </td>
 
@@ -1633,7 +1730,110 @@ const FleetChart = () => {
           </div>
         </div>
       )}
-      
+
+      {/* Log Book popup — generate a new log book and view a vehicle's past ones */}
+      {logBookVehicle && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => !isGeneratingLogBook && closeLogBookPopup()}>
+          <div className="w-full max-w-lg bg-white rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 shrink-0">
+              <div>
+                <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-emerald-600" /> Vehicle Log Book
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {logBookVehicle.vehicle_information?.vehicle_number || logBookVehicle.vehicle_id}
+                  {logBookVehicle.vehicle_information?.type ? ` · ${logBookVehicle.vehicle_information.type}` : ''}
+                </p>
+              </div>
+              <button type="button" onClick={closeLogBookPopup} className="text-gray-400 hover:text-gray-700">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {/* Generate section */}
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+                <p className="text-xs font-bold uppercase tracking-wide text-gray-500">Generate a new log book</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] font-semibold text-gray-500">Start Date</label>
+                    <input
+                      type="date"
+                      value={logBookStartDate}
+                      onChange={(e) => setLogBookStartDate(e.target.value)}
+                      className="mt-0.5 w-full rounded-md border border-gray-200 px-2 py-1.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-semibold text-gray-500">End Date</label>
+                    <input
+                      type="date"
+                      value={logBookEndDate}
+                      onChange={(e) => setLogBookEndDate(e.target.value)}
+                      className="mt-0.5 w-full rounded-md border border-gray-200 px-2 py-1.5 text-sm"
+                    />
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleGenerateLogBook}
+                  disabled={isGeneratingLogBook}
+                  className="w-full rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {isGeneratingLogBook ? 'Generating…' : 'Generate Log Book'}
+                </button>
+              </div>
+
+              {/* History */}
+              <div>
+                <p className="text-xs font-bold uppercase tracking-wide text-gray-500 mb-2">Past log books</p>
+                {isLoadingLogBooks ? (
+                  <div className="flex items-center justify-center gap-2 py-6 text-sm text-gray-400">
+                    <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                    Loading…
+                  </div>
+                ) : vehicleLogBooks.length === 0 ? (
+                  <p className="text-xs text-gray-400 py-4 text-center">No log books generated yet for this vehicle.</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {vehicleLogBooks.map((book) => (
+                      <div key={book.log_id} className="flex items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-gray-800">
+                            {formatDateDDMMYYYY(book.start_date)} – {formatDateDDMMYYYY(book.end_date)}
+                          </p>
+                          <p className="text-[10px] text-gray-400">
+                            {book.vendor_details?.vendor_name ? `Rental — ${book.vendor_details.vendor_name} · ` : ''}
+                            Generated {formatDateDDMMYYYY(book.generated_at)}
+                          </p>
+                          {book.operational_calendar_id && (
+                            <Link
+                              to="/operational-calendar"
+                              title="This log book's vendor work is also recorded in the Operational Calendar, where it becomes available as WCC evidence"
+                              className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 hover:text-emerald-800 hover:underline"
+                            >
+                              <CalendarIcon className="h-2.5 w-2.5" /> Logged in Operational Calendar
+                            </Link>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadLogBook(book)}
+                          title="Download PDF"
+                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };

@@ -770,13 +770,8 @@ const ScopeOfWork = () => {
                     <button
                       type="button"
                       onClick={() => setIsWccOpen(true)}
-                      disabled={scopeItems.length === 0}
-                      className={cn(
-                        'inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shadow-sm border',
-                        scopeItems.length === 0
-                          ? 'bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed'
-                          : 'border-emerald-200 bg-white text-emerald-800 hover:bg-emerald-50',
-                      )}
+                      title={scopeItems.length === 0 ? 'No land scope for this vendor — evidence (if any) will come from their operational calendar work, e.g. rental vehicle log books' : undefined}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shadow-sm border border-emerald-200 bg-white text-emerald-800 hover:bg-emerald-50"
                     >
                       <FileCheck className="w-3.5 h-3.5" /> Create WCC
                     </button>
