@@ -41,7 +41,7 @@ const SBR_ADMIN_USER: AuthUser = {
   designation: 'Super Admin',
   notification_permissions: true,
   module_access: [
-    'indents-request', 'admin-ops-indents', 'fuel-requests-admin', 'on-demand-task',
+    'indents-request', 'admin-ops-indents', 'fuel-requests-admin', 'on-demand-task', 'on-demand-task-legacy',
     'admin-request', 'admin-mrf-approvals', 'admin-inbox',
     'leads', 'farmers', 'land-acquisition', 'farm-directory', 'lease-master', 'land-hierarchy', 'tasks-beta',
     'user-management',

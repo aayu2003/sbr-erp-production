@@ -53,6 +53,7 @@
           "items": [
             { "key": "fuel-requests-admin",   "label": "Fuel Requests",               "path": "/admin-ops-fuel-requests",    "icon": "Fuel",          "enabled": true  },
             { "key": "on-demand-task",        "label": "On Demand Task & Allocation", "path": "/on-demand-task",             "icon": "ClipboardCheck","enabled": true  },
+            { "key": "on-demand-task-legacy", "label": "On Demand Task (Legacy)",     "path": "/on-demand-task-legacy",      "icon": "ClipboardCheck","enabled": true  },
             { "key": "admin-request",         "label": "Admin Ops Request",           "path": "/admin-request",              "icon": "ClipboardCheck","enabled": true },
             { "key": "admin-inbox",           "label": "Inbox",                       "path": "/admin/inbox",                "icon": "Mail",          "enabled": true  }
           ]

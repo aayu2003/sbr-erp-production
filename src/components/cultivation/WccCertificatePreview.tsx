@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { useAuth } from '@/context/AuthContext';
 import logo3f from '@/Assets/3f-logo.png';
-import type { ApiWorkDoneEntry, ApiTaskDetails, WccScopeLand } from './WccModal';
+import type { ApiWorkDoneEntry, ApiOperationalWorkDoneEntry, ApiTaskDetails, WccScopeLand } from './WccModal';
 import { WCC_WORK_TEMPLATES, calculateWccTotals, type WccEnterpriseDraft } from '@/lib/wccEnterprise';
 
 const BASE_URL = getBaseUrl().replace(/\/$/, '');
@@ -45,20 +45,32 @@ interface CropGroup {
   subtotalTotal: number;
 }
 
+// Non-cultivation vendor work (e.g. rental vehicle log books, via the Operational Calendar) —
+// shown as its own section since it has no land/crop/acreage to fit into the pivot grid above.
+export interface AnnexureOperationalLine {
+  activity: string;
+  from_date: string;
+  to_date: string;
+  quantity: number;
+  unit: string;
+}
+
 export interface AnnexurePivot {
   activities: string[];
   crops: CropGroup[];
   grandByActivity: Record<string, number>;
   grandTotal: number;
+  operationalLines: AnnexureOperationalLine[];
   enterprise?: WccEnterpriseDraft;
 }
 
-const EMPTY_PIVOT: AnnexurePivot = { activities: [], crops: [], grandByActivity: {}, grandTotal: 0 };
+const EMPTY_PIVOT: AnnexurePivot = { activities: [], crops: [], grandByActivity: {}, grandTotal: 0, operationalLines: [] };
 
 const buildAnnexurePivot = (
   workDone: ApiWorkDoneEntry[],
   taskDetailsById: Record<string, ApiTaskDetails>,
   scopeItems: WccScopeLand[],
+  operationalWorkDone: ApiOperationalWorkDoneEntry[] = [],
 ): AnnexurePivot => {
   const plotCropById = new Map<string, string>();
   const landById = new Map<string, WccScopeLand>();
@@ -139,7 +151,15 @@ const buildAnnexurePivot = (
     grandTotal += group.subtotalTotal;
   }
 
-  return { activities: activityOrder, crops, grandByActivity, grandTotal };
+  const operationalLines: AnnexureOperationalLine[] = operationalWorkDone.map((entry) => ({
+    activity: entry.activity,
+    from_date: entry.from_date,
+    to_date: entry.to_date,
+    quantity: Number(entry.quantity) || 0,
+    unit: entry.unit || '',
+  }));
+
+  return { activities: activityOrder, crops, grandByActivity, grandTotal, operationalLines };
 };
 
 // Flat, numbered certificate line items (crop-grouped, in pivot order) — shared by the
@@ -330,6 +350,20 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   ]);
 
   autoTable(doc, { startY: 32, head: annexureHead, body: annexureBody, styles: { fontSize: 7 }, headStyles: { fillColor: [30, 41, 59] } });
+
+  if (pivot.operationalLines.length > 0) {
+    const opStartY = (doc as JsPdfWithAutoTable).lastAutoTable.finalY + 6;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.text('Operational Work (Non-Cultivation)', 14, opStartY);
+    autoTable(doc, {
+      startY: opStartY + 2,
+      head: [['Activity', 'From', 'To', 'Quantity', 'Unit']],
+      body: pivot.operationalLines.map((l) => [l.activity, formatDate(l.from_date), formatDate(l.to_date), l.quantity, l.unit]),
+      styles: { fontSize: 7 },
+      headStyles: { fillColor: [30, 41, 59] },
+    });
+  }
 
   // ── Page 2: Work Completion Certificate ──
   doc.addPage();
@@ -595,6 +629,7 @@ export interface WccCertificatePreviewProps {
   fromDate?: string;
   toDate?: string;
   workDone?: ApiWorkDoneEntry[];
+  operationalWorkDone?: ApiOperationalWorkDoneEntry[];
   taskDetailsById?: Record<string, ApiTaskDetails>;
   scopeItems?: WccScopeLand[];
 
@@ -616,6 +651,7 @@ const WccCertificatePreview = ({
   fromDate: fromDateProp,
   toDate: toDateProp,
   workDone = [],
+  operationalWorkDone = [],
   taskDetailsById = {},
   scopeItems = [],
   existingRecord,
@@ -636,8 +672,8 @@ const WccCertificatePreview = ({
   // Live pivot only matters pre-submission in create mode; every other mode (and a
   // create-mode certificate that's already been submitted) renders the frozen snapshot.
   const livePivot = useMemo(
-    () => (isCreateMode ? buildAnnexurePivot(workDone, taskDetailsById, scopeItems) : EMPTY_PIVOT),
-    [isCreateMode, workDone, taskDetailsById, scopeItems],
+    () => (isCreateMode ? buildAnnexurePivot(workDone, taskDetailsById, scopeItems, operationalWorkDone) : EMPTY_PIVOT),
+    [isCreateMode, workDone, taskDetailsById, scopeItems, operationalWorkDone],
   );
   const pivot = record ? record.annexure : livePivot;
   const enterprise = pivot.enterprise;
@@ -979,71 +1015,105 @@ const WccCertificatePreview = ({
 
         {/* Printable content */}
         <div className="wcc-print-area flex-1 overflow-y-auto p-6 space-y-8 bg-slate-100">
-          {pivot.crops.length === 0 ? (
+          {pivot.crops.length === 0 && pivot.operationalLines.length === 0 ? (
             <div className="py-16 text-center text-sm text-slate-400">
               No completed work found for this vendor in the selected period.
             </div>
           ) : (
             <>
               {/* Annexure */}
-              <div className="bg-white rounded-lg border border-gray-200 p-4">
-                <h2 className="text-center text-base font-bold text-slate-900 uppercase tracking-wide">Annexure</h2>
-                <p className="text-center text-xs text-slate-500 mt-0.5">{vendorName} · {formatDate(fromDate)} – {formatDate(toDate)}</p>
-                <div className="mt-4 overflow-x-auto rounded-lg border border-gray-200">
-                  <table className="w-full text-xs border-collapse">
-                    <thead>
-                      <tr className="bg-slate-800 text-white">
-                        <th className="px-2 py-2 text-left font-semibold">S.No</th>
-                        <th className="px-2 py-2 text-left font-semibold">Name</th>
-                        <th className="px-2 py-2 text-right font-semibold">Area</th>
-                        {pivot.activities.map((a) => (
-                          <th key={a} className="px-2 py-2 text-right font-semibold whitespace-nowrap">{a}</th>
-                        ))}
-                        <th className="px-2 py-2 text-right font-semibold">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pivot.crops.map((group) => (
-                        <Fragment key={group.crop}>
-                          <tr className="bg-slate-100">
-                            <td colSpan={colCount} className="px-2 py-1.5 font-bold text-slate-700">
-                              {titleCase(group.crop)} Crop
-                            </td>
-                          </tr>
-                          {group.rows.map((row, i) => (
-                            <tr key={row.landId} className={cn('border-b border-gray-100', i % 2 === 1 && 'bg-slate-50/50')}>
-                              <td className="px-2 py-1.5">{i + 1}</td>
-                              <td className="px-2 py-1.5">{row.farmerName}</td>
-                              <td className="px-2 py-1.5 text-right whitespace-nowrap">{acres(row.area)}</td>
-                              {pivot.activities.map((a) => (
-                                <td key={a} className="px-2 py-1.5 text-right whitespace-nowrap">
-                                  {row.byActivity[a] ? acres(row.byActivity[a]) : ''}
-                                </td>
-                              ))}
-                              <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap">{acres(row.total)}</td>
-                            </tr>
+              {pivot.crops.length > 0 && (
+                <div className="bg-white rounded-lg border border-gray-200 p-4">
+                  <h2 className="text-center text-base font-bold text-slate-900 uppercase tracking-wide">Annexure</h2>
+                  <p className="text-center text-xs text-slate-500 mt-0.5">{vendorName} · {formatDate(fromDate)} – {formatDate(toDate)}</p>
+                  <div className="mt-4 overflow-x-auto rounded-lg border border-gray-200">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-800 text-white">
+                          <th className="px-2 py-2 text-left font-semibold">S.No</th>
+                          <th className="px-2 py-2 text-left font-semibold">Name</th>
+                          <th className="px-2 py-2 text-right font-semibold">Area</th>
+                          {pivot.activities.map((a) => (
+                            <th key={a} className="px-2 py-2 text-right font-semibold whitespace-nowrap">{a}</th>
                           ))}
-                          <tr className="border-b-2 border-gray-200 font-bold bg-slate-50">
-                            <td className="px-2 py-1.5" colSpan={2}>Total {titleCase(group.crop)} Crop</td>
-                            <td className="px-2 py-1.5" />
-                            {pivot.activities.map((a) => (
-                              <td key={a} className="px-2 py-1.5 text-right whitespace-nowrap">{acres(group.subtotalByActivity[a] || 0)}</td>
+                          <th className="px-2 py-2 text-right font-semibold">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pivot.crops.map((group) => (
+                          <Fragment key={group.crop}>
+                            <tr className="bg-slate-100">
+                              <td colSpan={colCount} className="px-2 py-1.5 font-bold text-slate-700">
+                                {titleCase(group.crop)} Crop
+                              </td>
+                            </tr>
+                            {group.rows.map((row, i) => (
+                              <tr key={row.landId} className={cn('border-b border-gray-100', i % 2 === 1 && 'bg-slate-50/50')}>
+                                <td className="px-2 py-1.5">{i + 1}</td>
+                                <td className="px-2 py-1.5">{row.farmerName}</td>
+                                <td className="px-2 py-1.5 text-right whitespace-nowrap">{acres(row.area)}</td>
+                                {pivot.activities.map((a) => (
+                                  <td key={a} className="px-2 py-1.5 text-right whitespace-nowrap">
+                                    {row.byActivity[a] ? acres(row.byActivity[a]) : ''}
+                                  </td>
+                                ))}
+                                <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap">{acres(row.total)}</td>
+                              </tr>
                             ))}
-                            <td className="px-2 py-1.5 text-right whitespace-nowrap">{acres(group.subtotalTotal)}</td>
-                          </tr>
-                        </Fragment>
-                      ))}
-                      <tr className="bg-emerald-50 font-bold">
-                        <td className="px-2 py-2" colSpan={3}>Total ({cropLabel} Crop)</td>
-                        {pivot.activities.map((a) => (
-                          <td key={a} className="px-2 py-2 text-right whitespace-nowrap">{acres(pivot.grandByActivity[a] || 0)}</td>
+                            <tr className="border-b-2 border-gray-200 font-bold bg-slate-50">
+                              <td className="px-2 py-1.5" colSpan={2}>Total {titleCase(group.crop)} Crop</td>
+                              <td className="px-2 py-1.5" />
+                              {pivot.activities.map((a) => (
+                                <td key={a} className="px-2 py-1.5 text-right whitespace-nowrap">{acres(group.subtotalByActivity[a] || 0)}</td>
+                              ))}
+                              <td className="px-2 py-1.5 text-right whitespace-nowrap">{acres(group.subtotalTotal)}</td>
+                            </tr>
+                          </Fragment>
                         ))}
-                        <td className="px-2 py-2 text-right whitespace-nowrap">{acres(pivot.grandTotal)}</td>
-                      </tr>
-                    </tbody>
-                  </table>
+                        <tr className="bg-emerald-50 font-bold">
+                          <td className="px-2 py-2" colSpan={3}>Total ({cropLabel} Crop)</td>
+                          {pivot.activities.map((a) => (
+                            <td key={a} className="px-2 py-2 text-right whitespace-nowrap">{acres(pivot.grandByActivity[a] || 0)}</td>
+                          ))}
+                          <td className="px-2 py-2 text-right whitespace-nowrap">{acres(pivot.grandTotal)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {/* Operational work (non-cultivation) — e.g. rental vehicle log books */}
+              {pivot.operationalLines.length > 0 && (
+                <div className="bg-white rounded-lg border border-gray-200 p-4">
+                  <h2 className="text-center text-base font-bold text-slate-900 uppercase tracking-wide">Operational Work</h2>
+                  <p className="text-center text-xs text-slate-500 mt-0.5">{vendorName} · {formatDate(fromDate)} – {formatDate(toDate)}</p>
+                  <div className="mt-4 overflow-x-auto rounded-lg border border-gray-200">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-800 text-white">
+                          <th className="px-2 py-2 text-left font-semibold">Activity</th>
+                          <th className="px-2 py-2 text-left font-semibold">From</th>
+                          <th className="px-2 py-2 text-left font-semibold">To</th>
+                          <th className="px-2 py-2 text-right font-semibold">Quantity</th>
+                          <th className="px-2 py-2 text-left font-semibold">Unit</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pivot.operationalLines.map((line, i) => (
+                          <tr key={`${line.activity}-${i}`} className={cn('border-b border-gray-100', i % 2 === 1 && 'bg-slate-50/50')}>
+                            <td className="px-2 py-1.5">{line.activity}</td>
+                            <td className="px-2 py-1.5">{formatDate(line.from_date)}</td>
+                            <td className="px-2 py-1.5">{formatDate(line.to_date)}</td>
+                            <td className="px-2 py-1.5 text-right">{line.quantity}</td>
+                            <td className="px-2 py-1.5">{line.unit}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               {/* Work Completion Certificate — replica of the real document */}
               <div className="bg-white rounded-lg border-2 border-gray-800 overflow-hidden">
