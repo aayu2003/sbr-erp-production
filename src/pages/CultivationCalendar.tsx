@@ -29,6 +29,8 @@ User,
 FileText,
 Map as MapIcon,
 AlertTriangle,
+Split,
+Undo2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
@@ -41,6 +43,7 @@ import { SidebarTask } from '@/components/cultivation/TaskSidebar';
 import { InlineTimeline } from '@/components/cultivation/InlineTimeline';
 import TaskMonitorModal, { MonitorTask } from '@/components/cultivation/TaskMonitorModal';
 import PlotMapViewModal, { MapViewTask } from '@/components/cultivation/PlotMapViewModal';
+import SplitTaskPlotMap from '@/components/cultivation/SplitTaskPlotMap';
 import { TaskTimelinePanel, type TimelineTask, type TimelineAssignment } from '@/components/cultivation/TaskTimelinePanel';
 
 // --- Types ---
@@ -122,6 +125,8 @@ assigned_area: number;
 status?: string;
 plot?: PlotItem[];
 task_id?: string;
+parent_task_id?: string;
+split_index?: 1 | 2;
 }>;
 }
 
@@ -375,6 +380,8 @@ farm_id: String(a?.farm_id || '').trim(),
 assigned_area: Number(a?.assigned_area) || 0,
 status: normalizeAssignmentStatus(a?.status),
 task_id: a?.task_id ? String(a.task_id) : undefined,
+parent_task_id: a?.parent_task_id ? String(a.parent_task_id) : undefined,
+split_index: a?.split_index === 1 || a?.split_index === 2 ? a.split_index : undefined,
 plot: Array.isArray(a?.plot)
 ? (a.plot as any[]).map((p) => ({
 plot_id: String(p?.plot_id || ''),
@@ -386,9 +393,12 @@ plot_area: Number(p?.plot_area) || 0,
 .filter((a) => !!a.farm_id)
 : [];
 
-const byFarm = new Map<string, { farm_id: string; assigned_area: number; status: string; plot: PlotItem[]; task_id?: string }>();
+// Keyed by task_id (when present) in addition to farm_id/status so that a split
+// task's two children — which share farm_id and status ("pending") but have
+// distinct task_ids — don't get merged back into a single row here.
+const byFarm = new Map<string, { farm_id: string; assigned_area: number; status: string; plot: PlotItem[]; task_id?: string; parent_task_id?: string; split_index?: 1 | 2 }>();
 for (const a of normalizedAssignments) {
-const mapKey = `${a.farm_id}__${normalizeAssignmentStatus(a.status)}`;
+const mapKey = `${a.farm_id}__${normalizeAssignmentStatus(a.status)}__${a.task_id ?? ''}`;
 const existing = byFarm.get(mapKey);
 if (!existing) {
 byFarm.set(mapKey, {
@@ -397,6 +407,8 @@ assigned_area: Number(a.assigned_area) || 0,
 status: normalizeAssignmentStatus(a.status),
 plot: a.plot,
 task_id: a.task_id,
+parent_task_id: a.parent_task_id,
+split_index: a.split_index,
 });
 continue;
 }
@@ -409,11 +421,13 @@ assigned_area: nextArea,
 status: existing.status,
 plot: mergedPlots,
 task_id: existing.task_id ?? a.task_id,
+parent_task_id: existing.parent_task_id ?? a.parent_task_id,
+split_index: existing.split_index ?? a.split_index,
 });
 }
 
 for (const farm of byFarm.values()) {
-const rowKey = `${planKey}__${plan.plan_id}__${plan.block_id}__${activity.index}__${activity.activity}__${farm.farm_id}__${farm.status}`;
+const rowKey = `${planKey}__${plan.plan_id}__${plan.block_id}__${activity.index}__${activity.activity}__${farm.farm_id}__${farm.status}__${farm.task_id ?? ''}`;
 calendarByDate[dateStr].set(rowKey, {
 index: activity.index,
 activity: activity.activity,
@@ -744,6 +758,23 @@ const [addTaskVendorPopup, setAddTaskVendorPopup] = useState<{ taskId: string; f
 const [addTaskVendorOptions, setAddTaskVendorOptions] = useState<Record<string, VendorScopeEntry>>({});
 const [isLoadingAddTaskVendorOptions, setIsLoadingAddTaskVendorOptions] = useState(false);
 const [isSavingTaskVendor, setIsSavingTaskVendor] = useState(false);
+// "Split Task" popup — divides a task's plots between two scope-of-work vendors
+const [splitTaskPopup, setSplitTaskPopup] = useState<{
+taskId: string;
+farmId: string;
+calanderId: string;
+activity: string;
+date: string;
+plots: PlotItem[];
+} | null>(null);
+const [splitTaskVendorOptions, setSplitTaskVendorOptions] = useState<Record<string, VendorScopeEntry>>({});
+const [isLoadingSplitTaskVendorOptions, setIsLoadingSplitTaskVendorOptions] = useState(false);
+const [isSavingSplitTask, setIsSavingSplitTask] = useState(false);
+// plot_id -> 'A' | 'B' assignment while the split modal is open
+const [splitTaskPlotSides, setSplitTaskPlotSides] = useState<Record<string, 'A' | 'B'>>({});
+const [splitTaskVendorA, setSplitTaskVendorA] = useState<{ vendorId: string; vendorName: string } | null>(null);
+const [splitTaskVendorB, setSplitTaskVendorB] = useState<{ vendorId: string; vendorName: string } | null>(null);
+const [undoingSplitTaskKey, setUndoingSplitTaskKey] = useState<string | null>(null);
 const [loading, setLoading] = useState(true);
 const [error, setError] = useState<string | null>(null);
 const taskModalRef = useRef<HTMLDivElement | null>(null);
@@ -1055,6 +1086,165 @@ setIsSavingTaskVendor(false);
 }
 };
 
+// Fetch scope-of-work vendors for the "Split Task" popup whenever it's opened for a task
+useEffect(() => {
+if (!splitTaskPopup) {
+setSplitTaskVendorOptions({});
+return;
+}
+let mounted = true;
+setIsLoadingSplitTaskVendorOptions(true);
+setSplitTaskVendorOptions({});
+fetch(`${BASE_URL}/admin_cultivation/get_scope_of_work_for_land/${splitTaskPopup.farmId}`)
+.then((res) => (res.ok ? res.json() : null))
+.then((data) => {
+if (!mounted) return;
+if (data?.success && data?.scope_of_work && typeof data.scope_of_work === 'object') {
+setSplitTaskVendorOptions(data.scope_of_work as Record<string, VendorScopeEntry>);
+}
+})
+.catch(() => { if (mounted) setSplitTaskVendorOptions({}); })
+.finally(() => { if (mounted) setIsLoadingSplitTaskVendorOptions(false); });
+return () => { mounted = false; };
+}, [splitTaskPopup]);
+
+const closeSplitTaskPopup = () => {
+setSplitTaskPopup(null);
+setSplitTaskPlotSides({});
+setSplitTaskVendorA(null);
+setSplitTaskVendorB(null);
+};
+
+const handleSplitTask = async () => {
+if (!splitTaskPopup || !splitTaskVendorA || !splitTaskVendorB) return;
+const sideAPlotIds = splitTaskPopup.plots.filter((p) => splitTaskPlotSides[p.plot_id] === 'A').map((p) => p.plot_id);
+const sideBPlotIds = splitTaskPopup.plots.filter((p) => splitTaskPlotSides[p.plot_id] === 'B').map((p) => p.plot_id);
+if (sideAPlotIds.length === 0 || sideBPlotIds.length === 0) {
+toast.error('Both sides must have at least one plot');
+return;
+}
+if (splitTaskVendorA.vendorId === splitTaskVendorB.vendorId) {
+toast.error('Choose two different vendors');
+return;
+}
+setIsSavingSplitTask(true);
+try {
+const { taskId, farmId, calanderId, activity, date } = splitTaskPopup;
+const res = await fetch(`${BASE_URL}/admin_cultivation/split_task_by_plot`, {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({
+task_id: taskId,
+calander_id: calanderId,
+activity,
+date,
+splits: [
+{ vendor_id: splitTaskVendorA.vendorId, vendor_name: splitTaskVendorA.vendorName, plot_ids: sideAPlotIds },
+{ vendor_id: splitTaskVendorB.vendorId, vendor_name: splitTaskVendorB.vendorName, plot_ids: sideBPlotIds },
+],
+}),
+});
+const body: any = await res.json().catch(() => null);
+if (!res.ok || body?.success !== true) throw new Error(body?.detail || body?.message || 'Failed to split task');
+
+setActivitiesData((prev) => {
+const list = prev[date] || [];
+const idx = list.findIndex((a) => a.assignments.some((asn) => asn.task_id === taskId));
+if (idx === -1) return prev;
+const original = list[idx];
+const childActs: CalendarActivity[] = (body.tasks as any[]).map((t) => ({
+...original,
+farm_id: farmId,
+assignments: [{
+farm_id: farmId,
+assigned_area: Number(t.assigned_area) || 0,
+status: 'pending',
+plot: (t.plot ?? []) as PlotItem[],
+task_id: t.task_id,
+parent_task_id: t.parent_task_id,
+split_index: t.split_index,
+}],
+}));
+const nextList = [...list.slice(0, idx), ...childActs, ...list.slice(idx + 1)];
+return { ...prev, [date]: nextList };
+});
+
+setTaskVendorById((prev) => {
+const next = { ...prev };
+(body.tasks as any[]).forEach((t) => {
+next[t.task_id] = {
+loading: false,
+vendorId: t.vendor_details?.vendor_id ?? '',
+vendorName: t.vendor_details?.vendor_name ?? '',
+};
+});
+return next;
+});
+
+closeSplitTaskPopup();
+toast.success('Task split');
+} catch (error) {
+toast.error(error instanceof Error ? error.message : 'Failed to split task');
+} finally {
+setIsSavingSplitTask(false);
+}
+};
+
+const handleUndoSplitTask = async (act: CalendarActivity) => {
+const row = act.assignments[0];
+if (!row?.task_id || !row?.parent_task_id || !selectedDate) return;
+const taskKey = getTaskKey(act);
+const parentId = row.parent_task_id;
+setUndoingSplitTaskKey(taskKey);
+try {
+const res = await fetch(`${BASE_URL}/admin_cultivation/undo_split_task`, {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({
+task_id: row.task_id,
+calander_id: act.calander_id,
+activity: act.activity,
+date: selectedDate,
+}),
+});
+const body: any = await res.json().catch(() => null);
+if (!res.ok || body?.success !== true) throw new Error(body?.detail || body?.message || 'Failed to undo split');
+
+setActivitiesData((prev) => {
+const list = prev[selectedDate] || [];
+const siblingActs = list.filter((a) => a.assignments.some((asn) => asn.parent_task_id === parentId));
+const firstIdx = list.findIndex((a) => a.assignments.some((asn) => asn.parent_task_id === parentId));
+if (siblingActs.length === 0 || firstIdx === -1) return prev;
+const mergedArea = siblingActs.reduce((sum, a) => sum + a.assignments.reduce((s, asn) => s + (Number(asn.assigned_area) || 0), 0), 0);
+const mergedPlots = siblingActs.flatMap((a) => a.assignments.flatMap((asn) => asn.plot || []));
+const mergedAct: CalendarActivity = {
+...act,
+assignments: [{
+farm_id: act.farm_id,
+assigned_area: mergedArea,
+status: 'pending',
+plot: mergedPlots,
+task_id: body.task_id,
+}],
+};
+const remaining = list.filter((a) => !a.assignments.some((asn) => asn.parent_task_id === parentId));
+const nextList = [...remaining];
+nextList.splice(firstIdx, 0, mergedAct);
+return { ...prev, [selectedDate]: nextList };
+});
+
+setTaskVendorById((prev) => ({
+...prev,
+[body.task_id]: { loading: false, vendorId: 'self', vendorName: 'SaiBio Resources Private Limited' },
+}));
+toast.success('Split undone');
+} catch (error) {
+toast.error(error instanceof Error ? error.message : 'Failed to undo split');
+} finally {
+setUndoingSplitTaskKey(null);
+}
+};
+
 // --- Logic to Populate Sidebar Data (from API or Mock) ---
 const { pendingToday, carryForward, earlyCompletion } = useMemo(() => {
 const today = new Date();
@@ -1273,7 +1463,29 @@ return {};
 
 const getTaskKey = (task: CalendarActivity) => {
 const status = normalizeAssignmentStatus(Array.isArray(task.assignments) ? task.assignments[0]?.status : undefined);
-return `${task.calander_id}__${task.plan_id}__${task.block_id}__${task.index}__${task.activity}__${task.farm_id}__${status}`;
+const taskId = Array.isArray(task.assignments) ? task.assignments.find((a) => a.task_id)?.task_id : undefined;
+return `${task.calander_id}__${task.plan_id}__${task.block_id}__${task.index}__${task.activity}__${task.farm_id}__${status}__${taskId ?? ''}`;
+};
+
+// Rows produced by a split-task both keep the same running position — e.g. a
+// split at position 3 renders as "3.1"/"3.2" instead of shifting everything
+// after it up to "3"/"4".
+const computeTaskLabels = (tasks: CalendarActivity[]): string[] => {
+let base = 0;
+const baseByParent: Record<string, number> = {};
+return tasks.map((act) => {
+const parentId = Array.isArray(act.assignments) ? act.assignments.find((a) => a.parent_task_id)?.parent_task_id : undefined;
+if (parentId) {
+if (!(parentId in baseByParent)) {
+base += 1;
+baseByParent[parentId] = base;
+}
+const splitIdx = act.assignments.find((a) => a.split_index)?.split_index ?? 1;
+return `${baseByParent[parentId]}.${splitIdx}`;
+}
+base += 1;
+return `${base}`;
+});
 };
 
 useEffect(() => {
@@ -2414,8 +2626,11 @@ title="Select multiple tasks"
 </div>
 {isExpanded && (
 <div className="divide-y divide-gray-200">
-{group.tasks.map((act, idx) => {
+{(() => {
+const taskLabels = computeTaskLabels(group.tasks);
+return group.tasks.map((act, idx) => {
 const taskKey = getTaskKey(act);
+const taskLabel = taskLabels[idx];
 const pendingTask = isTaskPending(act);
 const completedTask = isTaskCompleted(act);
 const contractTask = isTaskContractFarm(act);
@@ -2425,6 +2640,9 @@ const isFieldVisit = isFieldVisitActivity(String(act?.activity || ''));
 const supApproved = Array.isArray(act.assignments) ? act.assignments.some((a) => isSupervisorApprovedAssignmentStatus(a?.status)) : false;
 const fmApproved = Array.isArray(act.assignments) ? act.assignments.some((a) => isFieldManagerApprovedAssignmentStatus(a?.status)) : false;
 const totalArea = Array.isArray(act.assignments) ? act.assignments.reduce((sum, a) => sum + (Number(a.assigned_area) || 0), 0) : 0;
+const rowTaskId = act.assignments.find((a) => a.task_id)?.task_id;
+const rowPlots = act.assignments.flatMap((a) => a.plot || []);
+const rowParentTaskId = act.assignments.find((a) => a.parent_task_id)?.parent_task_id;
 const farmMeta = farmsById[act.farm_id];
 const landLocation = [farmMeta?.land_data?.village, farmMeta?.land_data?.district].filter(Boolean).join(', ');
 const assignedTask = Array.isArray(act.assignments) && act.assignments.some((a) => normalizeAssignmentStatus(a?.status) !== 'unassigned');
@@ -2459,7 +2677,7 @@ title="Select task"
 <Check className="h-3.5 w-3.5" />
 </button>
 ) : (
-<span className="flex h-7 w-7 items-center justify-center rounded-full border border-[#276152]/20 bg-white text-xs font-extrabold text-[#0D3A35]">{idx + 1}</span>
+<span className="flex h-7 min-w-7 items-center justify-center rounded-full border border-[#276152]/20 bg-white px-1 text-xs font-extrabold text-[#0D3A35]">{taskLabel}</span>
 )}
 </div>
 <div className="min-w-0">
@@ -2632,6 +2850,40 @@ title="View plot map"
 </button>
 <span className="text-[10px] font-semibold text-[#7A2533] leading-none">Map View</span>
 </div>
+{rowTaskId && rowPlots.length >= 2 && (
+<div className="flex flex-col items-center gap-1">
+<button
+type="button"
+onClick={() => setSplitTaskPopup({
+taskId: rowTaskId,
+farmId: act.farm_id,
+calanderId: act.calander_id,
+activity: act.activity,
+date: selectedDate || '',
+plots: rowPlots,
+})}
+className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-amber-300 bg-white text-amber-600 hover:bg-amber-50 transition-colors"
+title="Split task between two vendors"
+>
+<Split className="w-4 h-4" />
+</button>
+<span className="text-[10px] font-semibold text-amber-700 leading-none">Split Task</span>
+</div>
+)}
+{rowParentTaskId && (
+<div className="flex flex-col items-center gap-1">
+<button
+type="button"
+disabled={undoingSplitTaskKey === taskKey}
+onClick={() => handleUndoSplitTask(act)}
+className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-amber-300 bg-white text-amber-600 hover:bg-amber-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+title="Undo split"
+>
+<Undo2 className="w-4 h-4" />
+</button>
+<span className="text-[10px] font-semibold text-amber-700 leading-none">Undo Split</span>
+</div>
+)}
 <div className="flex flex-col items-center gap-1">
 <button
 type="button"
@@ -2733,7 +2985,8 @@ className="ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full b
 </div>
 </div>
 );
-})}
+});
+})()}
 </div>
 )}
 </div>
@@ -3151,6 +3404,124 @@ className="w-full text-left rounded-lg border border-gray-200 bg-white p-3 trans
 </div>
 </div>
 )}
+
+{/* Split Task popup — divides a task's plots between two scope-of-work vendors */}
+{splitTaskPopup && (() => {
+const sideAPlots = splitTaskPopup.plots.filter((p) => splitTaskPlotSides[p.plot_id] === 'A');
+const sideBPlots = splitTaskPopup.plots.filter((p) => splitTaskPlotSides[p.plot_id] === 'B');
+const sideAArea = sideAPlots.reduce((s, p) => s + (Number(p.plot_area) || 0), 0);
+const sideBArea = sideBPlots.reduce((s, p) => s + (Number(p.plot_area) || 0), 0);
+return (
+<div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={() => !isSavingSplitTask && closeSplitTaskPopup()}>
+<div className="w-full max-w-2xl bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+<div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
+<h3 className="text-sm font-bold text-[#0D3A35] flex items-center gap-2">
+<Split className="w-4 h-4" /> Split Task Between Two Vendors
+</h3>
+<button type="button" onClick={closeSplitTaskPopup} className="text-gray-400 hover:text-gray-700">
+<X className="w-4 h-4" />
+</button>
+</div>
+<div className="flex-1 overflow-y-auto p-4 space-y-4">
+<SplitTaskPlotMap farmId={splitTaskPopup.farmId} plots={splitTaskPopup.plots} sides={splitTaskPlotSides} />
+<div className="grid grid-cols-2 gap-3">
+<div className="rounded-lg border border-[#0D3A35]/25 bg-[#0D3A35]/5 px-3 py-2">
+<p className="text-[10px] font-bold uppercase tracking-wide text-[#0D3A35]">Side A</p>
+<p className="text-sm font-bold text-[#0D3A35]">{sideAArea.toFixed(2)} ac <span className="font-normal text-slate-500">· {sideAPlots.length} {sideAPlots.length === 1 ? 'plot' : 'plots'}</span></p>
+</div>
+<div className="rounded-lg border border-[#7A2533]/25 bg-[#7A2533]/5 px-3 py-2">
+<p className="text-[10px] font-bold uppercase tracking-wide text-[#7A2533]">Side B</p>
+<p className="text-sm font-bold text-[#7A2533]">{sideBArea.toFixed(2)} ac <span className="font-normal text-slate-500">· {sideBPlots.length} {sideBPlots.length === 1 ? 'plot' : 'plots'}</span></p>
+</div>
+</div>
+<div>
+<p className="text-xs font-bold uppercase tracking-wide text-slate-500 mb-2">Assign each plot to Side A or Side B</p>
+<div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+{splitTaskPopup.plots.map((p) => (
+<div key={p.plot_id} className="flex items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2">
+<div className="min-w-0">
+<span className="text-sm font-semibold text-slate-800 truncate">{p.plot_name}</span>
+<span className="ml-2 text-xs font-mono text-slate-400">{p.plot_area} ac</span>
+</div>
+<div className="flex shrink-0 rounded-md border border-gray-200 overflow-hidden">
+<button
+type="button"
+onClick={() => setSplitTaskPlotSides((prev) => ({ ...prev, [p.plot_id]: 'A' }))}
+className={cn(
+"px-2.5 py-1 text-xs font-bold transition-colors",
+splitTaskPlotSides[p.plot_id] === 'A' ? "bg-[#0D3A35] text-white" : "bg-white text-slate-500 hover:bg-slate-50"
+)}
+>
+Side A
+</button>
+<button
+type="button"
+onClick={() => setSplitTaskPlotSides((prev) => ({ ...prev, [p.plot_id]: 'B' }))}
+className={cn(
+"px-2.5 py-1 text-xs font-bold border-l border-gray-200 transition-colors",
+splitTaskPlotSides[p.plot_id] === 'B' ? "bg-[#7A2533] text-white" : "bg-white text-slate-500 hover:bg-slate-50"
+)}
+>
+Side B
+</button>
+</div>
+</div>
+))}
+</div>
+</div>
+{([['A', splitTaskVendorA, setSplitTaskVendorA], ['B', splitTaskVendorB, setSplitTaskVendorB]] as const).map(([side, selected, setSelected]) => (
+<div key={side}>
+<p className="text-xs font-bold uppercase tracking-wide text-slate-500 mb-2">Side {side} vendor</p>
+{isLoadingSplitTaskVendorOptions ? (
+<div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
+<div className="w-4 h-4 border-2 border-[#276152] border-t-transparent rounded-full animate-spin" />
+Loading vendors…
+</div>
+) : Object.keys(splitTaskVendorOptions).length === 0 ? (
+<p className="text-xs text-slate-400 py-2">No vendor scope found for this land.</p>
+) : (
+<div className="space-y-1.5">
+{Object.entries(splitTaskVendorOptions).map(([vendorId, scope]) => (
+<button
+key={vendorId}
+type="button"
+onClick={() => setSelected({ vendorId, vendorName: scope.vendor_details.vendor_name })}
+className={cn(
+"w-full text-left rounded-lg border px-3 py-2 transition-all",
+selected?.vendorId === vendorId ? "border-[#0D3A35] bg-[#0D3A35]/5 ring-1 ring-[#0D3A35]/30" : "border-gray-200 bg-white hover:border-[#0D3A35]/30 hover:bg-[#0D3A35]/5"
+)}
+>
+<span className="text-sm font-semibold text-slate-800">{scope.vendor_details.vendor_name}</span>
+<span className="ml-2 text-xs font-mono text-slate-400">{vendorId}</span>
+</button>
+))}
+</div>
+)}
+</div>
+))}
+</div>
+<div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-100 bg-slate-50 shrink-0">
+<button
+type="button"
+onClick={closeSplitTaskPopup}
+disabled={isSavingSplitTask}
+className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-600 hover:bg-gray-50 disabled:opacity-50"
+>
+Cancel
+</button>
+<button
+type="button"
+onClick={handleSplitTask}
+disabled={isSavingSplitTask}
+className="rounded-lg bg-[#0D3A35] px-3 py-1.5 text-sm font-semibold text-white hover:bg-[#0D3A35]/90 disabled:opacity-50"
+>
+{isSavingSplitTask ? 'Splitting…' : 'Split Task'}
+</button>
+</div>
+</div>
+</div>
+);
+})()}
 </div>
 );
 };

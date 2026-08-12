@@ -35,6 +35,21 @@ export interface ApiWorkDoneEntry {
   task_id: string;
 }
 
+// Non-cultivation vendor work (e.g. rental vehicle log books), from
+// /admin_cultivation/get_operational_work_done_by_vendor — the WCC evidence source for
+// vendors who have no land scope-of-work at all.
+export interface ApiOperationalWorkDoneEntry {
+  activity: string;
+  from_date: string;
+  to_date: string;
+  quantity?: number;
+  unit?: string;
+  spec_value?: number;
+  spec_unit?: string;
+  status?: string;
+  task_id?: string;
+}
+
 // Raw shape of a `Tasks` table item — only the fields this modal (and the certificate
 // preview it opens) read.
 export interface ApiTaskDetails {
@@ -108,6 +123,8 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
   const [toDate, setToDate] = useState(defaultEndDate || todayKey());
   const [workDone, setWorkDone] = useState<ApiWorkDoneEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [operationalWorkDone, setOperationalWorkDone] = useState<ApiOperationalWorkDoneEntry[]>([]);
+  const [loadingOperational, setLoadingOperational] = useState(true);
   const [mapViewTask, setMapViewTask] = useState<MapViewTask | null>(null);
   const [showCertificatePreview, setShowCertificatePreview] = useState(false);
 
@@ -136,6 +153,26 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
     return () => { mounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vendorId, fromDate, toDate, landIds.join(','), activities.join(',')]);
+
+  // Fetch the vendor's non-cultivation (operational calendar) work for the same period —
+  // independent of `activities`, so vendors with no land scope-of-work still get evidence.
+  useEffect(() => {
+    let mounted = true;
+    setLoadingOperational(true);
+    fetch(`${BASE_URL}/admin_cultivation/get_operational_work_done_by_vendor`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vendor_id: vendorId, start_date: fromDate, end_date: toDate }),
+    })
+      .then((res) => res.json())
+      .then((data: { success?: boolean; work_done?: ApiOperationalWorkDoneEntry[] }) => {
+        if (!mounted) return;
+        setOperationalWorkDone(data?.success && Array.isArray(data.work_done) ? data.work_done : []);
+      })
+      .catch(() => { if (mounted) setOperationalWorkDone([]); })
+      .finally(() => { if (mounted) setLoadingOperational(false); });
+    return () => { mounted = false; };
+  }, [vendorId, fromDate, toDate]);
 
   // Task details (activity name + progress photos) — fetched once per unique task_id.
   const [taskDetailsById, setTaskDetailsById] = useState<Record<string, ApiTaskDetails>>({});
@@ -266,7 +303,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
         </div>
 
         {/* Task Timeline */}
-        <div className="flex-1 overflow-hidden p-5 min-h-0">
+        <div className="flex-1 overflow-y-auto p-5 min-h-0 space-y-5">
           <TaskTimelinePanel
             tasks={timelineTasks}
             farmsById={farmsById}
@@ -282,12 +319,47 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
             })}
             progressImagesByTaskId={progressImagesByTaskId}
           />
+
+          {/* Operational (non-cultivation) work — e.g. rental vehicle log books */}
+          {(loadingOperational || operationalWorkDone.length > 0) && (
+            <div>
+              <div className="mb-2 flex items-center gap-2">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">Operational Work</span>
+                {operationalWorkDone.length > 0 && (
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">{operationalWorkDone.length}</span>
+                )}
+              </div>
+              {loadingOperational ? (
+                <div className="flex items-center gap-2 py-4 text-sm text-slate-400">
+                  <div className="h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                  Loading…
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  {operationalWorkDone.map((entry, idx) => (
+                    <div key={`${entry.task_id || idx}-${entry.from_date}`} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-slate-800 truncate">{entry.activity}</p>
+                        <p className="text-[11px] text-slate-400">{formatDate(entry.from_date)} – {formatDate(entry.to_date)}</p>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <p className="text-sm font-bold text-slate-700">{entry.quantity ?? '-'} {entry.unit || ''}</p>
+                        {entry.status && <p className="text-[10px] text-slate-400 capitalize">{entry.status}</p>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-gray-100 bg-gray-50/50 flex items-center justify-between gap-3 shrink-0">
           <p className="text-[11px] text-slate-400">
-            Covers {timelineTasks.length} task{timelineTasks.length !== 1 ? 's' : ''} · {formatDate(fromDate)} – {formatDate(toDate)}
+            Covers {timelineTasks.length} task{timelineTasks.length !== 1 ? 's' : ''}
+            {operationalWorkDone.length > 0 ? ` · ${operationalWorkDone.length} operational entr${operationalWorkDone.length !== 1 ? 'ies' : 'y'}` : ''}
+            {' '}· {formatDate(fromDate)} – {formatDate(toDate)}
           </p>
           <div className="flex items-center gap-2 shrink-0">
             <button
@@ -320,6 +392,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
           fromDate={fromDate}
           toDate={toDate}
           workDone={workDone}
+          operationalWorkDone={operationalWorkDone}
           taskDetailsById={taskDetailsById}
           scopeItems={scopeItems}
           onClose={() => setShowCertificatePreview(false)}
