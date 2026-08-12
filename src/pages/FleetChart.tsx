@@ -249,7 +249,10 @@ const fetchLogisticsPlan = async (): Promise<{ vehicles: ApiVehicle[]; schedule:
   }
 
   const list: Array<Record<string, BackendVehiclePlan>> = Array.isArray(data) ? data : [];
-  const vehicles: ApiVehicle[] = [];
+  // The backend can return more than one plan entry for the same vehicle (e.g. separate
+  // dispatch bookings) — key by vehicle_id so every booking folds into one row instead of
+  // spawning a duplicate row per booking.
+  const vehicleMap = new Map<string, ApiVehicle>();
   const schedule: ScheduleMap = {};
 
   for (const item of list) {
@@ -263,12 +266,17 @@ const fetchLogisticsPlan = async (): Promise<{ vehicles: ApiVehicle[]; schedule:
       const driverPhone = String(planObj.driver_contact ?? '—');
       const checkedIn = Boolean(planObj.trip_status);
 
-      vehicles.push({
-        vehicle_id: vehicleId,
-        vehicle_information: { vehicle_number: vehicleNumber, type: '—' },
-        driver: { name: driverName, phone: driverPhone, checkedIn },
-        currentFuelLevel: null,
-      });
+      const existingVehicle = vehicleMap.get(vehicleId);
+      if (!existingVehicle) {
+        vehicleMap.set(vehicleId, {
+          vehicle_id: vehicleId,
+          vehicle_information: { vehicle_number: vehicleNumber, type: '—' },
+          driver: { name: driverName, phone: driverPhone, checkedIn },
+          currentFuelLevel: null,
+        });
+      } else if (existingVehicle.driver?.name === '—' && driverName !== '—') {
+        existingVehicle.driver = { name: driverName, phone: driverPhone, checkedIn };
+      }
 
       const plan = planObj.plan && typeof planObj.plan === 'object' ? planObj.plan : {};
       schedule[vehicleId] = schedule[vehicleId] || {};
@@ -322,19 +330,30 @@ const fetchLogisticsPlan = async (): Promise<{ vehicles: ApiVehicle[]; schedule:
         ).filter(Boolean);
 
         const isLocked = toBooleanSafe(raw?.locked) || dayEntriesArray.some((e: any) => toBooleanSafe(e?.locked));
-        const statuses = tasks.map((t) => t.status);
+
+        // A vehicle can have more than one plan entry landing on the same date (multiple
+        // bookings) — fold them into the existing day instead of overwriting it, so all of
+        // that vehicle's tasks for the day show up together in its single row.
+        const existingDay = schedule[vehicleId][dateKey];
+        const mergedTasks = existingDay ? [...existingDay.tasks, ...tasks] : tasks;
+        const mergedStatuses = mergedTasks.map((t) => t.status);
 
         schedule[vehicleId][dateKey] = {
-          plan_id: planObj?.plan_id ? String(planObj.plan_id) : undefined,
+          plan_id: existingDay?.plan_id ?? (planObj?.plan_id ? String(planObj.plan_id) : undefined),
           date: dateKey,
-          tasks,
-          fuel: { input: inputFuel, consumed: usageFuel },
-          totalDistance,
-          initialEngineHours: initialEngineHours ?? 0,
-          finalEngineHours: finalEngineHours ?? 0,
-          damageChecklist: damageNotes.join(' | '),
-          tasksStatus: combineTaskStatuses(statuses),
-          isLocked,
+          tasks: mergedTasks,
+          fuel: {
+            input: (existingDay?.fuel?.input ?? 0) + inputFuel,
+            consumed: (existingDay?.fuel?.consumed ?? 0) + usageFuel,
+          },
+          totalDistance: (existingDay?.totalDistance ?? 0) + totalDistance,
+          initialEngineHours: existingDay?.initialEngineHours
+            ? Math.min(existingDay.initialEngineHours, initialEngineHours ?? existingDay.initialEngineHours)
+            : (initialEngineHours ?? 0),
+          finalEngineHours: Math.max(existingDay?.finalEngineHours ?? 0, finalEngineHours ?? 0),
+          damageChecklist: [existingDay?.damageChecklist, damageNotes.join(' | ')].filter(Boolean).join(' | '),
+          tasksStatus: combineTaskStatuses(mergedStatuses),
+          isLocked: Boolean(existingDay?.isLocked) || isLocked,
           // From API we can safely consider this "checked" even if notes empty
           damageChecklistTouched: true,
         };
@@ -342,6 +361,7 @@ const fetchLogisticsPlan = async (): Promise<{ vehicles: ApiVehicle[]; schedule:
     }
   }
 
+  const vehicles = Array.from(vehicleMap.values());
   return { vehicles, schedule };
 };
 
