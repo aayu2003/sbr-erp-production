@@ -728,53 +728,10 @@ const newStructuredAnnexureId = () => `${Date.now()}_${Math.random().toString(16
 const SHOW_LEGACY_ANNEXURE_EDITOR: boolean = false;
 const SHOW_PRE_ANNEXURE_PAGE: boolean = false;
 
-const PO_DRAFT_STORAGE_KEY = 'farmconnect.poDraft.v1';
-
-type PoDraft = {
-  indentId: string;
-  vendorId: string;
-  savedAt: string;
-  page: number;
-  p1: Page1State;
-  p2: Page2State;
-  preAnnexurePage?: Page3State;
-  p3: Page3State;
-  additionalAnnexures?: Page3State[];
-  p4?: Page4State;
-  authorizedSealAttachedAt?: string;
-};
-
-type PoDraftStore = {
-  drafts: Record<string, PoDraft>;
-};
-
 type ApiPurchaseOrder = {
   order_number?: unknown;
   purchase_quote?: unknown;
   other_terms_and_condition?: unknown;
-};
-
-const poDraftKey = (indentId: string, vendorId: string) => `${safe(indentId)}::${safe(vendorId)}`;
-
-const readPoDraftStore = (): PoDraftStore => {
-  try {
-    const raw = window.localStorage.getItem(PO_DRAFT_STORAGE_KEY);
-    if (!raw) return { drafts: {} };
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return { drafts: {} };
-    const drafts = (parsed as any).drafts;
-    return drafts && typeof drafts === 'object' ? { drafts } : { drafts: {} };
-  } catch {
-    return { drafts: {} };
-  }
-};
-
-const writePoDraftStore = (s: PoDraftStore) => {
-  try {
-    window.localStorage.setItem(PO_DRAFT_STORAGE_KEY, JSON.stringify(s));
-  } catch {
-    // ignore
-  }
 };
 
 const DEFAULT_ANNEXURE2_TERMS = annexure2TermsRaw
@@ -1494,7 +1451,10 @@ export function MakePurchaseOrderPopup({
         Accept: 'application/json',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ pr_number: prNo }),
+      // include_drafts: this popup needs to see its own in-progress draft
+      // (saved via /save_purchase_order_draft) to resume editing; every other
+      // consumer of this endpoint defaults to real orders only.
+      body: JSON.stringify({ pr_number: prNo, include_drafts: true }),
       signal,
     });
 
@@ -1655,52 +1615,15 @@ export function MakePurchaseOrderPopup({
         }
       } catch (e: any) {
         if (e?.name === 'AbortError') return;
-        // Silent fallback to local draft, but log for debugging
+        // No draft on the server (or it failed to load) — start fresh below.
         console.error('Failed to load PO draft from server:', e);
       }
 
-      // 2) Local fallback (older behavior)
-      const store = readPoDraftStore();
-      const key = poDraftKey(prNo, vId);
-      const d = store.drafts?.[key] as PoDraft | undefined;
-      if (!d) {
-        setDraftStatus('idle');
-        setAuthorizedSealAttachedAt('');
-        setAdditionalAnnexures([]);
-        setPreAnnexurePage(defaultPreAnnexurePage());
-        setSelectedAnnexureIndex(0);
-        setStructuredAnnexures([]);
-        setSelectedStructuredAnnexureIndex(0);
-        return;
-      }
-
       setDraftStatus('idle');
-      setPage(d.page || 1);
-      setP1({
-        ...defaultPage1(),
-        ...(d.p1 || {}),
-        poNo: safe(d.p1?.poNo) || safe(poNumber),
-        requiredPurchaseDocuments: normalizePurchaseFlowDocuments(d.p1?.requiredPurchaseDocuments),
-        customFields: Array.isArray(d.p1?.customFields) ? d.p1.customFields : [],
-      });
-      setP2({ ...defaultPage2(), ...(d.p2 || {}) });
-      setPreAnnexurePage({ ...defaultPreAnnexurePage(), ...(d.preAnnexurePage || {}) });
-      const legacyPage3 = d.p3 as any;
-      setP3({
-        ...defaultPage3(),
-        ...(safe(legacyPage3?.contentHtml) ? legacyPage3 : {}),
-        annexureTitle: normalizeAnnexureNumber(legacyPage3?.annexureTitle, defaultPage3().annexureTitle, 2, 1),
-        contentHtml: safe(legacyPage3?.contentHtml) || defaultPage3().contentHtml,
-      });
-      setAdditionalAnnexures(Array.isArray(d.additionalAnnexures) ? d.additionalAnnexures : []);
+      setAuthorizedSealAttachedAt('');
+      setAdditionalAnnexures([]);
+      setPreAnnexurePage(defaultPreAnnexurePage());
       setSelectedAnnexureIndex(0);
-      setP4({
-        ...defaultPage4(),
-        ...(d.p4 || {}),
-        annexureTitle: withAnnexureNumber(d.p4?.annexureTitle, defaultPage4().annexureTitle, (Array.isArray(d.additionalAnnexures) ? d.additionalAnnexures.length : 0) + 2),
-        termsText: safe(d.p4?.termsText) || safe(legacyPage3?.termsText) || DEFAULT_ANNEXURE2_TERMS,
-      });
-      setAuthorizedSealAttachedAt(safe(d.authorizedSealAttachedAt));
       setStructuredAnnexures([]);
       setSelectedStructuredAnnexureIndex(0);
     })();
@@ -2515,29 +2438,64 @@ export function MakePurchaseOrderPopup({
     const prNo = safe(prNumber) || safe((comparative as any)?.indentId);
     if (!prNo || !vId) return;
 
-    // Always persist locally first.
     setDraftStatus('saving');
-    const savedAt = new Date().toISOString();
-    const store = readPoDraftStore();
-    const key = poDraftKey(prNo, vId);
-    const next: PoDraft = {
-      indentId: prNo,
-      vendorId: vId,
-      savedAt,
-      page,
-      p1,
-      p2,
-      preAnnexurePage,
-      p3,
-      additionalAnnexures,
-      p4: { ...p4, termsText: effectiveAnnexureTerms },
-      authorizedSealAttachedAt: authorizedSealAttachedAt || '',
-    };
-    writePoDraftStore({ drafts: { ...(store.drafts || {}), [key]: next } });
+    try {
+      const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+      if (!baseUrl) throw new Error('Missing API base URL');
 
-    // A draft must not create an order number or call the final PO API.
-    setDraftStatus('saved');
-    toast.success('PO draft saved');
+      const annexurePayload = customAnnexures.reduce<Record<string, Page3State>>((result, annexure, index) => {
+        const annexureNumber = index + 1;
+        result[`annexure${annexureNumber}`] = {
+          ...annexure,
+          annexureTitle: withAnnexureNumber(annexure.annexureTitle, `ANNEXURE - ${annexureNumber}`, annexureNumber),
+        };
+        return result;
+      }, {});
+      (annexurePayload as Record<string, Page3State | Page4State>)[`annexure${legalAnnexureNumber}`] = {
+        ...p4,
+        annexureTitle: withAnnexureNumber(p4.annexureTitle, defaultPage4().annexureTitle, legalAnnexureNumber),
+        termsText: effectiveAnnexureTerms,
+      };
+
+      // A draft must not create an order number or call the final PO API —
+      // it's saved under a synthetic key, never a real order sequence number.
+      const res = await fetch(`${baseUrl}/purchase_flow/save_purchase_order_draft`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pr_number: prNo,
+          vendor_id: vId,
+          comparison_id: comparisonId || undefined,
+          purchase_quote: {
+            ...(p1 as any),
+            amendmentNo: effectiveAmendmentNo,
+            required_purchase_documents: normalizePurchaseFlowDocuments(p1.requiredPurchaseDocuments),
+            vendor_id: vId,
+            vendor_name: vendorNameFromComparative,
+            authorizedSealAttachedAt: authorizedSealAttachedAt || '',
+          },
+          other_terms_and_condition: {
+            ...(p2 as any),
+            custom_po_page: preAnnexurePage,
+            ...annexurePayload,
+          },
+          annexure_details: buildAnnexureDetailsPayload(structuredAnnexures),
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        throw new Error(errText || `HTTP ${res.status}`);
+      }
+
+      setDraftStatus('saved');
+      toast.success('PO draft saved');
+    } catch (e: any) {
+      setDraftStatus('idle');
+      const msg = String(e?.message ?? e ?? '').trim();
+      showTemporaryError(`Failed to save draft${msg ? `: ${msg}` : ''}`);
+      return;
+    }
     if (draftSavedTimerRef.current) window.clearTimeout(draftSavedTimerRef.current);
     draftSavedTimerRef.current = window.setTimeout(() => setDraftStatus('idle'), 1500);
   };
@@ -2642,6 +2600,14 @@ export function MakePurchaseOrderPopup({
           ...annexurePayload,
         },
         annexure_details: buildAnnexureDetailsPayload(structuredAnnexures),
+        // Snapshot of item name/uom/qty at save time, so the PO Approvals queue
+        // and Purchase Flow's left panel can show what's being ordered without
+        // re-joining back to the comparative statement.
+        item_details: ((comparative as any)?.items || []).map((item: any) => ({
+          name: safe(item?.partName) || 'Item not recorded',
+          uom: safe(item?.uom),
+          quantity: Number(item?.qty ?? 0) || 0,
+        })),
       };
 
       const existingOrderNo = effectivePoNo;
@@ -2651,25 +2617,10 @@ export function MakePurchaseOrderPopup({
       const orderNo = safe(apiRes?.order_number) || safe(apiRes?.orderNo) || safe(apiRes?.poNo) || effectivePoNo;
       if (orderNo && orderNo !== safe(p1.poNo)) setP1Field('poNo', orderNo as any);
 
-      // Keep the exact created/approved content locally as a resilient
-      // amendment snapshot. Revision mode can restore every editable field
-      // even when an older server response omits part of the purchase quote.
-      const snapshotKey = poDraftKey(prNo, finalVendorId);
-      const snapshotStore = readPoDraftStore();
-      const snapshot: PoDraft = {
-        indentId: prNo,
-        vendorId: finalVendorId,
-        savedAt: new Date().toISOString(),
-        page: 1,
-        p1: { ...p1, poNo: orderNo || effectivePoNo, amendmentNo: effectiveAmendmentNo },
-        p2,
-        preAnnexurePage,
-        p3,
-        additionalAnnexures,
-        p4: { ...p4, termsText: effectiveAnnexureTerms },
-        authorizedSealAttachedAt: authorizedSealAttachedAt || '',
-      };
-      writePoDraftStore({ drafts: { ...(snapshotStore.drafts || {}), [snapshotKey]: snapshot } });
+      // The backend now holds the exact saved content (purchase_quote /
+      // other_terms_and_condition / annexure_details are stored verbatim), so
+      // reloading via get_purchase_orders reconstructs it losslessly — no
+      // local snapshot needed.
 
       const createdAt = safe(apiRes?.created_at) || safe(apiRes?.updated_at) || new Date().toISOString();
       onConfirm?.({ indentId: safe(comparative.indentId), vendorId: finalVendorId, createdAt, poNo: orderNo });

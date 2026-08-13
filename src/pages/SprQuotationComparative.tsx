@@ -79,7 +79,6 @@ type DirectoryVendor = {
 // HELPERS
 // ─────────────────────────────────────────────────────────────
 
-const SPR_KEY = 'farmconnect.sprComparative.v1';
 const genId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const getApiBaseUrl = () => String(getBaseUrl() ?? '').replace(/\/$/, '');
 const safeTrim = (v: unknown) => String(v ?? '').trim();
@@ -94,19 +93,6 @@ const inr = (n: number) => {
 const stableItemId = (name: string, idx: number) => {
   const safe = safeTrim(name).replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
   return `spr-${idx + 1}-${safe || 'x'}`;
-};
-
-const readAll = (): Record<string, SprComparative> => {
-  try {
-    const raw = window.localStorage.getItem(SPR_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch { return {}; }
-};
-
-const writeAll = (all: Record<string, SprComparative>) => {
-  try { window.localStorage.setItem(SPR_KEY, JSON.stringify(all)); } catch {}
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -195,7 +181,6 @@ export default function SprQuotationComparative() {
     if (!normalizedIndentId) return;
     let cancelled = false;
     const load = async () => {
-      const localSaved = readAll()[normalizedIndentId];
       // Always fetch items from indent API for accurate SPR fields
       let indentItems: SprItem[] = [];
       try { indentItems = await fetchSprItemsFromIndent(normalizedIndentId); } catch {}
@@ -207,6 +192,7 @@ export default function SprQuotationComparative() {
         if (cancelled) return;
         if (draft) {
           const createdAt = safeTrim(draft?.created_at);
+          const meta = draft?.meta && typeof draft.meta === 'object' ? draft.meta as Partial<SprComparative> : null;
           const quoters: any[] = Array.isArray(draft?.quoters) ? draft.quoters : [];
 
           const vendors: QuoteVendor[] = quoters.map((q) => safeTrim(q?.vendor_id)).filter(Boolean)
@@ -253,8 +239,8 @@ export default function SprQuotationComparative() {
             deliveryTimeline,
             warranty,
             priceBasis,
-            customChargeRows: localSaved?.customChargeRows || [],
-            customDetailRows: localSaved?.customDetailRows || [],
+            customChargeRows: meta?.customChargeRows || [],
+            customDetailRows: meta?.customDetailRows || [],
             lastSavedAt: createdAt || undefined,
             lastSavedSource: createdAt ? 'server' : undefined,
           });
@@ -262,13 +248,6 @@ export default function SprQuotationComparative() {
         }
       } catch {}
       if (cancelled) return;
-
-      // Local draft fallback — but always override items with indent API data
-      const all = readAll();
-      if (all[normalizedIndentId]) {
-        setModel({ ...all[normalizedIndentId], items: indentItems.length ? indentItems : (all[normalizedIndentId].items ?? []) });
-        return;
-      }
 
       // Fresh start: items from indent, NO vendors (user adds manually)
       setModel({
@@ -381,6 +360,17 @@ export default function SprQuotationComparative() {
     return out;
   }, [vendorOrder, grandTotalByVendor]);
 
+  // The technical recommendation is never a manual choice — it's always the
+  // vendor currently ranked L1 (lowest grand total) on the comparison.
+  const l1RecommendationVendor = useMemo(() => {
+    const l1Id = Object.keys(vendorLTagByVendorId).find((id) => vendorLTagByVendorId[id] === 'L1');
+    if (!l1Id) return undefined;
+    const vendor = vendorOrder.find((v) => v.id === l1Id);
+    const directoryVendorId = String(vendor?.directoryVendorId ?? '').trim();
+    if (!vendor || !directoryVendorId) return undefined;
+    return { id: vendor.id, directoryVendorId, name: vendor.name, total: Number(grandTotalByVendor[l1Id] ?? 0) || 0 };
+  }, [vendorLTagByVendorId, vendorOrder, grandTotalByVendor]);
+
   // ─── Mutators ─────────────────────────────────────────────
   const setVendorRate = (vendorId: string, itemId: string, val: string) => {
     const rate = Number(val);
@@ -424,13 +414,6 @@ export default function SprQuotationComparative() {
     customDetailRows: [...(previous.customDetailRows || []), { id: genId(), label: `Detail ${(previous.customDetailRows || []).length + 1}`, values: {} }],
   } : previous);
 
-  const persist = (next: SprComparative) => {
-    if (!normalizedIndentId) return;
-    const all = readAll();
-    all[normalizedIndentId] = next;
-    writeAll(all);
-  };
-
   // ─── Save payload ──────────────────────────────────────────
   const buildPayload = (m: SprComparative) => ({
     pr_number: String(normalizedIndentId || m.indentId || '').trim(),
@@ -462,6 +445,10 @@ export default function SprQuotationComparative() {
         price_basis: String((m.priceBasis as any)?.[v.id] ?? '').trim() || null,
       };
     }).filter(Boolean),
+    technical_recommendation: String(m.technicalRecommendationVendorId ?? '').trim() || null,
+    // Full model, so fields the backend doesn't otherwise track (customChargeRows,
+    // customDetailRows, etc.) round-trip losslessly instead of relying on local storage.
+    meta: m,
   });
 
   const saveDraftToApi = async (payload: any) => {
@@ -482,7 +469,6 @@ export default function SprQuotationComparative() {
     if (!model || savingDraft) return;
     if (!model.items.length) { toast.error('No service items found'); return; }
     const snapshot = { ...model, isDraft: true, lastSavedAt: toIsoNow(), lastSavedSource: 'local' as const };
-    persist(snapshot);
     setModel(snapshot);
     setSavingDraft(true);
     try {
@@ -491,7 +477,7 @@ export default function SprQuotationComparative() {
       setModel((p) => p ? { ...p, lastSavedAt: serverSavedAt || p.lastSavedAt || toIsoNow(), lastSavedSource: serverSavedAt ? 'server' : (p.lastSavedSource || 'local') } : p);
       toast.success('Draft saved');
     } catch (e: any) {
-      toast.error(`Draft saved locally, server save failed${e?.message ? `: ${e.message}` : ''}`);
+      toast.error(`Failed to save draft${e?.message ? `: ${e.message}` : ''}`);
     } finally {
       setSavingDraft(false);
     }
@@ -500,12 +486,15 @@ export default function SprQuotationComparative() {
   const saveFinal = () => {
     if (!model || savingFinal) return;
     if (!model.items.length) { toast.error('No service items found'); return; }
-    const nextModel: SprComparative = { ...model, isDraft: false, technicalRecommendationVendorId: undefined, lastSavedAt: toIsoNow(), lastSavedSource: 'local' };
-    persist(nextModel);
+    if (!l1RecommendationVendor) {
+      toast.error('Enter vendor rates so an L1 (lowest cost) vendor can be determined');
+      return;
+    }
+    const nextModel: SprComparative = { ...model, isDraft: false, technicalRecommendationVendorId: l1RecommendationVendor.directoryVendorId, lastSavedAt: toIsoNow(), lastSavedSource: 'local' };
     setSavingFinal(true);
     void saveFinalToApi(buildPayload(nextModel))
       .then(() => { toast.success('Comparative statement saved'); navigate('/work-comparative-statement'); })
-      .catch((e: any) => { toast.error(`Saved locally, server save failed${e?.message ? `: ${e.message}` : ''}`); })
+      .catch((e: any) => { toast.error(`Failed to save${e?.message ? `: ${e.message}` : ''}`); })
       .finally(() => setSavingFinal(false));
   };
 

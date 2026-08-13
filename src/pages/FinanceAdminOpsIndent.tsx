@@ -37,14 +37,35 @@ import {
 import { PRPreview } from '@/components/purchase/PRPreview';
 import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
 import { type ComparativeModel } from '@/components/purchase/ComparativeStatementPreview';
-import {
-  addPoApprovalQuestion,
-  markPoForwardedToPurchaseFlow,
-  PO_APPROVALS_CHANGED_EVENT,
-  readPoApprovals,
-  reviewPoApproval,
-  type PoApprovalRecord,
-} from '@/lib/poApprovalStore';
+
+type PoApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected';
+
+type PoApprovalQuestion = {
+  id: string;
+  question: string;
+  askedBy: string;
+  askedAt: string;
+  reply?: string;
+  repliedBy?: string;
+  repliedAt?: string;
+};
+
+type PoApprovalRecord = {
+  id: string;
+  poNumber: string;
+  orderType?: 'PR' | 'SPR';
+  prNumber: string;
+  comparisonId: string;
+  vendorId: string;
+  vendorName: string;
+  itemDetails: Array<{ name: string; uom: string; quantity: number }>;
+  status: PoApprovalStatus;
+  createdAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  purchaseFlowForwardedAt?: string;
+  questions?: PoApprovalQuestion[];
+};
 
 const normalizePurchaseFlowDocuments = (value: unknown): string[] => {
   const source = Array.isArray(value) ? value : [];
@@ -71,6 +92,7 @@ const mapAdminPurchaseOrderToRecord = (order: any): PoApprovalRecord => {
   const quote = order?.purchase_quote && typeof order.purchase_quote === 'object' ? order.purchase_quote : {};
   const directorApproval = order?.director_approval && typeof order.director_approval === 'object' ? order.director_approval : {};
   const items: any[] = Array.isArray(order?.item_details) ? order.item_details : [];
+  const questions: any[] = Array.isArray(order?.approval_questions) ? order.approval_questions : [];
   const orderNumber = String(order?.order_number ?? '').trim();
   const status: PoApprovalRecord['status'] = (['draft', 'pending', 'approved', 'rejected'] as const)
     .includes(directorApproval?.status) ? directorApproval.status : 'pending';
@@ -91,6 +113,15 @@ const mapAdminPurchaseOrderToRecord = (order: any): PoApprovalRecord => {
     createdAt: String(order?.created_at ?? order?.updated_at ?? new Date().toISOString()),
     reviewedAt: directorApproval?.approval_time || directorApproval?.approval_date || undefined,
     reviewedBy: directorApproval?.staff_name || undefined,
+    questions: questions.map((q) => ({
+      id: String(q?.id ?? `po-question-${Date.now()}`),
+      question: String(q?.question ?? ''),
+      askedBy: String(q?.askedBy ?? ''),
+      askedAt: String(q?.askedAt ?? ''),
+      reply: q?.reply ? String(q.reply) : undefined,
+      repliedBy: q?.repliedBy ? String(q.repliedBy) : undefined,
+      repliedAt: q?.repliedAt ? String(q.repliedAt) : undefined,
+    })),
   };
 };
 
@@ -111,17 +142,30 @@ const fetchPoApprovalsFromBackend = async (): Promise<PoApprovalRecord[] | null>
   }
 };
 
-// Questions and the "forwarded to Purchase Flow" marker have no backend API yet,
-// so those two fields stay sourced from the local poApprovalStore cache.
-const mergeLocalOnlyFields = (records: PoApprovalRecord[], localRecords: PoApprovalRecord[]): PoApprovalRecord[] => {
-  const localByPoNumber = new Map(localRecords.map((record) => [record.poNumber, record]));
-  return records.map((record) => {
-    const local = localByPoNumber.get(record.poNumber);
-    return local
-      ? { ...record, questions: local.questions, purchaseFlowForwardedAt: local.purchaseFlowForwardedAt }
-      : record;
-  });
+// "Forwarded to Purchase Flow" isn't a stored flag — it's true whenever a
+// admin_purchase_flow row already exists for this order_number.
+const fetchForwardedOrderNumbers = async (): Promise<Set<string>> => {
+  try {
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return new Set();
+    const url = `${baseUrl}/purchase_flow/get_purchase_flows`;
+    let res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+    if (res.status === 405) res = await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } });
+    if (!res.ok) return new Set();
+    const data: any = await res.json().catch(() => null);
+    const flows: any[] = Array.isArray(data?.purchase_flows) ? data.purchase_flows : [];
+    return new Set(flows.map((flow) => String(flow?.order_number ?? '').trim()).filter(Boolean));
+  } catch {
+    return new Set();
+  }
 };
+
+const mergeForwardedStatus = (records: PoApprovalRecord[], forwardedOrderNumbers: Set<string>): PoApprovalRecord[] =>
+  records.map((record) =>
+    forwardedOrderNumbers.has(record.poNumber)
+      ? { ...record, purchaseFlowForwardedAt: record.purchaseFlowForwardedAt || 'forwarded' }
+      : record,
+  );
 
 type NfaApiItemRow = {
   item_name?: string;
@@ -667,10 +711,11 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
   const [nfaApprovalsMap, setNfaApprovalsMap] = useState<Record<string, boolean>>({});
 
   const [activeSection, setActiveSection] = useState<'indents' | 'nfa' | 'mrf' | 'po-approvals'>(orderTypeFilter === 'SPR' ? 'indents' : 'nfa');
-  const [poApprovals, setPoApprovals] = useState<PoApprovalRecord[]>(() => readPoApprovals());
+  const [poApprovals, setPoApprovals] = useState<PoApprovalRecord[]>([]);
   const [previewPoApproval, setPreviewPoApproval] = useState<PoApprovalRecord | null>(null);
   const [questionPoApproval, setQuestionPoApproval] = useState<PoApprovalRecord | null>(null);
   const [poQuestion, setPoQuestion] = useState('');
+  const [askingQuestion, setAskingQuestion] = useState(false);
   const [forwardingPoNumber, setForwardingPoNumber] = useState<string | null>(null);
   const [decidingPoNumber, setDecidingPoNumber] = useState<string | null>(null);
 
@@ -686,31 +731,17 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
   }, []);
 
   const refreshPoApprovals = async () => {
-    const backendRecords = await fetchPoApprovalsFromBackend();
-    const merged = mergeLocalOnlyFields(backendRecords ?? readPoApprovals(), readPoApprovals());
+    const [backendRecords, forwardedOrderNumbers] = await Promise.all([
+      fetchPoApprovalsFromBackend(),
+      fetchForwardedOrderNumbers(),
+    ]);
+    const merged = mergeForwardedStatus(backendRecords ?? [], forwardedOrderNumbers);
     setPoApprovals(merged);
     return merged;
   };
 
   useEffect(() => {
     void refreshPoApprovals();
-
-    // Questions and the forwarded-marker are still local-only, so keep syncing
-    // those two fields onto whatever we last loaded from the backend.
-    const handleLocalChange = () => {
-      setPoApprovals((current) => mergeLocalOnlyFields(current, readPoApprovals()));
-      setQuestionPoApproval((current) => {
-        if (!current) return null;
-        const local = readPoApprovals().find((record) => record.poNumber === current.poNumber);
-        return local ? { ...current, questions: local.questions } : current;
-      });
-    };
-    window.addEventListener(PO_APPROVALS_CHANGED_EVENT, handleLocalChange);
-    window.addEventListener('storage', handleLocalChange);
-    return () => {
-      window.removeEventListener(PO_APPROVALS_CHANGED_EVENT, handleLocalChange);
-      window.removeEventListener('storage', handleLocalChange);
-    };
   }, []);
 
   // Load NFA list from backend
@@ -1055,8 +1086,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
         const flowData: any = await flowsResponse.json().catch(() => null);
         const existingFlows = Array.isArray(flowData?.purchase_flows) ? flowData.purchase_flows : [];
         if (existingFlows.some((flow: any) => String(flow?.order_number ?? '').trim() === record.poNumber)) {
-          markPoForwardedToPurchaseFlow(record.poNumber);
-          setPoApprovals(readPoApprovals());
+          setPoApprovals((current) => current.map((r) => r.poNumber === record.poNumber ? { ...r, purchaseFlowForwardedAt: r.purchaseFlowForwardedAt || 'forwarded' } : r));
           toast.success(`PO ${record.poNumber} is already available in Purchase Flow`);
           return true;
         }
@@ -1106,8 +1136,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
         throw new Error(result?.message || result?.error || `Forwarding failed (HTTP ${response.status})`);
       }
 
-      markPoForwardedToPurchaseFlow(record.poNumber);
-      setPoApprovals(readPoApprovals());
+      setPoApprovals((current) => current.map((r) => r.poNumber === record.poNumber ? { ...r, purchaseFlowForwardedAt: r.purchaseFlowForwardedAt || 'forwarded' } : r));
       toast.success(`PO ${record.poNumber} forwarded to Purchase Flow`);
       return true;
     } catch (error: any) {
@@ -1516,7 +1545,6 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
                                 });
                                 const data: any = await res.json().catch(() => null);
                                 if (!res.ok || !data?.success) throw new Error(data?.message || `HTTP ${res.status}`);
-                                reviewPoApproval(record.poNumber, 'rejected', reviewer);
                                 await refreshPoApprovals();
                                 toast.success(`PO ${record.poNumber} rejected`);
                               } catch (error: any) {
@@ -1547,7 +1575,6 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
                                 });
                                 const data: any = await res.json().catch(() => null);
                                 if (!res.ok || !data?.success) throw new Error(data?.message || `HTTP ${res.status}`);
-                                reviewPoApproval(record.poNumber, 'approved', reviewer);
                                 await refreshPoApprovals();
                                 toast.success(`PO ${record.poNumber} approved`);
                                 await forwardApprovedPoToPurchaseFlow({ ...record, status: 'approved' });
@@ -1953,16 +1980,30 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
             <Button
               type="button"
               className="gap-2 bg-[#0D3A35] text-white hover:bg-[#092e2a]"
-              disabled={!poQuestion.trim()}
-              onClick={() => {
+              disabled={!poQuestion.trim() || askingQuestion}
+              onClick={async () => {
                 if (!questionPoApproval || !poQuestion.trim()) return;
                 const askedBy = readUserProfile().name?.trim() || 'Admin Ops Finance';
-                addPoApprovalQuestion(questionPoApproval.poNumber, poQuestion, askedBy);
-                const refreshed = readPoApprovals();
-                setPoApprovals(refreshed);
-                setQuestionPoApproval(refreshed.find((record) => record.poNumber === questionPoApproval.poNumber) || null);
-                setPoQuestion('');
-                toast.success(`Question raised against PO ${questionPoApproval.poNumber}`);
+                setAskingQuestion(true);
+                try {
+                  const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+                  if (!baseUrl) throw new Error('Missing API base URL');
+                  const res = await fetch(`${baseUrl}/purchase_flow/add_po_approval_question`, {
+                    method: 'POST',
+                    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ order_number: questionPoApproval.poNumber, question: poQuestion, asked_by: askedBy }),
+                  });
+                  const data: any = await res.json().catch(() => null);
+                  if (!res.ok || !data?.success) throw new Error(data?.message || `HTTP ${res.status}`);
+                  const refreshed = await refreshPoApprovals();
+                  setQuestionPoApproval(refreshed.find((record) => record.poNumber === questionPoApproval.poNumber) || null);
+                  setPoQuestion('');
+                  toast.success(`Question raised against PO ${questionPoApproval.poNumber}`);
+                } catch (error: any) {
+                  toast.error(error?.message || 'Failed to raise question');
+                } finally {
+                  setAskingQuestion(false);
+                }
               }}
             >
               <Send className="h-4 w-4" /> Raise Question

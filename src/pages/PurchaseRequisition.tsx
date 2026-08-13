@@ -891,8 +891,6 @@ const SprPreview = ({
   );
 };
 
-const COMPARATIVE_KEY = 'farmconnect.prComparative.v1';
-
 type ComparativeVendor = {
   id: string;
   name: string;
@@ -973,28 +971,62 @@ type Comparative = {
   isDraft?: boolean;
 };
 
-const readComparatives = (): Record<string, Comparative> => {
+const fetchComparativeForPreview = async (prNumber: string): Promise<Comparative | null> => {
+  const baseUrl = getApiBaseUrl();
+  if (!baseUrl || !prNumber) return null;
   try {
-    const raw = window.localStorage.getItem(COMPARATIVE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-};
+    const res = await fetch(`${baseUrl}/purchase_flow/get_comparative_statement_draft`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pr_number: prNumber }),
+    });
+    if (!res.ok) return null;
+    const data: any = await res.json().catch(() => null);
+    const row: any = Array.isArray(data?.items) ? data.items[0] : null;
+    if (!row) return null;
 
-const latestComparative = (...candidates: Array<Comparative | null | undefined>): Comparative | null => {
-  const available = candidates.filter(Boolean) as Comparative[];
-  if (!available.length) return null;
-  return available.sort((left, right) => {
-    const leftRevision = Number(left.revision || String(left.comparisonNo || '').match(/\/R(\d+)$/i)?.[1] || 0);
-    const rightRevision = Number(right.revision || String(right.comparisonNo || '').match(/\/R(\d+)$/i)?.[1] || 0);
-    if (leftRevision !== rightRevision) return rightRevision - leftRevision;
-    const leftSaved = new Date(left.lastSavedAt || left.revisionDate || 0).getTime() || 0;
-    const rightSaved = new Date(right.lastSavedAt || right.revisionDate || 0).getTime() || 0;
-    return rightSaved - leftSaved;
-  })[0];
+    // Rows saved after the "meta" field was introduced carry the entire
+    // Comparative model; prefer it. Older rows only have item_row/quoters,
+    // so reconstruct a minimal preview from those instead.
+    const meta = row?.meta && typeof row.meta === 'object' ? row.meta : null;
+    if (meta && Array.isArray(meta.items) && meta.items.length) {
+      return meta as Comparative;
+    }
+
+    const itemRows: any[] = Array.isArray(row?.item_row) ? row.item_row : [];
+    const items: ComparativeItem[] = itemRows.map((it, idx) => ({
+      id: `it-${idx + 1}`,
+      srNo: idx + 1,
+      partName: str(it?.item_name),
+      uom: str(it?.UoM),
+      qty: numOr0(it?.quantity),
+      gstPercent: numOr0(it?.gst_percentage),
+    }));
+    const quoters: any[] = Array.isArray(row?.quoters) ? row.quoters : [];
+    const vendors: ComparativeVendor[] = quoters.map((q) => str(q?.vendor_id)).filter(Boolean).map((vid) => ({ id: vid, name: vid }));
+    const quotes: ComparativeQuote[] = quoters
+      .map((q) => {
+        const vendorId = str(q?.vendor_id);
+        const unitRateByItemId: Record<string, number> = {};
+        const costing = q?.item_costing && typeof q.item_costing === 'object' ? q.item_costing : {};
+        items.forEach((it) => {
+          const costRow = (costing as any)?.[it.partName || ''];
+          unitRateByItemId[it.id] = numOr0(costRow?.per_unit_costing);
+        });
+        return { vendorId, unitRateByItemId };
+      })
+      .filter((q) => q.vendorId);
+
+    return {
+      indentId: prNumber,
+      vendors,
+      items,
+      quotes,
+      lastSavedAt: str(row?.created_at),
+    };
+  } catch {
+    return null;
+  }
 };
 
 const numOr0 = (v: unknown) => {
@@ -1203,14 +1235,6 @@ const ComparativeStatementPreview = ({ c, showForwardedStamp }: { c: Comparative
       ) : null}
     </div>
   );
-};
-
-const writeComparatives = (all: Record<string, any>) => {
-  try {
-    window.localStorage.setItem(COMPARATIVE_KEY, JSON.stringify(all));
-  } catch {
-    // ignore
-  }
 };
 
 const normalize = (v: unknown) => str(v).toLowerCase();
@@ -1441,10 +1465,14 @@ const PurchaseRequisition = ({ indentTypeFilter = 'PR' }: { indentTypeFilter?: '
       setPreviewComparative(null);
       return;
     }
-    const all = readComparatives();
-    const key1 = str(previewIndent.id);
-    const key2 = str(previewIndent.prNo);
-    setPreviewComparative(latestComparative((all as any)[key1], (all as any)[key2]));
+    let cancelled = false;
+    const prNumber = str(previewIndent.prNo) || str(previewIndent.id);
+    void fetchComparativeForPreview(prNumber).then((c) => {
+      if (!cancelled) setPreviewComparative(c);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [previewIndent]);
 
   const labelForQuotationStatus = (s: QuotationStatus) => {
@@ -1606,27 +1634,8 @@ const PurchaseRequisition = ({ indentTypeFilter = 'PR' }: { indentTypeFilter?: '
       toast.error('Already forwarded. Quotations are locked.');
       return;
     }
-    const all = readComparatives();
-    if (!all[indent.id]) {
-      all[indent.id] = {
-        indentId: indent.id,
-        title: `Vendor Comparative Statement for ${indent.project}`,
-        gstPercent: 18,
-        vendors: [
-          { id: genId(), name: 'VENDOR 1' },
-          { id: genId(), name: 'VENDOR 2' },
-        ],
-        items: indent.items.map((li) => ({
-          id: li.id,
-          srNo: li.srNo,
-          partName: li.partName,
-          uom: li.uom,
-          qty: netPrQty(li),
-        })),
-        quotes: [],
-      };
-      writeComparatives(all);
-    }
+    // No pre-seeding here — the quotation page itself seeds a fresh comparative
+    // (from the indent API) the first time it opens with nothing saved yet.
     const typeSegment = indent.indentType === 'SPR' ? 'SPR' : 'PR';
     navigate(`/purchase-requisition/${typeSegment}/${encodeURIComponent(indent.id)}/quotation`);
   };

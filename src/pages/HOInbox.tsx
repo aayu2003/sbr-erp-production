@@ -40,54 +40,7 @@ type ApiTcComparative = {
   comparison_id?: unknown;
   comparision_id?: unknown;
   indent_type?: unknown;
-};
-
-const HO_OVERRIDES_KEY = 'farmconnect.hoInboxOverrides.v1';
-const COMPARATIVE_SNAPSHOT_KEY = 'farmconnect.prComparative.v1';
-
-type HoOverrides = Record<
-  string,
-  {
-    hoSelectedVendorId?: string;
-    hoForwardedAt?: string;
-    tcApprovedVendorId?: string;
-    tcApprovedAt?: string;
-    hoLocked?: boolean;
-    poCreatedAt?: string;
-    poNo?: string;
-    poStatus?: string;
-    poNextProcessSeries?: string[];
-  }
->;
-
-const readHoOverrides = (): HoOverrides => {
-  try {
-    const raw = window.localStorage.getItem(HO_OVERRIDES_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-};
-
-const writeHoOverrides = (next: HoOverrides) => {
-  try {
-    window.localStorage.setItem(HO_OVERRIDES_KEY, JSON.stringify(next));
-  } catch {
-    // ignore
-  }
-};
-
-const readComparativeSnapshots = (): Record<string, ComparativeModel> => {
-  try {
-    const raw = window.localStorage.getItem(COMPARATIVE_SNAPSHOT_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
+  meta?: unknown;
 };
 
 const safeTrim = (v: unknown) => String(v ?? '').trim();
@@ -190,11 +143,20 @@ const mapTcToModel = (x: ApiTcComparative): ComparativeModel | null => {
   const techRec = safeTrim((x as any)?.technical_recommendation);
   const createdAt = safeTrim((x as any)?.created_at);
 
+  // Rows saved after the "meta" field was introduced carry the entire
+  // Comparative model from QuotationComparative.tsx/SprQuotationComparative.tsx
+  // (comparisonNo, revision, comparison basis, award strategy, custom charges,
+  // technical/scope parameters, etc.). Use it to fill in everything this
+  // function doesn't otherwise compute from item_row/quoters — the explicit
+  // fields below still win since backend status fields must stay authoritative.
+  const rawMeta = (x as any)?.meta;
+  const meta: Partial<ComparativeModel> = rawMeta && typeof rawMeta === 'object' ? rawMeta : {};
+
   const model: ComparativeModel = {
+    ...meta,
     indentId: prNumber,
     comparisonId: comparisonId || undefined,
-    title: 'Price Comparative Statement',
-    subTitle: undefined,
+    title: meta.title || 'Price Comparative Statement',
     vendors,
     items,
     quotes,
@@ -202,9 +164,9 @@ const mapTcToModel = (x: ApiTcComparative): ComparativeModel | null => {
     otherCharges,
     paymentTerms,
     deliveryTimeline,
-    priceBasis: {},
+    priceBasis: meta.priceBasis || {},
     warranty,
-    vendorStatus: {},
+    vendorStatus: meta.vendorStatus || {},
     technicalRecommendationVendorId: techRec || undefined,
     lastSavedAt: createdAt || undefined,
     isDraft: false,
@@ -324,38 +286,14 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
           r.status === 'fulfilled' ? r.value : mapped[i]
         );
 
-        // ── Step 3: merge with local HO overrides ──────────────────────────
-        const overrides = readHoOverrides();
-        const snapshots = readComparativeSnapshots();
+        // ── Step 3: index by indentId ────────────────────────────────────
+        // No local overrides/snapshots anymore — mapTcToModel already folds in
+        // the row's "meta" (the full comparative model, once saved by
+        // QuotationComparative.tsx/SprQuotationComparative.tsx) so everything
+        // here is backend-derived.
         const next: Record<string, ComparativeModel> = {};
         for (const m of resolvedMapped) {
-          const o = overrides[m.indentId];
-          const snapshot = snapshots[m.indentId];
-          const completeModel: ComparativeModel = snapshot
-            ? {
-                ...m,
-                ...snapshot,
-                indentId: m.indentId,
-                comparisonId: m.comparisonId || snapshot.comparisonId,
-                flowStatus: m.flowStatus,
-                tcStatus: m.tcStatus,
-                nfaStatus: m.nfaStatus,
-                backendApprovedVendorId: m.backendApprovedVendorId,
-                tcApprovedVendorId: m.tcApprovedVendorId,
-                tcApprovedAt: m.tcApprovedAt,
-                indent_type: m.indent_type || snapshot.indent_type,
-              }
-            : m;
-          next[m.indentId] = o
-            ? {
-                ...completeModel,
-                ...o,
-                hoSelectedVendorId: o.hoSelectedVendorId || completeModel.hoSelectedVendorId,
-                tcApprovedVendorId: completeModel.tcApprovedVendorId || o.tcApprovedVendorId,
-                tcApprovedAt: o.tcApprovedAt || completeModel.tcApprovedAt,
-                hoForwardedAt: o.hoForwardedAt || completeModel.hoForwardedAt,
-              }
-            : completeModel;
+          next[m.indentId] = m;
         }
 
         if (!cancelled) setAll(next);
@@ -443,22 +381,14 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
     };
   }, [scopedInboxRows]);
 
+  // In-memory only — every field here (TC/NFA/PO status) is re-derived from
+  // the backend on the next load, so nothing needs local persistence. This
+  // just gives instant feedback for the rest of the current session.
   const updateComparative = (indentId: string, patch: Partial<ComparativeModel>) => {
     setAll((prev) => {
       const existing = prev[indentId];
       if (!existing) return prev;
-      const merged = { ...existing, ...patch };
-      const overrides = readHoOverrides();
-      overrides[indentId] = {
-        ...overrides[indentId],
-        hoSelectedVendorId: merged.hoSelectedVendorId,
-        hoForwardedAt: merged.hoForwardedAt,
-        tcApprovedVendorId: merged.tcApprovedVendorId,
-        tcApprovedAt: merged.tcApprovedAt,
-        hoLocked: (merged as any)?.hoLocked,
-      };
-      writeHoOverrides(overrides);
-      return { ...prev, [indentId]: merged };
+      return { ...prev, [indentId]: { ...existing, ...patch } };
     });
   };
 

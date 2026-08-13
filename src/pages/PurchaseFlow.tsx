@@ -6,7 +6,6 @@ import { Button } from '@/components/ui/button';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
 import { formatDateDDMMYYYY, formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
-import { markPoForwardedToPurchaseFlow, readPoApprovals } from '@/lib/poApprovalStore';
 import { getGrnsByOrder, type GRNRecord } from '@/lib/grnApi';
 import { buildGrnPdfBlob } from '@/lib/grnPdf';
 import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
@@ -14,6 +13,10 @@ import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderP
 type LeftPanelInfo = {
   pr_number?: string;
   approved_vendor_id?: string;
+  // Fallback item source for POs whose own item_details snapshot is empty
+  // (e.g. saved before that field existed) — the comparative statement's
+  // item_row is always populated.
+  item_row?: Array<{ item_name?: string; UoM?: string; uom?: string; quantity?: number }>;
   vendor_details?: {
     nature_of_vendor?: string;
     aadhar_card_number?: string;
@@ -309,6 +312,60 @@ async function fetchPurchaseFlows(signal?: AbortSignal): Promise<ApiPurchaseFlow
 
   const list = (data as any)?.purchase_flows;
   return Array.isArray(list) ? (list as ApiPurchaseFlow[]) : [];
+}
+
+type PoApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected';
+
+type PoApprovalRecord = {
+  poNumber: string;
+  orderType?: 'PR' | 'SPR';
+  prNumber: string;
+  comparisonId: string;
+  vendorId: string;
+  vendorName: string;
+  itemDetails: Array<{ name: string; uom: string; quantity: number }>;
+  status: PoApprovalStatus;
+};
+
+// Mirrors the same admin_purchase_order -> PoApprovalRecord mapping used in
+// POCreation.tsx/FinanceAdminOpsIndent.tsx — all three read the same backend record.
+const mapAdminPurchaseOrderToApprovalRecord = (order: any): PoApprovalRecord => {
+  const quote = order?.purchase_quote && typeof order.purchase_quote === 'object' ? order.purchase_quote : {};
+  const directorApproval = order?.director_approval && typeof order.director_approval === 'object' ? order.director_approval : {};
+  const items: any[] = Array.isArray(order?.item_details) ? order.item_details : [];
+  const status: PoApprovalStatus = (['draft', 'pending', 'approved', 'rejected'] as const)
+    .includes(directorApproval?.status) ? directorApproval.status : 'pending';
+  return {
+    poNumber: safeTrim(order?.order_number),
+    orderType: order?.order_type === 'SPR' ? 'SPR' : 'PR',
+    prNumber: safeTrim(order?.pr_number),
+    comparisonId: safeTrim(order?.comparison_id),
+    vendorId: safeTrim(quote?.vendor_id),
+    vendorName: safeTrim(quote?.vendor_name) || safeTrim(quote?.vendor_id),
+    itemDetails: items.map((item) => ({
+      name: safeTrim(item?.name) || 'Item not recorded',
+      uom: safeTrim(item?.uom),
+      quantity: Number(item?.quantity ?? 0) || 0,
+    })),
+    status,
+  };
+};
+
+async function fetchPoApprovalRecords(signal?: AbortSignal): Promise<PoApprovalRecord[]> {
+  const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+  if (!baseUrl) return [];
+  try {
+    const res = await fetch(`${baseUrl}/purchase_flow/get_all_purchase_orders`, {
+      headers: { Accept: 'application/json' },
+      signal,
+    });
+    if (!res.ok) return [];
+    const data: any = await res.json().catch(() => null);
+    const orders: any[] = Array.isArray(data?.purchase_orders) ? data.purchase_orders : [];
+    return orders.map(mapAdminPurchaseOrderToApprovalRecord);
+  } catch {
+    return [];
+  }
 }
 
 function UploadStepDocPopup({
@@ -1435,7 +1492,12 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
     copy.sort((a, b) => safeTrim((b as any)?.timestamp).localeCompare(safeTrim((a as any)?.timestamp)));
     return copy;
   }, [flows, orderTypeFilter]);
-  const poApprovalRecords = useMemo(() => readPoApprovals(), [flowRefreshNonce]);
+  const [poApprovalRecords, setPoApprovalRecords] = useState<PoApprovalRecord[]>([]);
+  useEffect(() => {
+    const ac = new AbortController();
+    void fetchPoApprovalRecords(ac.signal).then((records) => setPoApprovalRecords(records));
+    return () => ac.abort();
+  }, [flowRefreshNonce]);
 
   useEffect(() => {
     Object.entries(flowStepOverrides).forEach(([flowId, steps]) => {
@@ -1465,7 +1527,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
     if (loading) return;
 
     const liveOrderNumbers = new Set(rows.map((flow) => safeTrim(flow.order_number)).filter(Boolean));
-    const missingApprovals = readPoApprovals().filter((record) =>
+    const missingApprovals = poApprovalRecords.filter((record) =>
       (!orderTypeFilter || (orderTypeFilter === 'PR' && (!record.orderType || record.orderType === 'PR')) || (orderTypeFilter === 'SPR' && record.orderType === 'SPR'))
       &&
       record.status !== 'rejected'
@@ -1531,7 +1593,6 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
             throw new Error(result?.message || result?.error || `HTTP ${forwardResponse.status}`);
           }
 
-          markPoForwardedToPurchaseFlow(record.poNumber);
           forwardedCount += 1;
         } catch (error: any) {
           if (error?.name === 'AbortError') return;
@@ -1548,7 +1609,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
 
     void reconcile();
     return () => controller.abort();
-  }, [loading, orderTypeFilter, rows]);
+  }, [loading, orderTypeFilter, rows, poApprovalRecords]);
 
   // After all rows are in view, fetch left-panel info row by row (in parallel)
   useEffect(() => {
@@ -2330,7 +2391,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                     const approvalRecord = poApprovalRecords.find((record) =>
                       (displayOrder !== '—' && record.poNumber === displayOrder) || record.prNumber === effectivePrNumber,
                     );
-                    const itemDetails = poDetails?.itemDetails?.length ? poDetails.itemDetails : approvalRecord?.itemDetails || [];
+                    const itemDetails = normalizePoItemDetails(poDetails?.itemDetails, approvalRecord?.itemDetails, info?.item_row);
                     const approvedVendorName = vendor?.vendor_name || approvalRecord?.vendorName || approvedVendorId || 'Not recorded';
 
                     return (
