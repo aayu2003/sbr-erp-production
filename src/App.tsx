@@ -166,12 +166,25 @@ const App = () => (
           <Route path="/on-demand-task/:taskId" element={<AppLayout><TaskDetailPage /></AppLayout>} />
           <Route path="/on-demand-task-legacy" element={<AppLayout><OnDemandTask /></AppLayout>} />
           <Route path="/finance-admin-ops-indents" element={<AppLayout><FinanceAdminOpsIndent orderTypeFilter="PR" /></AppLayout>} />
+          <Route path="/work-requisition-approver" element={<AppLayout><FinanceAdminOpsIndent orderTypeFilter="SPR" /></AppLayout>} />
           <Route path="/finance/inspection-report-approvals" element={<AppLayout><InspectionReportApprovals stage="finance_admin_ops" /></AppLayout>} />
           <Route
             path="/purchase-requisition"
+            element={<Navigate to="/purchase-comparative-statement" replace />}
+          />
+          <Route
+            path="/purchase-comparative-statement"
             element={
               <AppLayout>
-                <PurchaseRequisition />
+                <PurchaseRequisition indentTypeFilter="PR" />
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/work-comparative-statement"
+            element={
+              <AppLayout>
+                <PurchaseRequisition indentTypeFilter="SPR" />
               </AppLayout>
             }
           />

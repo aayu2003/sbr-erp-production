@@ -262,6 +262,9 @@ const AppSidebar = () => {
                 item.enabled && (
                   isSuperAdmin ||
                   allowedModules.includes(item.key) ||
+                  (item.key === 'purchase-comparative' && allowedModules.includes('purchase-req')) ||
+                  (item.key === 'work-comparative' && (allowedModules.includes('work-order') || allowedModules.includes('purchase-req'))) ||
+                  (item.key === 'work-requisition-approver' && (allowedModules.includes('work-order') || allowedModules.includes('finance-admin-ops'))) ||
                   (['wo-creation', 'work-verifier', 'work-approver', 'work-flow'].includes(item.key) && allowedModules.includes('work-order')) ||
                   (item.key === 'purchase-verifier' && ['admin-ops-indents', 'admin-wcc-approval', 'admin-grn-approval', 'admin-inspection-approval'].some(key => allowedModules.includes(key))) ||
                   (item.key === 'inspection-report' && allowedModules.includes('grn-module')) ||

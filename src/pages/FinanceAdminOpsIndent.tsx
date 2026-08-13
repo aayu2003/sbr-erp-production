@@ -666,7 +666,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
   const [nfas, setNfas] = useState<NfaApiRow[]>([]);
   const [nfaApprovalsMap, setNfaApprovalsMap] = useState<Record<string, boolean>>({});
 
-  const [activeSection, setActiveSection] = useState<'indents' | 'nfa' | 'mrf' | 'po-approvals'>('nfa');
+  const [activeSection, setActiveSection] = useState<'indents' | 'nfa' | 'mrf' | 'po-approvals'>(orderTypeFilter === 'SPR' ? 'indents' : 'nfa');
   const [poApprovals, setPoApprovals] = useState<PoApprovalRecord[]>(() => readPoApprovals());
   const [previewPoApproval, setPreviewPoApproval] = useState<PoApprovalRecord | null>(null);
   const [questionPoApproval, setQuestionPoApproval] = useState<PoApprovalRecord | null>(null);
@@ -1342,14 +1342,14 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
     sectionContent = (
       <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
         <div className="border-b border-slate-100 px-5 py-5">
-          <h2 className="text-lg font-bold text-slate-950">Purchase Approver Register</h2>
-          <p className="mt-1 text-sm font-medium text-slate-500">{filtered.length} purchase requisition{filtered.length === 1 ? '' : 's'} available for finance review</p>
+          <h2 className="text-lg font-bold text-slate-950">{orderTypeFilter === 'SPR' ? 'Work Approver Register' : 'Purchase Approver Register'}</h2>
+          <p className="mt-1 text-sm font-medium text-slate-500">{filtered.length} {orderTypeFilter === 'SPR' ? 'service' : 'purchase'} requisition{filtered.length === 1 ? '' : 's'} available for finance review</p>
         </div>
         {filtered.length === 0 ? (
           <div className="flex min-h-[300px] flex-col items-center justify-center px-6 py-12 text-center">
             <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400"><FileText className="h-7 w-7" /></span>
             <h3 className="mt-4 text-base font-bold text-slate-900">No finance indents found</h3>
-            <p className="mt-1 text-sm text-slate-500">Try another PR number, project, item or requester.</p>
+            <p className="mt-1 text-sm text-slate-500">Try another {orderTypeFilter === 'SPR' ? 'SR' : 'PR'} number, project, {orderTypeFilter === 'SPR' ? 'service' : 'item'} or requester.</p>
           </div>
         ) : (
         <div className="overflow-x-auto">
@@ -1357,8 +1357,8 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
             <thead className="bg-[#0D3A35] text-white">
               <tr>
                 {[
-                  ['PR Number', 'w-[13%]'], ['Project', 'w-[16%]'], ['Department', 'w-[12%]'],
-                  ['Item Details', 'w-[20%]'], ['Indented By', 'w-[15%]'], ['Date', 'w-[9%]'],
+                  [orderTypeFilter === 'SPR' ? 'SR Number' : 'PR Number', 'w-[13%]'], ['Project', 'w-[16%]'], ['Department', 'w-[12%]'],
+                  [orderTypeFilter === 'SPR' ? 'Service Details' : 'Item Details', 'w-[20%]'], ['Indented By', 'w-[15%]'], ['Date', 'w-[9%]'],
                   ['Status', 'w-[7%]'], ['Action', 'w-[8%]'],
                 ].map(([label, width]) => <th key={label} className={`${width} px-3 py-4 text-center text-[12px] font-bold uppercase tracking-[0.07em] text-white/90`}>{label}</th>)}
               </tr>
@@ -1850,9 +1850,9 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
     <div className="min-h-screen space-y-6 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
       <header className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm font-bold text-emerald-700"><FileText className="h-4 w-4" />Procurement · Purchase Order</div>
-          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">Purchase Approver</h1>
-          <p className="mt-2 text-base font-medium text-slate-600">Review indents, workforce requests and finalized quotations before approval</p>
+          <div className="flex items-center gap-2 text-sm font-bold text-emerald-700"><FileText className="h-4 w-4" />Procurement · {orderTypeFilter === 'SPR' ? 'Work Order' : 'Purchase Order'}</div>
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">{orderTypeFilter === 'SPR' ? 'Work Approver' : 'Purchase Approver'}</h1>
+          <p className="mt-2 text-base font-medium text-slate-600">Review and approve {orderTypeFilter === 'SPR' ? 'service requisitions before comparative statement preparation' : 'indents, workforce requests and finalized quotations'}</p>
         </div>
         <Button variant="outline" onClick={() => setConfigOpen(true)} className="h-11 gap-2 rounded-xl border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5">
           <Settings className="h-4 w-4" />
@@ -1862,27 +1862,27 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
 
       <section className="flex flex-col gap-4 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_14px_40px_rgba(15,23,42,0.05)] lg:flex-row lg:items-center lg:justify-between">
         <div className="inline-flex w-fit rounded-xl border border-slate-200 bg-slate-50 p-1">
-          <button
+          {orderTypeFilter !== 'SPR' && <button
             type="button"
             className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'indents' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('indents')}
           >
             Indents ({filtered.length})
-          </button>
-          <button
+          </button>}
+          {orderTypeFilter !== 'SPR' && <button
             type="button"
             className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'nfa' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('nfa')}
           >
             NFA Notes
-          </button>
-          <button
+          </button>}
+          {orderTypeFilter !== 'SPR' && <button
             type="button"
             className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'po-approvals' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('po-approvals')}
           >
             PO Approvals ({poApprovals.filter((record) => record.status === 'pending').length})
-          </button>
+          </button>}
           <button
             type="button"
             className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'mrf' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
@@ -1893,7 +1893,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
         </div>
         <div className="relative w-full lg:w-[390px]">
           <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-          <Input placeholder={activeSection === 'po-approvals' ? 'Search PO, PR, vendor or item' : 'Search PR no., project, item or requester'} className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7] pl-10 shadow-none focus-visible:ring-[#0D3A35]/20" value={search} onChange={(event) => setSearch(event.target.value)} />
+          <Input placeholder={activeSection === 'po-approvals' ? 'Search PO, PR, vendor or item' : `Search ${orderTypeFilter === 'SPR' ? 'SR' : 'PR'} no., project, ${orderTypeFilter === 'SPR' ? 'service' : 'item'} or requester`} className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7] pl-10 shadow-none focus-visible:ring-[#0D3A35]/20" value={search} onChange={(event) => setSearch(event.target.value)} />
         </div>
       </section>
 

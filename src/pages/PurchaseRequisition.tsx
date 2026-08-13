@@ -1272,7 +1272,8 @@ const groupIndentsByDate = (list: Indent[]) => {
   return dates.map((date) => ({ date, indents: byDate[date] }));
 };
 
-const PurchaseRequisition = () => {
+const PurchaseRequisition = ({ indentTypeFilter = 'PR' }: { indentTypeFilter?: 'PR' | 'SPR' }) => {
+  const isWorkComparative = indentTypeFilter === 'SPR';
   const navigate = useNavigate();
   const [indents, setIndents] = useState<Indent[]>([]);
   const [open, setOpen] = useState(false);
@@ -1543,7 +1544,7 @@ const PurchaseRequisition = () => {
         purchaseOrder: { id: genId(), date: today(), totalValue: total, items: selected },
       };
     }));
-    toast.success('Purchase Order created');
+    toast.success(`${isWorkComparative ? 'Work' : 'Purchase'} Order created`);
   };
 
   const raisePR = (id: string) => {
@@ -1635,11 +1636,16 @@ const PurchaseRequisition = () => {
     navigate(`/purchase-requisition/${typeSegment}/${encodeURIComponent(indent.id)}/quotation?revise=1`);
   };
 
+  const scopedIndents = useMemo(
+    () => indents.filter((indent) => (indent.indentType || 'PR') === indentTypeFilter),
+    [indentTypeFilter, indents],
+  );
+
   const indentsAfterSearch = useMemo(() => {
     const q = str(searchQuery);
-    if (!q) return indents;
-    return indents.filter((it) => indentMatchesSearch(it, q));
-  }, [indents, searchQuery]);
+    if (!q) return scopedIndents;
+    return scopedIndents.filter((it) => indentMatchesSearch(it, q));
+  }, [scopedIndents, searchQuery]);
 
   const newIndents = useMemo(() => indentsAfterSearch.filter((it) => it.status !== 'po'), [indentsAfterSearch]);
   const processIndents = useMemo(
@@ -1669,15 +1675,15 @@ const PurchaseRequisition = () => {
     <div className="min-h-screen space-y-7 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
       <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
         <div>
-          <p className="text-sm font-bold text-emerald-700">Purchase Operations</p>
-          <h1 className="mt-3 text-3xl font-black tracking-tight text-slate-950">Comparative Statement</h1>
-          <p className="mt-3 text-base font-medium text-slate-600">Create and manage commercial comparative statements against every purchase requisition raised in the system.</p>
+          <p className="text-sm font-bold text-emerald-700">{isWorkComparative ? 'Work Order Operations' : 'Purchase Order Operations'}</p>
+          <h1 className="mt-3 text-3xl font-black tracking-tight text-slate-950">{isWorkComparative ? 'Work Comparative Statement' : 'Purchase Comparative Statement'}</h1>
+          <p className="mt-3 text-base font-medium text-slate-600">Create and manage commercial comparative statements against every {isWorkComparative ? 'service requisition' : 'purchase requisition'} raised in the system.</p>
         </div>
       </div>
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: 'Purchase Requisitions', value: comparativeSummary.total, hint: 'All PRs available for comparison', Icon: ClipboardList, tone: 'bg-[#0D3A35]/10 text-[#0D3A35]' },
+          { label: isWorkComparative ? 'Service Requisitions' : 'Purchase Requisitions', value: comparativeSummary.total, hint: `All ${isWorkComparative ? 'SRs' : 'PRs'} available for comparison`, Icon: ClipboardList, tone: 'bg-[#0D3A35]/10 text-[#0D3A35]' },
           { label: 'Not Started', value: comparativeSummary.notStarted, hint: 'Comparative statement pending', Icon: FileText, tone: 'bg-blue-50 text-blue-700' },
           { label: 'Draft / Saved', value: comparativeSummary.inProgress, hint: 'Statements being prepared', Icon: Clock3, tone: 'bg-amber-50 text-amber-700' },
           { label: 'Forwarded', value: comparativeSummary.forwarded, hint: 'Sent for HO processing', Icon: ShoppingCart, tone: 'bg-emerald-50 text-emerald-700' },
@@ -1696,14 +1702,14 @@ const PurchaseRequisition = () => {
           <div className="flex flex-col gap-4 border-b border-slate-200 p-5 xl:flex-row xl:items-center xl:justify-between">
             <div className="relative w-full xl:max-w-xl">
               <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <Input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search PR number, project, requester or item" className="h-12 rounded-xl border-slate-200 bg-slate-50 pl-11 font-semibold focus-visible:ring-emerald-100" />
+              <Input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder={`Search ${isWorkComparative ? 'SR' : 'PR'} number, department, requester or ${isWorkComparative ? 'service' : 'item'}`} className="h-12 rounded-xl border-slate-200 bg-slate-50 pl-11 font-semibold focus-visible:ring-emerald-100" />
             </div>
             <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-1">
           <button
             onClick={() => setActiveTab('new')}
             className={`rounded-lg px-4 py-2.5 text-sm font-black transition ${activeTab === 'new' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
           >
-            All PRs ({newIndents.length})
+            All {isWorkComparative ? 'SRs' : 'PRs'} ({newIndents.length})
           </button>
           <button
             onClick={() => setActiveTab('process')}
@@ -1853,7 +1859,7 @@ const PurchaseRequisition = () => {
               </Fragment>
             ))}
             {activeTab === 'new' && newGroups.length === 0 && (
-              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><ClipboardList className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No purchase requisitions found</p><p className="mt-1 text-sm font-semibold text-slate-400">Raised and approved purchase requisitions will appear here for comparative statement preparation.</p></div>
+              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><ClipboardList className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No {isWorkComparative ? 'service' : 'purchase'} requisitions found</p><p className="mt-1 text-sm font-semibold text-slate-400">Raised and approved {isWorkComparative ? 'service' : 'purchase'} requisitions will appear here for comparative statement preparation.</p></div>
             )}
 
             {activeTab === 'process' && processGroups.map((g) => (
@@ -1937,7 +1943,7 @@ const PurchaseRequisition = () => {
                             className={`h-10 gap-2 rounded-xl font-black ${it.items.some(li => !(li.quotes && li.quotes.length > 0)) ? 'bg-slate-100 text-slate-400' : 'bg-[#0D3A35] text-white hover:bg-[#092b27]'}`}
                             disabled={it.items.some(li => !(li.quotes && li.quotes.length > 0))}
                           >
-                            <Plus className="w-4 h-4" /> Create PO
+                            <Plus className="w-4 h-4" /> Create {isWorkComparative ? 'WO' : 'PO'}
                           </Button>
                         </div>
                       </div>
@@ -1987,7 +1993,7 @@ const PurchaseRequisition = () => {
 
             {activeTab === 'po' && poGroups.map((g) => (
               <Fragment key={`po-${g.date}`}>
-                <div className="border-y border-slate-200 bg-slate-50 px-5 py-2.5 text-xs font-black uppercase tracking-[0.12em] text-slate-500">PO Date · {formatDisplayDate(g.date)}</div>
+                <div className="border-y border-slate-200 bg-slate-50 px-5 py-2.5 text-xs font-black uppercase tracking-[0.12em] text-slate-500">{isWorkComparative ? 'WO' : 'PO'} Date · {formatDisplayDate(g.date)}</div>
                 {g.indents.map((it) => {
                   const pr = str(it.prNo || it.id);
                   const qs = quotationStatusByPr[pr];
@@ -1999,9 +2005,9 @@ const PurchaseRequisition = () => {
                   return (
                     <div key={it.id} className={`relative flex flex-col gap-4 px-5 py-5 transition hover:bg-slate-50/70 xl:flex-row xl:items-center xl:justify-between ${forwarded ? 'bg-emerald-50/70' : ''}`}>
                       <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-sm font-black text-[#0D3A35]">{it.prNo}</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase text-emerald-700">PO Created</span></div>
+                        <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-sm font-black text-[#0D3A35]">{it.prNo}</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase text-emerald-700">{isWorkComparative ? 'WO' : 'PO'} Created</span></div>
                         <div className="mt-2 truncate text-base font-black text-slate-900">{it.project}</div>
-                        <div className="mt-2 text-xs font-semibold text-slate-500">PO Date: {formatDisplayDate(it.purchaseOrder?.date)} · Total: <span className="font-black text-slate-700">{it.purchaseOrder ? formatInr(it.purchaseOrder.totalValue) : '—'}</span></div>
+                        <div className="mt-2 text-xs font-semibold text-slate-500">{isWorkComparative ? 'WO' : 'PO'} Date: {formatDisplayDate(it.purchaseOrder?.date)} · Total: <span className="font-black text-slate-700">{it.purchaseOrder ? formatInr(it.purchaseOrder.totalValue) : '—'}</span></div>
                         <div className="mt-1 text-xs font-semibold text-slate-500">
                           Comparative Statement:{' '}
                           {qLoading ? (
@@ -2040,7 +2046,7 @@ const PurchaseRequisition = () => {
                           {forwarding ? 'Forwarding…' : forwarded ? 'Forwarded' : 'Forward'}
                         </Button>
                         <Button variant="outline" onClick={() => setPreviewIndent(it)} className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]">
-                          <FilePlus className="w-4 h-4" /> View PO
+                          <FilePlus className="w-4 h-4" /> View {isWorkComparative ? 'WO' : 'PO'}
                         </Button>
                         <Button
                           variant="outline"
@@ -2058,7 +2064,7 @@ const PurchaseRequisition = () => {
               </Fragment>
             ))}
             {activeTab === 'po' && poGroups.length === 0 && (
-              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><PackageCheck className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No purchase orders created</p><p className="mt-1 text-sm font-semibold text-slate-400">Converted requisitions will be listed in this tab.</p></div>
+              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><PackageCheck className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No {isWorkComparative ? 'work' : 'purchase'} orders created</p><p className="mt-1 text-sm font-semibold text-slate-400">Converted requisitions will be listed in this tab.</p></div>
             )}
           </div>
         </div>

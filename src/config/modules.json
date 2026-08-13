@@ -122,7 +122,7 @@
             { "key": "purchase-req-entry", "label": "Purchase Requisition",  "path": "/purchase-requisition-entry", "icon": "FileText",     "enabled": true },
             { "key": "purchase-verifier",  "label": "Purchase Verifier",     "path": "/purchase-verifier",         "icon": "ShieldCheck",  "enabled": true },
             { "key": "finance-admin-ops",  "label": "Purchase Approver",     "path": "/finance-admin-ops-indents", "icon": "FileText",     "enabled": true },
-            { "key": "purchase-req",       "label": "Comparative Statement", "path": "/purchase-requisition",      "icon": "FileText",     "enabled": true },
+            { "key": "purchase-comparative", "label": "Comparative Statement", "path": "/purchase-comparative-statement", "icon": "FileText", "enabled": true },
             { "key": "ho-module",          "label": "PO communication",      "path": "/ho",                        "icon": "FileText",     "enabled": true },
             { "key": "po-creation",        "label": "PO Creation",           "path": "/po-creation",               "icon": "ShoppingCart", "enabled": true },
             { "key": "purchase-flow",      "label": "Purchase Flow",         "path": "/purchase-flow",             "icon": "FileText",     "enabled": true }
@@ -135,8 +135,8 @@
           "items": [
             { "key": "work-order",      "label": "Service Requisition", "path": "/work-requisition", "icon": "ClipboardCheck", "enabled": true },
             { "key": "work-verifier",   "label": "Work Verifier",    "path": "/work-verifier",    "icon": "ShieldCheck",    "enabled": true },
-            { "key": "finance-admin-ops", "label": "Work Approver",  "path": "/finance-admin-ops-indents", "icon": "FileText", "enabled": true },
-            { "key": "purchase-req",    "label": "Comparative Statement", "path": "/purchase-requisition", "icon": "FileText", "enabled": true },
+            { "key": "work-requisition-approver", "label": "Work Approver", "path": "/work-requisition-approver", "icon": "FileText", "enabled": true },
+            { "key": "work-comparative", "label": "Comparative Statement", "path": "/work-comparative-statement", "icon": "FileText", "enabled": true },
             { "key": "work-approver",   "label": "WO communication", "path": "/work-approver",    "icon": "FileCheck",      "enabled": true },
             { "key": "wo-creation",     "label": "WO Creation",      "path": "/wo-creation",      "icon": "FileText",       "enabled": true },
             { "key": "work-flow",       "label": "Work Flow",        "path": "/work-flow",        "icon": "FileText",       "enabled": true },
