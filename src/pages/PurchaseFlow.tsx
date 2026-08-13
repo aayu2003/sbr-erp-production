@@ -9,6 +9,7 @@ import { formatDateDDMMYYYY, formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
 import { markPoForwardedToPurchaseFlow, readPoApprovals } from '@/lib/poApprovalStore';
 import { getGrnsByOrder, type GRNRecord } from '@/lib/grnApi';
 import { buildGrnPdfBlob } from '@/lib/grnPdf';
+import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
 
 type LeftPanelInfo = {
   pr_number?: string;
@@ -57,6 +58,7 @@ type PurchaseOrderDetails = {
   preparedBy: string;
   requiredDocuments: string[];
   itemDetails: Array<{ name: string; uom: string; quantity: number }>;
+  docUrl: string;
 };
 
 type ApiPurchaseFlowStageEntry = {
@@ -1272,6 +1274,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
   const [accountDocsByFlowId, setAccountDocsByFlowId] = useState<Record<string, PurchaseFlowStep[]>>({});
   const [grnsByFlowId, setGrnsByFlowId] = useState<Record<string, GRNRecord[]>>({});
   const [grnPreviewUrlsByKey, setGrnPreviewUrlsByKey] = useState<Record<string, string>>({});
+  const [poPreviewTarget, setPoPreviewTarget] = useState<{ indentId: string; comparisonId?: string; vendorId?: string; poNumber?: string } | null>(null);
 
   const getFlowSteps = (flowId: string, flow: ApiPurchaseFlow): PurchaseFlowStep[] => {
     const current = flowStepOverrides[flowId] ?? parseSteps((flow as any)?.purchase_flow_stage);
@@ -1660,6 +1663,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
               quote.item_row,
               quote.items,
             ),
+            docUrl: safeTrim(selectedOrder?.document_url || selectedOrder?.doc_url),
           };
           return { flowId, requiredDocuments, details };
         } catch (error: any) {
@@ -2099,6 +2103,22 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
         />
       ) : null}
 
+      {poPreviewTarget ? (
+        <MakePurchaseOrderPopup
+          open
+          reviewOnly
+          variant="modal"
+          comparative={{
+            indentId: poPreviewTarget.indentId,
+            comparisonId: poPreviewTarget.comparisonId,
+            hoSelectedVendorId: poPreviewTarget.vendorId,
+          }}
+          vendorId={poPreviewTarget.vendorId}
+          poNumber={poPreviewTarget.poNumber}
+          onClose={() => setPoPreviewTarget(null)}
+        />
+      ) : null}
+
       {createFlowOpen ? (
         <CreateFlowPopup
           onClose={() => setCreateFlowOpen(false)}
@@ -2441,6 +2461,107 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                     ) : null}
 
                     <div className="flex min-w-max flex-1 items-stretch gap-3">
+                      {(() => {
+                        // Step 0 — the Purchase Order itself, always shown first so the
+                        // document workflow steps that follow have something to anchor to.
+                        const poDetails = poDetailsByFlowId[flowId];
+                        const poDocUrl = poDetails?.docUrl || '';
+                        const stepZeroInfo = leftPanelInfoMap[flowId];
+                        const stepZeroApproval = poApprovalRecords.find((record) =>
+                          (orderNumber && record.poNumber === orderNumber) || record.prNumber === (stepZeroInfo?.pr_number || prNumber),
+                        );
+                        const stepZeroPrNumber = stepZeroInfo?.pr_number || prNumber;
+                        const stepZeroVendorId = stepZeroInfo?.approved_vendor_id || stepZeroApproval?.vendorId || '';
+                        const stepZeroPoNumber = poDetails?.poNumber || orderNumber;
+                        const canLivePreview = Boolean(stepZeroPrNumber && stepZeroVendorId);
+                        return (
+                          <div className="flex h-full items-center gap-3">
+                            <div className="flex h-full flex-col items-center gap-1">
+                              <div
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => {
+                                  if (poDocUrl) { previewDocument('Purchase Order', poDocUrl); return; }
+                                  if (canLivePreview) {
+                                    setPoPreviewTarget({ indentId: stepZeroPrNumber, comparisonId, vendorId: stepZeroVendorId, poNumber: stepZeroPoNumber });
+                                  }
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key !== 'Enter' && event.key !== ' ') return;
+                                  event.preventDefault();
+                                  if (poDocUrl) { previewDocument('Purchase Order', poDocUrl); return; }
+                                  if (canLivePreview) {
+                                    setPoPreviewTarget({ indentId: stepZeroPrNumber, comparisonId, vendorId: stepZeroVendorId, poNumber: stepZeroPoNumber });
+                                  }
+                                }}
+                                className={`group flex min-h-[300px] w-[328px] flex-1 flex-col items-center gap-1 rounded-xl border bg-white p-3 text-left shadow-sm outline-none transition lg:min-h-0 ${
+                                  poDocUrl || canLivePreview ? 'cursor-pointer border-slate-200 hover:-translate-y-0.5 hover:border-[#0D3A35]/30 hover:shadow-md' : 'cursor-default border-slate-200'
+                                }`}
+                                title={poDocUrl ? 'Preview Purchase Order' : canLivePreview ? 'Open Purchase Order preview' : 'Purchase Order details'}
+                              >
+                                {poDocUrl ? (
+                                  <>
+                                    <div className="min-h-20 w-full flex-1 overflow-hidden rounded-lg border border-emerald-200 bg-emerald-50">
+                                      <InlineDocumentPreview url={poDocUrl} label="Purchase Order" />
+                                    </div>
+                                    <div className="w-full pt-1.5">
+                                      <p className="text-sm font-bold leading-tight text-slate-800">Purchase Order</p>
+                                      <p className="text-[10px] font-semibold text-slate-400">{stepZeroPoNumber || '—'}</p>
+                                    </div>
+                                  </>
+                                ) : canLivePreview ? (
+                                  <>
+                                    <div className="relative min-h-20 w-full flex-1 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                                      <div
+                                        className="pointer-events-none absolute left-0 top-0"
+                                        style={{ width: 794, transform: 'scale(0.365)', transformOrigin: 'top left' }}
+                                      >
+                                        <MakePurchaseOrderPopup
+                                          open
+                                          reviewOnly
+                                          variant="inline"
+                                          comparative={{
+                                            indentId: stepZeroPrNumber,
+                                            comparisonId,
+                                            hoSelectedVendorId: stepZeroVendorId,
+                                          }}
+                                          vendorId={stepZeroVendorId}
+                                          poNumber={stepZeroPoNumber}
+                                          onClose={() => {}}
+                                        />
+                                      </div>
+                                    </div>
+                                    <div className="w-full pt-1.5">
+                                      <p className="text-sm font-bold leading-tight text-slate-800">Purchase Order</p>
+                                      <p className="text-[10px] font-semibold text-slate-400">{stepZeroPoNumber || '—'} · Click to view</p>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <>
+                                    <div className="flex min-h-20 w-full flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-[#0D3A35]/20 bg-[#f7faf9] p-3 text-center">
+                                      <Receipt className="h-6 w-6 text-[#0D3A35]" />
+                                      <div className="space-y-0.5">
+                                        <p className="text-xs font-bold text-slate-800">{stepZeroPoNumber || '—'}</p>
+                                        <p className="text-[10px] text-slate-500">{poDetails?.poDate ? formatDateDDMMYYYY(poDetails.poDate) : 'Purchase Order details unavailable'}</p>
+                                      </div>
+                                    </div>
+                                    <div className="w-full pt-1.5">
+                                      <p className="text-sm font-bold leading-tight text-slate-800">Purchase Order</p>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+
+                            {steps.length > 0 ? (
+                              <div className="text-muted-foreground">
+                                <ArrowRight className="w-4 h-4" />
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })()}
+
                       {(() => {
                         // Index of the first step that is eligible to be uploaded next
                         // (not yet uploaded AND all previous steps are uploaded)

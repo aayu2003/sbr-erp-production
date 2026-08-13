@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { BookUser, CheckCircle2, ChevronDown, Eye, FileText, Loader2, MessageCircleQuestion, Paperclip, Plus, Search, Send, Settings, ShoppingCart, Trash2, UserCircle, XCircle } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { BookUser, CheckCircle2, ChevronDown, Clock3, Eye, FileText, Loader2, MessageCircleQuestion, Paperclip, Plus, Search, Send, Settings, ShoppingCart, Trash2, UserCircle, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -653,6 +654,7 @@ type FinanceAdminOpsIndentProps = {
 };
 
 const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
+  const navigate = useNavigate();
   const [indents, setIndents] = useState<Indent[]>(initialIndents);
   const [search, setSearch] = useState('');
   const [openRowId, setOpenRowId] = useState<string>('');
@@ -735,6 +737,43 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
     };
     loadNfas();
   }, []);
+
+  // Load the TC queue too — purely informational here, so a forwarded comparative
+  // that's still waiting on TC Approval (in PO Communication) doesn't look like it
+  // silently vanished just because it hasn't reached NFA yet.
+  const [tcPending, setTcPending] = useState<NfaApiRow[]>([]);
+  useEffect(() => {
+    const loadTc = async () => {
+      try {
+        const BASE_URL = getBaseUrl().replace(/\/$/, '');
+        if (!BASE_URL) return;
+        const res = await fetch(`${BASE_URL}/purchase_flow/get_TC`);
+        const text = await res.text().catch(() => '');
+        if (!res.ok) return;
+        let json: any = null;
+        try {
+          json = text ? JSON.parse(text) : [];
+        } catch {
+          return;
+        }
+        const list = Array.isArray(json) ? json : (Array.isArray(json?.tc) ? json.tc : []);
+        setTcPending(list as NfaApiRow[]);
+      } catch {
+        // best-effort — this only feeds an informational banner, not core data
+      }
+    };
+    void loadTc();
+  }, []);
+
+  const pendingTcApprovals = useMemo(() => {
+    return tcPending.filter((tc) => {
+      const tcType = String(tc.indent_type ?? '').trim().toUpperCase();
+      if (orderTypeFilter && tcType && tcType !== orderTypeFilter) return false;
+      const tcStatus = String(tc.TC_status ?? '').trim().toLowerCase();
+      const approvedVendorId = String(tc.approved_vendor_id ?? tc.approved_vendor?.vendor_id ?? '').trim();
+      return tcStatus !== 'approved' && !approvedVendorId;
+    });
+  }, [tcPending, orderTypeFilter]);
 
   // Load MRFs from HRMS
   useEffect(() => {
@@ -1717,6 +1756,27 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
             <p className="text-xs text-gray-500">For information only (corporate procedure). Your task: approve & forward the finalized quotation.</p>
           </div>
         </div>
+
+        {pendingTcApprovals.length > 0 && (
+          <div className="mx-4 mt-3 flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-2 text-sm text-amber-800">
+              <Clock3 className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                <span className="font-bold">{pendingTcApprovals.length}</span> comparative statement{pendingTcApprovals.length === 1 ? '' : 's'} forwarded but still awaiting{' '}
+                <span className="font-bold">TC Approval</span> in PO Communication — they won't appear here until that's done.
+              </span>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="shrink-0 self-start border-amber-300 bg-white text-amber-800 hover:bg-amber-100 sm:self-auto"
+              onClick={() => navigate('/ho')}
+            >
+              Go to PO Communication
+            </Button>
+          </div>
+        )}
 
         <div className="grid grid-cols-[minmax(220px,3fr)_minmax(320px,5fr)_minmax(220px,3fr)] gap-2 bg-[#0D3A35] px-4 py-4 text-xs font-bold uppercase tracking-[0.07em] text-white/90">
           <div>PR No / Project</div>

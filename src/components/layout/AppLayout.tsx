@@ -105,6 +105,7 @@ const NavItem = ({
 
 interface NavGroupProps {
   label?: string;
+  count?: number;
   renderHeader?: (isOpen: boolean, toggle: () => void) => React.ReactNode;
   children: React.ReactNode;
   isSidebarCollapsed: boolean;
@@ -112,11 +113,12 @@ interface NavGroupProps {
 
 const NavGroup = ({
   label,
+  count,
   renderHeader,
   children,
   isSidebarCollapsed,
 }: NavGroupProps) => {
-  const [isOpen, setIsOpen] = useState(true);
+  const [isOpen, setIsOpen] = useState(false);
 
   if (isSidebarCollapsed) {
     return (
@@ -135,7 +137,14 @@ const NavGroup = ({
           onClick={() => setIsOpen(!isOpen)}
           className="w-full flex items-center justify-between px-3 py-2 text-[11px] font-bold text-white/50 uppercase tracking-[0.08em] hover:text-white"
         >
-          <span>{label}</span>
+          <span className="flex items-center gap-1.5">
+            {label}
+            {typeof count === 'number' && (
+              <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[9px] font-bold normal-case tracking-normal text-white/70">
+                {count}
+              </span>
+            )}
+          </span>
           <ChevronDown
             className={cn(
               "w-3 h-3 transition-transform",
@@ -289,6 +298,7 @@ const AppSidebar = () => {
           // Supersets with a single group don't need a separate group-label row —
           // the section header itself becomes the collapse toggle.
           const isSingleGroup = visibleGroups.length === 1;
+          const supersetItemCount = visibleGroups.reduce((sum, g) => sum + g.visibleItems.length, 0);
 
           return (
             <div key={superset.key} className={cn("space-y-2 py-1", !isCollapsed && "border-t border-white/10 mt-2 pt-3")}>
@@ -306,6 +316,9 @@ const AppSidebar = () => {
                         <span className="flex-1 text-[12px] font-extrabold text-white uppercase tracking-[0.1em]">
                           {superset.label}
                         </span>
+                        <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] font-bold text-white/70 shrink-0">
+                          {supersetItemCount}
+                        </span>
                         <ChevronDown
                           className={cn(
                             "w-3.5 h-3.5 text-white/50 transition-transform shrink-0",
@@ -313,34 +326,58 @@ const AppSidebar = () => {
                           )}
                         />
                       </div>
+                      {superset.description && (
+                        <p className="mt-1 text-[11px] font-medium text-white/60">
+                          {superset.description}
+                        </p>
+                      )}
                     </button>
                   )}
                 >
                   {renderItems(visibleGroups[0].visibleItems)}
                 </NavGroup>
               ) : (
-                <>
-                  {!isCollapsed && (
-                    <div className="mx-1 mb-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <NavGroup
+                  isSidebarCollapsed={isCollapsed}
+                  renderHeader={(isOpen, toggle) => (
+                    <button
+                      type="button"
+                      onClick={toggle}
+                      className="w-full mx-1 mb-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left hover:bg-white/10 transition-colors"
+                    >
                       <div className="flex items-center gap-2">
-                        <SupersetIcon className="h-4 w-4 text-white/70" />
-                        <span className="text-[12px] font-extrabold text-white uppercase tracking-[0.1em]">
+                        <SupersetIcon className="h-4 w-4 text-white/70 shrink-0" />
+                        <span className="flex-1 text-[12px] font-extrabold text-white uppercase tracking-[0.1em]">
                           {superset.label}
                         </span>
+                        <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] font-bold text-white/70 shrink-0">
+                          {supersetItemCount}
+                        </span>
+                        <ChevronDown
+                          className={cn(
+                            "w-3.5 h-3.5 text-white/50 transition-transform shrink-0",
+                            isOpen && "rotate-180"
+                          )}
+                        />
                       </div>
-                    </div>
+                      {superset.description && (
+                        <p className="mt-1 text-[11px] font-medium text-white/60">
+                          {superset.description}
+                        </p>
+                      )}
+                    </button>
                   )}
-
+                >
                   {visibleGroups.map(group => group.key === 'procurement-common' ? (
                     <div key={group.key} className="space-y-1 px-1 py-1">
                       {renderItems(group.visibleItems)}
                     </div>
                   ) : (
-                    <NavGroup key={group.key} label={group.label} isSidebarCollapsed={isCollapsed}>
+                    <NavGroup key={group.key} label={group.label} count={group.visibleItems.length} isSidebarCollapsed={isCollapsed}>
                       {renderItems(group.visibleItems)}
                     </NavGroup>
                   ))}
-                </>
+                </NavGroup>
               )}
             </div>
           );

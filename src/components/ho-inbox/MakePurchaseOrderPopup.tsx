@@ -849,6 +849,45 @@ const buildAnnexureDetailsPayload = (annexures: StructuredAnnexure[]): Record<st
     return entry;
   });
 
+// Inverse of buildAnnexureDetailsPayload — reconstructs structured annexures
+// (item/price tables, labeled inputs) from a saved order's annexure_details so
+// review/reopen shows the same tables that were saved. The per-block position
+// within an annexure isn't preserved by the save format (input/table blocks
+// each keep their own counter), so blocks are re-assembled in input/table
+// pairs ordered by their numeric suffix — a reasonable best-effort ordering.
+const parseAnnexureDetailsPayload = (raw: unknown): StructuredAnnexure[] => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entryRaw, annexureIndex): StructuredAnnexure => {
+      const entry = entryRaw && typeof entryRaw === 'object' && !Array.isArray(entryRaw) ? (entryRaw as Record<string, unknown>) : {};
+      const blockKeys = Object.keys(entry)
+        .map((key) => {
+          const match = key.match(/^(input|table)_(\d+)$/);
+          return match ? { key, kind: match[1] as 'input' | 'table', order: Number(match[2]) } : null;
+        })
+        .filter((v): v is { key: string; kind: 'input' | 'table'; order: number } => Boolean(v))
+        .sort((a, b) => a.order - b.order || (a.kind === b.kind ? 0 : a.kind === 'table' ? -1 : 1));
+
+      const blocks: AnnexureBlock[] = blockKeys.map(({ key, kind }) => {
+        if (kind === 'input') {
+          const value = entry[key];
+          const heading = value && typeof value === 'object' ? safe((value as any).heading) : '';
+          const data = value && typeof value === 'object' ? safe((value as any).data) : safe(value);
+          return { id: newStructuredAnnexureId(), kind: 'input', heading, value: data };
+        }
+        const rows = Array.isArray(entry[key]) ? (entry[key] as Record<string, unknown>[]) : [];
+        const columns = rows.length ? Object.keys(rows[0]).filter((col) => col !== 's.no') : ['Column 1'];
+        const tableRows = rows.length
+          ? rows.map((row) => columns.map((col) => safe(row[col])))
+          : [['']];
+        return { id: newStructuredAnnexureId(), kind: 'table', heading: '', columns: columns.length ? columns : ['Column 1'], rows: tableRows };
+      });
+
+      return { id: newStructuredAnnexureId(), title: `Annexure ${annexureIndex + 1}`, blocks };
+    })
+    .filter((annexure) => annexure.blocks.length > 0);
+};
+
 const ANNEXURE_RICH_TEXT_CSS = `
   .annexure-rich-editor h1, .annexure-rich-content h1 { margin: 0 0 12px; font-size: 24px; line-height: 1.2; font-weight: 800; }
   .annexure-rich-editor h2, .annexure-rich-content h2 { margin: 0 0 10px; font-size: 19px; line-height: 1.25; font-weight: 750; }
@@ -1610,6 +1649,10 @@ export function MakePurchaseOrderPopup({
             termsText: safe(legalAnnexure?.termsText) || safe(annexure2?.termsText) || DEFAULT_ANNEXURE2_TERMS,
           });
           setAuthorizedSealAttachedAt(safe((pq as any)?.authorizedSealAttachedAt) || safe((draft as any)?.authorizedSealAttachedAt));
+          const parsedStructuredAnnexures = parseAnnexureDetailsPayload((draft as any)?.annexure_details);
+          console.log('[PO-DEBUG] annexure_details raw=', JSON.stringify((draft as any)?.annexure_details), 'parsed=', JSON.stringify(parsedStructuredAnnexures));
+          setStructuredAnnexures(parsedStructuredAnnexures);
+          setSelectedStructuredAnnexureIndex(0);
           return;
         }
       } catch (e: any) {
@@ -1628,6 +1671,8 @@ export function MakePurchaseOrderPopup({
         setAdditionalAnnexures([]);
         setPreAnnexurePage(defaultPreAnnexurePage());
         setSelectedAnnexureIndex(0);
+        setStructuredAnnexures([]);
+        setSelectedStructuredAnnexureIndex(0);
         return;
       }
 
@@ -1658,6 +1703,8 @@ export function MakePurchaseOrderPopup({
         termsText: safe(d.p4?.termsText) || safe(legacyPage3?.termsText) || DEFAULT_ANNEXURE2_TERMS,
       });
       setAuthorizedSealAttachedAt(safe(d.authorizedSealAttachedAt));
+      setStructuredAnnexures([]);
+      setSelectedStructuredAnnexureIndex(0);
     })();
 
     return () => ac.abort();
@@ -2519,6 +2566,39 @@ export function MakePurchaseOrderPopup({
     setWorkflowStep('draft');
   };
 
+  // Quoting happens before a vendor is formally onboarded — QuotationComparative
+  // tags an un-onboarded quote with a `MANUAL:VendorName` pseudo-ID rather than a
+  // real directory vendor_id. Only once that vendor's quote actually wins (i.e. a
+  // PO is being created for them) do we call add_new_vendor to mint a real
+  // SBR/VEN/xxxx record — vendors that never win a PO never touch the directory.
+  const onboardManualVendorIfNeeded = async (vendorId: string): Promise<string> => {
+    if (!vendorId.startsWith('MANUAL:')) return vendorId;
+
+    const manualName = vendorId.slice('MANUAL:'.length).trim();
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) throw new Error('Missing API base URL');
+
+    const res = await fetch(`${baseUrl}/purchase_flow/add_new_vendor`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        vendor_details: {
+          vendor_name: safe(selectedVendorFromComparative?.name) || manualName || vendorNameFromComparative,
+          vendor_contact: safe(selectedVendorFromComparative?.phone),
+          vendor_address: safe(selectedVendorFromComparative?.address) || safe(selectedVendorFromComparative?.location),
+        },
+      }),
+    });
+    const data: any = await res.json().catch(() => null);
+    if (!res.ok || data?.success !== true || !safe(data?.vendor_id)) {
+      throw new Error(data?.message || data?.detail || 'Failed to onboard vendor');
+    }
+
+    const newVendorId = String(data.vendor_id);
+    toast.success(`Vendor onboarded as ${newVendorId}`);
+    return newVendorId;
+  };
+
   const handleConfirm = async () => {
     if (!comparative) return;
     if (!resolvedVendorId) return;
@@ -2533,6 +2613,7 @@ export function MakePurchaseOrderPopup({
 
     setSavingPo(true);
     try {
+      const finalVendorId = await onboardManualVendorIfNeeded(safe(resolvedVendorId));
       const annexurePayload = customAnnexures.reduce<Record<string, Page3State>>((result, annexure, index) => {
         const annexureNumber = index + 1;
         result[`annexure${annexureNumber}`] = {
@@ -2553,7 +2634,7 @@ export function MakePurchaseOrderPopup({
           ...(p1 as any),
           amendmentNo: effectiveAmendmentNo,
           required_purchase_documents: normalizePurchaseFlowDocuments(p1.requiredPurchaseDocuments),
-          vendor_id: safe(resolvedVendorId),
+          vendor_id: finalVendorId,
           vendor_name: vendorNameFromComparative,
           authorizedSealAttachedAt: authorizedSealAttachedAt || '',
         },
@@ -2575,11 +2656,11 @@ export function MakePurchaseOrderPopup({
       // Keep the exact created/approved content locally as a resilient
       // amendment snapshot. Revision mode can restore every editable field
       // even when an older server response omits part of the purchase quote.
-      const snapshotKey = poDraftKey(prNo, resolvedVendorId);
+      const snapshotKey = poDraftKey(prNo, finalVendorId);
       const snapshotStore = readPoDraftStore();
       const snapshot: PoDraft = {
         indentId: prNo,
-        vendorId: resolvedVendorId,
+        vendorId: finalVendorId,
         savedAt: new Date().toISOString(),
         page: 1,
         p1: { ...p1, poNo: orderNo || effectivePoNo, amendmentNo: effectiveAmendmentNo },
@@ -2593,7 +2674,7 @@ export function MakePurchaseOrderPopup({
       writePoDraftStore({ drafts: { ...(snapshotStore.drafts || {}), [snapshotKey]: snapshot } });
 
       const createdAt = safe(apiRes?.created_at) || safe(apiRes?.updated_at) || new Date().toISOString();
-      onConfirm?.({ indentId: safe(comparative.indentId), vendorId: resolvedVendorId, createdAt, poNo: orderNo });
+      onConfirm?.({ indentId: safe(comparative.indentId), vendorId: finalVendorId, createdAt, poNo: orderNo });
       onClose();
     } catch (e: any) {
       const msg = String(e?.message ?? e ?? '').trim();
