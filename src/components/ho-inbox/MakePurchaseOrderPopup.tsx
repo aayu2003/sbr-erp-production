@@ -1649,9 +1649,7 @@ export function MakePurchaseOrderPopup({
             termsText: safe(legalAnnexure?.termsText) || safe(annexure2?.termsText) || DEFAULT_ANNEXURE2_TERMS,
           });
           setAuthorizedSealAttachedAt(safe((pq as any)?.authorizedSealAttachedAt) || safe((draft as any)?.authorizedSealAttachedAt));
-          const parsedStructuredAnnexures = parseAnnexureDetailsPayload((draft as any)?.annexure_details);
-          console.log('[PO-DEBUG] annexure_details raw=', JSON.stringify((draft as any)?.annexure_details), 'parsed=', JSON.stringify(parsedStructuredAnnexures));
-          setStructuredAnnexures(parsedStructuredAnnexures);
+          setStructuredAnnexures(parseAnnexureDetailsPayload((draft as any)?.annexure_details));
           setSelectedStructuredAnnexureIndex(0);
           return;
         }
