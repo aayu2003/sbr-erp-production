@@ -542,7 +542,11 @@ const initialIndents: Indent[] = [
   },
 ];
 
-const AdminOpsIndent = () => {
+type AdminOpsIndentProps = {
+  indentTypeFilter?: 'PR' | 'SPR';
+};
+
+const AdminOpsIndent = ({ indentTypeFilter }: AdminOpsIndentProps) => {
   const [indents, setIndents] = useState<Indent[]>(initialIndents);
   const [search, setSearch] = useState('');
   const [openRowId, setOpenRowId] = useState<string>('');
@@ -681,17 +685,20 @@ const AdminOpsIndent = () => {
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    return indents.filter((it) =>
-      (it.project ?? '').toLowerCase().includes(q) ||
-      (it.prNo ?? '').toLowerCase().includes(q) ||
-      (it.indentedBy ?? '').toLowerCase().includes(q) ||
-      (it.items ?? []).some(
-        (li) =>
-          (li.partName ?? '').toLowerCase().includes(q) ||
-          (li.itemCode ?? '').toLowerCase().includes(q),
-      ),
-    );
-  }, [indents, search]);
+    return indents
+      .filter((it) => !indentTypeFilter || it.indentType === indentTypeFilter)
+      .filter((it) =>
+        (it.project ?? '').toLowerCase().includes(q) ||
+        (it.prNo ?? '').toLowerCase().includes(q) ||
+        (it.indentedBy ?? '').toLowerCase().includes(q) ||
+        (it.items ?? []).some(
+          (li) =>
+            (li.partName ?? '').toLowerCase().includes(q) ||
+            (li.itemCode ?? '').toLowerCase().includes(q),
+        ) ||
+        (it.sprItems ?? []).some((li) => (li.serviceDescription ?? '').toLowerCase().includes(q)),
+      );
+  }, [indentTypeFilter, indents, search]);
 
   const markAttached = (id: string) => {
     setAttachedMap((prev) => ({ ...prev, [id]: true }));
@@ -770,10 +777,10 @@ const AdminOpsIndent = () => {
         <div>
           <div className="flex items-center gap-2 text-sm font-bold text-emerald-700">
             <FileText className="h-4 w-4" />
-            Purchase Operations
+            {indentTypeFilter === 'SPR' ? 'Procurement · Work Order' : 'Procurement · Purchase Order'}
           </div>
-          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">Admin Ops Indents</h1>
-          <p className="mt-2 text-base font-medium text-slate-600">Review purchase requisitions, attach approval and forward them for finance review</p>
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">{indentTypeFilter === 'SPR' ? 'Service Requisition Verification' : 'Purchase Requisition Verification'}</h1>
+          <p className="mt-2 text-base font-medium text-slate-600">Review {indentTypeFilter === 'SPR' ? 'service purchase requisitions' : 'purchase requisitions'}, attach verification and forward them for approval</p>
         </div>
         <Button
           variant="outline"
@@ -788,13 +795,13 @@ const AdminOpsIndent = () => {
       <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
         <div className="flex flex-col gap-4 border-b border-slate-100 px-5 py-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h2 className="text-lg font-bold text-slate-950">Admin Ops Indent Register</h2>
+            <h2 className="text-lg font-bold text-slate-950">{indentTypeFilter === 'SPR' ? 'SPR Verification Register' : 'PR Verification Register'}</h2>
             <p className="mt-1 text-sm font-medium text-slate-500">{filtered.length} record{filtered.length === 1 ? '' : 's'} awaiting or completing Admin Ops review</p>
           </div>
           <div className="relative w-full lg:w-[390px]">
             <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <Input
-              placeholder="Search PR no., project, item or requester"
+              placeholder={`Search ${indentTypeFilter === 'SPR' ? 'SPR' : 'PR'} no., project, ${indentTypeFilter === 'SPR' ? 'service' : 'item'} or requester`}
               className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7] pl-10 shadow-none focus-visible:ring-[#0D3A35]/20"
               value={search}
               onChange={(event) => setSearch(event.target.value)}

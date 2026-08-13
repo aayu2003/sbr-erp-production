@@ -1,20 +1,26 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
+  Check,
   CheckCircle2,
   Clock3,
   Eye,
   FileText,
   IndianRupee,
   Loader2,
+  Lock,
+  Package,
   PackageSearch,
   Paperclip,
   Plus,
+  Printer,
   Search,
   Settings,
   Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
 import {
   Accordion,
   AccordionContent,
@@ -38,6 +44,7 @@ import { getBaseUrl } from '@/lib/config';
 import { useAuth } from '@/context/AuthContext';
 import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 import logo3f from '@/Assets/3f-logo.png';
+import { printInventoryIndentPdf } from '@/lib/inventoryIndentPdf';
 
 type PRLineItem = {
   id: string;
@@ -59,6 +66,11 @@ type PRLineItem = {
   actualLifeHr: string;
   reasonForReplacement: string;
   repairingPossibility: 'Yes' | 'No' | 'NA';
+  // Set when this row's item code came from an already-existing inventory item
+  // (e.g. via "Request Stock"). Selecting/re-selecting a category must not
+  // regenerate a fresh code for those rows — only genuinely new item rows
+  // (added via "+ Add Row") get an auto-generated code on category select.
+  lockItemCode?: boolean;
 };
 
 type IndentSignatureDetails = {
@@ -460,87 +472,86 @@ const InventoryIndent = ({ pageVariant = 'inventory' }: InventoryIndentProps) =>
   const [configVersion, setConfigVersion] = useState(0);
   const [previewIndent, setPreviewIndent] = useState<Indent | null>(null);
   const [indentPendingDelete, setIndentPendingDelete] = useState<Indent | null>(null);
+  const [itemsPreviewIndent, setItemsPreviewIndent] = useState<Indent | null>(null);
+  const [hoveredItemsRowId, setHoveredItemsRowId] = useState<string | null>(null);
+  const [itemsHoverAnchor, setItemsHoverAnchor] = useState<{ top: number; left: number } | null>(null);
 
   const [indentApprovalsMap, setIndentApprovalsMap] = useState<Record<string, IndentApproval>>({});
   const [attachingApprovalMap, setAttachingApprovalMap] = useState<Record<string, boolean>>({});
 
+  const loadIndents = async () => {
+    try {
+      const BASE_URL = getBaseUrl().replace(/\/$/, '');
+      const res = await fetch(`${BASE_URL}/purchase_flow/get_indents`);
+      if (!res.ok) throw new Error(`Failed to fetch indents (HTTP ${res.status})`);
+      const data: any = await res.json();
+      const raw = Array.isArray(data?.indents) ? data.indents : [];
+
+      const mapped: Indent[] = raw.map((r: any, idx: number) => {
+        const items: PRLineItem[] = (r.indent_data?.item_row ?? []).map((row: any, i: number) => ({
+          id: genId(),
+          srNo: row.sr_no ?? i + 1,
+          category: row.category ?? '',
+          itemCode: row.item_code ?? row.itemCode ?? '',
+          partName: row.part_name ?? row.partName ?? '',
+          specification: row.specification ?? '',
+          uom: row.uom ?? 'No',
+          totalQtyRequired: row.total_qty_required ?? row.totalQtyRequired ?? 0,
+          lessQtyAvailableInStock: row.less_qty_available_in_stock ?? row.lessQtyAvailableInStock ?? 0,
+          procurementLeadTimeWeeks: row.procurement_lead_time_weeks ?? row.procurementLeadTimeWeeks ?? 0,
+          materialRequiredByDate: row.material_required_by_date ?? today(),
+          indigenousOrImported: (row.indigenous_or_imported ?? 'Indigenous') === 'Imported' ? 'Imported' : 'Indigenous',
+          ratePerItem: row.rate_per_item ?? row.ratePerItem ?? 0,
+          preferredVendorName: row.preferred_vendor_name ?? row.preferredVendorName ?? '',
+          validityOfWarrantyAndGuarantee: row.validity_of_warranty_and_guarantee ?? 'NA',
+          fullLifeHr: row.full_life_hr ?? 'NA',
+          actualLifeHr: row.actual_life_hr ?? 'NA',
+          reasonForReplacement: row.reason_for_replacement ?? 'NA',
+          repairingPossibility: row.repairing_possibility ?? 'NA',
+        }));
+
+        const indentedByDetails = signatureDetailsFrom(r.indented_by);
+        const forwardedByDetails = signatureDetailsFrom(r.forwarded_by);
+        const directorsApprovalDetails = signatureDetailsFrom(r.approved_by);
+
+        const derivedStatus: Indent['status'] =
+          directorsApprovalDetails?.signature
+            ? 'approved'
+            : forwardedByDetails?.signature || indentedByDetails?.signature
+              ? 'forwarded'
+              : 'open';
+
+        return {
+          id: r.pr_number ?? `${r.created_at ?? ''}-${idx}`,
+          project: r.indent_data?.project ?? '',
+          department: r.department ?? '',
+          prNo: r.pr_number ?? '',
+          date: r.created_at ? String(r.created_at).split('T')[0] : today(),
+          indentedBy: formatPersonDisplay(r.indented_by),
+          forwardedBy: formatPersonDisplay(r.forwarded_by),
+          directorsApproval: formatPersonDisplay(r.approved_by),
+          remarksNotes: r.notes ?? '',
+          budgetHead: formatBudgetHead(r.budget_head),
+          items,
+          indentedByDetails,
+          forwardedByDetails,
+          directorsApprovalDetails,
+          status: derivedStatus,
+        } as Indent;
+      });
+
+      const scopedIndents = mapped.filter((indent) => {
+        const department = String(indent.department || '').trim().toUpperCase();
+        return isPurchasePage ? department === 'PURCHASE' : department !== 'PURCHASE';
+      });
+      setIndents(scopedIndents);
+    } catch (err: any) {
+      toast.error(err?.message || 'Unable to load indents');
+    }
+  };
+
   useEffect(() => {
-    let mounted = true;
-    const loadIndents = async () => {
-      try {
-        const BASE_URL = getBaseUrl().replace(/\/$/, '');
-        const res = await fetch(`${BASE_URL}/purchase_flow/get_indents`);
-        if (!res.ok) throw new Error(`Failed to fetch indents (HTTP ${res.status})`);
-        const data: any = await res.json();
-        const raw = Array.isArray(data?.indents) ? data.indents : [];
-
-        const mapped: Indent[] = raw.map((r: any, idx: number) => {
-          const items: PRLineItem[] = (r.indent_data?.item_row ?? []).map((row: any, i: number) => ({
-            id: genId(),
-            srNo: row.sr_no ?? i + 1,
-            category: row.category ?? '',
-            itemCode: row.item_code ?? row.itemCode ?? '',
-            partName: row.part_name ?? row.partName ?? '',
-            specification: row.specification ?? '',
-            uom: row.uom ?? 'No',
-            totalQtyRequired: row.total_qty_required ?? row.totalQtyRequired ?? 0,
-            lessQtyAvailableInStock: row.less_qty_available_in_stock ?? row.lessQtyAvailableInStock ?? 0,
-            procurementLeadTimeWeeks: row.procurement_lead_time_weeks ?? row.procurementLeadTimeWeeks ?? 0,
-            materialRequiredByDate: row.material_required_by_date ?? today(),
-            indigenousOrImported: (row.indigenous_or_imported ?? 'Indigenous') === 'Imported' ? 'Imported' : 'Indigenous',
-            ratePerItem: row.rate_per_item ?? row.ratePerItem ?? 0,
-            preferredVendorName: row.preferred_vendor_name ?? row.preferredVendorName ?? '',
-            validityOfWarrantyAndGuarantee: row.validity_of_warranty_and_guarantee ?? 'NA',
-            fullLifeHr: row.full_life_hr ?? 'NA',
-            actualLifeHr: row.actual_life_hr ?? 'NA',
-            reasonForReplacement: row.reason_for_replacement ?? 'NA',
-            repairingPossibility: row.repairing_possibility ?? 'NA',
-          }));
-
-          const indentedByDetails = signatureDetailsFrom(r.indented_by);
-          const forwardedByDetails = signatureDetailsFrom(r.forwarded_by);
-          const directorsApprovalDetails = signatureDetailsFrom(r.approved_by);
-
-          const derivedStatus: Indent['status'] =
-            directorsApprovalDetails?.signature
-              ? 'approved'
-              : forwardedByDetails?.signature || indentedByDetails?.signature
-                ? 'forwarded'
-                : 'open';
-
-          return {
-            id: r.pr_number ?? `${r.created_at ?? ''}-${idx}`,
-            project: r.indent_data?.project ?? '',
-            department: r.department ?? '',
-            prNo: r.pr_number ?? '',
-            date: r.created_at ? String(r.created_at).split('T')[0] : today(),
-            indentedBy: formatPersonDisplay(r.indented_by),
-            forwardedBy: formatPersonDisplay(r.forwarded_by),
-            directorsApproval: formatPersonDisplay(r.approved_by),
-            remarksNotes: r.notes ?? '',
-            budgetHead: formatBudgetHead(r.budget_head),
-            items,
-            indentedByDetails,
-            forwardedByDetails,
-            directorsApprovalDetails,
-            status: derivedStatus,
-          } as Indent;
-        });
-
-        const scopedIndents = mapped.filter((indent) => {
-          const department = String(indent.department || '').trim().toUpperCase();
-          return isPurchasePage ? department === 'PURCHASE' : department !== 'PURCHASE';
-        });
-        if (mounted) setIndents(scopedIndents);
-      } catch (err: any) {
-        toast.error(err?.message || 'Unable to load indents');
-      }
-    };
-
-    loadIndents();
-    return () => {
-      mounted = false;
-    };
+    void loadIndents();
   }, [isPurchasePage]);
 
   useEffect(() => {
@@ -556,8 +567,10 @@ const InventoryIndent = ({ pageVariant = 'inventory' }: InventoryIndentProps) =>
       category: String(it?.category || ''),
       partName: String(it?.itemName || ''),
       itemCode: String(it?.itemCode || ''),
+      specification: String(it?.specification || ''),
       uom: String(it?.uom || 'No'),
       lessQtyAvailableInStock: Number(it?.stock) || 0,
+      lockItemCode: Boolean(String(it?.itemCode || '').trim()),
     }));
 
     setPrefillDraft({
@@ -792,21 +805,20 @@ const InventoryIndent = ({ pageVariant = 'inventory' }: InventoryIndentProps) =>
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1100px] table-fixed border-collapse text-[13px] leading-5">
+            <table className="w-full min-w-[1100px] table-auto border-collapse text-[13px] leading-5">
               <thead className="bg-[#0D3A35] text-white">
                 <tr>
                   {[
-                    ['PR Number', 'w-[12%]'],
-                    ['Project', 'w-[15%]'],
-                    ['Item Name', 'w-[19%]'],
-                    ['UoM', 'w-[7%]'],
-                    ['Qty.', 'w-[8%]'],
-                    ['Rate', 'w-[10%]'],
-                    ['Total Value', 'w-[11%]'],
-                    ['Status', 'w-[8%]'],
-                    ['Action Buttons', 'w-[10%]'],
-                  ].map(([label, width]) => (
-                    <th key={label} className={`${width} px-3 py-4 text-center text-[12px] font-bold uppercase tracking-[0.07em] text-white/90`}>
+                    ['PR Number', 'text-left'],
+                    ['Indent Date', 'text-left'],
+                    ['Project', 'text-left'],
+                    ['Items', 'text-left'],
+                    ['Total Value', 'text-right'],
+                    ['Status', 'text-center'],
+                    ['Monitor', 'text-center'],
+                    ['Action Buttons', 'text-center'],
+                  ].map(([label, align]) => (
+                    <th key={label} className={`${align} whitespace-nowrap px-3 py-4 text-[12px] font-bold uppercase tracking-[0.07em] text-white/90`}>
                       {label}
                     </th>
                   ))}
@@ -830,37 +842,86 @@ const InventoryIndent = ({ pageVariant = 'inventory' }: InventoryIndentProps) =>
                           {indent.prNo || 'PR (Draft)'}
                         </button>
                       </td>
+                      <td className="px-3 py-4 text-[13px] font-semibold leading-5 text-slate-700">
+                        {formatDateDDMMYYYY(indent.date)}
+                      </td>
                       <td className="px-3 py-4 text-[13px] font-semibold leading-5 text-slate-800">
                         <span className="line-clamp-2">{indent.project || 'Not Recorded'}</span>
                       </td>
-                      <td className="px-3 py-4">
-                        <div className="space-y-1.5">
-                          {(indent.items ?? []).map((item) => (
-                            <div key={`name-${item.id}`} className="min-h-5 border-b border-slate-100 pb-1.5 last:border-b-0 last:pb-0">
-                              <p className="line-clamp-2 text-[13px] font-semibold leading-5 text-slate-800">{item.partName || 'Not Recorded'}</p>
-                              <p className="mt-0.5 font-mono text-[11px] leading-4 text-slate-500">{item.itemCode || 'Code pending'}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </td>
-                      <td className="px-3 py-4 text-center">
-                        <div className="space-y-1.5">
-                          {(indent.items ?? []).map((item) => <p key={`uom-${item.id}`} className="min-h-5 border-b border-slate-100 pb-1.5 text-[13px] font-semibold leading-5 text-slate-700 last:border-b-0 last:pb-0">{item.uom || '—'}</p>)}
-                        </div>
-                      </td>
-                      <td className="px-3 py-4 text-right">
-                        <div className="space-y-1.5">
-                          {(indent.items ?? []).map((item) => <p key={`qty-${item.id}`} className="min-h-5 border-b border-slate-100 pb-1.5 text-[13px] font-bold leading-5 text-slate-800 last:border-b-0 last:pb-0">{netPrQty(item).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</p>)}
-                        </div>
-                      </td>
-                      <td className="px-3 py-4 text-right">
-                        <div className="space-y-1.5">
-                          {(indent.items ?? []).map((item) => <p key={`rate-${item.id}`} className="min-h-5 border-b border-slate-100 pb-1.5 text-[13px] font-semibold leading-5 text-slate-800 last:border-b-0 last:pb-0">{formatInr(item.ratePerItem || 0)}</p>)}
-                        </div>
+                      <td className="px-3 py-4 align-middle">
+                        <button
+                          type="button"
+                          onClick={() => setItemsPreviewIndent(indent)}
+                          onMouseEnter={(event) => {
+                            const rect = event.currentTarget.getBoundingClientRect();
+                            setItemsHoverAnchor({ top: rect.bottom + 8, left: rect.left });
+                            setHoveredItemsRowId(indent.id);
+                          }}
+                          onMouseLeave={() => setHoveredItemsRowId((current) => (current === indent.id ? null : current))}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-[#0D3A35] transition-colors hover:border-[#0D3A35]/30 hover:bg-[#0D3A35]/5"
+                        >
+                          <Package className="h-3.5 w-3.5" />
+                          {(indent.items ?? []).length} item{(indent.items ?? []).length === 1 ? '' : 's'}
+                        </button>
+
+                        {hoveredItemsRowId === indent.id && itemsHoverAnchor && (indent.items ?? []).length > 0 &&
+                          createPortal(
+                            <div
+                              className="fixed z-[100] w-64 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-xl"
+                              style={{ top: itemsHoverAnchor.top, left: itemsHoverAnchor.left }}
+                            >
+                              <div className="space-y-1.5">
+                                {(indent.items ?? []).slice(0, 4).map((item) => (
+                                  <p key={`hover-${item.id}`} className="line-clamp-1 text-[12px] font-semibold leading-4 text-slate-700">
+                                    {item.partName || 'Not Recorded'}
+                                  </p>
+                                ))}
+                              </div>
+                              {(indent.items ?? []).length > 4 && (
+                                <p className="mt-1.5 text-[11px] font-bold text-[#0D3A35]">+{(indent.items ?? []).length - 4} more — click to view all</p>
+                              )}
+                            </div>,
+                            document.body
+                          )}
                       </td>
                       <td className="px-3 py-4 text-right text-[13px] font-bold leading-5 text-slate-950">{formatInr(totalValue(indent.items ?? []))}</td>
                       <td className="px-3 py-4 text-center">
                         <span className={`inline-flex rounded-full border px-2.5 py-1 text-[12px] font-bold capitalize ${statusClass}`}>{indent.status}</span>
+                      </td>
+                      <td className="px-3 py-4 align-middle">
+                        {(() => {
+                          const steps = [
+                            { label: 'Initiation', done: Boolean(indent.indentedByDetails?.signature) },
+                            { label: 'Verification', done: Boolean(indent.directorsApprovalDetails?.signature) },
+                            { label: 'Final Approval', done: Boolean(indent.forwardedByDetails?.signature) },
+                          ];
+                          return (
+                            <div
+                              className="flex items-start justify-center"
+                              title={steps.map((s) => `${s.label}: ${s.done ? 'Signed' : 'Pending'}`).join(' · ')}
+                            >
+                              {steps.map((step, idx) => (
+                                <Fragment key={step.label}>
+                                  <div className="flex w-14 shrink-0 flex-col items-center gap-1">
+                                    <span
+                                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
+                                        step.done ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'
+                                      }`}
+                                    >
+                                      {step.done ? <Check className="h-3 w-3" /> : idx + 1}
+                                    </span>
+                                    <span className="text-center text-[8px] font-bold uppercase leading-tight tracking-wide text-slate-500">
+                                      {step.label}
+                                    </span>
+                                  </div>
+                                  {idx < steps.length - 1 && (
+                                    <span className={`mt-2.5 h-0.5 w-3 shrink-0 ${step.done ? 'bg-emerald-500' : 'bg-slate-200'}`} />
+                                  )}
+                                </Fragment>
+                              ))}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="px-3 py-4">
                         <div className="flex items-center justify-center gap-2">
@@ -963,11 +1024,13 @@ const InventoryIndent = ({ pageVariant = 'inventory' }: InventoryIndentProps) =>
         mode="create"
         pageVariant={pageVariant}
         initialData={prefillDraft}
-        onSave={(data) => {
-          setIndents((p) => [{ ...data, id: genId(), status: 'open' }, ...p]);
+        onSave={async (data) => {
           setPrefillDraft(null);
           setOpen(false);
-          toast.success('Indent created');
+          toast.success(data.prNo ? `Indent ${data.prNo} created` : 'Indent created');
+          // Refetch from the backend rather than trusting the create response's
+          // guessed field shape, so the auto-generated PR number is always correct.
+          await loadIndents();
         }}
       />
 
@@ -984,6 +1047,47 @@ const InventoryIndent = ({ pageVariant = 'inventory' }: InventoryIndentProps) =>
         onClose={() => setConfigOpen(false)}
         onSaved={() => setConfigVersion((v) => v + 1)}
       />
+
+      <Dialog open={Boolean(itemsPreviewIndent)} onOpenChange={(nextOpen) => { if (!nextOpen) setItemsPreviewIndent(null); }}>
+        <DialogContent className="max-h-[85vh] max-w-3xl overflow-hidden rounded-2xl border-0 p-0 shadow-2xl">
+          <DialogHeader className="shrink-0 bg-[#0D3A35] px-6 py-5 text-left">
+            <DialogTitle className="flex items-center gap-3 text-lg font-bold text-white">
+              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10">
+                <Package className="h-4 w-4" />
+              </span>
+              Line Items — {itemsPreviewIndent?.prNo || 'PR (Draft)'}
+            </DialogTitle>
+            <p className="mt-1 pl-[52px] text-sm text-white/70">{(itemsPreviewIndent?.items ?? []).length} item{(itemsPreviewIndent?.items ?? []).length === 1 ? '' : 's'} · {itemsPreviewIndent?.project || 'Not Recorded'}</p>
+          </DialogHeader>
+          <div className="max-h-[calc(85vh-96px)] overflow-y-auto p-6">
+            <table className="w-full border-collapse text-[13px]">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">
+                  <th className="py-2 pr-3">Item</th>
+                  <th className="py-2 pr-3 text-center">UoM</th>
+                  <th className="py-2 pr-3 text-right">Qty.</th>
+                  <th className="py-2 pr-3 text-right">Rate</th>
+                  <th className="py-2 text-right">Value</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {(itemsPreviewIndent?.items ?? []).map((item) => (
+                  <tr key={item.id}>
+                    <td className="py-2.5 pr-3">
+                      <p className="font-semibold leading-5 text-slate-800">{item.partName || 'Not Recorded'}</p>
+                      <p className="mt-0.5 font-mono text-[11px] leading-4 text-slate-500">{item.itemCode || 'Code pending'}</p>
+                    </td>
+                    <td className="py-2.5 pr-3 text-center font-semibold text-slate-700">{item.uom || '—'}</td>
+                    <td className="py-2.5 pr-3 text-right font-bold text-slate-800">{netPrQty(item).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                    <td className="py-2.5 pr-3 text-right font-semibold text-slate-800">{formatInr(item.ratePerItem || 0)}</td>
+                    <td className="py-2.5 text-right font-bold text-slate-950">{formatInr(approxValue(item))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
@@ -1066,6 +1170,19 @@ const AddIndentModal = ({
       setItems(nextItems.map((x, idx) => ({ ...x, srNo: idx + 1 })));
       setOpenRowId(nextItems[nextItems.length - 1].id);
       setConfiguredProjects(readInventoryIndentConfig().projects ?? []);
+
+      // Prefilled rows (e.g. from "Request Stock") may carry a category that
+      // isn't in the hardcoded list yet — make sure it still shows up as a
+      // matching <option>, otherwise the select renders blank and forces a
+      // manual re-pick that would otherwise wipe the item's real code.
+      const itemCategories = nextItems.map((item) => item.category).filter(Boolean);
+      try {
+        const inventoryConfig = JSON.parse(localStorage.getItem('farm-connect.inventory-master-config.v1') || '{}');
+        const configuredCategories = Array.isArray(inventoryConfig?.categories) ? inventoryConfig.categories : [];
+        setAvailableItemCategories(Array.from(new Set([...INVENTORY_ITEM_CATEGORIES, ...configuredCategories.filter(Boolean), ...itemCategories])));
+      } catch {
+        setAvailableItemCategories(Array.from(new Set([...INVENTORY_ITEM_CATEGORIES, ...itemCategories])));
+      }
       return;
     }
 
@@ -1153,6 +1270,15 @@ const AddIndentModal = ({
   };
 
   const selectItemCategory = async (id: string, category: string) => {
+    const targetItem = items.find((item) => item.id === id);
+    if (targetItem?.lockItemCode) {
+      // This row's item code came from an existing inventory item (e.g. via
+      // "Request Stock") — only correct the category label, never touch the
+      // already-assigned code.
+      updateItem(id, 'category', category);
+      return;
+    }
+
     setItems((current) => current.map((item) => (
       item.id === id ? { ...item, category, itemCode: '' } : item
     )));
@@ -1171,7 +1297,7 @@ const AddIndentModal = ({
       setItems((current) => {
         let categoryOffset = 0;
         return current.map((item) => {
-          if (item.category !== category) return item;
+          if (item.lockItemCode || item.category !== category) return item;
           const generatedCode = incrementInventoryItemCode(nextCode, categoryOffset);
           categoryOffset += 1;
           return { ...item, itemCode: generatedCode };
@@ -1181,7 +1307,7 @@ const AddIndentModal = ({
       setItems((current) => {
         let categoryOffset = 0;
         return current.map((item) => {
-          if (item.category !== category) return item;
+          if (item.lockItemCode || item.category !== category) return item;
           const generatedCode = incrementInventoryItemCode(fallbackCode, categoryOffset);
           categoryOffset += 1;
           return { ...item, itemCode: generatedCode };
@@ -1213,12 +1339,10 @@ const AddIndentModal = ({
     if (!project.trim()) return toast.error('Project is required');
     if (!department.trim()) return toast.error('Department is required');
     if (!date) return toast.error('Indent date is required');
-    if (!forwardedBy.trim()) return toast.error('Select the employee who will forward the indent');
-    if (!directorsApproval.trim()) return toast.error("Select the employee for Director's Approval");
     if (items.length === 0) return toast.error('Add at least 1 item row');
     if (items.some((i) => !i.category.trim())) return toast.error('Select an item category for each row');
     if (items.some((i) => !i.itemCode.trim())) return toast.error('Please wait for every item code to be generated');
-    if (items.some((i) => !i.partName.trim())) return toast.error('Each row must have Part Name');
+    if (items.some((i) => !i.partName.trim())) return toast.error('Each row must have an Item Name');
     if (items.some((i) => !i.uom.trim())) return toast.error('UoM is required for each item');
     if (items.some((i) => Number(i.totalQtyRequired) <= 0)) return toast.error('Required quantity must be greater than zero for each item');
     if (items.some((i) => !i.materialRequiredByDate)) return toast.error('Material Required By date is required for each item');
@@ -1317,7 +1441,10 @@ const AddIndentModal = ({
               <p className="mb-3 text-sm font-bold uppercase tracking-[0.08em] text-[#0D3A35]">Indent Details</p>
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <div>
-                  <label className="text-xs font-bold uppercase tracking-[0.06em] text-slate-500">Indent Type *</label>
+                  <label className="flex items-center gap-1 text-xs font-bold uppercase tracking-[0.06em] text-slate-500">
+                    <Lock className="h-3 w-3 text-slate-400" />
+                    Indent Type *
+                  </label>
                   <Input value="Purchase Requisition (PR)" readOnly className="mt-1.5 h-11 rounded-xl border-slate-200 bg-slate-50 font-semibold text-slate-600" />
                 </div>
                 <div>
@@ -1405,24 +1532,232 @@ const AddIndentModal = ({
                     </AccordionTrigger>
 
                     <AccordionContent className="pt-0 pb-3">
+                      {isPurchasePage ? (
+                        <div className="grid grid-cols-3 gap-3">
+                          {/* Column 1 — Essentials (auto-fetched, list format) */}
+                          <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-slate-500">Essentials</p>
+                            <div>
+                              <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                                {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                                Item Category *
+                              </label>
+                              <select
+                                value={it.category}
+                                onChange={(event) => void selectItemCategory(it.id, event.target.value)}
+                                disabled={it.lockItemCode}
+                                className={cn(
+                                  "mt-1 h-10 w-full appearance-none rounded-lg border border-gray-200 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/20",
+                                  it.lockItemCode ? "cursor-not-allowed bg-slate-100 text-slate-600" : "bg-white"
+                                )}
+                              >
+                                <option value="">Select category</option>
+                                {availableItemCategories.map((category) => <option key={category} value={category}>{category}</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                                {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                                Item Name *
+                              </label>
+                              <Input
+                                value={it.partName}
+                                onChange={(e) => updateItem(it.id, 'partName', e.target.value)}
+                                readOnly={it.lockItemCode}
+                                className={cn("mt-1", it.lockItemCode && "bg-slate-100 text-slate-600")}
+                              />
+                            </div>
+                            <div>
+                              <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                                {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                                Item Code
+                              </label>
+                              <div className="relative mt-1">
+                                <Input value={it.itemCode} readOnly placeholder={it.category ? 'Generating item code…' : 'Select category first'} className="bg-slate-100 pr-9 font-mono font-semibold text-[#0D3A35]" />
+                                {itemCodeLoadingMap[it.id] && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-[#0D3A35]" />}
+                              </div>
+                            </div>
+                            <div>
+                              <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                                {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                                Specification
+                              </label>
+                              <Input
+                                value={it.specification}
+                                onChange={(e) => updateItem(it.id, 'specification', e.target.value)}
+                                readOnly={it.lockItemCode}
+                                className={cn("mt-1", it.lockItemCode && "bg-slate-100 text-slate-600")}
+                              />
+                            </div>
+                            <div>
+                              <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                                {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                                UoM *
+                              </label>
+                              <Input
+                                value={it.uom}
+                                onChange={(e) => updateItem(it.id, 'uom', e.target.value)}
+                                placeholder="No / kg / litre"
+                                readOnly={it.lockItemCode}
+                                className={cn("mt-1", it.lockItemCode && "bg-slate-100 text-slate-600")}
+                              />
+                            </div>
+                          </div>
+
+                          {/* Column 2 — Specifications */}
+                          <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-slate-500">Specifications</p>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Total Qty Required *</label>
+                              <Input
+                                type="number"
+                                min={0}
+                                value={it.totalQtyRequired}
+                                onChange={(e) => updateItem(it.id, 'totalQtyRequired', Number(e.target.value))}
+                                className="mt-1"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Net PR Qty</label>
+                              <Input value={netPrQty(it)} readOnly className="mt-1" />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Lead Time (weeks)</label>
+                              <Input
+                                type="number"
+                                min={0}
+                                value={it.procurementLeadTimeWeeks}
+                                onChange={(e) => updateItem(it.id, 'procurementLeadTimeWeeks', Number(e.target.value))}
+                                className="mt-1"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Material Required By *</label>
+                              <Input
+                                type="date"
+                                value={it.materialRequiredByDate}
+                                onChange={(e) => updateItem(it.id, 'materialRequiredByDate', e.target.value)}
+                                className="mt-1"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Rate / Item *</label>
+                              <Input
+                                type="number"
+                                min={0}
+                                value={it.ratePerItem}
+                                onChange={(e) => updateItem(it.id, 'ratePerItem', Number(e.target.value))}
+                                className="mt-1"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Column 3 — Other Specifications */}
+                          <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-slate-500">Other Specifications</p>
+                            <div>
+                              <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                                {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                                Less Qty (Stock)
+                              </label>
+                              <Input
+                                type="number"
+                                min={0}
+                                value={it.lessQtyAvailableInStock}
+                                onChange={(e) => updateItem(it.id, 'lessQtyAvailableInStock', Number(e.target.value))}
+                                readOnly={it.lockItemCode}
+                                className={cn("mt-1", it.lockItemCode && "bg-slate-100 text-slate-600")}
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Indigenous / Imported</label>
+                              <select
+                                className="mt-1 w-full appearance-none border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-green-500"
+                                value={it.indigenousOrImported}
+                                onChange={(e) => updateItem(it.id, 'indigenousOrImported', e.target.value as any)}
+                              >
+                                <option value="Indigenous">Indigenous</option>
+                                <option value="Imported">Imported</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Preferred Vendor Name</label>
+                              <Input value={it.preferredVendorName} onChange={(e) => updateItem(it.id, 'preferredVendorName', e.target.value)} className="mt-1" />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Approx. Value (Auto-calculated)</label>
+                              <div className="mt-1 flex h-10 items-center justify-end rounded-md border border-[#0D3A35]/15 bg-[#0D3A35]/5 px-3 text-sm font-black text-[#0D3A35]">
+                                {formatInr(approxValue(it))}
+                              </div>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Warranty / Guarantee Validity</label>
+                              <Input value={it.validityOfWarrantyAndGuarantee} onChange={(e) => updateItem(it.id, 'validityOfWarrantyAndGuarantee', e.target.value)} className="mt-1" />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Reason for replacement</label>
+                              <Input value={it.reasonForReplacement} onChange={(e) => updateItem(it.id, 'reasonForReplacement', e.target.value)} className="mt-1" />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Full life (Hr)</label>
+                              <Input value={it.fullLifeHr} onChange={(e) => updateItem(it.id, 'fullLifeHr', e.target.value)} className="mt-1" />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Actual life (Hr)</label>
+                              <Input value={it.actualLifeHr} onChange={(e) => updateItem(it.id, 'actualLifeHr', e.target.value)} className="mt-1" />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500">Repairing possibility</label>
+                              <select
+                                className="mt-1 w-full appearance-none border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-green-500"
+                                value={it.repairingPossibility}
+                                onChange={(e) => updateItem(it.id, 'repairingPossibility', e.target.value as any)}
+                              >
+                                <option value="NA">NA</option>
+                                <option value="Yes">Yes</option>
+                                <option value="No">No</option>
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                      <>
                       <div className="grid gap-3 md:grid-cols-3">
                         <div>
-                          <label className="text-xs font-medium text-gray-500">Item Category *</label>
+                          <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                            {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                            Item Category *
+                          </label>
                           <select
                             value={it.category}
                             onChange={(event) => void selectItemCategory(it.id, event.target.value)}
-                            className="mt-1 h-10 w-full appearance-none rounded-lg border border-gray-200 bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/20"
+                            disabled={it.lockItemCode}
+                            className={cn(
+                              "mt-1 h-10 w-full appearance-none rounded-lg border border-gray-200 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/20",
+                              it.lockItemCode ? "cursor-not-allowed bg-slate-100 text-slate-600" : "bg-white"
+                            )}
                           >
                             <option value="">Select category</option>
                             {availableItemCategories.map((category) => <option key={category} value={category}>{category}</option>)}
                           </select>
                         </div>
                         <div>
-                          <label className="text-xs font-medium text-gray-500">Part Name *</label>
-                          <Input value={it.partName} onChange={(e) => updateItem(it.id, 'partName', e.target.value)} className="mt-1" />
+                          <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                            {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                            Item Name *
+                          </label>
+                          <Input
+                            value={it.partName}
+                            onChange={(e) => updateItem(it.id, 'partName', e.target.value)}
+                            readOnly={it.lockItemCode}
+                            className={cn("mt-1", it.lockItemCode && "bg-slate-100 text-slate-600")}
+                          />
                         </div>
                         <div>
-                          <label className="text-xs font-medium text-gray-500">Item Code</label>
+                          <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                            {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                            Item Code
+                          </label>
                           <div className="relative mt-1">
                             <Input value={it.itemCode} readOnly placeholder={it.category ? 'Generating item code…' : 'Select category first'} className="bg-slate-100 pr-9 font-mono font-semibold text-[#0D3A35]" />
                             {itemCodeLoadingMap[it.id] && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-[#0D3A35]" />}
@@ -1433,12 +1768,29 @@ const AddIndentModal = ({
 
                       <div className="grid grid-cols-2 gap-3 mt-3">
                         <div>
-                          <label className="text-xs font-medium text-gray-500">Specification</label>
-                          <Input value={it.specification} onChange={(e) => updateItem(it.id, 'specification', e.target.value)} />
+                          <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                            {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                            Specification
+                          </label>
+                          <Input
+                            value={it.specification}
+                            onChange={(e) => updateItem(it.id, 'specification', e.target.value)}
+                            readOnly={it.lockItemCode}
+                            className={cn(it.lockItemCode && "bg-slate-100 text-slate-600")}
+                          />
                         </div>
                         <div>
-                          <label className="text-xs font-medium text-gray-500">UoM *</label>
-                          <Input value={it.uom} onChange={(e) => updateItem(it.id, 'uom', e.target.value)} placeholder="No / kg / litre" />
+                          <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                            {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                            UoM *
+                          </label>
+                          <Input
+                            value={it.uom}
+                            onChange={(e) => updateItem(it.id, 'uom', e.target.value)}
+                            placeholder="No / kg / litre"
+                            readOnly={it.lockItemCode}
+                            className={cn(it.lockItemCode && "bg-slate-100 text-slate-600")}
+                          />
                         </div>
                       </div>
 
@@ -1453,12 +1805,17 @@ const AddIndentModal = ({
                           />
                         </div>
                         <div>
-                          <label className="text-xs font-medium text-gray-500">Less Qty (Stock)</label>
+                          <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                            {it.lockItemCode && <Lock className="h-3 w-3 text-slate-400" />}
+                            Less Qty (Stock)
+                          </label>
                           <Input
                             type="number"
                             min={0}
                             value={it.lessQtyAvailableInStock}
                             onChange={(e) => updateItem(it.id, 'lessQtyAvailableInStock', Number(e.target.value))}
+                            readOnly={it.lockItemCode}
+                            className={cn(it.lockItemCode && "bg-slate-100 text-slate-600")}
                           />
                         </div>
                         <div>
@@ -1559,6 +1916,8 @@ const AddIndentModal = ({
                           </select>
                         </div>
                       </div>
+                      </>
+                      )}
                     </AccordionContent>
                   </AccordionItem>
                 ))}
@@ -1573,45 +1932,24 @@ const AddIndentModal = ({
                   <Input value={indentedBy} readOnly disabled className="mt-1 h-11 cursor-not-allowed rounded-xl bg-gray-50 text-gray-600" />
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-gray-500">Forwarded By *</label>
-                  <select
-                    value={forwardedBy}
-                    onChange={(event) => setForwardedBy(event.target.value)}
-                    disabled={employeesLoading}
-                    className="mt-1 h-11 w-full appearance-none rounded-xl border border-slate-200 bg-[#fbfaf7] px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35] disabled:bg-slate-100"
-                  >
-                    <option value="">{employeesLoading ? 'Loading employees…' : 'Select employee'}</option>
-                    {forwardedBy && !employeeOptions.some((employee) => employeeOptionValue(employee) === forwardedBy) && (
-                      <option value={forwardedBy}>{forwardedBy} (Saved)</option>
-                    )}
-                    {employeeOptions.map((employee) => (
-                      <option key={employee.id} value={employeeOptionValue(employee)}>
-                        {employee.name} · {employee.id}{employee.designation ? ` · ${employee.designation}` : ''}
-                      </option>
-                    ))}
-                  </select>
+                  <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                    <Lock className="h-3 w-3 text-slate-400" />
+                    Forwarded By
+                  </label>
+                  <div className="mt-1 flex h-11 items-center rounded-xl border border-slate-200 bg-gray-50 px-3 text-xs font-medium italic text-slate-500">
+                    Authorized approvers will add their signatures respectively
+                  </div>
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-gray-500">Director's Approval *</label>
-                  <select
-                    value={directorsApproval}
-                    onChange={(event) => setDirectorsApproval(event.target.value)}
-                    disabled={employeesLoading}
-                    className="mt-1 h-11 w-full appearance-none rounded-xl border border-slate-200 bg-[#fbfaf7] px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35] disabled:bg-slate-100"
-                  >
-                    <option value="">{employeesLoading ? 'Loading employees…' : 'Select employee'}</option>
-                    {directorsApproval && !employeeOptions.some((employee) => employeeOptionValue(employee) === directorsApproval) && (
-                      <option value={directorsApproval}>{directorsApproval} (Saved)</option>
-                    )}
-                    {employeeOptions.map((employee) => (
-                      <option key={employee.id} value={employeeOptionValue(employee)}>
-                        {employee.name} · {employee.id}{employee.designation ? ` · ${employee.designation}` : ''}
-                      </option>
-                    ))}
-                  </select>
+                  <label className="flex items-center gap-1 text-xs font-medium text-gray-500">
+                    <Lock className="h-3 w-3 text-slate-400" />
+                    Director's Approval
+                  </label>
+                  <div className="mt-1 flex h-11 items-center rounded-xl border border-slate-200 bg-gray-50 px-3 text-xs font-medium italic text-slate-500">
+                    Authorized approvers will add their signatures respectively
+                  </div>
                 </div>
               </div>
-              {employeesError && <p className="mt-2 text-xs font-semibold text-red-600">{employeesError}</p>}
 
               {/* Budget Head — 3-field display */}
               <div className="mt-3">
@@ -1897,7 +2235,7 @@ const BudgetHeadPickerModal = ({
 
         {/* Step 2 — full data-grid table */}
         {step === 2 && selectedBudget && (
-          <div className="space-y-3 py-2">
+          <div className="min-w-0 space-y-3 py-2">
             <div className="flex items-center gap-3">
               <button
                 type="button"
@@ -1922,7 +2260,7 @@ const BudgetHeadPickerModal = ({
             ) : lineItems.length === 0 ? (
               <div className="text-xs text-gray-400 text-center py-10">No line items found for this budget</div>
             ) : (
-              <div className="overflow-auto rounded-lg border border-gray-200 max-h-[420px]">
+              <div className="w-full min-w-0 overflow-auto rounded-lg border border-gray-200 max-h-[420px]">
                 <table className="w-full text-xs border-collapse">
                   <thead>
                     <tr className="bg-gray-100 sticky top-0 z-10">
@@ -2065,6 +2403,19 @@ const IndentPreviewModal = ({
    onAttachApproval?: (indentRef: Pick<Indent, 'id' | 'prNo'>) => void;
  }) => {
    const alreadySigned = Boolean(indent?.indentedByDetails?.signature) || Boolean(approval);
+   const [printing, setPrinting] = useState(false);
+
+   const printIndent = async () => {
+     if (!indent) return;
+     setPrinting(true);
+     try {
+       await printInventoryIndentPdf(indent, approval);
+     } catch (error) {
+       toast.error(error instanceof Error ? error.message : 'Failed to generate indent PDF');
+     } finally {
+       setPrinting(false);
+     }
+   };
 
    return (
      <Dialog
@@ -2074,12 +2425,27 @@ const IndentPreviewModal = ({
        }}
      >
        <DialogContent className="max-h-[92vh] max-w-[min(96vw,1280px)] overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">
-         <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left">
-           <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white">
-             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><Eye className="h-5 w-5" /></span>
-             Indent Preview
-           </DialogTitle>
-           <p className="mt-1 pl-[52px] text-sm text-white/70">Review the complete purchase requisition and approval details.</p>
+         <DialogHeader className="bg-[#0D3A35] px-6 py-5 pr-14 text-left">
+           <div className="flex items-center justify-between gap-4">
+             <div>
+               <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white">
+                 <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><Eye className="h-5 w-5" /></span>
+                 Indent Preview
+               </DialogTitle>
+               <p className="mt-1 pl-[52px] text-sm text-white/70">Review the complete purchase requisition and approval details.</p>
+             </div>
+             {indent ? (
+               <Button
+                 type="button"
+                 onClick={() => void printIndent()}
+                 disabled={printing}
+                 className="h-10 shrink-0 rounded-xl bg-white px-5 font-bold text-[#0D3A35] hover:bg-emerald-50"
+               >
+                 {printing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
+                 Print Indent
+               </Button>
+             ) : null}
+           </div>
          </DialogHeader>
          {indent && (
            <div className="max-h-[calc(92vh-154px)] overflow-auto px-5 py-5 sm:px-6">
