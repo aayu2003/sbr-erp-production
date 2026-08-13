@@ -1,0 +1,120 @@
+PO WORKFLOW — API REFERENCE
+============================
+Backend router: sbr-erp-backend/backend-production/app/routers/admin_purchase_flow.py
+Prefix: /purchase_flow
+
+
+1. PO CREATION
+--------------
+POST /purchase_flow/save_purchase_order
+Called from: MakePurchaseOrderPopup.tsx (handleConfirm -> savePurchaseOrderToApi)
+
+Request body:
+  comparison_id: str
+  pr_number: str
+  purchase_quote: dict | null          (vendor_id, vendor_name, poNo, amendmentNo, etc.)
+  other_terms_and_condition: dict | null
+  order_number: str | null             (omit to auto-generate; pass to update an existing PO)
+  doc_url: str | null
+  order_type: str = "PO"
+  item_details: [{ name, uom, quantity }] | null
+
+Response:
+  { success, order_number, action: "created" | "updated" }
+
+Notes:
+  - Every save (create or update) resets director_approval to {"status": "pending"}.
+    An edit to an already-approved PO puts it back into the approval queue.
+
+
+2. PO SAVING DRAFT
+-------------------
+No API call. handleSaveDraft() in MakePurchaseOrderPopup.tsx writes straight to
+localStorage (readPoDraftStore / writePoDraftStore). A draft never gets an
+order_number and never touches the backend — it only becomes a real PO once
+"Create PO" calls save_purchase_order above.
+
+Stored locally: { indentId, vendorId, savedAt, page, p1, p2, p3, p4,
+                   additionalAnnexures, authorizedSealAttachedAt }
+
+
+3. PO SENDING FOR APPROVAL
+----------------------------
+a) Fetch the approval queue
+GET /purchase_flow/get_all_purchase_orders
+Called from: FinanceAdminOpsIndent.tsx (refreshPoOrders), POCreation.tsx, PurchaseFlow.tsx
+No parameters.
+Response: { purchase_orders: [ ...full admin_purchase_order items... ] }
+
+b) Approve / Reject
+POST /purchase_flow/approve_purchase_order
+Called from: FinanceAdminOpsIndent.tsx (decidePoApproval)
+
+Request body:
+  order_number: str
+  action: "approved" | "rejected"
+  staff_name: str
+  staff_designation: str = ""
+
+Response:
+  { success, director_approval: { status, staff_name, staff_designation,
+                                   approval_time, approval_date } }
+
+c) Raise a question (Admin Ops Finance -> PO creator)
+POST /purchase_flow/add_po_approval_question
+Called from: FinanceAdminOpsIndent.tsx
+
+Request body:
+  order_number: str
+  question: str
+  asked_by: str
+
+Response:
+  { success, question: { id, question, askedBy, askedAt } }
+
+d) Reply to a question (PO creator -> Admin Ops Finance)
+POST /purchase_flow/reply_po_approval_question
+Called from: POCreation.tsx
+
+Request body:
+  order_number: str
+  question_id: str
+  reply: str
+  replied_by: str
+
+Response:
+  { success: true }
+
+Note: There is no separate "send for approval" API — saving a PO (step 1) already
+sets director_approval to "pending", which is what makes it show up here.
+
+
+4. PO APPROVED -> SENT TO PURCHASE FLOW
+------------------------------------------
+a) Dedupe check (is this PO already forwarded?)
+GET /purchase_flow/get_purchase_flows
+No parameters.
+Response: { purchase_flows: [...] }
+
+b) Look up the PO's required documents before building the flow stage
+POST /purchase_flow/get_purchase_orders
+Request body:
+  pr_number: str
+Response: { purchase_orders: [ matching order ] }   (404 if none found)
+
+c) Forward to Purchase Flow
+POST /purchase_flow/forward_purchase_order
+Called from: FinanceAdminOpsIndent.tsx (forwardApprovedPoToPurchaseFlow, right after
+approve) and PurchaseFlow.tsx's reconciliation effect (auto-retries any approved PO
+missing from the flow list).
+
+Request body:
+  order_number: str
+  pr_number: str
+  comparison_id: str
+  purchase_flow_stage: dict   ({ step_1: { document, status: "empty", doc_link: "" }, ... })
+
+Response:
+  { success: true }
+  400 error if director_approval.status on that order is not "approved"
+      (backend enforces this — forwarding a pending/rejected PO is rejected outright)

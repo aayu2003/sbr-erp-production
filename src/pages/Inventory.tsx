@@ -3456,6 +3456,8 @@ const Inventory = () => {
             itemCode: it.sku,
             uom: it.unit,
             itemName: it.name,
+            category: it.category,
+            specification: it.description,
             stock: it.currentStock,
           }));
           setRequestStockOpen(false);

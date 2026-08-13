@@ -192,7 +192,7 @@ export default function POCreation() {
   }, []);
 
   const approvedRecords = useMemo(
-    () => records.filter((record) => safe(record.nfaStatus).toLowerCase() === 'approved'),
+    () => records.filter((record) => safe(record.nfaStatus).toLowerCase() === 'approved' && safe(record.indent_type).toUpperCase() !== 'SPR'),
     [records],
   );
 
@@ -286,7 +286,7 @@ export default function POCreation() {
             <ShoppingCart className="h-7 w-7" />
           </span>
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Purchase &amp; Procurement</p>
+            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Procurement · Purchase Order</p>
             <h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">PO Creation</h1>
             <p className="mt-1 text-sm text-slate-500">Create purchase orders from NFA-approved vendor comparative statements.</p>
           </div>
@@ -453,6 +453,7 @@ export default function POCreation() {
           const vendorName = source?.vendors?.find((vendor) => safe(vendor.id) === approvedVendorId)?.name || approvedVendorId;
           const savedApprovalRecord = saveCreatedPoForApproval({
             poNumber: poNo,
+            orderType: 'PR',
             prNumber: indentId,
             comparisonId: safe(source?.comparisonId),
             vendorId: approvedVendorId,

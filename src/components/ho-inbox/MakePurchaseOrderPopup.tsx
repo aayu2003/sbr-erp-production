@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { ChevronLeft, ChevronRight, Download, FileText, Printer, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, FileText, Plus, Printer, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
@@ -714,6 +714,20 @@ type Page4State = {
   rightColumn?: string;
 };
 
+// Structured "Add Annexure" builder (tables + labeled inputs). UI-only for now —
+// not yet wired into the save payload, draft store, or print/PDF output.
+type AnnexureTableBlock = { id: string; kind: 'table'; heading: string; columns: string[]; rows: string[][] };
+type AnnexureInputBlock = { id: string; kind: 'input'; heading: string; value: string };
+type AnnexureBlock = AnnexureTableBlock | AnnexureInputBlock;
+type StructuredAnnexure = { id: string; title: string; blocks: AnnexureBlock[] };
+
+const newStructuredAnnexureId = () => `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+// Toggles visibility of the legacy rich-text annexure editor, superseded by the
+// structured "Add Annexure" builder. Its state/handlers stay intact either way.
+const SHOW_LEGACY_ANNEXURE_EDITOR: boolean = false;
+const SHOW_PRE_ANNEXURE_PAGE: boolean = false;
+
 const PO_DRAFT_STORAGE_KEY = 'farmconnect.poDraft.v1';
 
 type PoDraft = {
@@ -723,6 +737,7 @@ type PoDraft = {
   page: number;
   p1: Page1State;
   p2: Page2State;
+  preAnnexurePage?: Page3State;
   p3: Page3State;
   additionalAnnexures?: Page3State[];
   p4?: Page4State;
@@ -772,6 +787,12 @@ const defaultPage3 = (): Page3State => ({
   marginPreset: 'normal',
 });
 
+const defaultPreAnnexurePage = (): Page3State => ({
+  annexureTitle: 'ADDITIONAL CLAUSES & SCHEDULES',
+  contentHtml: '<p><br></p>',
+  marginPreset: 'normal',
+});
+
 const defaultPage4 = (): Page4State => ({
   annexureTitle: 'GENERAL TERMS AND CONDITIONS — ANNEXURE - 2',
   termsText: DEFAULT_ANNEXURE2_TERMS,
@@ -792,6 +813,81 @@ const withAnnexureNumber = (value: unknown, fallback: string, annexureNumber: nu
     : `${title} — ANNEXURE - ${annexureNumber}`;
 };
 
+// Flattens structured annexures for /purchase_flow/save_purchase_order's
+// annexure_details: array index = annexure number; within each annexure,
+// input and table blocks each get their own sequential counter in the order
+// they appear (input_1, input_2, table_1, input_3, ...). Table rows carry a
+// 1-indexed "s.no" plus one key per column, keyed by the column's own
+// heading text (de-duplicated if two columns share a heading).
+const buildAnnexureDetailsPayload = (annexures: StructuredAnnexure[]): Record<string, unknown>[] =>
+  annexures.map((annexure) => {
+    const entry: Record<string, unknown> = {};
+    let inputCount = 0;
+    let tableCount = 0;
+    annexure.blocks.forEach((block) => {
+      if (block.kind === 'input') {
+        inputCount += 1;
+        entry[`input_${inputCount}`] = { heading: block.heading, data: block.value };
+        return;
+      }
+      tableCount += 1;
+      const seenHeadings = new Map<string, number>();
+      const columnKeys = block.columns.map((column) => {
+        const base = column || 'Column';
+        const occurrence = (seenHeadings.get(base) || 0) + 1;
+        seenHeadings.set(base, occurrence);
+        return occurrence > 1 ? `${base} (${occurrence})` : base;
+      });
+      entry[`table_${tableCount}`] = block.rows.map((row, rowIndex) => {
+        const rowEntry: Record<string, unknown> = { 's.no': rowIndex + 1 };
+        columnKeys.forEach((columnKey, colIndex) => {
+          rowEntry[columnKey] = row[colIndex] ?? '';
+        });
+        return rowEntry;
+      });
+    });
+    return entry;
+  });
+
+// Inverse of buildAnnexureDetailsPayload — reconstructs structured annexures
+// (item/price tables, labeled inputs) from a saved order's annexure_details so
+// review/reopen shows the same tables that were saved. The per-block position
+// within an annexure isn't preserved by the save format (input/table blocks
+// each keep their own counter), so blocks are re-assembled in input/table
+// pairs ordered by their numeric suffix — a reasonable best-effort ordering.
+const parseAnnexureDetailsPayload = (raw: unknown): StructuredAnnexure[] => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entryRaw, annexureIndex): StructuredAnnexure => {
+      const entry = entryRaw && typeof entryRaw === 'object' && !Array.isArray(entryRaw) ? (entryRaw as Record<string, unknown>) : {};
+      const blockKeys = Object.keys(entry)
+        .map((key) => {
+          const match = key.match(/^(input|table)_(\d+)$/);
+          return match ? { key, kind: match[1] as 'input' | 'table', order: Number(match[2]) } : null;
+        })
+        .filter((v): v is { key: string; kind: 'input' | 'table'; order: number } => Boolean(v))
+        .sort((a, b) => a.order - b.order || (a.kind === b.kind ? 0 : a.kind === 'table' ? -1 : 1));
+
+      const blocks: AnnexureBlock[] = blockKeys.map(({ key, kind }) => {
+        if (kind === 'input') {
+          const value = entry[key];
+          const heading = value && typeof value === 'object' ? safe((value as any).heading) : '';
+          const data = value && typeof value === 'object' ? safe((value as any).data) : safe(value);
+          return { id: newStructuredAnnexureId(), kind: 'input', heading, value: data };
+        }
+        const rows = Array.isArray(entry[key]) ? (entry[key] as Record<string, unknown>[]) : [];
+        const columns = rows.length ? Object.keys(rows[0]).filter((col) => col !== 's.no') : ['Column 1'];
+        const tableRows = rows.length
+          ? rows.map((row) => columns.map((col) => safe(row[col])))
+          : [['']];
+        return { id: newStructuredAnnexureId(), kind: 'table', heading: '', columns: columns.length ? columns : ['Column 1'], rows: tableRows };
+      });
+
+      return { id: newStructuredAnnexureId(), title: `Annexure ${annexureIndex + 1}`, blocks };
+    })
+    .filter((annexure) => annexure.blocks.length > 0);
+};
+
 const ANNEXURE_RICH_TEXT_CSS = `
   .annexure-rich-editor h1, .annexure-rich-content h1 { margin: 0 0 12px; font-size: 24px; line-height: 1.2; font-weight: 800; }
   .annexure-rich-editor h2, .annexure-rich-content h2 { margin: 0 0 10px; font-size: 19px; line-height: 1.25; font-weight: 750; }
@@ -809,6 +905,9 @@ const ANNEXURE_RICH_TEXT_CSS = `
   .annexure-rich-content .annexure-table-resizer { overflow: visible; padding: 0; }
   .annexure-rich-editor .annexure-selected-cell { outline: 3px solid #0D3A35; outline-offset: -3px; background: #e7f3ef !important; }
   .annexure-rich-content { overflow-wrap: anywhere; }
+  .po-clause-box { margin: 10px 0; overflow: hidden; border: 1px solid #94a3b8; border-radius: 6px; break-inside: avoid; }
+  .po-clause-title { border-bottom: 1px solid #94a3b8; background: #edf4f2; padding: 7px 10px; color: #0D3A35; font-weight: 800; }
+  .po-clause-content { min-height: 42px; padding: 9px 10px; background: #fff; }
   .po-report-sheet .annexure-rich-content,
   .po-report-sheet .annexure-rich-content * { font-family: inherit !important; }
   .po-draft-font-11 .annexure-rich-content,
@@ -838,10 +937,21 @@ export function MakePurchaseOrderPopup({
   const [page, setPage] = useState(1);
   const [p1, setP1] = useState<Page1State>(() => defaultPage1());
   const [p2, setP2] = useState<Page2State>(() => defaultPage2());
+  const [preAnnexurePage, setPreAnnexurePage] = useState<Page3State>(() => defaultPreAnnexurePage());
   const [p3, setP3] = useState<Page3State>(() => defaultPage3());
   const [additionalAnnexures, setAdditionalAnnexures] = useState<Page3State[]>([]);
   const [selectedAnnexureIndex, setSelectedAnnexureIndex] = useState(0);
+  const [structuredAnnexures, setStructuredAnnexures] = useState<StructuredAnnexure[]>([]);
+  const [selectedStructuredAnnexureIndex, setSelectedStructuredAnnexureIndex] = useState(0);
   const [p4, setP4] = useState<Page4State>(() => defaultPage4());
+  const preAnnexureEditorRef = useRef<HTMLDivElement>(null);
+  const [preClauseTitle, setPreClauseTitle] = useState('');
+  const [preTableRows, setPreTableRows] = useState(3);
+  const [preTableColumns, setPreTableColumns] = useState(3);
+  const [preFontName, setPreFontName] = useState('Arial');
+  const [preFontSize, setPreFontSize] = useState('12');
+  const [preTextColor, setPreTextColor] = useState('#0f172a');
+  const [preHighlightColor, setPreHighlightColor] = useState('#fff59d');
   const annexureEditorRef = useRef<HTMLDivElement>(null);
   const [annexureFieldLabel, setAnnexureFieldLabel] = useState('');
   const [annexureTableRows, setAnnexureTableRows] = useState(3);
@@ -866,13 +976,15 @@ export function MakePurchaseOrderPopup({
   );
   const customAnnexures = useMemo(() => [p3, ...additionalAnnexures], [p3, additionalAnnexures]);
   const printableCustomAnnexures = useMemo(
-    () => customAnnexures.filter(
-      (annexure): annexure is Page3State => Boolean(annexure) && annexureWordCount(annexure?.contentHtml) > 0
-    ),
+    () => SHOW_LEGACY_ANNEXURE_EDITOR
+      ? customAnnexures.filter(
+          (annexure): annexure is Page3State => Boolean(annexure) && annexureWordCount(annexure?.contentHtml) > 0
+        )
+      : [],
     [customAnnexures]
   );
   const activeCustomAnnexure = customAnnexures[selectedAnnexureIndex] || p3;
-  const legalAnnexureNumber = printableCustomAnnexures.length + 1;
+  const legalAnnexureNumber = printableCustomAnnexures.length + structuredAnnexures.length + 1;
 
   useEffect(() => {
     setP2((current) => {
@@ -953,6 +1065,129 @@ export function MakePurchaseOrderPopup({
   const setP4Field = <K extends keyof Page4State>(k: K, v: Page4State[K]) => {
     setP4((p) => ({ ...p, [k]: v }));
   };
+
+  // Structured "Add Annexure" builder — see StructuredAnnexure/AnnexureBlock types above.
+  const addStructuredAnnexure = () => {
+    setStructuredAnnexures((current) => [
+      ...current,
+      { id: newStructuredAnnexureId(), title: `Annexure ${current.length + 1}`, blocks: [] },
+    ]);
+    setSelectedStructuredAnnexureIndex(structuredAnnexures.length);
+  };
+
+  const removeStructuredAnnexure = (index: number) => {
+    setStructuredAnnexures((current) => current.filter((_, i) => i !== index));
+    setSelectedStructuredAnnexureIndex((current) => Math.max(0, index <= current ? current - 1 : current));
+  };
+
+  const updateStructuredAnnexureTitle = (index: number, title: string) =>
+    setStructuredAnnexures((current) => current.map((a, i) => (i === index ? { ...a, title } : a)));
+
+  const updateAnnexureBlocks = (annexureIndex: number, updater: (blocks: AnnexureBlock[]) => AnnexureBlock[]) =>
+    setStructuredAnnexures((current) => current.map((a, i) => (i === annexureIndex ? { ...a, blocks: updater(a.blocks) } : a)));
+
+  const addTableBlock = (annexureIndex: number) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => [
+      ...blocks,
+      { id: newStructuredAnnexureId(), kind: 'table', heading: '', columns: ['Column 1'], rows: [['']] },
+    ]);
+
+  const addInputBlock = (annexureIndex: number) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => [
+      ...blocks,
+      { id: newStructuredAnnexureId(), kind: 'input', heading: '', value: '' },
+    ]);
+
+  const removeAnnexureBlock = (annexureIndex: number, blockId: string) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => blocks.filter((b) => b.id !== blockId));
+
+  const updateAnnexureBlockHeading = (annexureIndex: number, blockId: string, heading: string) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => blocks.map((b) => (b.id === blockId ? { ...b, heading } : b)));
+
+  const updateAnnexureInputValue = (annexureIndex: number, blockId: string, value: string) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => blocks.map((b) => (b.id === blockId && b.kind === 'input' ? { ...b, value } : b)));
+
+  const addAnnexureTableColumn = (annexureIndex: number, blockId: string) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => blocks.map((b) => (b.id === blockId && b.kind === 'table'
+      ? { ...b, columns: [...b.columns, `Column ${b.columns.length + 1}`], rows: b.rows.map((row) => [...row, '']) }
+      : b)));
+
+  const removeAnnexureTableColumn = (annexureIndex: number, blockId: string, colIndex: number) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => blocks.map((b) => (b.id === blockId && b.kind === 'table'
+      ? { ...b, columns: b.columns.filter((_, i) => i !== colIndex), rows: b.rows.map((row) => row.filter((_, i) => i !== colIndex)) }
+      : b)));
+
+  const updateAnnexureTableColumnHeading = (annexureIndex: number, blockId: string, colIndex: number, heading: string) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => blocks.map((b) => (b.id === blockId && b.kind === 'table'
+      ? { ...b, columns: b.columns.map((c, i) => (i === colIndex ? heading : c)) }
+      : b)));
+
+  const addAnnexureTableRow = (annexureIndex: number, blockId: string) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => blocks.map((b) => (b.id === blockId && b.kind === 'table'
+      ? { ...b, rows: [...b.rows, b.columns.map(() => '')] }
+      : b)));
+
+  const removeAnnexureTableRow = (annexureIndex: number, blockId: string, rowIndex: number) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => blocks.map((b) => (b.id === blockId && b.kind === 'table'
+      ? { ...b, rows: b.rows.filter((_, i) => i !== rowIndex) }
+      : b)));
+
+  const updateAnnexureTableCell = (annexureIndex: number, blockId: string, rowIndex: number, colIndex: number, value: string) =>
+    updateAnnexureBlocks(annexureIndex, (blocks) => blocks.map((b) => (b.id === blockId && b.kind === 'table'
+      ? { ...b, rows: b.rows.map((row, ri) => (ri === rowIndex ? row.map((cell, ci) => (ci === colIndex ? value : cell)) : row)) }
+      : b)));
+
+  useEffect(() => {
+    const editor = preAnnexureEditorRef.current;
+    if (!editor || document.activeElement === editor) return;
+    const nextHtml = sanitizeAnnexureHtml(preAnnexurePage.contentHtml || '<p><br></p>');
+    if (editor.innerHTML !== nextHtml) editor.innerHTML = nextHtml;
+  }, [preAnnexurePage.contentHtml, workflowStep]);
+
+  const syncPreAnnexureEditor = () => {
+    const editor = preAnnexureEditorRef.current;
+    if (!editor) return;
+    setPreAnnexurePage((current) => ({ ...current, contentHtml: sanitizeAnnexureHtml(editor.innerHTML) }));
+  };
+
+  const runPreAnnexureCommand = (command: string, value?: string) => {
+    const editor = preAnnexureEditorRef.current;
+    if (!editor) return;
+    editor.focus();
+    document.execCommand(command, false, value);
+    syncPreAnnexureEditor();
+  };
+
+  const appendPreAnnexureHtml = (html: string) => {
+    const editor = preAnnexureEditorRef.current;
+    if (!editor) return;
+    editor.focus();
+    const cleanHtml = sanitizeAnnexureHtml(html);
+    const insertedAtCursor = document.execCommand('insertHTML', false, cleanHtml);
+    if (!insertedAtCursor) editor.insertAdjacentHTML('beforeend', cleanHtml);
+    syncPreAnnexureEditor();
+  };
+
+  const addPreClauseBox = () => {
+    const label = safe(preClauseTitle) || 'Clause Title';
+    const escapedLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    appendPreAnnexureHtml(`<div class="po-clause-box"><div class="po-clause-title">${escapedLabel}</div><div class="po-clause-content">Enter clause details here.</div></div><p><br></p>`);
+    setPreClauseTitle('');
+  };
+
+  const addPreTable = () => {
+    const rows = Math.min(20, Math.max(1, Number(preTableRows) || 1));
+    const columns = Math.min(10, Math.max(1, Number(preTableColumns) || 1));
+    const head = `<tr>${Array.from({ length: columns }, (_, index) => `<th>Column ${index + 1}</th>`).join('')}</tr>`;
+    const body = Array.from({ length: Math.max(0, rows - 1) }, () => `<tr>${Array.from({ length: columns }, () => '<td>Enter details</td>').join('')}</tr>`).join('');
+    appendPreAnnexureHtml(`<div class="annexure-table-resizer" style="width:100%;"><table class="annexure-document-table"><thead>${head}</thead><tbody>${body}</tbody></table></div><p><br></p>`);
+  };
+
+  const preAnnexurePagePadding = preAnnexurePage.marginPreset === 'narrow'
+    ? '38px 42px'
+    : preAnnexurePage.marginPreset === 'wide'
+      ? '96px 106px'
+      : '72px 76px';
 
   const ensureAnnexureTableResizer = (table: HTMLTableElement) => {
     const existingWrapper = table.parentElement?.classList.contains('annexure-table-resizer')
@@ -1042,7 +1277,7 @@ export function MakePurchaseOrderPopup({
     const editor = annexureEditorRef.current;
     const sourceRange = savedAnnexureRangeRef.current;
     if (!editor || !sourceRange || sourceRange.collapsed || !editor.contains(sourceRange.commonAncestorContainer)) {
-      showTemporaryError('Select text in Annexure 1 before applying colour');
+      showTemporaryError('Select text in the document before applying colour');
       return;
     }
 
@@ -1076,7 +1311,7 @@ export function MakePurchaseOrderPopup({
     });
 
     if (!styledSpans.length) {
-      showTemporaryError('Select text in Annexure 1 before applying colour');
+      showTemporaryError('Select text in the document before applying colour');
       return;
     }
 
@@ -1374,7 +1609,10 @@ export function MakePurchaseOrderPopup({
           const customStoredAnnexures = storedAnnexures.filter((value) => safe(value?.contentHtml));
           const customAnnexure = customStoredAnnexures[0] || (safe(annexure1?.contentHtml) ? annexure1 : annexure2);
           const legalAnnexure = [...storedAnnexures].reverse().find((value) => safe(value?.termsText)) || (safe(annexure1?.contentHtml) ? annexure2 : annexure3);
-          const baseTerms = Object.fromEntries(Object.entries(otc).filter(([key]) => !/^annexure\d+$/i.test(key)));
+          const storedPreAnnexurePage = otc?.custom_po_page && typeof otc.custom_po_page === 'object' && !Array.isArray(otc.custom_po_page)
+            ? otc.custom_po_page as Page3State
+            : defaultPreAnnexurePage();
+          const baseTerms = Object.fromEntries(Object.entries(otc).filter(([key]) => !/^annexure\d+$/i.test(key) && key !== 'custom_po_page'));
 
           const orderNo = safe((draft as any)?.order_number) || safe(pq?.order_number) || safe(pq?.poNo) || safe(pq?.po_no) || safe(poNumber);
 
@@ -1390,6 +1628,7 @@ export function MakePurchaseOrderPopup({
             customFields: Array.isArray((pq as any)?.customFields) ? (pq as any).customFields : [],
           } as Page1State);
           setP2({ ...defaultPage2(), ...(baseTerms as any) } as Page2State);
+          setPreAnnexurePage({ ...defaultPreAnnexurePage(), ...storedPreAnnexurePage });
           setP3({
             ...defaultPage3(),
             ...(safe(customAnnexure?.contentHtml) ? customAnnexure : {}),
@@ -1410,6 +1649,10 @@ export function MakePurchaseOrderPopup({
             termsText: safe(legalAnnexure?.termsText) || safe(annexure2?.termsText) || DEFAULT_ANNEXURE2_TERMS,
           });
           setAuthorizedSealAttachedAt(safe((pq as any)?.authorizedSealAttachedAt) || safe((draft as any)?.authorizedSealAttachedAt));
+          const parsedStructuredAnnexures = parseAnnexureDetailsPayload((draft as any)?.annexure_details);
+          console.log('[PO-DEBUG] annexure_details raw=', JSON.stringify((draft as any)?.annexure_details), 'parsed=', JSON.stringify(parsedStructuredAnnexures));
+          setStructuredAnnexures(parsedStructuredAnnexures);
+          setSelectedStructuredAnnexureIndex(0);
           return;
         }
       } catch (e: any) {
@@ -1426,7 +1669,10 @@ export function MakePurchaseOrderPopup({
         setDraftStatus('idle');
         setAuthorizedSealAttachedAt('');
         setAdditionalAnnexures([]);
+        setPreAnnexurePage(defaultPreAnnexurePage());
         setSelectedAnnexureIndex(0);
+        setStructuredAnnexures([]);
+        setSelectedStructuredAnnexureIndex(0);
         return;
       }
 
@@ -1440,6 +1686,7 @@ export function MakePurchaseOrderPopup({
         customFields: Array.isArray(d.p1?.customFields) ? d.p1.customFields : [],
       });
       setP2({ ...defaultPage2(), ...(d.p2 || {}) });
+      setPreAnnexurePage({ ...defaultPreAnnexurePage(), ...(d.preAnnexurePage || {}) });
       const legacyPage3 = d.p3 as any;
       setP3({
         ...defaultPage3(),
@@ -1456,6 +1703,8 @@ export function MakePurchaseOrderPopup({
         termsText: safe(d.p4?.termsText) || safe(legacyPage3?.termsText) || DEFAULT_ANNEXURE2_TERMS,
       });
       setAuthorizedSealAttachedAt(safe(d.authorizedSealAttachedAt));
+      setStructuredAnnexures([]);
+      setSelectedStructuredAnnexureIndex(0);
     })();
 
     return () => ac.abort();
@@ -1864,6 +2113,13 @@ export function MakePurchaseOrderPopup({
     rows.filter((row) => row.no !== correspondenceSpaceMarker.no)
   );
   const commercialTermPageCount = commercialTermPages.length;
+  const preAnnexureReportPages = annexureWordCount(preAnnexurePage.contentHtml) > 0
+    ? paginateAnnexureHtml(preAnnexurePage.contentHtml).map((contentHtml, pageIndex, pages) => ({
+        contentHtml,
+        pageIndex,
+        pageCount: pages.length,
+      }))
+    : [];
   const annexureReportPages = printableCustomAnnexures.flatMap((annexure, annexureIndex) =>
     paginateAnnexureHtml(annexure.contentHtml || defaultPage3().contentHtml).map((contentHtml, pageIndex, pages) => ({
       annexure,
@@ -1874,8 +2130,15 @@ export function MakePurchaseOrderPopup({
       pageCount: pages.length,
     }))
   );
-  const customAnnexureStartPage = 2 + commercialTermPageCount;
-  const totalReportPages = commercialTermPageCount + annexureReportPages.length + 2;
+  // One A4 page per structured annexure — see AnnexureBlock/StructuredAnnexure types.
+  const structuredAnnexureReportPages = structuredAnnexures.map((annexure, index) => ({
+    annexure,
+    annexureNumber: printableCustomAnnexures.length + index + 1,
+  }));
+  const preAnnexureStartPage = 2 + commercialTermPageCount;
+  const customAnnexureStartPage = preAnnexureStartPage + preAnnexureReportPages.length;
+  const structuredAnnexureStartPage = customAnnexureStartPage + annexureReportPages.length;
+  const totalReportPages = commercialTermPageCount + preAnnexureReportPages.length + annexureReportPages.length + structuredAnnexureReportPages.length + 2;
   const legalReportPage = totalReportPages;
 
   // Review, print and download must share one physical A4 layout. Fit any page
@@ -1902,7 +2165,7 @@ export function MakePurchaseOrderPopup({
       });
     });
     return () => globalThis.cancelAnimationFrame(frameId);
-  }, [workflowStep, totalReportPages, p1, p2, p3, p4, customAnnexures]);
+  }, [workflowStep, totalReportPages, p1, p2, preAnnexurePage, p3, p4, customAnnexures, structuredAnnexures]);
 
   const effectivePoNo = safe(p1.poNo) || safe(poNumber);
   const effectiveAmendmentNo = Math.max(0, numOr0(p1.amendmentNo), numOr0(amendmentNumber));
@@ -2266,6 +2529,7 @@ export function MakePurchaseOrderPopup({
       page,
       p1,
       p2,
+      preAnnexurePage,
       p3,
       additionalAnnexures,
       p4: { ...p4, termsText: effectiveAnnexureTerms },
@@ -2302,6 +2566,39 @@ export function MakePurchaseOrderPopup({
     setWorkflowStep('draft');
   };
 
+  // Quoting happens before a vendor is formally onboarded — QuotationComparative
+  // tags an un-onboarded quote with a `MANUAL:VendorName` pseudo-ID rather than a
+  // real directory vendor_id. Only once that vendor's quote actually wins (i.e. a
+  // PO is being created for them) do we call add_new_vendor to mint a real
+  // SBR/VEN/xxxx record — vendors that never win a PO never touch the directory.
+  const onboardManualVendorIfNeeded = async (vendorId: string): Promise<string> => {
+    if (!vendorId.startsWith('MANUAL:')) return vendorId;
+
+    const manualName = vendorId.slice('MANUAL:'.length).trim();
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) throw new Error('Missing API base URL');
+
+    const res = await fetch(`${baseUrl}/purchase_flow/add_new_vendor`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        vendor_details: {
+          vendor_name: safe(selectedVendorFromComparative?.name) || manualName || vendorNameFromComparative,
+          vendor_contact: safe(selectedVendorFromComparative?.phone),
+          vendor_address: safe(selectedVendorFromComparative?.address) || safe(selectedVendorFromComparative?.location),
+        },
+      }),
+    });
+    const data: any = await res.json().catch(() => null);
+    if (!res.ok || data?.success !== true || !safe(data?.vendor_id)) {
+      throw new Error(data?.message || data?.detail || 'Failed to onboard vendor');
+    }
+
+    const newVendorId = String(data.vendor_id);
+    toast.success(`Vendor onboarded as ${newVendorId}`);
+    return newVendorId;
+  };
+
   const handleConfirm = async () => {
     if (!comparative) return;
     if (!resolvedVendorId) return;
@@ -2316,6 +2613,7 @@ export function MakePurchaseOrderPopup({
 
     setSavingPo(true);
     try {
+      const finalVendorId = await onboardManualVendorIfNeeded(safe(resolvedVendorId));
       const annexurePayload = customAnnexures.reduce<Record<string, Page3State>>((result, annexure, index) => {
         const annexureNumber = index + 1;
         result[`annexure${annexureNumber}`] = {
@@ -2336,14 +2634,16 @@ export function MakePurchaseOrderPopup({
           ...(p1 as any),
           amendmentNo: effectiveAmendmentNo,
           required_purchase_documents: normalizePurchaseFlowDocuments(p1.requiredPurchaseDocuments),
-          vendor_id: safe(resolvedVendorId),
+          vendor_id: finalVendorId,
           vendor_name: vendorNameFromComparative,
           authorizedSealAttachedAt: authorizedSealAttachedAt || '',
         },
         other_terms_and_condition: {
           ...(p2 as any),
+          custom_po_page: preAnnexurePage,
           ...annexurePayload,
         },
+        annexure_details: buildAnnexureDetailsPayload(structuredAnnexures),
       };
 
       const existingOrderNo = effectivePoNo;
@@ -2356,15 +2656,16 @@ export function MakePurchaseOrderPopup({
       // Keep the exact created/approved content locally as a resilient
       // amendment snapshot. Revision mode can restore every editable field
       // even when an older server response omits part of the purchase quote.
-      const snapshotKey = poDraftKey(prNo, resolvedVendorId);
+      const snapshotKey = poDraftKey(prNo, finalVendorId);
       const snapshotStore = readPoDraftStore();
       const snapshot: PoDraft = {
         indentId: prNo,
-        vendorId: resolvedVendorId,
+        vendorId: finalVendorId,
         savedAt: new Date().toISOString(),
         page: 1,
         p1: { ...p1, poNo: orderNo || effectivePoNo, amendmentNo: effectiveAmendmentNo },
         p2,
+        preAnnexurePage,
         p3,
         additionalAnnexures,
         p4: { ...p4, termsText: effectiveAnnexureTerms },
@@ -2373,7 +2674,7 @@ export function MakePurchaseOrderPopup({
       writePoDraftStore({ drafts: { ...(snapshotStore.drafts || {}), [snapshotKey]: snapshot } });
 
       const createdAt = safe(apiRes?.created_at) || safe(apiRes?.updated_at) || new Date().toISOString();
-      onConfirm?.({ indentId: safe(comparative.indentId), vendorId: resolvedVendorId, createdAt, poNo: orderNo });
+      onConfirm?.({ indentId: safe(comparative.indentId), vendorId: finalVendorId, createdAt, poNo: orderNo });
       onClose();
     } catch (e: any) {
       const msg = String(e?.message ?? e ?? '').trim();
@@ -2938,9 +3239,56 @@ export function MakePurchaseOrderPopup({
         </div>
       </section>
 
-      <section style={{ order: 7 }} className="overflow-hidden rounded-2xl border border-slate-300 bg-[#252827] shadow-xl">
+      {/* Pre-annexure "Additional Clauses & Tables" page — logic kept intact, hidden from view. */}
+      {SHOW_PRE_ANNEXURE_PAGE && (
+      <section style={{ order: 7 }} className="overflow-hidden rounded-2xl border border-slate-300 bg-white shadow-sm">
+        <style>{ANNEXURE_RICH_TEXT_CSS}</style>
+        <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
+          <h3 className="font-bold text-slate-900">Additional Clauses &amp; Tables</h3>
+          <p className="mt-0.5 text-xs text-slate-500">Independent PO content printed on dedicated pages immediately before Annexure-I.</p>
+        </div>
+
+        <div className="grid gap-4 border-b border-slate-200 bg-white p-5 md:grid-cols-[minmax(0,1fr)_220px]">
+          <div><label className={formLabelClass}>Page Title</label><Input value={preAnnexurePage.annexureTitle} onChange={(event) => setPreAnnexurePage((current) => ({ ...current, annexureTitle: event.target.value }))} className={formInputClass} /></div>
+          <div><label className={formLabelClass}>Page Margins</label><Select value={preAnnexurePage.marginPreset} onValueChange={(value: Page3State['marginPreset']) => setPreAnnexurePage((current) => ({ ...current, marginPreset: value }))}><SelectTrigger className={formInputClass}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="narrow">Narrow</SelectItem><SelectItem value="wide">Wide</SelectItem></SelectContent></Select></div>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-2 border-b border-slate-300 bg-[#edf4f2] px-4 py-3">
+          <div><label className="block text-[9px] font-bold uppercase text-[#0D3A35]">Clause Box</label><Input value={preClauseTitle} onChange={(event) => setPreClauseTitle(event.target.value)} placeholder="Clause title" className="mt-1 h-8 w-40 bg-white text-xs" /></div>
+          <Button type="button" onClick={addPreClauseBox} className="h-8 bg-[#0D3A35] px-3 text-xs text-white">Add Clause Box</Button>
+          <span className="mx-1 h-8 w-px bg-slate-300" />
+          <div><label className="block text-[9px] font-bold uppercase text-[#0D3A35]">Rows</label><Input type="number" min={1} max={20} value={preTableRows} onChange={(event) => setPreTableRows(Number(event.target.value))} className="mt-1 h-8 w-16 bg-white text-center text-xs" /></div>
+          <div><label className="block text-[9px] font-bold uppercase text-[#0D3A35]">Columns</label><Input type="number" min={1} max={10} value={preTableColumns} onChange={(event) => setPreTableColumns(Number(event.target.value))} className="mt-1 h-8 w-16 bg-white text-center text-xs" /></div>
+          <Button type="button" onClick={addPreTable} className="h-8 bg-[#0D3A35] px-3 text-xs text-white">Create Table</Button>
+          <Button type="button" variant="outline" onMouseDown={(event) => { event.preventDefault(); appendPreAnnexureHtml('<hr><p><br></p>'); }} className="h-8 bg-white px-3 text-xs">Divider</Button>
+          <Button type="button" variant="outline" onMouseDown={(event) => { event.preventDefault(); appendPreAnnexureHtml('<p style="page-break-before:always;"><br></p>'); }} className="h-8 bg-white px-3 text-xs">Page Break</Button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1 border-b border-white/10 bg-[#202322] px-4 py-2 text-white">
+          <select value={preFontName} onChange={(event) => { setPreFontName(event.target.value); runPreAnnexureCommand('fontName', event.target.value); }} className="h-8 rounded border border-white/20 bg-white px-2 text-xs text-slate-800"><option>Arial</option><option>Times New Roman</option><option>Calibri</option><option>Georgia</option><option>Courier New</option></select>
+          <select value={preFontSize} onChange={(event) => { const size = event.target.value; setPreFontSize(size); const map: Record<string, string> = { '8': '1', '10': '2', '12': '3', '14': '4', '18': '5', '24': '6' }; runPreAnnexureCommand('fontSize', map[size] || '3'); }} className="h-8 rounded border border-white/20 bg-white px-2 text-xs text-slate-800">{['8', '10', '12', '14', '18', '24'].map((size) => <option key={size}>{size}</option>)}</select>
+          {[['B', 'bold'], ['I', 'italic'], ['U', 'underline']].map(([label, command]) => <button key={command} type="button" onMouseDown={(event) => { event.preventDefault(); runPreAnnexureCommand(command); }} className="h-8 min-w-8 rounded font-bold hover:bg-white/10">{label}</button>)}
+          <button type="button" onMouseDown={(event) => { event.preventDefault(); runPreAnnexureCommand('insertUnorderedList'); }} className="h-8 rounded px-2 text-xs hover:bg-white/10">• List</button>
+          <button type="button" onMouseDown={(event) => { event.preventDefault(); runPreAnnexureCommand('insertOrderedList'); }} className="h-8 rounded px-2 text-xs hover:bg-white/10">1. List</button>
+          {[['Left', 'justifyLeft'], ['Centre', 'justifyCenter'], ['Right', 'justifyRight'], ['Justify', 'justifyFull']].map(([label, command]) => <button key={command} type="button" onMouseDown={(event) => { event.preventDefault(); runPreAnnexureCommand(command); }} className="h-8 rounded px-2 text-[10px] hover:bg-white/10">{label}</button>)}
+          <span className="mx-1 h-6 w-px bg-white/20" />
+          <label className="flex items-center gap-1 text-[10px]">Text <input type="color" value={preTextColor} onChange={(event) => { setPreTextColor(event.target.value); runPreAnnexureCommand('foreColor', event.target.value); }} className="h-7 w-7 cursor-pointer rounded bg-white p-0.5" /></label>
+          <label className="flex items-center gap-1 text-[10px]">Highlight <input type="color" value={preHighlightColor} onChange={(event) => { setPreHighlightColor(event.target.value); runPreAnnexureCommand('hiliteColor', event.target.value); }} className="h-7 w-7 cursor-pointer rounded bg-white p-0.5" /></label>
+          <button type="button" onMouseDown={(event) => { event.preventDefault(); runPreAnnexureCommand('removeFormat'); }} className="ml-auto h-8 rounded px-2 text-xs hover:bg-white/10">Clear Style</button>
+        </div>
+
+        <div className="overflow-auto bg-[#343837] px-8 py-7">
+          <div ref={preAnnexureEditorRef} contentEditable suppressContentEditableWarning role="textbox" aria-multiline="true" aria-label="Additional clauses and tables editor" onInput={syncPreAnnexureEditor} onBlur={syncPreAnnexureEditor} className="annexure-rich-editor mx-auto min-h-[720px] bg-white text-[12pt] leading-[1.5] text-slate-950 shadow-2xl outline-none" style={{ width: '794px', padding: preAnnexurePagePadding, fontFamily: preFontName }} />
+        </div>
+      </section>
+      )}
+
+      {/* Legacy rich-text annexure editor — logic kept intact, hidden from view in favor of the structured "Add Annexure" builder below. */}
+      {SHOW_LEGACY_ANNEXURE_EDITOR && (
+      <section style={{ order: 8 }} className="overflow-hidden rounded-2xl border border-slate-300 bg-[#252827] shadow-xl">
         <style>{ANNEXURE_RICH_TEXT_CSS}</style>
 
+        <div className="border-b border-slate-200 bg-white px-5 py-4"><h3 className="font-bold text-slate-900">Annexures</h3><p className="mt-0.5 text-xs text-slate-500">Create and manage Annexure-I and any additional annexures.</p></div>
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-2.5">
           <div className="flex flex-wrap items-center gap-1.5">
             {customAnnexures.map((_, index) => (
@@ -3022,7 +3370,7 @@ export function MakePurchaseOrderPopup({
               <div className="text-center text-[9px] font-bold uppercase tracking-wider text-[#0D3A35]">Insert</div>
               <div className="flex flex-wrap items-center justify-center gap-1">
                 <Input value={annexureFieldLabel} onChange={(event) => setAnnexureFieldLabel(event.target.value)} placeholder="Field label" aria-label="Annexure field label" className="h-8 w-24 rounded-md bg-white text-[10px]" />
-                <Button type="button" onClick={addAnnexureField} className="h-8 bg-[#0D3A35] px-2 text-[10px]">Add</Button>
+                <Button type="button" onClick={addAnnexureField} className="h-8 bg-[#0D3A35] px-2 text-[10px]">Add Field</Button>
                 <Input aria-label="Table rows" title="Table rows" type="number" min={1} max={20} value={annexureTableRows} onChange={(event) => setAnnexureTableRows(Number(event.target.value))} className="h-8 w-10 rounded-md bg-white px-1 text-center text-[10px]" /><span className="text-[10px]">×</span><Input aria-label="Table columns" title="Table columns" type="number" min={1} max={10} value={annexureTableColumns} onChange={(event) => setAnnexureTableColumns(Number(event.target.value))} className="h-8 w-10 rounded-md bg-white px-1 text-center text-[10px]" />
                 <Button type="button" onClick={addAnnexureTable} className="h-8 bg-[#0D3A35] px-2 text-[10px]">Table</Button>
                 <Button type="button" variant="outline" onMouseDown={(event) => { event.preventDefault(); runAnnexureCommand('insertHorizontalRule'); }} className="h-8 px-2 text-[10px]">Divider</Button>
@@ -3057,7 +3405,7 @@ export function MakePurchaseOrderPopup({
             suppressContentEditableWarning
             role="textbox"
             aria-multiline="true"
-            aria-label="Annexure 1 document editor"
+            aria-label={`Annexure ${selectedAnnexureIndex + 1} document editor`}
             onClick={(event) => { selectAnnexureTableCell(event.target); captureAnnexureSelection(); }}
             onMouseUp={() => { captureAnnexureSelection(); syncAnnexureEditor(); }}
             onPointerUp={() => { captureAnnexureSelection(); syncAnnexureEditor(); }}
@@ -3072,8 +3420,171 @@ export function MakePurchaseOrderPopup({
 
         <div className="flex items-center justify-between border-t border-white/10 bg-[#202322] px-4 py-2 text-[11px] text-white/70"><div className="flex gap-5"><span>Page 1</span><span>{activeAnnexureWordCount} words</span><span>English (India)</span><span>Accessibility: Good to go</span></div><div className="flex items-center gap-2"><button type="button" onClick={() => setAnnexureZoom((value) => Math.max(60, value - 10))} className="h-6 w-6 rounded hover:bg-white/10">−</button><input type="range" min={60} max={140} step={10} value={annexureZoom} onChange={(event) => setAnnexureZoom(Number(event.target.value))} className="w-28 accent-emerald-500" /><button type="button" onClick={() => setAnnexureZoom((value) => Math.min(140, value + 10))} className="h-6 w-6 rounded hover:bg-white/10">+</button><span className="w-10 text-right">{annexureZoom}%</span></div></div>
       </section>
+      )}
 
       <section style={{ order: 8 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
+          <h3 className="font-bold text-slate-900">Add Annexure</h3>
+          <p className="mt-0.5 text-xs text-slate-500">Build one or more annexures out of tables and labeled input fields.</p>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50/60 px-4 py-2.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {structuredAnnexures.map((annexure, index) => (
+              <button
+                key={annexure.id}
+                type="button"
+                onClick={() => setSelectedStructuredAnnexureIndex(index)}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-bold ${selectedStructuredAnnexureIndex === index ? 'border-[#0D3A35] bg-[#0D3A35] text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-[#7fa89e]'}`}
+              >
+                {annexure.title || `Annexure ${index + 1}`}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            {structuredAnnexures.length > 0 ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => removeStructuredAnnexure(selectedStructuredAnnexureIndex)}
+                className="h-8 gap-1 border-red-200 text-xs text-red-600 hover:bg-red-50"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Remove Annexure
+              </Button>
+            ) : null}
+            <Button type="button" size="sm" onClick={addStructuredAnnexure} className="h-8 gap-1 bg-[#0D3A35] text-xs text-white hover:bg-[#174f48]">
+              <Plus className="h-3.5 w-3.5" /> Add Annexure
+            </Button>
+          </div>
+        </div>
+
+        {structuredAnnexures.length === 0 ? (
+          <div className="px-5 py-10 text-center text-sm text-slate-400">No annexures added yet. Click "Add Annexure" to create one.</div>
+        ) : (
+          <div className="space-y-5 p-5">
+            {(() => {
+              const annexureIndex = selectedStructuredAnnexureIndex;
+              const annexure = structuredAnnexures[annexureIndex];
+              if (!annexure) return null;
+              return (
+                <>
+                  <div>
+                    <label className={formLabelClass}>Annexure Title</label>
+                    <Input
+                      value={annexure.title}
+                      onChange={(event) => updateStructuredAnnexureTitle(annexureIndex, event.target.value)}
+                      className={formInputClass}
+                    />
+                  </div>
+
+                  {annexure.blocks.length === 0 ? (
+                    <p className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-6 text-center text-sm text-slate-400">
+                      This annexure is empty — add a table or input field below.
+                    </p>
+                  ) : (
+                    <div className="space-y-4">
+                      {annexure.blocks.map((block) => (
+                        <div key={block.id} className="rounded-xl border border-slate-200 p-4">
+                          <div className="mb-3 flex items-center justify-between gap-3">
+                            <input
+                              value={block.heading}
+                              onChange={(event) => updateAnnexureBlockHeading(annexureIndex, block.id, event.target.value)}
+                              placeholder={block.kind === 'table' ? 'Table heading' : 'Field heading'}
+                              className="w-full max-w-sm rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-bold text-slate-800 outline-none focus:border-[#0D3A35]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => removeAnnexureBlock(annexureIndex, block.id)}
+                              className="shrink-0 rounded-lg p-1.5 text-red-500 hover:bg-red-50"
+                              aria-label="Remove block"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+
+                          {block.kind === 'input' ? (
+                            <input
+                              value={block.value}
+                              onChange={(event) => updateAnnexureInputValue(annexureIndex, block.id, event.target.value)}
+                              placeholder="Value"
+                              className={formInputClass + ' w-full px-3'}
+                            />
+                          ) : (
+                            <div className="overflow-x-auto">
+                              <table className="w-full min-w-[480px] border-collapse text-sm">
+                                <thead>
+                                  <tr>
+                                    {block.columns.map((column, colIndex) => (
+                                      <th key={colIndex} className="border border-slate-200 bg-slate-50 p-1">
+                                        <div className="flex items-center gap-1">
+                                          <input
+                                            value={column}
+                                            onChange={(event) => updateAnnexureTableColumnHeading(annexureIndex, block.id, colIndex, event.target.value)}
+                                            className="w-full min-w-[90px] rounded border border-transparent bg-transparent px-1.5 py-1 text-xs font-bold text-slate-700 outline-none focus:border-[#0D3A35] focus:bg-white"
+                                          />
+                                          {block.columns.length > 1 && (
+                                            <button type="button" onClick={() => removeAnnexureTableColumn(annexureIndex, block.id, colIndex)} className="shrink-0 rounded p-0.5 text-red-400 hover:bg-red-50" aria-label="Remove column">
+                                              <Trash2 className="h-3 w-3" />
+                                            </button>
+                                          )}
+                                        </div>
+                                      </th>
+                                    ))}
+                                    <th className="border border-slate-200 bg-slate-50 p-1">
+                                      <button type="button" onClick={() => addAnnexureTableColumn(annexureIndex, block.id)} className="flex w-full items-center justify-center gap-1 rounded px-2 py-1 text-xs font-bold text-[#0D3A35] hover:bg-[#0D3A35]/5">
+                                        <Plus className="h-3 w-3" /> Column
+                                      </button>
+                                    </th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {block.rows.map((row, rowIndex) => (
+                                    <tr key={rowIndex}>
+                                      {row.map((cell, colIndex) => (
+                                        <td key={colIndex} className="border border-slate-200 p-1">
+                                          <input
+                                            value={cell}
+                                            onChange={(event) => updateAnnexureTableCell(annexureIndex, block.id, rowIndex, colIndex, event.target.value)}
+                                            className="w-full min-w-[90px] rounded border border-transparent px-1.5 py-1 text-xs text-slate-700 outline-none focus:border-[#0D3A35]"
+                                          />
+                                        </td>
+                                      ))}
+                                      <td className="border border-slate-200 p-1 text-center">
+                                        <button type="button" onClick={() => removeAnnexureTableRow(annexureIndex, block.id, rowIndex)} className="rounded p-1 text-red-400 hover:bg-red-50" aria-label="Remove row">
+                                          <Trash2 className="h-3 w-3" />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                              <button type="button" onClick={() => addAnnexureTableRow(annexureIndex, block.id)} className="mt-2 flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-bold text-[#0D3A35] hover:bg-[#0D3A35]/5">
+                                <Plus className="h-3 w-3" /> Row
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2 border-t border-slate-100 pt-4">
+                    <Button type="button" size="sm" variant="outline" onClick={() => addTableBlock(annexureIndex)} className="h-8 gap-1 text-xs font-bold text-[#0D3A35]">
+                      <Plus className="h-3.5 w-3.5" /> Add Table
+                    </Button>
+                    <Button type="button" size="sm" variant="outline" onClick={() => addInputBlock(annexureIndex)} className="h-8 gap-1 text-xs font-bold text-[#0D3A35]">
+                      <Plus className="h-3.5 w-3.5" /> Add Input Field
+                    </Button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
+      </section>
+
+      <section style={{ order: 9 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
           <h3 className="font-bold text-slate-900">Annexure - {legalAnnexureNumber}</h3>
           <p className="mt-0.5 text-xs text-slate-500">Complete General Terms and Conditions attached to the Purchase Order.</p>
@@ -3230,13 +3741,21 @@ export function MakePurchaseOrderPopup({
 
   const reportPageLabel = (pageNumber: number) => {
     if (pageNumber === 1) return 'Purchase Order';
-    if (pageNumber < customAnnexureStartPage) {
+    if (pageNumber < preAnnexureStartPage) {
       return pageNumber === 2 ? 'Terms & Conditions' : 'Terms & Conditions — Continued';
     }
+    if (pageNumber < customAnnexureStartPage) {
+      const customPage = preAnnexureReportPages[pageNumber - preAnnexureStartPage];
+      return `${safe(preAnnexurePage.annexureTitle) || 'Additional Clauses & Schedules'}${customPage?.pageIndex ? ' — Continued' : ''}`;
+    }
+    if (pageNumber < structuredAnnexureStartPage) {
+      const annexurePage = annexureReportPages[pageNumber - customAnnexureStartPage];
+      if (!annexurePage) return 'Annexure';
+      return `Annexure - ${annexurePage.annexureNumber}${annexurePage.pageIndex ? ' — Continued' : ''}`;
+    }
     if (pageNumber === legalReportPage) return `Annexure - ${legalAnnexureNumber}`;
-    const annexurePage = annexureReportPages[pageNumber - customAnnexureStartPage];
-    if (!annexurePage) return 'Annexure';
-    return `Annexure - ${annexurePage.annexureNumber}${annexurePage.pageIndex ? ' — Continued' : ''}`;
+    const structuredPage = structuredAnnexureReportPages[pageNumber - structuredAnnexureStartPage];
+    return structuredPage?.annexure?.title || `Annexure - ${structuredPage?.annexureNumber ?? ''}`;
   };
 
   const renderPageContent = (p: number) =>
@@ -3445,9 +3964,21 @@ export function MakePurchaseOrderPopup({
         </div>
         {renderPoReportFooter(1, 'Purchase Order')}
       </div>
-    ) : p >= 2 && p < customAnnexureStartPage ? (
+    ) : p >= 2 && p < preAnnexureStartPage ? (
       renderCommercialTermsPage(p)
-    ) : p === -1 ? (
+    ) : p >= preAnnexureStartPage && p < customAnnexureStartPage ? (() => {
+      const customPage = preAnnexureReportPages[Math.max(0, p - preAnnexureStartPage)];
+      const continued = Boolean(customPage?.pageIndex);
+      const customTitle = safe(preAnnexurePage.annexureTitle) || 'ADDITIONAL CLAUSES & SCHEDULES';
+      return (
+        <div className="po-report-sheet po-draft-font-11 mx-auto flex h-[1123px] min-h-[1123px] max-h-[1123px] w-[794px] max-w-full flex-col overflow-hidden border border-slate-300 bg-white p-5 font-sans text-[11px] text-gray-950 shadow-sm">
+          <style>{ANNEXURE_RICH_TEXT_CSS}</style>
+          {renderPoSectionHeader(continued ? `${customTitle} (Continued)` : customTitle, poReferenceLabel)}
+          <div className="annexure-rich-content min-h-0 flex-1 overflow-hidden text-[11px] leading-[1.5]" dangerouslySetInnerHTML={{ __html: customPage?.contentHtml || '' }} />
+          <div className="mt-auto">{renderPoReportFooter(p, `${customTitle}${continued ? ' — Continued' : ''}`)}</div>
+        </div>
+      );
+    })() : p === -1 ? (
       <div className="po-report-sheet po-terms-report-sheet po-draft-font-11 mx-auto min-h-[1123px] w-[794px] max-w-full overflow-visible border border-slate-300 bg-white p-5 font-sans text-[11px] shadow-sm">
         {renderPoSectionHeader(`Purchase Order${amendmentLabel ? ` — ${amendmentLabel}` : ''} — Terms & Conditions`, poReferenceLabel)}
 
@@ -3744,7 +4275,7 @@ export function MakePurchaseOrderPopup({
         </div>
         {renderPoReportFooter(2, 'Terms & Conditions')}
       </div>
-    ) : p < legalReportPage ? (() => {
+    ) : p < structuredAnnexureStartPage ? (() => {
       const reportPage = annexureReportPages[Math.max(0, p - customAnnexureStartPage)];
       const annexure = reportPage?.annexure || defaultPage3();
       const annexureNumber = reportPage?.annexureNumber || 1;
@@ -3760,6 +4291,45 @@ export function MakePurchaseOrderPopup({
           )}
           <div className="annexure-rich-content min-h-0 flex-1 overflow-hidden text-[11px] leading-[1.5]" dangerouslySetInnerHTML={{ __html: annexureHtml }} />
           <div className="mt-auto">{renderPoReportFooter(p, `Annexure - ${annexureNumber}${continued ? ' — Continued' : ''}`)}</div>
+        </div>
+      );
+    })() : p < legalReportPage ? (() => {
+      const reportPage = structuredAnnexureReportPages[Math.max(0, p - structuredAnnexureStartPage)];
+      const annexure = reportPage?.annexure;
+      const annexureNumber = reportPage?.annexureNumber ?? 1;
+      return (
+        <div className="po-report-sheet po-draft-font-11 mx-auto flex h-[1123px] min-h-[1123px] max-h-[1123px] w-[794px] max-w-full flex-col overflow-hidden border border-slate-300 bg-white p-5 font-sans text-[11px] text-gray-950 shadow-sm">
+          {renderPoSectionHeader(annexure?.title || `Annexure ${annexureNumber}`, poReferenceLabel)}
+          <div className="min-h-0 flex-1 space-y-4 overflow-hidden">
+            {!annexure || annexure.blocks.length === 0 ? (
+              <p className="text-center text-[10px] text-slate-400">No content added to this annexure.</p>
+            ) : annexure.blocks.map((block) => (
+              <div key={block.id}>
+                {block.heading ? <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-800">{block.heading}</p> : null}
+                {block.kind === 'input' ? (
+                  <p className="text-[11px] text-gray-900">{block.value || '—'}</p>
+                ) : (
+                  <div className="border border-gray-300">
+                    <table className="w-full table-fixed border-collapse text-[10px]">
+                      <thead>
+                        <tr className="bg-[#0D3A35] text-white">
+                          {block.columns.map((col, i) => <th key={i} className="border-r border-[#315d58] px-2 py-1.5 text-center font-bold last:border-r-0">{col}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {block.rows.map((row, ri) => (
+                          <tr key={ri} className="bg-white">
+                            {row.map((cell, ci) => <td key={ci} className="border-r border-t border-gray-300 px-2 py-1.5 align-top last:border-r-0">{cell}</td>)}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="mt-auto">{renderPoReportFooter(p, `Annexure - ${annexureNumber}`)}</div>
         </div>
       );
     })() : (

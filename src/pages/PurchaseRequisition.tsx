@@ -14,12 +14,14 @@ import {
   Send,
   PackageCheck,
   RotateCcw,
+  Printer,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
@@ -1290,6 +1292,20 @@ const PurchaseRequisition = () => {
   const [addQuoteForms, setAddQuoteForms] = useState<Record<string, { vendor: string; file?: File | null; prices: Record<string, string> }>>({});
 
   const [previewComparative, setPreviewComparative] = useState<Comparative | null>(null);
+  const [printComparativeIndent, setPrintComparativeIndent] = useState<Indent | null>(null);
+
+  const printComparativeStatement = (indent: Indent, orientation: 'portrait' | 'landscape') => {
+    const indentNumber = str(indent.prNo || indent.id);
+    if (!indentNumber) {
+      toast.error('PR number is unavailable for this comparative statement.');
+      return;
+    }
+    const base = String(import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+    const popup = window.open(`${base}/purchase-requisition/PR/${encodeURIComponent(indentNumber)}/quotation?print=${orientation}`, '_blank');
+    if (!popup) {
+      toast.error('Pop-up blocked. Please allow pop-ups to print the comparative statement.');
+    }
+  };
 
   const [quotationStatusByPr, setQuotationStatusByPr] = useState<Record<
     string,
@@ -1751,6 +1767,15 @@ const PurchaseRequisition = () => {
                           </Button>
                           <Button
                             variant="outline"
+                            onClick={() => setPrintComparativeIndent(it)}
+                            className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]"
+                            disabled={qLoading || qStatus === 'unknown' || qStatus === 'no_comparative_statement'}
+                            title="Print comparative statement"
+                          >
+                            <Printer className="h-4 w-4" /> Print
+                          </Button>
+                          <Button
+                            variant="outline"
                             onClick={() => openRevisionPage(it)}
                             className="h-10 gap-2 rounded-xl border-[#0D3A35]/25 font-bold text-[#0D3A35] hover:bg-[#edf5f2]"
                             disabled={qLoading || !['saved', 'forwarded', 'draft'].includes(qStatus)}
@@ -1861,6 +1886,15 @@ const PurchaseRequisition = () => {
                         <div className="relative z-[1] flex flex-wrap items-center gap-2 xl:ml-4 xl:justify-end">
                           <Button variant="outline" onClick={() => setPreviewIndent(it)} className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]">
                             <FilePlus className="w-4 h-4" /> Preview
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() => setPrintComparativeIndent(it)}
+                            className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]"
+                            disabled={qLoading || qStatus === 'unknown' || qStatus === 'no_comparative_statement'}
+                            title="Print comparative statement"
+                          >
+                            <Printer className="h-4 w-4" /> Print
                           </Button>
                           <Button
                             variant="outline"
@@ -2008,6 +2042,15 @@ const PurchaseRequisition = () => {
                         <Button variant="outline" onClick={() => setPreviewIndent(it)} className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]">
                           <FilePlus className="w-4 h-4" /> View PO
                         </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => setPrintComparativeIndent(it)}
+                          className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]"
+                          disabled={qLoading || qStatus === 'unknown' || qStatus === 'no_comparative_statement'}
+                          title="Print comparative statement"
+                        >
+                          <Printer className="h-4 w-4" /> Print
+                        </Button>
                       </div>
                     </div>
                   );
@@ -2071,6 +2114,44 @@ const PurchaseRequisition = () => {
             <Button variant="outline" onClick={() => setOpen(false)} className="h-10 rounded-xl border-slate-200 px-5 font-bold">Cancel</Button>
             <Button className="h-10 rounded-xl bg-[#0D3A35] px-6 font-black text-white hover:bg-[#092b27]" onClick={saveNew}><Plus className="mr-2 h-4 w-4" />Create Requisition</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(printComparativeIndent)} onOpenChange={(open) => { if (!open) setPrintComparativeIndent(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Choose Print Orientation</DialogTitle>
+            <DialogDescription>Select the A4 page orientation for the Commercial Comparative Statement.</DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3 py-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (!printComparativeIndent) return;
+                const indent = printComparativeIndent;
+                setPrintComparativeIndent(null);
+                printComparativeStatement(indent, 'portrait');
+              }}
+              className="rounded-xl border border-[#d5e1dd] bg-white p-4 text-left transition hover:border-[#0b463f] hover:bg-[#edf5f2]"
+            >
+              <span className="mx-auto block h-20 w-14 rounded border-2 border-[#0b463f] bg-white" />
+              <span className="mt-3 block text-center text-sm font-semibold text-[#0b463f]">A4 Portrait</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!printComparativeIndent) return;
+                const indent = printComparativeIndent;
+                setPrintComparativeIndent(null);
+                printComparativeStatement(indent, 'landscape');
+              }}
+              className="rounded-xl border-2 border-[#0b463f] bg-[#edf5f2] p-4 text-left transition hover:bg-[#e3efeb]"
+            >
+              <span className="mx-auto mt-3 block h-14 w-20 rounded border-2 border-[#0b463f] bg-white" />
+              <span className="mt-3 block text-center text-sm font-semibold text-[#0b463f]">A4 Landscape</span>
+              <span className="mt-1 block text-center text-[11px] text-[#58716a]">Recommended</span>
+            </button>
+          </div>
         </DialogContent>
       </Dialog>
 

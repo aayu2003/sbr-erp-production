@@ -499,6 +499,7 @@ export default function QuotationComparative() {
   const [model, setModel] = useState<Comparative | null>(null);
   const [openRecommendation, setOpenRecommendation] = useState(false);
   const [openPrintOrientation, setOpenPrintOrientation] = useState(false);
+  const autoPrintTriggeredRef = useRef(false);
   const [openReviseConfirmation, setOpenReviseConfirmation] = useState(false);
   const [recommendationVendorId, setRecommendationVendorId] = useState<string>('');
   const [savingDraft, setSavingDraft] = useState(false);
@@ -1501,13 +1502,13 @@ export default function QuotationComparative() {
     return raw.replace(/\b(L\s*1|L\s*2)\b/gi, (m) => `<b>${m.toUpperCase().replace(/\s+/g, ' ')}</b>`);
   };
 
-  const printComparativeReport = (orientation: 'portrait' | 'landscape') => {
+  const printComparativeReport = (orientation: 'portrait' | 'landscape', targetWindow?: Window) => {
     if (!model) return;
     if (!model.items.length) {
       toast.error('There are no items to print.');
       return;
     }
-    const popup = window.open('', '_blank', 'width=1500,height=950');
+    const popup = targetWindow || window.open('', '_blank', 'width=1500,height=950');
     if (!popup) {
       toast.error('Pop-up blocked. Please allow pop-ups to print the report.');
       return;
@@ -1571,6 +1572,14 @@ export default function QuotationComparative() {
     </style></head><body><div class="sheet"><div class="header"><img src="${logoUrl}" alt="Sai Bioresources"><div class="company">SAI BIORESOURCES PRIVATE LIMITED</div><div class="address">Khasra No. 121/1, Amrit Dairy Farm, Kachandur-Dhour Road, Village Jeora (Jeora-Sirsa), Durg, Chhattisgarh - 491001</div><div class="company-meta">GSTIN: 22ARPCS5442R1ZM &nbsp;|&nbsp; Phone: +91 75870 76870 &nbsp;|&nbsp; Email: rajendra.s@saiobioenergy.com</div></div><div class="title">COMMERCIAL COMPARATIVE STATEMENT</div><div class="meta"><div><div class="label">Comparison No.</div><div class="value">${escapeHtml(reportId)}</div></div><div><div class="label">PR Number</div><div class="value">${escapeHtml(normalizedIndentId)}</div></div><div><div class="label">Indent Date</div><div class="value">${escapeHtml(displayDate(model.indentDate))}</div></div><div><div class="label">Required By</div><div class="value">${escapeHtml(displayDate(model.requiredByDate))}</div></div><div><div class="label">Prepared By</div><div class="value">${escapeHtml(model.preparedBy || 'Not Recorded')}</div></div></div><div class="meta"><div><div class="label">Department</div><div class="value">${escapeHtml(model.department || 'Not Recorded')}</div></div><div><div class="label">Requirement</div><div class="value">${escapeHtml(model.requirementType || 'Goods')}</div></div><div><div class="label">Project / Cluster</div><div class="value">${escapeHtml(model.projectCluster || 'Not Recorded')}</div></div><div><div class="label">Delivery Location</div><div class="value">${escapeHtml(model.deliveryLocation || 'Not Recorded')}</div></div><div><div class="label">Purpose / Remarks</div><div class="value">${escapeHtml(model.purposeRemarks || 'Not Recorded')}</div></div></div><div class="vendors">${vendorDetails || '<div class="vendor-card">No vendors recorded</div>'}</div><div class="section"><div class="section-title">Item & Vendor Comparison</div><table><colgroup><col style="width:4%"><col style="width:24%"><col style="width:6%"><col style="width:6%">${printableVendors.map(() => `<col style="width:${itemVendorWidth}%">`).join('')}</colgroup><thead><tr><th>S. No.</th><th>Item / Part Name</th><th>Qty.</th><th>UOM</th>${vendorHeadings}</tr></thead><tbody>${itemRows}</tbody></table></div><div class="section"><div class="section-title">Commercial Summary</div><table><colgroup><col style="width:40%">${printableVendors.map(() => `<col style="width:${itemVendorWidth}%">`).join('')}</colgroup><thead><tr><th>Particular</th>${vendorHeadings}</tr></thead><tbody>${summaryRows}${grandTotalRow}</tbody></table></div>${termRows ? `<div class="section"><div class="section-title">Commercial Terms</div><table><colgroup><col style="width:40%">${printableVendors.map(() => `<col style="width:${itemVendorWidth}%">`).join('')}</colgroup><thead><tr><th>Comparison Parameter</th>${vendorHeadings}</tr></thead><tbody>${termRows}</tbody></table></div>` : ''}<div class="footer"><span>System-generated Commercial Comparative Statement</span><span>Generated on: ${escapeHtml(generatedOn)}</span><span>Report ID: ${escapeHtml(reportId)}</span><span>Page 1 of 1</span></div></div><script>window.addEventListener('load',()=>setTimeout(()=>window.print(),350));<\/script></body></html>`);
     popup.document.close();
   };
+
+  useEffect(() => {
+    if (!model || autoPrintTriggeredRef.current) return;
+    const requested = new URLSearchParams(window.location.search).get('print');
+    if (requested !== 'portrait' && requested !== 'landscape') return;
+    autoPrintTriggeredRef.current = true;
+    printComparativeReport(requested, window);
+  }, [model]);
 
   const getDirectoryVendorById = (id?: string) => {
     if (!id) return undefined;

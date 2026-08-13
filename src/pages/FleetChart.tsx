@@ -475,6 +475,7 @@ const FleetChart = () => {
     date: string;
     distance_traveled: number;
     fuel_consumed: number;
+    fuel_intake: number;
     damage_notes: string;
   }) => {
     const base = getBaseUrl().replace(/\/$/, '');
@@ -572,6 +573,53 @@ const FleetChart = () => {
       await downloadVehicleLogBookAsPdf(book);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to generate PDF');
+    }
+  };
+
+  // Let the logistics manager mark a task complete directly from the fleet chart,
+  // instead of only reacting to the driver's own TASK_STATUS_UPDATED websocket event.
+  const markTaskCompleted = async (vehicleId: string, dateKey: string, task: TaskAssignment, planId?: string) => {
+    if (!planId) {
+      toast.error('Missing plan reference for this task');
+      return;
+    }
+    try {
+      const base = getBaseUrl().replace(/\/$/, '');
+      const resp = await fetch(`${base}/admin_vehicles/update_task_status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          plan_id: planId,
+          date: dateKey,
+          activity: task.location_name,
+          farm_id: task.farm_id || '',
+          status: 'completed',
+        }),
+      });
+      const data: any = await resp.json().catch(() => null);
+      if (!resp.ok || data?.success !== true) {
+        throw new Error(data?.message || 'Failed to update task status');
+      }
+
+      setSchedule((prev) => {
+        const day = prev[vehicleId]?.[dateKey];
+        if (!day) return prev;
+        const updatedTasks = day.tasks.map((t) => (t.id === task.id ? { ...t, status: 'completed' as const } : t));
+        return {
+          ...prev,
+          [vehicleId]: {
+            ...prev[vehicleId],
+            [dateKey]: {
+              ...day,
+              tasks: updatedTasks,
+              tasksStatus: combineTaskStatuses(updatedTasks.map((t) => t.status)),
+            },
+          },
+        };
+      });
+      toast.success('Task marked as completed');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update task status');
     }
   };
 
@@ -1311,12 +1359,19 @@ const FleetChart = () => {
                               {/* Task buttons — only when tasks are assigned */}
                               {hasTasks && (
                                 <div className="flex-1">
-                                  {tasks.map((task, tIdx) => (
-                                    <button
+                                  {tasks.map((task) => (
+                                    <div
                                       key={task.id}
+                                      role="button"
+                                      tabIndex={0}
                                       onClick={() => setSelectedCell({ ...task, vehicle: vName, date: dateKey })}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                          setSelectedCell({ ...task, vehicle: vName, date: dateKey });
+                                        }
+                                      }}
                                       className={cn(
-                                        "w-full rounded-md border flex flex-col items-start justify-center px-2 py-1 transition-all group relative overflow-hidden shadow-sm hover:shadow-md mb-1",
+                                        "w-full rounded-md border flex flex-col items-start justify-center px-2 py-1 transition-all group relative overflow-hidden shadow-sm hover:shadow-md mb-1 cursor-pointer",
                                         getCellColor(task.type)
                                       )}
                                     >
@@ -1326,9 +1381,17 @@ const FleetChart = () => {
                                             <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
                                           </span>
                                         ) : (
-                                          <span className="shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              markTaskCompleted(vId, dateKey, task, dayData?.plan_id);
+                                            }}
+                                            className="shrink-0 hover:scale-110 transition-transform"
+                                            title="Mark task as completed"
+                                          >
                                             <CircleDashed className="w-3.5 h-3.5 text-amber-600" />
-                                          </span>
+                                          </button>
                                         )}
                                         <span className="truncate">{task.location_name}</span>
                                       </span>
@@ -1336,7 +1399,7 @@ const FleetChart = () => {
                                         {task.type === 'hub' ? <Warehouse className="w-3 h-3" /> : null}
                                         {task.type}
                                       </span>
-                                    </button>
+                                    </div>
                                   ))}
                                 </div>
                               )}
@@ -1398,6 +1461,7 @@ const FleetChart = () => {
 
                                         const distanceTraveled = Number(dayData?.totalDistance) || 0;
                                         const fuelConsumed = Number(dayData?.fuel?.consumed) || 0;
+                                        const fuelIntake = Number(dayData?.fuel?.input) || 0;
                                         const damageNotes = String(dayData?.damageChecklist ?? '');
 
                                         lockFleetCard({
@@ -1405,6 +1469,7 @@ const FleetChart = () => {
                                           date: dateKey,
                                           distance_traveled: distanceTraveled,
                                           fuel_consumed: fuelConsumed,
+                                          fuel_intake: fuelIntake,
                                           damage_notes: damageNotes,
                                         })
                                           .then(() => {
@@ -1478,35 +1543,51 @@ const FleetChart = () => {
                             const dateKey = formatDateKey(day);
                             const dayData = vSchedule[dateKey];
                             const fuel = dayData?.fuel;
-                            const hasDayData = Boolean(dayData?.tasks?.length) || Boolean(fuel);
                             const inputFuel = fuel ? (Number(fuel.input) || 0) : 0;
                             const usedFuel = fuel ? (Number(fuel.consumed) || 0) : 0;
-                            const balance = hasDayData ? inputFuel - usedFuel : null;
+                            const balance = inputFuel - usedFuel;
 
                             return (
                                 <td key={`${vId}-f-${dIndex}`} className="border-r border-b border-gray-100 p-1 h-12 text-center align-middle">
-                                    {hasDayData ? (
-                                      <div className="flex items-center justify-between gap-2 px-2 text-[10px] font-medium text-gray-500">
+                                    <div className="flex items-center justify-between gap-2 px-2 text-[10px] font-medium text-gray-500">
                                         <span
                                           className={cn(
                                             "flex items-center gap-1 whitespace-nowrap",
-                                            (balance ?? 0) > 0
+                                            balance > 0
                                               ? "text-emerald-700 font-bold"
-                                              : (balance ?? 0) < 0
+                                              : balance < 0
                                                 ? "text-red-700 font-bold"
                                                 : "text-gray-600"
                                           )}
                                         >
-                                          Balance: {balance !== null ? `${balance}L` : '-'}
+                                          Balance: {balance}L
                                         </span>
                                         <span className="text-gray-300">|</span>
-                                        <span
-                                          className={cn(
-                                            "flex items-center gap-1 whitespace-nowrap",
-                                            inputFuel > 0 ? "text-green-600 font-bold" : ""
-                                          )}
-                                        >
-                                          In: {inputFuel > 0 ? `${inputFuel}L` : '-'}
+                                        <span className="flex items-center gap-1 whitespace-nowrap text-gray-600">
+                                          In:
+                                          <input
+                                            type="number"
+                                            inputMode="decimal"
+                                            value={fuel ? (fuel.input ?? '') : ''}
+                                            onChange={(e) => {
+                                              const raw = e.target.value;
+                                              const nextInput = raw === '' ? 0 : Number(raw);
+                                              const safeNextInput = Number.isFinite(nextInput) ? nextInput : 0;
+
+                                              updateScheduleData(vId, dateKey, 'fuel', {
+                                                input: safeNextInput,
+                                                consumed: usedFuel,
+                                              });
+                                            }}
+                                            disabled={dayData?.isLocked}
+                                            className={cn(
+                                              "w-12 px-1 border border-gray-300 rounded text-[9px] text-center",
+                                              dayData?.isLocked ? "bg-gray-100 cursor-not-allowed" : "bg-white"
+                                            )}
+                                            placeholder="L"
+                                            min={0}
+                                          />
+                                          L
                                         </span>
                                         <span className="text-gray-300">|</span>
                                         <span className="flex items-center gap-1 whitespace-nowrap text-gray-600">
@@ -1535,10 +1616,7 @@ const FleetChart = () => {
                                           />
                                           L
                                         </span>
-                                      </div>
-                                    ) : (
-                                      <div className="text-[10px] text-gray-300">-</div>
-                                    )}
+                                    </div>
                                 </td>
                             )
                         })}
@@ -1634,7 +1712,7 @@ const FleetChart = () => {
                     <div className="w-2 h-2 bg-green-500 rounded-full mt-2"></div>
                     <div>
                       <p className="font-medium text-gray-900">Task Status</p>
-                      <p className="text-sm text-gray-600">Completion status from driver (Completed, Pending, Partial)</p>
+                      <p className="text-sm text-gray-600">Completion status from the driver (Completed, Pending, Partial). Click the pending icon on a task to mark it completed yourself.</p>
                     </div>
                   </div>
                 </div>
@@ -1700,8 +1778,9 @@ const FleetChart = () => {
                   Fuel Tracking (Bottom Row)
                 </h3>
                 <div className="bg-gray-50 p-4 rounded-lg space-y-2">
-                  <p className="text-sm text-gray-600"><strong>In:</strong> Fuel input from inventory (API data)</p>
+                  <p className="text-sm text-gray-600"><strong>In:</strong> Fuel intake/refuel amount — editable, and also auto-filled when a driver's fuel request is approved</p>
                   <p className="text-sm text-gray-600"><strong>Use:</strong> Daily fuel consumption you track</p>
+                  <p className="text-sm text-gray-600">Both fields can be entered even on days with no task assigned — locking that day still saves the log, and if no task exists for that date it's also recorded in the Operational Calendar.</p>
                 </div>
               </section>
 

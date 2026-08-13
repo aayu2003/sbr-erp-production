@@ -555,10 +555,10 @@ const ScopeOfWork = () => {
             <Link2 className="h-7 w-7 text-white" />
           </div>
           <div>
-            <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-700">Cultivation Operations</p>
+            <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-700">Procurement · Work Order</p>
             <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">Scope of Work</h1>
             <p className="mt-1 text-sm text-slate-500 max-w-lg">
-              Map farm lands to active vendors with live Work Orders or Purchase Orders.
+              Map farm lands to active vendors with live Work Orders and approved scopes.
             </p>
           </div>
         </div>
