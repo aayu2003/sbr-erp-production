@@ -69,6 +69,27 @@ type Vendor = {
   // address fields (stored as concatenated string for backward compatibility)
   address?: string;
   placeOfSupplyAddress?: string;
+  // structured address breakdown, kept alongside the concatenated strings above
+  // so editing a vendor can restore each field instead of re-splitting a joined string
+  addressRaw?: {
+    plot?: string;
+    premises?: string;
+    road?: string;
+    locality?: string;
+    district?: string;
+    state?: string;
+    pin?: string;
+  };
+  placeOfSupplyRaw?: {
+    plot?: string;
+    premises?: string;
+    road?: string;
+    locality?: string;
+    district?: string;
+    state?: string;
+    pin?: string;
+    gst?: string;
+  };
   // bank and contacts
   bankName?: string;
   bankBranch?: string;
@@ -236,6 +257,25 @@ const mapVendorRawToVendor = (raw: any): Vendor => {
     aadhar: str(vendorDetails?.aadhar_card_number),
     address: str(vendorDetails?.vendor_address) ?? formatAddress(vendorDetails?.address),
     placeOfSupplyAddress: formatAddress(vendorDetails?.address_for_place_of_supply_of_goods_services),
+    addressRaw: vendorDetails?.address && typeof vendorDetails.address === 'object' ? {
+      plot: str(vendorDetails.address.plot_flat_unit_no_and_floor),
+      premises: str(vendorDetails.address.name_of_premises),
+      road: str(vendorDetails.address.road),
+      locality: str(vendorDetails.address.taluka_locality),
+      district: str(vendorDetails.address.district),
+      state: str(vendorDetails.address.state),
+      pin: str(vendorDetails.address.pin_code),
+    } : undefined,
+    placeOfSupplyRaw: supply && typeof supply === 'object' && Object.keys(supply).length ? {
+      plot: str(supply.plot_flat_unit_no_and_floor),
+      premises: str(supply.name_of_premises),
+      road: str(supply.road),
+      locality: str(supply.taluka_locality),
+      district: str(supply.district),
+      state: str(supply.state),
+      pin: str(supply.pin_code),
+      gst: str(supply.gst_number),
+    } : undefined,
     supplyContactNumber: str(supply?.contact_number),
     supplyContactEmail: str(supply?.e_mail_id),
     bankName: str(bankDetails?.name_of_bank),
@@ -580,20 +620,26 @@ const VendorDirectory = () => {
   };
 
   const addVendor = async () => {
-    if (!name.trim()) return toast.error('Vendor name is required');
-    if (!legalConstitution) return toast.error('Vendor legal type is required');
-    if (!pan.trim()) return toast.error('Income Tax PAN is required');
-    if (['Individual', 'Sole Proprietorship', 'HUF'].includes(legalConstitution) && !aadhar.trim()) {
-      return toast.error(`Aadhaar number is required for ${legalConstitution} vendors`);
-    }
-    if (needsEntityRegistration && !registrationNumber.trim()) {
-      return toast.error(`${registrationLabelFor(legalConstitution)} is required`);
-    }
-    if (legalConstitution !== 'Individual' && !principalPersonName.trim()) {
-      return toast.error(`${principalPersonLabelFor(legalConstitution)} is required`);
-    }
-    if (needsAuthorisation && !authorisedSignatoryName.trim()) {
-      return toast.error('Authorised signatory name is required');
+    // Existing vendor records (e.g. auto-onboarded "MANUAL:" vendors created at
+    // PO time) are frequently missing PAN/legal-type/etc. Editing one to fill in
+    // a single field shouldn't be blocked by unrelated required-field checks —
+    // those only make sense when creating a brand-new vendor from scratch.
+    if (!editingId) {
+      if (!name.trim()) return toast.error('Vendor name is required');
+      if (!legalConstitution) return toast.error('Vendor legal type is required');
+      if (!pan.trim()) return toast.error('Income Tax PAN is required');
+      if (['Individual', 'Sole Proprietorship', 'HUF'].includes(legalConstitution) && !aadhar.trim()) {
+        return toast.error(`Aadhaar number is required for ${legalConstitution} vendors`);
+      }
+      if (needsEntityRegistration && !registrationNumber.trim()) {
+        return toast.error(`${registrationLabelFor(legalConstitution)} is required`);
+      }
+      if (legalConstitution !== 'Individual' && !principalPersonName.trim()) {
+        return toast.error(`${principalPersonLabelFor(legalConstitution)} is required`);
+      }
+      if (needsAuthorisation && !authorisedSignatoryName.trim()) {
+        return toast.error('Authorised signatory name is required');
+      }
     }
     const next: Vendor = {
       id: genId(),
@@ -639,11 +685,7 @@ const VendorDirectory = () => {
       addressProofFile,
       tags: selectedTags.length ? selectedTags : undefined,
     };
-    if (editingId) {
-      setVendors((p) => p.map((x) => x.id === editingId ? { ...x, ...next, id: editingId } : x));
-      toast.success('Vendor updated');
-      setEditingId(null);
-    } else {
+    {
       const baseUrl = getApiBaseUrl();
       if (!baseUrl) return toast.error('API base URL is not set');
 
@@ -720,28 +762,41 @@ const VendorDirectory = () => {
 
       setIsSaving(true);
       try {
-        const res = await fetch(`${baseUrl}/purchase_flow/add_new_vendor`, {
+        const url = editingId
+          ? `${baseUrl}/purchase_flow/update_vendor`
+          : `${baseUrl}/purchase_flow/add_new_vendor`;
+        const body = editingId ? { vendor_id: editingId, ...payload } : payload;
+
+        const res = await fetch(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(body),
         });
 
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
-          toast.error(`Failed to add vendor${errText ? `: ${errText}` : ''}`);
+          const verb = editingId ? 'update' : 'add';
+          toast.error(`Failed to ${verb} vendor${errText ? `: ${errText}` : ''}`);
           return;
         }
 
-        const data: any = await res.json().catch(() => null);
-        const returnedId = data?.vendor_id ?? data?.id;
-        const vendorToAdd = returnedId ? { ...next, id: String(returnedId) } : next;
-        setVendors((p) => [vendorToAdd, ...p]);
-        toast.success('Vendor added');
+        if (editingId) {
+          setVendors((p) => p.map((x) => (x.id === editingId ? { ...x, ...next, id: editingId } : x)));
+          toast.success('Vendor updated');
+          setEditingId(null);
+        } else {
+          const data: any = await res.json().catch(() => null);
+          const returnedId = data?.vendor_id ?? data?.id;
+          const vendorToAdd = returnedId ? { ...next, id: String(returnedId) } : next;
+          setVendors((p) => [vendorToAdd, ...p]);
+          toast.success('Vendor added');
+        }
         void refreshVendors();
       } catch (e: any) {
-        toast.error(`Failed to add vendor${e?.message ? `: ${e.message}` : ''}`);
+        const verb = editingId ? 'update' : 'add';
+        toast.error(`Failed to ${verb} vendor${e?.message ? `: ${e.message}` : ''}`);
         return;
       } finally {
         setIsSaving(false);
@@ -752,6 +807,7 @@ const VendorDirectory = () => {
   };
 
   const openEdit = (v: Vendor) => {
+    resetForm();
     setEditingId(v.id);
     // populate form fields from vendor
     setName(v.name || '');
@@ -768,14 +824,33 @@ const VendorDirectory = () => {
     setPan(v.pan || '');
     setAadhar(v.aadhar || '');
     setAddress(v.address || '');
-    // try to split address into first piece for plot if possible
-    if (v.address) {
-      const parts = String(v.address).split(',');
-      setAddressPlot(parts[0] || '');
+    if (v.addressRaw) {
+      setAddressPlot(v.addressRaw.plot || '');
+      setAddressPremises(v.addressRaw.premises || '');
+      setAddressRoad(v.addressRaw.road || '');
+      setAddressLocality(v.addressRaw.locality || '');
+      setAddressDistrict(v.addressRaw.district || '');
+      setAddressState(v.addressRaw.state || '');
+      setAddressPin(v.addressRaw.pin || '');
+    } else if (v.address) {
+      // no structured breakdown recorded (e.g. legacy/mock data) — keep the
+      // full string in the first field rather than silently dropping it
+      setAddressPlot(v.address);
     }
     setContactNumber(v.contactNumber || '');
     setContactEmail(v.contactEmail || '');
-    setSupplyPlot(v.placeOfSupplyAddress || '');
+    if (v.placeOfSupplyRaw) {
+      setSupplyPlot(v.placeOfSupplyRaw.plot || '');
+      setSupplyPremises(v.placeOfSupplyRaw.premises || '');
+      setSupplyRoad(v.placeOfSupplyRaw.road || '');
+      setSupplyLocality(v.placeOfSupplyRaw.locality || '');
+      setSupplyDistrict(v.placeOfSupplyRaw.district || '');
+      setSupplyState(v.placeOfSupplyRaw.state || '');
+      setSupplyPin(v.placeOfSupplyRaw.pin || '');
+      setSupplyGst(v.placeOfSupplyRaw.gst || '');
+    } else if (v.placeOfSupplyAddress) {
+      setSupplyPlot(v.placeOfSupplyAddress);
+    }
     setSupplyContactNumber(v.supplyContactNumber || '');
     setSupplyContactEmail(v.supplyContactEmail || '');
     setBankName(v.bankName || '');
@@ -928,13 +1003,13 @@ const VendorDirectory = () => {
       <div className="flex items-center justify-between pb-2"><p className="text-sm font-semibold text-slate-500">Showing {filtered.length} of {vendors.length} vendors</p><span className="rounded-full border border-slate-200 bg-white px-4 py-1.5 text-sm font-bold text-slate-600 shadow-sm">{filtered.length.toString().padStart(2, '0')} Vendors</span></div>
 
         <Dialog open={open} onOpenChange={(v) => { if (!v) { setOpen(false); resetForm(); } }}>
-          <DialogContent className="max-h-[92vh] max-w-4xl overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">
-            <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left">
+          <DialogContent className="flex max-h-[92vh] max-w-4xl flex-col overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">
+            <DialogHeader className="shrink-0 bg-[#0D3A35] px-6 py-5 text-left">
               <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><Building2 className="h-5 w-5" /></span>{editingId ? 'Edit Vendor Profile' : 'Create Vendor Profile'}</DialogTitle>
               <DialogDescription className="pl-[52px] text-sm font-medium text-white/70">Record statutory, banking, contact and document information.</DialogDescription>
             </DialogHeader>
 
-            <div className="max-h-[calc(92vh-166px)] overflow-y-auto px-6 py-5">
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
               <div className="mb-5 grid grid-cols-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                 {['Entity & Address', 'Banking & Contacts', 'Documents', 'Classification'].map((label, index) => (
                   <button key={label} type="button" onClick={() => setStep(index + 1)} className={`flex min-h-14 items-center justify-center gap-2 border-r border-slate-200 px-3 text-center text-xs font-bold last:border-r-0 ${step === index + 1 ? 'bg-[#0D3A35] text-white' : 'text-slate-500 hover:bg-slate-50'}`}>
@@ -1130,7 +1205,7 @@ const VendorDirectory = () => {
               )}
             </div>
 
-            <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+            <DialogFooter className="shrink-0 border-t border-slate-200 bg-white px-6 py-4">
               <Button variant="outline" onClick={() => { setOpen(false); resetForm(); }} className="h-10 rounded-xl border-slate-200 px-5 font-bold">Cancel</Button>
               <div className="flex items-center gap-2">
                 {step > 1 && <Button variant="outline" onClick={() => setStep((s) => s - 1)} className="h-10 rounded-xl border-slate-200 px-5 font-bold">Back</Button>}
