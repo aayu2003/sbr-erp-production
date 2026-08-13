@@ -7,6 +7,7 @@ import {
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
   Car, Mail, Package, Scale, Truck, CheckSquare,
   FileCheck, PackageCheck, DoorOpen,
+  ShieldCheck,
 } from "lucide-react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -20,7 +21,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
   ClipboardCheck, Activity, FolderKanban, Landmark,
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
   Car, Mail, Package, Scale, Truck, CheckSquare,
-  FileCheck, PackageCheck, DoorOpen,
+  FileCheck, PackageCheck, DoorOpen, ShieldCheck,
 };
 
 /* ---------------- NAV ITEM COMPONENT ---------------- */
@@ -252,6 +253,8 @@ const AppSidebar = ({ leadsComplete }: AppSidebarProps) => {
                 item.enabled && (
                   isSuperAdmin ||
                   allowedModules.includes(item.key) ||
+                  (['wo-creation', 'work-verifier', 'work-approver', 'work-flow'].includes(item.key) && allowedModules.includes('work-order')) ||
+                  (item.key === 'purchase-verifier' && ['admin-ops-indents', 'admin-wcc-approval', 'admin-grn-approval', 'admin-inspection-approval'].some(key => allowedModules.includes(key))) ||
                   (item.key === 'inspection-report' && allowedModules.includes('grn-module')) ||
                   (item.key === 'admin-inspection-approval' && (allowedModules.includes('admin-grn-approval') || allowedModules.includes('admin-ops-indents'))) ||
                   (item.key === 'finance-inspection-approval' && allowedModules.includes('finance-admin-ops'))
@@ -281,13 +284,14 @@ const AppSidebar = ({ leadsComplete }: AppSidebarProps) => {
                 </div>
               )}
 
-              {visibleGroups.map(group => (
-                <NavGroup key={group.key} label={group.label} isSidebarCollapsed={isCollapsed}>
-                  {group.visibleItems.map(item => {
+              {visibleGroups.map(group => {
+                const items = group.visibleItems.map(item => {
                     const ItemIcon = ICON_MAP[item.icon] ?? FileText;
                     const notif = item.key === 'leads'
                       ? (leadsComplete ? 'success' : 'warning')
-                      : ((item as any).notificationStatus ?? 'none');
+                      : ('notificationStatus' in item
+                        ? item.notificationStatus as NavItemProps['notificationStatus']
+                        : 'none');
                     return (
                       <NavItem
                         key={item.key}
@@ -298,9 +302,18 @@ const AppSidebar = ({ leadsComplete }: AppSidebarProps) => {
                         notificationStatus={notif as 'warning' | 'success' | 'none'}
                       />
                     );
-                  })}
-                </NavGroup>
-              ))}
+                  });
+
+                return group.key === 'procurement-common' ? (
+                  <div key={group.key} className="space-y-1 px-1 py-1">
+                    {items}
+                  </div>
+                ) : (
+                  <NavGroup key={group.key} label={group.label} isSidebarCollapsed={isCollapsed}>
+                    {items}
+                  </NavGroup>
+                );
+              })}
             </div>
           );
         })}
