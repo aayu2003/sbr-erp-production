@@ -36,14 +36,75 @@ import {
 import { PRPreview } from '@/components/purchase/PRPreview';
 import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
 import { type ComparativeModel } from '@/components/purchase/ComparativeStatementPreview';
-import {
-  addPoApprovalQuestion,
-  markPoForwardedToPurchaseFlow,
-  PO_APPROVALS_CHANGED_EVENT,
-  readPoApprovals,
-  reviewPoApproval,
-  type PoApprovalRecord,
-} from '@/lib/poApprovalStore';
+import { useAuth } from '@/context/AuthContext';
+
+type DirectorApproval = {
+  status: 'pending' | 'approved' | 'rejected';
+  staff_name?: string;
+  staff_designation?: string;
+  approval_time?: string;
+  approval_date?: string;
+};
+
+type PoApprovalQuestion = {
+  id: string;
+  question: string;
+  askedBy: string;
+  askedAt: string;
+  reply?: string;
+  repliedBy?: string;
+  repliedAt?: string;
+};
+
+type PoApprovalRecord = {
+  poNumber: string;
+  prNumber: string;
+  comparisonId: string;
+  vendorId: string;
+  vendorName: string;
+  itemDetails: Array<{ name: string; uom: string; quantity: number }>;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+  sentAt?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  purchaseFlowForwardedAt?: string;
+  questions?: PoApprovalQuestion[];
+  directorApproval: DirectorApproval;
+};
+
+// Backend `admin_purchase_order` items are the single source of truth for approval
+// state now (director_approval), replacing the old localStorage-only tracking that
+// couldn't be seen across different browsers/devices.
+const toPoApprovalRecord = (order: any): PoApprovalRecord => {
+  const quote = order?.purchase_quote && typeof order.purchase_quote === 'object' ? order.purchase_quote : {};
+  const directorApproval: DirectorApproval = order?.director_approval && typeof order.director_approval === 'object'
+    ? order.director_approval
+    : { status: 'pending' };
+  const status: PoApprovalRecord['status'] = directorApproval.status === 'approved' || directorApproval.status === 'rejected'
+    ? directorApproval.status
+    : 'pending';
+  const reviewedAt = directorApproval.approval_date
+    ? `${directorApproval.approval_date}T${directorApproval.approval_time || '00:00:00'}`
+    : undefined;
+
+  return {
+    poNumber: String(order?.order_number ?? ''),
+    prNumber: String(order?.pr_number ?? ''),
+    comparisonId: String(order?.comparison_id ?? ''),
+    vendorId: String(quote?.vendor_id ?? ''),
+    vendorName: String(quote?.vendor_name ?? ''),
+    itemDetails: Array.isArray(order?.item_details) ? order.item_details : [],
+    status,
+    createdAt: String(order?.created_at ?? ''),
+    sentAt: String(order?.created_at ?? ''),
+    reviewedAt,
+    reviewedBy: directorApproval.staff_name,
+    purchaseFlowForwardedAt: String(order?.status ?? '') === 'forwarded' ? String(order?.updated_at ?? order?.created_at ?? '') : undefined,
+    questions: Array.isArray(order?.approval_questions) ? order.approval_questions : [],
+    directorApproval,
+  };
+};
 
 const normalizePurchaseFlowDocuments = (value: unknown): string[] => {
   const source = Array.isArray(value) ? value : [];
@@ -604,11 +665,14 @@ const AdminOpsIndent = () => {
   const [nfaApprovalsMap, setNfaApprovalsMap] = useState<Record<string, boolean>>({});
 
   const [activeSection, setActiveSection] = useState<'indents' | 'nfa' | 'mrf' | 'po-approvals'>('nfa');
-  const [poApprovals, setPoApprovals] = useState<PoApprovalRecord[]>(() => readPoApprovals());
+  const { user: authUser } = useAuth();
+  const [poOrders, setPoOrders] = useState<any[]>([]);
+  const poApprovals = useMemo(() => poOrders.map(toPoApprovalRecord), [poOrders]);
   const [previewPoApproval, setPreviewPoApproval] = useState<PoApprovalRecord | null>(null);
   const [questionPoApproval, setQuestionPoApproval] = useState<PoApprovalRecord | null>(null);
   const [poQuestion, setPoQuestion] = useState('');
   const [forwardingPoNumber, setForwardingPoNumber] = useState<string | null>(null);
+  const [decidingPoNumber, setDecidingPoNumber] = useState<string | null>(null);
 
   // MRF state
   const [mrfRecords, setMrfRecords] = useState<any[]>([]);
@@ -621,22 +685,35 @@ const AdminOpsIndent = () => {
     setDirectorsAttachedMap(readDirectorsAttachedMap());
   }, []);
 
+  const refreshPoOrders = async (signal?: AbortSignal) => {
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return;
+    try {
+      const res = await fetch(`${baseUrl}/purchase_flow/get_all_purchase_orders`, {
+        headers: { Accept: 'application/json' },
+        signal,
+      });
+      const data: any = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || data?.message || `HTTP ${res.status}`);
+      setPoOrders(Array.isArray(data?.purchase_orders) ? data.purchase_orders : []);
+    } catch (error: any) {
+      if (error?.name === 'AbortError') return;
+      toast.error(error?.message || 'Failed to load purchase orders');
+    }
+  };
+
   useEffect(() => {
-    const refreshPoApprovals = () => {
-      const approvals = readPoApprovals();
-      setPoApprovals(approvals);
-      setQuestionPoApproval((current) => current
-        ? approvals.find((record) => record.poNumber === current.poNumber) || null
-        : null);
-    };
-    refreshPoApprovals();
-    window.addEventListener(PO_APPROVALS_CHANGED_EVENT, refreshPoApprovals);
-    window.addEventListener('storage', refreshPoApprovals);
-    return () => {
-      window.removeEventListener(PO_APPROVALS_CHANGED_EVENT, refreshPoApprovals);
-      window.removeEventListener('storage', refreshPoApprovals);
-    };
+    const controller = new AbortController();
+    void refreshPoOrders(controller.signal);
+    return () => controller.abort();
   }, []);
+
+  // Keep the open question dialog's data in sync whenever the PO list refreshes.
+  useEffect(() => {
+    setQuestionPoApproval((current) => current
+      ? poApprovals.find((record) => record.poNumber === current.poNumber) || null
+      : null);
+  }, [poApprovals]);
 
   // Load NFA list from backend
   useEffect(() => {
@@ -922,6 +999,43 @@ const AdminOpsIndent = () => {
       .sort((left, right) => String(right.sentAt ?? right.createdAt).localeCompare(String(left.sentAt ?? left.createdAt)));
   }, [poApprovals, search]);
 
+  const decidePoApproval = async (record: PoApprovalRecord, action: 'approved' | 'rejected') => {
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) {
+      toast.error('Missing API base URL');
+      return;
+    }
+    const staffName = authUser?.name?.trim() || readUserProfile().name?.trim() || 'Admin Ops Finance';
+    const staffDesignation = authUser?.designation?.trim() || '';
+
+    setDecidingPoNumber(record.poNumber);
+    try {
+      const res = await fetch(`${baseUrl}/purchase_flow/approve_purchase_order`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          order_number: record.poNumber,
+          action,
+          staff_name: staffName,
+          staff_designation: staffDesignation,
+        }),
+      });
+      const data: any = await res.json().catch(() => null);
+      if (!res.ok || data?.success !== true) {
+        throw new Error(data?.detail || data?.message || `Failed to ${action === 'approved' ? 'approve' : 'reject'} PO`);
+      }
+      await refreshPoOrders();
+      toast.success(`PO ${record.poNumber} ${action}`);
+      if (action === 'approved') {
+        await forwardApprovedPoToPurchaseFlow({ ...record, status: 'approved', directorApproval: data.director_approval });
+      }
+    } catch (error: any) {
+      toast.error(error?.message || `Failed to ${action === 'approved' ? 'approve' : 'reject'} PO ${record.poNumber}`);
+    } finally {
+      setDecidingPoNumber(null);
+    }
+  };
+
   const forwardApprovedPoToPurchaseFlow = async (record: PoApprovalRecord) => {
     const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
     if (!baseUrl) {
@@ -941,8 +1055,7 @@ const AdminOpsIndent = () => {
         const flowData: any = await flowsResponse.json().catch(() => null);
         const existingFlows = Array.isArray(flowData?.purchase_flows) ? flowData.purchase_flows : [];
         if (existingFlows.some((flow: any) => String(flow?.order_number ?? '').trim() === record.poNumber)) {
-          markPoForwardedToPurchaseFlow(record.poNumber);
-          setPoApprovals(readPoApprovals());
+          await refreshPoOrders();
           toast.success(`PO ${record.poNumber} is already available in Purchase Flow`);
           return true;
         }
@@ -992,8 +1105,7 @@ const AdminOpsIndent = () => {
         throw new Error(result?.message || result?.error || `Forwarding failed (HTTP ${response.status})`);
       }
 
-      markPoForwardedToPurchaseFlow(record.poNumber);
-      setPoApprovals(readPoApprovals());
+      await refreshPoOrders();
       toast.success(`PO ${record.poNumber} forwarded to Purchase Flow`);
       return true;
     } catch (error: any) {
@@ -1388,30 +1500,20 @@ const AdminOpsIndent = () => {
                             size="icon"
                             className="h-9 w-9 rounded-xl border-red-200 text-red-600 hover:bg-red-50"
                             title="Reject PO"
-                            onClick={() => {
-                              const reviewer = readUserProfile().name?.trim() || 'Admin Ops Finance';
-                              reviewPoApproval(record.poNumber, 'rejected', reviewer);
-                              setPoApprovals(readPoApprovals());
-                              toast.success(`PO ${record.poNumber} rejected`);
-                            }}
+                            disabled={decidingPoNumber === record.poNumber}
+                            onClick={() => void decidePoApproval(record, 'rejected')}
                           >
-                            <XCircle className="h-4 w-4" />
+                            {decidingPoNumber === record.poNumber ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
                           </Button>
                           <Button
                             type="button"
                             size="icon"
                             className="h-9 w-9 rounded-xl bg-[#0D3A35] text-white hover:bg-[#092e2a]"
                             title="Approve PO"
-                            disabled={forwardingPoNumber === record.poNumber}
-                            onClick={async () => {
-                              const reviewer = readUserProfile().name?.trim() || 'Admin Ops Finance';
-                              reviewPoApproval(record.poNumber, 'approved', reviewer);
-                              setPoApprovals(readPoApprovals());
-                              toast.success(`PO ${record.poNumber} approved`);
-                              await forwardApprovedPoToPurchaseFlow({ ...record, status: 'approved' });
-                            }}
+                            disabled={decidingPoNumber === record.poNumber || forwardingPoNumber === record.poNumber}
+                            onClick={() => void decidePoApproval(record, 'approved')}
                           >
-                            {forwardingPoNumber === record.poNumber ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                            {decidingPoNumber === record.poNumber || forwardingPoNumber === record.poNumber ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                           </Button>
                           </>
                         ) : record.status === 'approved' && !record.purchaseFlowForwardedAt ? (
@@ -1427,12 +1529,16 @@ const AdminOpsIndent = () => {
                           </Button>
                         ) : null}
                       </div>
-                      {record.status !== 'pending' && (
-                        <div className="mt-2 text-center text-[11px] font-medium text-slate-500">
-                          <p>{record.reviewedBy || 'Admin Ops Finance'} · {record.reviewedAt ? formatDateDDMMYYYY(record.reviewedAt) : ''}</p>
-                          {record.purchaseFlowForwardedAt ? <p className="mt-0.5 font-bold text-emerald-700">Forwarded to Purchase Flow</p> : null}
+                      {record.status === 'approved' ? (
+                        <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-center text-[10px] font-semibold text-emerald-900">
+                          {record.directorApproval.staff_name || 'Director'} | {record.directorApproval.staff_designation || 'Not recorded'} | {record.directorApproval.approval_time || '—'} | {record.directorApproval.approval_date ? formatDateDDMMYYYY(record.directorApproval.approval_date) : '—'} | Approved
+                          {record.purchaseFlowForwardedAt ? <p className="mt-0.5 font-bold">Forwarded to Purchase Flow</p> : null}
                         </div>
-                      )}
+                      ) : record.status === 'rejected' ? (
+                        <div className="mt-2 text-center text-[11px] font-medium text-slate-500">
+                          <p>Rejected by {record.reviewedBy || 'Admin Ops Finance'} · {record.reviewedAt ? formatDateDDMMYYYY(record.reviewedAt) : ''}</p>
+                        </div>
+                      ) : null}
                     </td>
                   </tr>
                 ))}
@@ -1735,6 +1841,9 @@ const AdminOpsIndent = () => {
         open={Boolean(previewPoApproval)}
         comparative={previewPoComparative}
         vendorId={previewPoApproval?.vendorId}
+        poNumber={previewPoApproval?.poNumber}
+        documentStatus={previewPoApproval?.status}
+        directorApproval={previewPoApproval?.directorApproval}
         onClose={() => setPreviewPoApproval(null)}
         reviewOnly
       />
@@ -1786,15 +1895,28 @@ const AdminOpsIndent = () => {
               type="button"
               className="gap-2 bg-[#0D3A35] text-white hover:bg-[#092e2a]"
               disabled={!poQuestion.trim()}
-              onClick={() => {
+              onClick={async () => {
                 if (!questionPoApproval || !poQuestion.trim()) return;
-                const askedBy = readUserProfile().name?.trim() || 'Admin Ops Finance';
-                addPoApprovalQuestion(questionPoApproval.poNumber, poQuestion, askedBy);
-                const refreshed = readPoApprovals();
-                setPoApprovals(refreshed);
-                setQuestionPoApproval(refreshed.find((record) => record.poNumber === questionPoApproval.poNumber) || null);
-                setPoQuestion('');
-                toast.success(`Question raised against PO ${questionPoApproval.poNumber}`);
+                const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+                if (!baseUrl) {
+                  toast.error('Missing API base URL');
+                  return;
+                }
+                const askedBy = authUser?.name?.trim() || readUserProfile().name?.trim() || 'Admin Ops Finance';
+                try {
+                  const res = await fetch(`${baseUrl}/purchase_flow/add_po_approval_question`, {
+                    method: 'POST',
+                    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ order_number: questionPoApproval.poNumber, question: poQuestion, asked_by: askedBy }),
+                  });
+                  const data: any = await res.json().catch(() => null);
+                  if (!res.ok || data?.success !== true) throw new Error(data?.detail || data?.message || 'Failed to raise question');
+                  await refreshPoOrders();
+                  setPoQuestion('');
+                  toast.success(`Question raised against PO ${questionPoApproval.poNumber}`);
+                } catch (error: any) {
+                  toast.error(error?.message || 'Failed to raise question');
+                }
               }}
             >
               <Send className="h-4 w-4" /> Raise Question

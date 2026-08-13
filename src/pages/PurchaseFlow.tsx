@@ -6,9 +6,43 @@ import { Button } from '@/components/ui/button';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
 import { formatDateDDMMYYYY, formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
-import { markPoForwardedToPurchaseFlow, readPoApprovals } from '@/lib/poApprovalStore';
 import { getGrnsByOrder, type GRNRecord } from '@/lib/grnApi';
 import { buildGrnPdfBlob } from '@/lib/grnPdf';
+
+type DirectorApproval = {
+  status: 'pending' | 'approved' | 'rejected';
+  staff_name?: string;
+  staff_designation?: string;
+  approval_time?: string;
+  approval_date?: string;
+};
+
+type PoApprovalRecord = {
+  poNumber: string;
+  prNumber: string;
+  comparisonId: string;
+  vendorName: string;
+  itemDetails: Array<{ name: string; uom: string; quantity: number }>;
+  directorApproval: DirectorApproval;
+};
+
+// Backend `admin_purchase_order` items are the source of truth for approval state —
+// used both to fill in vendor/item details this flow's own record doesn't carry, and
+// to reconcile approved-but-not-yet-forwarded POs into Purchase Flow.
+const toPoApprovalRecord = (order: any): PoApprovalRecord => {
+  const quote = order?.purchase_quote && typeof order.purchase_quote === 'object' ? order.purchase_quote : {};
+  const directorApproval: DirectorApproval = order?.director_approval && typeof order.director_approval === 'object'
+    ? order.director_approval
+    : { status: 'pending' };
+  return {
+    poNumber: String(order?.order_number ?? ''),
+    prNumber: String(order?.pr_number ?? ''),
+    comparisonId: String(order?.comparison_id ?? ''),
+    vendorName: String(quote?.vendor_name ?? ''),
+    itemDetails: Array.isArray(order?.item_details) ? order.item_details : [],
+    directorApproval,
+  };
+};
 
 type LeftPanelInfo = {
   pr_number?: string;
@@ -1418,7 +1452,27 @@ export default function PurchaseFlow() {
     copy.sort((a, b) => safeTrim((b as any)?.timestamp).localeCompare(safeTrim((a as any)?.timestamp)));
     return copy;
   }, [flows]);
-  const poApprovalRecords = useMemo(() => readPoApprovals(), [flowRefreshNonce]);
+  const [poOrders, setPoOrders] = useState<any[]>([]);
+  const poApprovalRecords = useMemo(() => poOrders.map(toPoApprovalRecord), [poOrders]);
+
+  const refreshPoOrders = async (signal?: AbortSignal) => {
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return;
+    try {
+      const res = await fetch(`${baseUrl}/purchase_flow/get_all_purchase_orders`, { headers: { Accept: 'application/json' }, signal });
+      const data: any = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || data?.message || `HTTP ${res.status}`);
+      setPoOrders(Array.isArray(data?.purchase_orders) ? data.purchase_orders : []);
+    } catch (error: any) {
+      if (error?.name !== 'AbortError') console.error('Failed to load purchase orders', error);
+    }
+  };
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void refreshPoOrders(controller.signal);
+    return () => controller.abort();
+  }, [flowRefreshNonce]);
 
   useEffect(() => {
     Object.entries(flowStepOverrides).forEach(([flowId, steps]) => {
@@ -1441,15 +1495,16 @@ export default function PurchaseFlow() {
     };
   }, [flowStepOverrides, rows]);
 
-  // Repair the hand-off for POs created through the newer PO Creation screen.
-  // A saved PO must enter Purchase Flow immediately; finance approval remains
-  // a separate review state and must not prevent the operational flow record.
+  // Forward any director-approved PO that isn't in Purchase Flow yet. The backend
+  // itself now refuses to forward a PO that isn't director_approval.status ===
+  // 'approved' (see /forward_purchase_order), so this only ever attempts POs that
+  // are genuinely cleared — draft/pending/rejected POs are never candidates here.
   useEffect(() => {
     if (loading) return;
 
     const liveOrderNumbers = new Set(rows.map((flow) => safeTrim(flow.order_number)).filter(Boolean));
-    const missingApprovals = readPoApprovals().filter((record) =>
-      record.status !== 'rejected'
+    const missingApprovals = poApprovalRecords.filter((record) =>
+      record.directorApproval.status === 'approved'
       && Boolean(record.poNumber && record.prNumber && record.comparisonId)
       && !liveOrderNumbers.has(record.poNumber)
       && !reconciliationAttemptsRef.current.has(record.poNumber),
@@ -1512,7 +1567,6 @@ export default function PurchaseFlow() {
             throw new Error(result?.message || result?.error || `HTTP ${forwardResponse.status}`);
           }
 
-          markPoForwardedToPurchaseFlow(record.poNumber);
           forwardedCount += 1;
         } catch (error: any) {
           if (error?.name === 'AbortError') return;
@@ -1529,7 +1583,7 @@ export default function PurchaseFlow() {
 
     void reconcile();
     return () => controller.abort();
-  }, [loading, rows]);
+  }, [loading, rows, poApprovalRecords]);
 
   // After all rows are in view, fetch left-panel info row by row (in parallel)
   useEffect(() => {
@@ -2391,6 +2445,12 @@ export default function PurchaseFlow() {
                         <div className="px-3 py-4 text-center text-[10px] text-slate-500">No item details recorded for this PO.</div>
                       )}
                     </div>
+
+                    {approvalRecord?.directorApproval.status === 'approved' && (
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-center text-[10px] font-semibold text-emerald-900">
+                        {approvalRecord.directorApproval.staff_name || 'Director'} | {approvalRecord.directorApproval.staff_designation || 'Not recorded'} | {approvalRecord.directorApproval.approval_time || '—'} | {approvalRecord.directorApproval.approval_date ? formatDateDDMMYYYY(approvalRecord.directorApproval.approval_date) : '—'} | Approved
+                      </div>
+                    )}
 
                     <div className="flex items-center justify-between gap-3 text-[10px] text-slate-500">
                       <span>{ts ? `Updated: ${formatDateTime(ts)}` : ''}</span>

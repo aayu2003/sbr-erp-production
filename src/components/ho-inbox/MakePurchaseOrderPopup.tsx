@@ -14,6 +14,7 @@ import { type ComparativeModel } from '@/components/purchase/ComparativeStatemen
 import logoUrl from '@/Assets/3f-logo.png';
 import annexure2TermsRaw from '@/Assets/general-terms-annexure-2.txt?raw';
 import getBaseUrl from '@/lib/config';
+import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 
 type Props = {
   open: boolean;
@@ -28,6 +29,13 @@ type Props = {
   reviewOnly?: boolean;
   revisionMode?: boolean;
   documentStatus?: 'draft' | 'pending' | 'approved' | 'rejected';
+  directorApproval?: {
+    status: 'pending' | 'approved' | 'rejected';
+    staff_name?: string;
+    staff_designation?: string;
+    approval_time?: string;
+    approval_date?: string;
+  } | null;
 };
 
 const safe = (v: unknown) => String(v ?? '').trim();
@@ -832,6 +840,7 @@ export function MakePurchaseOrderPopup({
   reviewOnly = false,
   revisionMode = false,
   documentStatus = 'draft',
+  directorApproval = null,
 }: Props) {
   const printRef = useRef<HTMLDivElement>(null);
   const [workflowStep, setWorkflowStep] = useState<'details' | 'draft'>('details');
@@ -2332,6 +2341,11 @@ export function MakePurchaseOrderPopup({
       const payload: any = {
         comparison_id: comparisonId,
         pr_number: prNo,
+        item_details: (comparative.items || []).map((item) => ({
+          name: safe(item.partName) || 'Item not recorded',
+          uom: safe(item.uom),
+          quantity: item.qty,
+        })),
         purchase_quote: {
           ...(p1 as any),
           amendmentNo: effectiveAmendmentNo,
@@ -3868,6 +3882,19 @@ export function MakePurchaseOrderPopup({
                 <div><p className={`text-sm font-bold ${documentStatus === 'approved' ? 'text-emerald-800' : 'text-amber-800'}`}>{documentStatus === 'approved' ? 'Approved Purchase Order' : 'Draft Purchase Order'}{amendmentLabel ? ` · ${amendmentLabel}` : ''}</p><p className={`text-xs ${documentStatus === 'approved' ? 'text-emerald-700' : 'text-amber-700'}`}>{documentStatus === 'approved' ? `PO Number: ${effectivePoNo || 'Not recorded'}` : amendmentLabel ? `Review ${amendmentLabel} before saving and sending it for approval.` : 'Review all details before creating the final PO.'}</p></div>
                 <span className={`rounded-full px-3 py-1 text-xs font-black uppercase tracking-widest ${documentStatus === 'approved' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{documentStatus === 'approved' ? 'Approved' : 'Draft'}</span>
               </div>
+              {documentStatus === 'approved' && directorApproval?.status === 'approved' && (
+                <div className="mb-3 flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-white px-4 py-2 text-xs font-semibold text-emerald-900">
+                  <span>{directorApproval.staff_name || 'Director'}</span>
+                  <span className="text-emerald-300">|</span>
+                  <span>{directorApproval.staff_designation || 'Not recorded'}</span>
+                  <span className="text-emerald-300">|</span>
+                  <span>{directorApproval.approval_time || '—'}</span>
+                  <span className="text-emerald-300">|</span>
+                  <span>{directorApproval.approval_date ? formatDateDDMMYYYY(directorApproval.approval_date) : '—'}</span>
+                  <span className="text-emerald-300">|</span>
+                  <span className="font-black uppercase tracking-widest">Approved</span>
+                </div>
+              )}
               <div className="space-y-6">
                 {Array.from({ length: totalReportPages }, (_, index) => index + 1).map((pageNumber) => (
                   <section
