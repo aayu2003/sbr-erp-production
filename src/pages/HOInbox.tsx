@@ -222,6 +222,9 @@ type HOInboxProps = {
 const tcApproved = (item: ComparativeModel) =>
   safeTrim(item.tcStatus).toLowerCase() === 'approved' || Boolean(safeTrim(item.tcApprovedVendorId));
 const nfaApproved = (item: ComparativeModel) => safeTrim(item.nfaStatus).toLowerCase() === 'approved';
+const orderCreated = (item: ComparativeModel) =>
+  Boolean(safeTrim((item as any).poNo) || safeTrim((item as any).poCreatedAt));
+const forwardedToOrderCreation = (item: ComparativeModel) => Boolean(safeTrim((item as any).hoForwardedAt));
 
 export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInboxProps = {}) {
   const navigate = useNavigate();
@@ -352,9 +355,19 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
         // the row's "meta" (the full comparative model, once saved by
         // QuotationComparative.tsx/SprQuotationComparative.tsx) so everything
         // here is backend-derived.
+        let forwardedMap: Record<string, string> = {};
+        try {
+          const saved = window.localStorage.getItem('farmconnect.orderCreationForwarded.v1');
+          forwardedMap = saved ? JSON.parse(saved) : {};
+        } catch {
+          forwardedMap = {};
+        }
+
         const next: Record<string, ComparativeModel> = {};
         for (const m of withOrderStatus) {
-          next[m.indentId] = m;
+          next[m.indentId] = forwardedMap[m.indentId]
+            ? { ...m, hoForwardedAt: forwardedMap[m.indentId] } as ComparativeModel
+            : m;
         }
 
         if (!cancelled) setAll(next);
@@ -388,8 +401,8 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
   // ── Tab counts ─────────────────────────────────────────────────────────────
   const scopedInboxRows = useMemo(() => inboxRows.filter((row) => {
     if (orderTypeFilter && safeTrim(row.item.indent_type).toUpperCase() !== orderTypeFilter) return false;
-    if (view === 'approval') return !nfaApproved(row.item);
-    if (view === 'creation') return nfaApproved(row.item);
+    if (view === 'approval') return !orderCreated(row.item);
+    if (view === 'creation') return nfaApproved(row.item) && forwardedToOrderCreation(row.item) && !orderCreated(row.item);
     return true;
   }), [inboxRows, orderTypeFilter, view]);
 
@@ -431,14 +444,11 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
   }, [scopedInboxRows, activeTab, query]);
 
   const metrics = useMemo(() => {
-    const hasOrder = (item: ComparativeModel) =>
-      Boolean(safeTrim((item as any).poNo) || safeTrim((item as any).poCreatedAt));
-
     return {
       total: scopedInboxRows.length,
       pendingTc: scopedInboxRows.filter((row) => !tcApproved(row.item)).length,
       pendingNfa: scopedInboxRows.filter((row) => tcApproved(row.item) && !nfaApproved(row.item)).length,
-      orders: scopedInboxRows.filter((row) => hasOrder(row.item)).length,
+      orders: scopedInboxRows.filter((row) => orderCreated(row.item)).length,
     };
   }, [scopedInboxRows]);
 
@@ -463,7 +473,7 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
           <div>
             <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Procurement · {orderTypeFilter === 'SPR' ? 'Work Order' : 'Purchase Order'}</p>
             <h1 className="text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">{title || 'Order Approval Flow'}</h1>
-            <p className="mt-1 max-w-3xl text-sm text-slate-500">Track every {orderTypeFilter === 'SPR' ? 'service' : 'vendor'} comparative statement through TC approval, NFA approval and {orderTypeFilter === 'SPR' ? 'work' : 'purchase'} order creation.</p>
+            <p className="mt-1 max-w-3xl text-sm text-slate-500">{orderTypeFilter === 'SPR' && view === 'approval' ? 'Approve TC and NFA, then forward the approved comparative statement to WO Creation.' : `Track every ${orderTypeFilter === 'SPR' ? 'service' : 'vendor'} comparative statement through TC approval, NFA approval and ${orderTypeFilter === 'SPR' ? 'work' : 'purchase'} order creation.`}</p>
           </div>
         </div>
         <div className="rounded-xl border border-[#d7e4e0] bg-[#edf5f2] px-4 py-3 text-right">
@@ -477,7 +487,7 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
           { label: 'Comparative Statements', value: metrics.total, icon: FileText, tone: 'bg-slate-100 text-slate-700' },
           { label: 'Pending TC Approval', value: metrics.pendingTc, icon: ClipboardCheck, tone: 'bg-amber-50 text-amber-700' },
           { label: 'Pending NFA Approval', value: metrics.pendingNfa, icon: CheckCircle2, tone: 'bg-blue-50 text-blue-700' },
-          { label: `${orderTypeFilter === 'SPR' ? 'Work' : 'Purchase'} Orders Created`, value: metrics.orders, icon: ShoppingCart, tone: 'bg-[#edf5f2] text-[#0D3A35]' },
+          { label: orderTypeFilter === 'SPR' && view === 'approval' ? 'Ready for WO Creation' : `${orderTypeFilter === 'SPR' ? 'Work' : 'Purchase'} Orders Created`, value: orderTypeFilter === 'SPR' && view === 'approval' ? scopedInboxRows.filter((row) => nfaApproved(row.item)).length : metrics.orders, icon: ShoppingCart, tone: 'bg-[#edf5f2] text-[#0D3A35]' },
         ].map(({ label, value, icon: Icon, tone }, index) => (
           <div key={label} className={cn('flex items-center justify-between px-5 py-5', index > 0 && 'sm:border-l', index > 1 && 'sm:border-t xl:border-t-0', 'border-slate-200')}>
             <div><p className="text-[10px] font-bold uppercase tracking-[0.1em] text-slate-400">{label}</p><p className="mt-1 text-2xl font-black text-slate-950">{value}</p></div>
@@ -490,13 +500,13 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
         <div className="border-b border-slate-200 px-5 py-4">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div>
-              <h2 className="text-base font-bold text-slate-900">Vendor Comparative Statement Register</h2>
-              <p className="mt-0.5 text-xs text-slate-500">Comparative statement → TC approval → NFA approval → {orderTypeFilter === 'SPR' ? 'work' : 'purchase'} order.</p>
+              <h2 className="text-base font-bold text-slate-900">{orderTypeFilter === 'SPR' ? 'WO Comparative Statement Register' : 'Vendor Comparative Statement Register'}</h2>
+              <p className="mt-0.5 text-xs text-slate-500">Comparative Statement → TC Approval → NFA Approval → {orderTypeFilter === 'SPR' && view === 'approval' ? 'Forward to WO Creation' : `${orderTypeFilter === 'SPR' ? 'Work' : 'Purchase'} Order`}.</p>
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <label className="relative block min-w-[300px]">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PR, vendor, item or comparison" className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm font-medium text-slate-700 outline-none transition focus:border-[#0D3A35] focus:bg-white" />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${orderTypeFilter === 'SPR' ? 'SR, vendor, service' : 'PR, vendor, item'} or comparison`} className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm font-medium text-slate-700 outline-none transition focus:border-[#0D3A35] focus:bg-white" />
               </label>
               {!orderTypeFilter && <div className="flex min-w-max items-center rounded-xl border border-slate-200 bg-slate-50 p-1">
                 {visibleTabs.map((tab) => {
@@ -511,24 +521,34 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
 
         <div className="hidden grid-cols-[minmax(190px,1fr)_minmax(180px,1.15fr)_80px_80px_minmax(120px,.7fr)_minmax(120px,.7fr)_minmax(120px,.7fr)_minmax(250px,auto)] items-center border-b border-slate-200 bg-[#0D3A35] px-5 py-3 text-center text-[11px] font-bold uppercase tracking-[0.08em] text-white lg:grid">
           <span>Comparative Statement No.</span>
-          <span>Item Details</span>
+          <span>{orderTypeFilter === 'SPR' ? 'Service Details' : 'Item Details'}</span>
           <span>UoM</span>
           <span>Qty.</span>
-          <span>TC Approval</span>
-          <span>NFA Approval</span>
-          <span>{orderTypeFilter === 'SPR' ? 'Work Order' : 'Purchase Order'}</span>
+          {view === 'creation' ? (
+            <>
+              <span>Approved Vendor</span>
+              <span>Order Value</span>
+              <span>Forwarded On</span>
+            </>
+          ) : (
+            <>
+              <span>TC Approval</span>
+              <span>NFA Approval</span>
+              <span>{orderTypeFilter === 'SPR' && view === 'approval' ? 'WO Creation' : orderTypeFilter === 'SPR' ? 'Work Order' : 'Purchase Order'}</span>
+            </>
+          )}
           <span>Actions</span>
         </div>
 
         {loading ? (
           <div className="space-y-3 p-5">{[1, 2, 3].map((row) => <div key={row} className="h-16 animate-pulse rounded-xl bg-slate-100" />)}</div>
         ) : filteredRows.length === 0 ? (
-          <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><ClipboardCheck className="h-10 w-10 text-slate-300" /><p className="mt-4 font-bold text-slate-700">No HO records found</p><p className="mt-1 text-sm text-slate-400">{query ? 'Try a different search term or document type.' : activeTab === 'all' ? 'Forward a commercial comparison to populate this register.' : `No ${TAB_META[activeTab]?.full ?? activeTab} are available.`}</p></div>
+          <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><ClipboardCheck className="h-10 w-10 text-slate-300" /><p className="mt-4 font-bold text-slate-700">No {orderTypeFilter === 'SPR' ? 'WO approval' : 'HO'} records found</p><p className="mt-1 text-sm text-slate-400">{query ? 'Try a different search term or document type.' : activeTab === 'all' ? `Forward a ${orderTypeFilter === 'SPR' ? 'service' : 'commercial'} comparative statement to populate this register.` : `No ${TAB_META[activeTab]?.full ?? activeTab} are available.`}</p></div>
         ) : (
           <div className="divide-y divide-slate-200">
             {filteredRows.map((row) => {
               const isTarget = Boolean(openIndentId) && row.item.indentId === openIndentId;
-              return <ComparativeQuotationApprovalRow key={row.key} item={row.item} onOpen={(indentId) => navigate(`/ho/${indentId}`)} onUpdate={updateComparative} defaultOpen={isTarget} defaultTab={isTarget ? desiredTab : undefined} />;
+              return <ComparativeQuotationApprovalRow key={row.key} item={row.item} onOpen={(indentId) => navigate(`/ho/${indentId}`)} onUpdate={updateComparative} defaultOpen={isTarget} defaultTab={isTarget ? desiredTab : undefined} approvalFlowOnly={view === 'approval'} creationFlow={view === 'creation'} />;
             })}
           </div>
         )}

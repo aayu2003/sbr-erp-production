@@ -261,32 +261,6 @@ const clampPercent = (v: unknown) => {
   return Math.min(100, Math.max(0, n));
 };
 
-const baseForVendor = (c: ComparativeModel, vendorId: string) => {
-  const items = Array.isArray(c.items) ? c.items : [];
-  const q = (c.quotes || []).find((x: any) => String(x?.vendorId ?? '') === vendorId);
-  const unitById = (q as any)?.unitRateByItemId || {};
-  return items.reduce((sum, it: any) => sum + numOr0(unitById[it.id]) * numOr0(it.qty), 0);
-};
-
-const gstForVendor = (c: ComparativeModel, vendorId: string) => {
-  const items = Array.isArray(c.items) ? c.items : [];
-  const q = (c.quotes || []).find((x: any) => String(x?.vendorId ?? '') === vendorId);
-  const unitById = (q as any)?.unitRateByItemId || {};
-  return items.reduce((sum, it: any) => {
-    const base = numOr0(unitById[it.id]) * numOr0(it.qty);
-    const gst = (numOr0((it as any)?.gstPercent) / 100) * base;
-    return sum + gst;
-  }, 0);
-};
-
-const totalForVendor = (c: ComparativeModel, vendorId: string) => {
-  const base = baseForVendor(c, vendorId);
-  const freight = numOr0((c as any)?.freightCharges?.[vendorId]);
-  const other = numOr0((c as any)?.otherCharges?.[vendorId]);
-  const gst = gstForVendor(c, vendorId);
-  return base + freight + other + gst;
-};
-
 const DUMMY_COMPANY = {
   name: 'SAI BIORESOURCES PRIVATE LIMITED',
   line1: 'Khasra No.121/1, Amrit Dairy Farm',
@@ -319,12 +293,20 @@ const DOCUMENT_REQUIRED_OPTIONS = [
   'Inspection Release Note',
 ] as const;
 
+const WORK_DOCUMENT_REQUIRED_OPTIONS = [
+  'Tax Invoice',
+  'Measurement Sheet',
+  'Progress / Service Report',
+  'Work Completion Certificate',
+  'Statutory & Safety Compliance Records',
+] as const;
+
 const normalizeDocText = (v: unknown) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
 
-const selectedDocsFromText = (text: string) => {
+const selectedDocsFromText = (text: string, options: readonly string[] = DOCUMENT_REQUIRED_OPTIONS) => {
   const t = normalizeDocText(text);
-  const out = new Set<(typeof DOCUMENT_REQUIRED_OPTIONS)[number]>();
-  for (const opt of DOCUMENT_REQUIRED_OPTIONS) {
+  const out = new Set<string>();
+  for (const opt of options) {
     if (t.includes(normalizeDocText(opt))) out.add(opt);
   }
   return out;
@@ -340,11 +322,25 @@ const PURCHASE_FLOW_DOCUMENT_OPTIONS = [
   { value: 'Tax Invoice', label: 'Tax Invoice', mandatory: false },
 ] as const;
 
-const MANDATORY_PURCHASE_FLOW_DOCUMENT = PURCHASE_FLOW_DOCUMENT_OPTIONS[0].value;
+const WORK_FLOW_DOCUMENT_OPTIONS = [
+  { value: 'WO Acceptance', label: 'WO Acceptance', mandatory: true },
+  { value: 'Proforma Invoice', label: 'Proforma Invoice', mandatory: false },
+  { value: 'Inspection Report', label: 'Inspection Report', mandatory: false },
+  { value: 'Annexure', label: 'Annexure', mandatory: false },
+  { value: 'PRR', label: 'PRR', mandatory: false },
+  { value: 'Progress Report', label: 'Progress Report', mandatory: false },
+  { value: 'Work Completion Certificate', label: 'Work Completion Certificate', mandatory: false },
+  { value: 'Measurement Sheet', label: 'Measurement Sheet', mandatory: false },
+  { value: 'Tax Invoice', label: 'Tax Invoice', mandatory: false },
+] as const;
 
-const normalizePurchaseFlowDocuments = (value: unknown): string[] => {
+const orderFlowDocumentOptions = (isWorkOrder: boolean) => isWorkOrder
+  ? WORK_FLOW_DOCUMENT_OPTIONS
+  : PURCHASE_FLOW_DOCUMENT_OPTIONS;
+
+const normalizeOrderFlowDocuments = (value: unknown, isWorkOrder: boolean): string[] => {
   const supplied = Array.isArray(value) ? value.map(normalizeDocText) : [];
-  return PURCHASE_FLOW_DOCUMENT_OPTIONS
+  return orderFlowDocumentOptions(isWorkOrder)
     .filter((option) => option.mandatory || supplied.includes(normalizeDocText(option.value)))
     .map((option) => option.value);
 };
@@ -369,6 +365,114 @@ type CustomPoField = {
   id: string;
   label: string;
   value: string;
+};
+
+type EditableOrderLine = {
+  id: string;
+  sourceItemId?: string;
+  name: string;
+  description: string;
+  quantity: string;
+  uom: string;
+  unitRate: string;
+  gstPercent: string;
+};
+
+type EditableOrderCharge = {
+  id: string;
+  label: string;
+  amount: string;
+};
+
+const newEditableOrderLineId = () => `order_line_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+const newEditableOrderChargeId = () => `order_charge_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+const normalizeEditableOrderCharges = (value: unknown): EditableOrderCharge[] => {
+  if (!Array.isArray(value)) return [];
+  return value.map((row: any) => ({
+    id: safe(row?.id) || newEditableOrderChargeId(),
+    label: safe(row?.label) || safe(row?.name),
+    amount: String(row?.amount ?? row?.value ?? ''),
+  }));
+};
+
+const normalizeEditableOrderLines = (value: unknown): EditableOrderLine[] => {
+  if (!Array.isArray(value)) return [];
+  return value.map((line: any) => ({
+    id: safe(line?.id) || newEditableOrderLineId(),
+    sourceItemId: safe(line?.sourceItemId) || safe(line?.source_item_id) || undefined,
+    name: safe(line?.name) || safe(line?.partName) || safe(line?.itemName),
+    description: safe(line?.description) || safe(line?.specification),
+    quantity: String(line?.quantity ?? line?.qty ?? ''),
+    uom: safe(line?.uom),
+    unitRate: String(line?.unitRate ?? line?.unit_rate ?? line?.rate ?? ''),
+    gstPercent: String(line?.gstPercent ?? line?.gst_percent ?? ''),
+  }));
+};
+
+const editableOrderLinesFromComparative = (comparative: ComparativeModel | null, vendorId: string): EditableOrderLine[] => {
+  if (!comparative) return [];
+  const quote = (comparative.quotes || []).find((entry: any) => safe(entry?.vendorId) === vendorId) as any;
+  return (Array.isArray(comparative.items) ? comparative.items : []).map((item: any) => ({
+    id: safe(item?.id) || newEditableOrderLineId(),
+    sourceItemId: safe(item?.id) || undefined,
+    name: safe(item?.partName) || safe(item?.itemName),
+    description: safe(item?.description) || safe(item?.specification),
+    quantity: String(item?.qty ?? ''),
+    uom: safe(item?.uom),
+    unitRate: String(quote?.unitRateByItemId?.[item?.id] ?? ''),
+    gstPercent: String(item?.gstPercent ?? ''),
+  }));
+};
+
+const fetchLegacyOrderLinesFromComparative = async (
+  prNumber: string,
+  comparisonId: string,
+  vendorId: string,
+  signal?: AbortSignal,
+): Promise<EditableOrderLine[]> => {
+  const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+  if (!baseUrl || (!prNumber && !comparisonId) || !vendorId) return [];
+
+  const url = `${baseUrl}/purchase_flow/get_TC`;
+  const request = (method: 'GET' | 'POST') => fetch(url, {
+    method,
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  let response = await request('GET');
+  if (response.status === 405) response = await request('POST');
+  if (!response.ok) return [];
+
+  const payload: unknown = await response.json().catch(() => null);
+  const records = Array.isArray(payload) ? payload : [];
+  const record: any = records.find((entry: any) => (
+    (comparisonId && safe(entry?.comparison_id ?? entry?.comparision_id) === comparisonId)
+    || (prNumber && safe(entry?.pr_number) === prNumber)
+  ));
+  if (!record) return [];
+
+  const itemRows: any[] = Array.isArray(record?.item_row) ? record.item_row : [];
+  const selectedQuote: any = (Array.isArray(record?.quoters) ? record.quoters : [])
+    .find((quote: any) => safe(quote?.vendor_id) === vendorId);
+  const costing = selectedQuote?.item_costing && typeof selectedQuote.item_costing === 'object'
+    ? selectedQuote.item_costing
+    : {};
+
+  return itemRows.map((item: any) => {
+    const name = safe(item?.item_name) || safe(item?.name) || safe(item?.description);
+    const costRow: any = costing?.[name] || Object.entries(costing).find(([key]) => safe(key).toLowerCase() === name.toLowerCase())?.[1] || {};
+    return {
+      id: safe(item?.id) || safe(item?.item_id) || newEditableOrderLineId(),
+      sourceItemId: safe(item?.id) || safe(item?.item_id) || undefined,
+      name,
+      description: safe(item?.description) || safe(item?.specification),
+      quantity: String(item?.quantity ?? item?.qty ?? ''),
+      uom: safe(item?.UoM) || safe(item?.uom),
+      unitRate: String(costRow?.per_unit_costing ?? costRow?.unit_rate ?? ''),
+      gstPercent: String(item?.gst_percentage ?? item?.gstPercent ?? ''),
+    } satisfies EditableOrderLine;
+  });
 };
 
 type CommercialDraftRow = {
@@ -496,13 +600,15 @@ const formatPaymentTermsText = (installments: PaymentInstallment[]) => {
     .join('\n\n');
 };
 
-const formatLdPenaltyText = (perWeekPct: number, maxPct: number) => {
+const formatLdPenaltyText = (perWeekPct: number, maxPct: number, isWorkOrder = false) => {
   const perWeek = `${perWeekPct.toFixed(perWeekPct % 1 === 0 ? 0 : 2)}%`;
   const max = maxPct > 0 ? `${maxPct.toFixed(maxPct % 1 === 0 ? 0 : 2)}%` : '';
 
-  const line1 = `In the event of a delay in the delivery beyond the delivery timeline mentioned in the schedule, LD @ ${perWeek} of the PO value per week of delay for each calendar week or part thereof shall be applicable.`;
+  const line1 = isWorkOrder
+    ? `In the event of delay in completing the work beyond the agreed completion schedule, LD @ ${perWeek} of the WO value per week of delay or part thereof shall be applicable.`
+    : `In the event of a delay in the delivery beyond the delivery timeline mentioned in the schedule, LD @ ${perWeek} of the PO value per week of delay for each calendar week or part thereof shall be applicable.`;
   if (max) {
-    const line2 = `The LD penalty shall be subject to a maximum of ${max} of the total Basic Value of the Purchase Order.`;
+    const line2 = `The LD penalty shall be subject to a maximum of ${max} of the total Basic Value of the ${isWorkOrder ? 'Work Order' : 'Purchase Order'}.`;
     return `${line1}\n\n${line2}`;
   }
   return line1;
@@ -560,7 +666,7 @@ type Page1State = {
   customFields: CustomPoField[];
 };
 
-const defaultPage1 = (): Page1State => ({
+const defaultPage1 = (isWorkOrder = false): Page1State => ({
   poNo: '',
   amendmentNo: 0,
   poDate: formatYmd(new Date().toISOString()),
@@ -582,7 +688,7 @@ const defaultPage1 = (): Page1State => ({
   vendorPan: '',
   vendorLegalConstitution: '',
   paymentTerms: 'Due within 30 Days',
-  incoTerms: 'FOB',
+  incoTerms: isWorkOrder ? 'Not Applicable' : 'FOB',
   deliveryDate: formatYmd(new Date().toISOString()),
   shipToGstNo: extractAfterColon(DUMMY_COMPANY.gst),
   buyerPan: DUMMY_COMPANY.pan,
@@ -604,12 +710,13 @@ const defaultPage1 = (): Page1State => ({
   coverSalutation: 'Dear Sir,',
   coverOrderIntroduction: '',
   coverCommercialReference: '',
-  notes:
-    'The Delay penalty is applicable once the delivery period will be one week exceeded\nPlease send the original invoice to finance department along with a copy of purchase order\nAny Shipment and invoice without PO no will not be accepted.',
+  notes: isWorkOrder
+    ? 'Work shall commence only after issue of the Work Order and site clearance.\nSubmit invoices with the applicable measurement sheet / work completion certificate and a copy of the Work Order.\nAny work or invoice without a valid WO number will not be accepted.'
+    : 'The Delay penalty is applicable once the delivery period will be one week exceeded\nPlease send the original invoice to finance department along with a copy of purchase order\nAny Shipment and invoice without PO no will not be accepted.',
   preparedBy: '',
   verifiedBy: '',
   approvedBy: '',
-  requiredPurchaseDocuments: [MANDATORY_PURCHASE_FLOW_DOCUMENT],
+  requiredPurchaseDocuments: [orderFlowDocumentOptions(isWorkOrder)[0].value],
   customFields: [],
 });
 
@@ -649,35 +756,48 @@ type Page2State = {
   correspondenceAcceptance: string;
 };
 
-const defaultPage2 = (): Page2State => ({
-  supplierFinalQuotationNo: 'SABCO/20225-26/37',
+const defaultPage2 = (isWorkOrder = false): Page2State => ({
+  supplierFinalQuotationNo: isWorkOrder ? '' : 'SABCO/20225-26/37',
   supplierFinalQuotationDate: '',
-  scopeOfWork:
-    'Total SOW is inclusive of but not limited to the complete Preparation – Supply of Organic Manure as per supplier’s referred offer and Approved by the Buyer',
-  basisOfPrice:
-    'Ex – Works, Supplier’s Godown, C/o. Amriyt Agrotech, Jeora Village, Durg, Chhattisgarh.\nTransportation up to Project Site shall be in the scope of Buyer.',
+  scopeOfWork: isWorkOrder
+    ? 'The contractor shall execute the complete scope of service described in the approved Service Requisition and Comparative Statement, including labour, supervision, tools, safety compliance, testing and handover unless specifically excluded in this Work Order.'
+    : 'Total SOW is inclusive of but not limited to the complete Preparation – Supply of Organic Manure as per supplier’s referred offer and Approved by the Buyer',
+  basisOfPrice: isWorkOrder
+    ? 'Rates are firm for the complete contracted service and include labour, supervision, tools, equipment, travel and all incidental costs unless separately stated in this Work Order.'
+    : 'Ex – Works, Supplier’s Godown, C/o. Amriyt Agrotech, Jeora Village, Durg, Chhattisgarh.\nTransportation up to Project Site shall be in the scope of Buyer.',
   taxes: '',
   taxAutoCalcEnabled: false,
   taxGstPercent: '5',
   taxOtherPercent: '',
-  deliveryTimelines:
-    'Time is the essence of this contract. Supplier shall ensure that the Organic Manure is ready to be supplied from SBACO Godown, C/o. Amriyt Agrotech, Jeora Village, Durg, Chhattisgarh, within 3-4 Months from the date of order confirmation. Supplier shall submit all the necessary documents for approval immediately after PO confirmation. Supplier shall submit a detailed delivery schedule in line with technical team’s requirement.',
-  documents:
-    'The Supplier shall submit all necessary documents to the Buyer within 1-2 days of order confirmation, for Approval and clearance if required by the buyer.\nThe responsibility of getting documents approved from Buyer is in the scope of Supplier. The delay in submission of documents or getting the documents approved shall not be a reason for providing delivery extension.',
-  paymentTerms:
-    'a) 60% of the Basic order value shall be paid in advance upon acceptance of the Purchase Order (PO) and against submission of Performa invoice (PI).\n\nb) Balance 40% of the order value along with total applicable GST shall be paid on actual supply basis within 7-10 days from the date of receipt of material at site.',
+  deliveryTimelines: isWorkOrder
+    ? 'Time is the essence of this Work Order. The contractor shall mobilize and commence work on the agreed start date, follow the approved work schedule and complete all services by the specified completion date.'
+    : 'Time is the essence of this contract. Supplier shall ensure that the Organic Manure is ready to be supplied from SBACO Godown, C/o. Amriyt Agrotech, Jeora Village, Durg, Chhattisgarh, within 3-4 Months from the date of order confirmation. Supplier shall submit all the necessary documents for approval immediately after PO confirmation. Supplier shall submit a detailed delivery schedule in line with technical team’s requirement.',
+  documents: isWorkOrder
+    ? 'The contractor shall submit the work programme, statutory licences, safety documents, progress records, measurement sheets and completion documentation required for certification and payment.'
+    : 'The Supplier shall submit all necessary documents to the Buyer within 1-2 days of order confirmation, for Approval and clearance if required by the buyer.\nThe responsibility of getting documents approved from Buyer is in the scope of Supplier. The delay in submission of documents or getting the documents approved shall not be a reason for providing delivery extension.',
+  paymentTerms: isWorkOrder
+    ? 'Payment shall be released against certified work / service milestones, approved measurement sheets and a valid tax invoice, subject to statutory deductions and the terms of this Work Order.'
+    : 'a) 60% of the Basic order value shall be paid in advance upon acceptance of the Purchase Order (PO) and against submission of Performa invoice (PI).\n\nb) Balance 40% of the order value along with total applicable GST shall be paid on actual supply basis within 7-10 days from the date of receipt of material at site.',
   paymentAutoEnabled: false,
-  paymentInstallments: [
-    newInstallment({ percent: '60', label: 'of the basic order value shall be paid in advance upon acceptance of the Purchase Order (PO)' }),
-    newInstallment({ percent: '40', label: 'of the basic order value shall be paid on delivery / invoice submission (as applicable)' }),
-  ],
+  paymentInstallments: isWorkOrder
+    ? [
+        newInstallment({ percent: '90', label: 'of the certified work value shall be paid against approved measurement and invoice' }),
+        newInstallment({ percent: '10', label: 'shall be paid after completion certification / expiry of the agreed retention condition' }),
+      ]
+    : [
+        newInstallment({ percent: '60', label: 'of the basic order value shall be paid in advance upon acceptance of the Purchase Order (PO)' }),
+        newInstallment({ percent: '40', label: 'of the basic order value shall be paid on delivery / invoice submission (as applicable)' }),
+      ],
   installationSupport: 'NA',
-  inspection:
-    'Shall be in the scope of Buyer. Supplier has to inform regarding material readiness and shall raise the inspection call 1-2 days prior to material readiness.',
-  warranty:
-    'The Supplier guarantees that the Supplied Organic Manure material shall be new, and shall conform to the specifications and quality standards as agreed at the time of purchase.',
-  ldPenalty:
-    'In the event of a delay in the delivery of the Organic Manure beyond the delivery timeline mentioned in the schedule, LD @ 1% of the PO value per week of delay for each calendar week or part thereof shall be applicable. The LD penalty shall be subject to a maximum of 10% of the total Basic Value of the Purchase Order.',
+  inspection: isWorkOrder
+    ? 'Work shall be inspected and measured by the authorized representative of the Company. The contractor shall rectify any non-conforming work before completion certification.'
+    : 'Shall be in the scope of Buyer. Supplier has to inform regarding material readiness and shall raise the inspection call 1-2 days prior to material readiness.',
+  warranty: isWorkOrder
+    ? 'The contractor warrants that all services and workmanship shall conform to the approved scope, applicable standards and agreed quality requirements during the specified defect-liability / guarantee period.'
+    : 'The Supplier guarantees that the Supplied Organic Manure material shall be new, and shall conform to the specifications and quality standards as agreed at the time of purchase.',
+  ldPenalty: isWorkOrder
+    ? 'For delay in completing the contracted work beyond the agreed completion date, LD @ 1% of the WO value per week or part thereof shall apply, subject to a maximum of 10% of the basic Work Order value.'
+    : 'In the event of a delay in the delivery of the Organic Manure beyond the delivery timeline mentioned in the schedule, LD @ 1% of the PO value per week of delay for each calendar week or part thereof shall be applicable. The LD penalty shall be subject to a maximum of 10% of the total Basic Value of the Purchase Order.',
   ldAutoEnabled: false,
   ldPerWeekPercent: '1',
   ldMaxPercent: '10',
@@ -685,8 +805,9 @@ const defaultPage2 = (): Page2State => ({
     '1) Price breakup Annexure-1\n2) All the other terms are as per attached General terms and conditions Annexure 2.',
   siteBillingAddress:
     'SITE & BILLING ADDRESS:\n\nName of the Company: SAI BIORESOURCES PRIVATE LIMITED\nBuilding. No/Flat. No: Khasra No.121/1, Amrit Dairy Farm\nRoad/Street: Kachandur Dhour Road;\nVillage: Jeora,\nDistrict: Durg\nPin code: 491001\nGST No: 22ARPCS5442R1ZM\nName: Rajendra Shriringarpulate\nMobile Number: +91 79748 97686\nEmail: rajendra.s@saiobioenergy.com',
-  documentsRequired:
-    '1) Invoice\n2) Packing List\n3) Manufacturer\'s Guarantee Certificate\n4) Inspection Release Note\n5) Any Other Documents as may be needed at the time of supply & Handover.',
+  documentsRequired: isWorkOrder
+    ? '1) Tax Invoice\n2) Measurement Sheet\n3) Progress / Service Report\n4) Work Completion Certificate\n5) Statutory & Safety Compliance Records\n6) Any other document required for certification and handover.'
+    : '1) Invoice\n2) Packing List\n3) Manufacturer\'s Guarantee Certificate\n4) Inspection Release Note\n5) Any Other Documents as may be needed at the time of supply & Handover.',
   correspondenceCompanyName: 'SAI BIORESOURCES PRIVATE LIMITED',
   correspondenceStreet: 'Trendz Green, Plot No 80, Shilpi Valley',
   correspondenceArea: 'Madhapur, Hitech City',
@@ -695,10 +816,12 @@ const defaultPage2 = (): Page2State => ({
   correspondencePin: '500081',
   correspondenceContactPerson: 'Mr. V. Sharan Preeth',
   correspondencePhone: '+91-7013492364',
-  correspondenceAcknowledgement:
-    'Please acknowledge the receipt of this PO and send us a signed & Stamped copy of this PO as a token of acceptance within 2 working days from the date of the PO.',
-  correspondenceAcceptance:
-    "If acceptance is not received in 2 working days, this PO shall be deemed to be accepted by the supplier in totality and shall strictly be adhered to. The buyer may withdraw this at any point of time, at their own discretion. All the T&C shall be as per the buyer's standard. There shall be no deviations acceptable unless confirmed in writing by the buyer. In case of any ambiguity between terms and conditions mentioned in the purchase order vis-a-vis the general terms and conditions of the buyer, terms based on the buyer's discretion shall prevail and shall be adhered to, accepted by the supplier.",
+  correspondenceAcknowledgement: isWorkOrder
+    ? 'Please acknowledge receipt of this WO and return a signed and stamped copy as acceptance within 2 working days from the Work Order date.'
+    : 'Please acknowledge the receipt of this PO and send us a signed & Stamped copy of this PO as a token of acceptance within 2 working days from the date of the PO.',
+  correspondenceAcceptance: isWorkOrder
+    ? "If acceptance is not received within 2 working days, this WO shall be deemed accepted by the contractor in full. No deviation from the Work Order or the Company's terms is valid unless confirmed in writing by the Company."
+    : "If acceptance is not received in 2 working days, this PO shall be deemed to be accepted by the supplier in totality and shall strictly be adhered to. The buyer may withdraw this at any point of time, at their own discretion. All the T&C shall be as per the buyer's standard. There shall be no deviations acceptable unless confirmed in writing by the buyer. In case of any ambiguity between terms and conditions mentioned in the purchase order vis-a-vis the general terms and conditions of the buyer, terms based on the buyer's discretion shall prevail and shall be adhered to, accepted by the supplier.",
 });
 
 type Page3State = {
@@ -889,11 +1012,22 @@ export function MakePurchaseOrderPopup({
   revisionMode = false,
   documentStatus = 'draft',
 }: Props) {
+  const isWorkOrder = safe((comparative as any)?.indent_type).toUpperCase() === 'SPR';
+  const orderLabel = isWorkOrder ? 'Work Order' : 'Purchase Order';
+  const orderShortLabel = isWorkOrder ? 'WO' : 'PO';
+  const sourceRequestShortLabel = isWorkOrder ? 'SR' : 'PR';
+  const partyLabel = isWorkOrder ? 'Contractor' : 'Supplier';
+  const lineLabel = isWorkOrder ? 'Service' : 'Item';
+  const flowLabel = isWorkOrder ? 'Work Flow' : 'Purchase Flow';
+  const selectedOrderDocuments = orderFlowDocumentOptions(isWorkOrder);
+  const requiredCommercialDocuments = isWorkOrder ? WORK_DOCUMENT_REQUIRED_OPTIONS : DOCUMENT_REQUIRED_OPTIONS;
   const printRef = useRef<HTMLDivElement>(null);
   const [workflowStep, setWorkflowStep] = useState<'details' | 'draft'>('details');
   const [page, setPage] = useState(1);
-  const [p1, setP1] = useState<Page1State>(() => defaultPage1());
-  const [p2, setP2] = useState<Page2State>(() => defaultPage2());
+  const [p1, setP1] = useState<Page1State>(() => defaultPage1(isWorkOrder));
+  const [p2, setP2] = useState<Page2State>(() => defaultPage2(isWorkOrder));
+  const [orderLines, setOrderLines] = useState<EditableOrderLine[]>([]);
+  const [orderCharges, setOrderCharges] = useState<EditableOrderCharge[]>([]);
   const [preAnnexurePage, setPreAnnexurePage] = useState<Page3State>(() => defaultPreAnnexurePage());
   const [p3, setP3] = useState<Page3State>(() => defaultPage3());
   const [additionalAnnexures, setAdditionalAnnexures] = useState<Page3State[]>([]);
@@ -1543,6 +1677,15 @@ export function MakePurchaseOrderPopup({
     if (didHydrateDraftRef.current) return;
     didHydrateDraftRef.current = true;
 
+    // The popup is usually mounted before a comparison is selected, so its
+    // first render cannot determine whether it will create a PO or a WO.
+    // Reset here, after the SPR/PR context is known, to avoid carrying PO
+    // defaults into a new Work Order (or values from a previously opened order).
+    setP1(defaultPage1(isWorkOrder));
+    setP2(defaultPage2(isWorkOrder));
+    setOrderLines(editableOrderLinesFromComparative(comparative, resolvedVendorId));
+    setOrderCharges([]);
+
     const ac = new AbortController();
 
     (async () => {
@@ -1579,15 +1722,38 @@ export function MakePurchaseOrderPopup({
           setDraftStatus('idle');
           setPage(1);
           setP1({
-            ...defaultPage1(),
+            ...defaultPage1(isWorkOrder),
             ...(pq as any),
             poNo: orderNo,
-            requiredPurchaseDocuments: normalizePurchaseFlowDocuments(
+            requiredPurchaseDocuments: normalizeOrderFlowDocuments(
               (pq as any)?.requiredPurchaseDocuments ?? (pq as any)?.required_purchase_documents,
+              isWorkOrder,
             ),
             customFields: Array.isArray((pq as any)?.customFields) ? (pq as any).customFields : [],
           } as Page1State);
-          setP2({ ...defaultPage2(), ...(baseTerms as any) } as Page2State);
+          setP2({ ...defaultPage2(isWorkOrder), ...(baseTerms as any) } as Page2State);
+          const storedOrderLines = normalizeEditableOrderLines(
+            (pq as any)?.orderLines ?? (pq as any)?.order_lines ?? (draft as any)?.item_details,
+          );
+          const currentComparativeLines = editableOrderLinesFromComparative(comparative, resolvedVendorId);
+          const hasSavedRates = storedOrderLines.some((line) => safe(line.unitRate));
+          const hasCurrentRates = currentComparativeLines.some((line) => safe(line.unitRate));
+          const legacyComparativeLines = !hasSavedRates && !hasCurrentRates
+            ? await fetchLegacyOrderLinesFromComparative(prNo, comparisonId, resolvedVendorId, ac.signal)
+            : [];
+          if (ac.signal.aborted) return;
+          setOrderLines(
+            hasSavedRates
+              ? storedOrderLines
+              : hasCurrentRates
+                ? currentComparativeLines
+                : legacyComparativeLines.length
+                  ? legacyComparativeLines
+                  : storedOrderLines,
+          );
+          setOrderCharges(normalizeEditableOrderCharges(
+            (pq as any)?.orderCharges ?? (pq as any)?.order_charges ?? (draft as any)?.order_charges,
+          ));
           setPreAnnexurePage({ ...defaultPreAnnexurePage(), ...storedPreAnnexurePage });
           setP3({
             ...defaultPage3(),
@@ -1616,7 +1782,7 @@ export function MakePurchaseOrderPopup({
       } catch (e: any) {
         if (e?.name === 'AbortError') return;
         // No draft on the server (or it failed to load) — start fresh below.
-        console.error('Failed to load PO draft from server:', e);
+        console.error(`Failed to load ${orderShortLabel} draft from server:`, e);
       }
 
       setDraftStatus('idle');
@@ -1629,7 +1795,7 @@ export function MakePurchaseOrderPopup({
     })();
 
     return () => ac.abort();
-  }, [open, comparative, resolvedVendorId, prNumber, reviewOnly, revisionMode, poNumber]);
+  }, [open, comparative, resolvedVendorId, prNumber, reviewOnly, revisionMode, poNumber, isWorkOrder]);
 
   useEffect(() => {
     return () => {
@@ -1922,8 +2088,11 @@ export function MakePurchaseOrderPopup({
 
   const computedTotals = useMemo(() => {
     if (!comparative || !resolvedVendorId) return null;
-    const base = baseForVendor(comparative, resolvedVendorId);
-    const gst = gstForVendor(comparative, resolvedVendorId);
+    const base = orderLines.reduce((sum, line) => sum + numOr0(line.quantity) * numOr0(line.unitRate), 0);
+    const gst = orderLines.reduce((sum, line) => {
+      const lineBase = numOr0(line.quantity) * numOr0(line.unitRate);
+      return sum + (numOr0(line.gstPercent) / 100) * lineBase;
+    }, 0);
     const freight = numOr0((comparative as any)?.freightCharges?.[resolvedVendorId]);
     const other = numOr0((comparative as any)?.otherCharges?.[resolvedVendorId]);
 
@@ -1932,15 +2101,17 @@ export function MakePurchaseOrderPopup({
     const autoGst = (gstPct / 100) * base;
     const autoOther = (otherPct / 100) * base;
     const autoTax = autoGst + autoOther;
+    const customCharges = orderCharges.reduce((sum, row) => sum + numOr0(row.amount), 0);
 
     const tax = p2.taxAutoCalcEnabled ? autoTax : gst;
-    const gross = base + tax + freight + other;
+    const gross = base + tax + freight + other + customCharges;
 
     return {
       base,
       gst, // original (item-based) GST
       freight,
       other,
+      customCharges,
       tax, // effective tax used in totals
       gross,
       auto: {
@@ -1951,7 +2122,7 @@ export function MakePurchaseOrderPopup({
         taxAmount: autoTax,
       },
     };
-  }, [comparative, resolvedVendorId, p2.taxAutoCalcEnabled, p2.taxGstPercent, p2.taxOtherPercent]);
+  }, [comparative, resolvedVendorId, orderLines, orderCharges, p2.taxAutoCalcEnabled, p2.taxGstPercent, p2.taxOtherPercent]);
 
   const taxesAutoText = useMemo(() => {
     const gstPct = clampPercent(p2.taxGstPercent);
@@ -1974,8 +2145,8 @@ export function MakePurchaseOrderPopup({
   const ldAutoText = useMemo(() => {
     const perWeekPct = clampPercent(p2.ldPerWeekPercent);
     const maxPct = clampPercent(p2.ldMaxPercent);
-    return formatLdPenaltyText(perWeekPct, maxPct);
-  }, [p2.ldPerWeekPercent, p2.ldMaxPercent]);
+    return formatLdPenaltyText(perWeekPct, maxPct, isWorkOrder);
+  }, [p2.ldPerWeekPercent, p2.ldMaxPercent, isWorkOrder]);
 
   const ldAmounts = useMemo(() => {
     const base = computedTotals?.base ?? 0;
@@ -1991,14 +2162,14 @@ export function MakePurchaseOrderPopup({
       no: 1,
       particular: 'Reference',
       details: [
-        `Supplier's final quotation No.: ${safe(p2.supplierFinalQuotationNo) || 'Not Recorded'}`,
+        `${partyLabel}'s final quotation No.: ${safe(p2.supplierFinalQuotationNo) || 'Not Recorded'}`,
         `Quotation Date: ${safe(p2.supplierFinalQuotationDate) || 'Not Recorded'}`,
       ].join('\n'),
     },
     { no: 2, particular: 'Scope of Work', details: safe(p2.scopeOfWork) || '—' },
     { no: 3, particular: 'Basis of Price', details: safe(p2.basisOfPrice) || '—' },
     { no: 4, particular: 'Taxes', details: safe(p2.taxAutoCalcEnabled ? taxesAutoText : p2.taxes) || '—' },
-    { no: 5, particular: 'Delivery Timelines', details: safe(p2.deliveryTimelines) || '—' },
+    { no: 5, particular: isWorkOrder ? 'Work Schedule / Completion Timeline' : 'Delivery Timelines', details: safe(p2.deliveryTimelines) || '—' },
     { no: 6, particular: 'Documents', details: safe(p2.documents) || '—' },
     { no: 7, particular: 'Payment Terms', details: safe(p2.paymentAutoEnabled ? paymentAutoText : p2.paymentTerms) || '—' },
     { no: 8, particular: 'Installation Support', details: safe(p2.installationSupport) || '—' },
@@ -2091,7 +2262,7 @@ export function MakePurchaseOrderPopup({
   const effectivePoNo = safe(p1.poNo) || safe(poNumber);
   const effectiveAmendmentNo = Math.max(0, numOr0(p1.amendmentNo), numOr0(amendmentNumber));
   const amendmentLabel = effectiveAmendmentNo > 0 ? `Amendment - ${effectiveAmendmentNo}` : '';
-  const poReferenceLabel = `PO No. · ${effectivePoNo || 'Draft'}${amendmentLabel ? ` · ${amendmentLabel}` : ''}`;
+  const poReferenceLabel = `${orderShortLabel} No. · ${effectivePoNo || 'Draft'}${amendmentLabel ? ` · ${amendmentLabel}` : ''}`;
 
   const sanitizeForFilename = (name: string) =>
     String(name ?? '')
@@ -2100,7 +2271,7 @@ export function MakePurchaseOrderPopup({
       .replace(/\s+/g, ' ');
 
   const openPrintWindowAndAppendPages = (opts?: { title?: string }) => {
-    const title = sanitizeForFilename(opts?.title || 'Purchase Order');
+    const title = sanitizeForFilename(opts?.title || orderLabel);
 
     // Keep a live reference to the generated document. Passing `noopener` here
     // makes some browsers return `null`, which prevents the print flow from
@@ -2281,7 +2452,7 @@ export function MakePurchaseOrderPopup({
     const pageRoots = Array.from(
       printRef.current?.querySelectorAll<HTMLElement>('[data-po-page="true"]') || []
     );
-    if (!pageRoots.length) throw new Error('Purchase Order pages are not ready.');
+    if (!pageRoots.length) throw new Error(`${orderLabel} pages are not ready.`);
     if (document.fonts?.ready) await document.fonts.ready;
 
     const canvases: HTMLCanvasElement[] = [];
@@ -2315,7 +2486,7 @@ export function MakePurchaseOrderPopup({
       normalized.width = captured.width;
       normalized.height = Math.round(captured.width * (297 / 210));
       const context = normalized.getContext('2d');
-      if (!context) throw new Error('Unable to prepare the A4 Purchase Order page.');
+      if (!context) throw new Error(`Unable to prepare the A4 ${orderLabel} page.`);
       context.fillStyle = '#ffffff';
       context.fillRect(0, 0, normalized.width, normalized.height);
       context.drawImage(captured, 0, 0, normalized.width, normalized.height);
@@ -2332,18 +2503,18 @@ export function MakePurchaseOrderPopup({
     const w = window.open('', '_blank');
     try {
       if (!w) {
-        showTemporaryError('Please allow pop-ups to print the Purchase Order.');
+        showTemporaryError(`Please allow pop-ups to print the ${orderLabel}.`);
         return;
       }
 
       w.document.open();
-      w.document.write('<!doctype html><html><head><title>Preparing Purchase Order…</title></head><body style="font-family:Arial,sans-serif;padding:24px">Preparing A4 pages…</body></html>');
+      w.document.write(`<!doctype html><html><head><title>Preparing ${orderLabel}…</title></head><body style="font-family:Arial,sans-serif;padding:24px">Preparing A4 pages…</body></html>`);
       w.document.close();
 
       const canvases = await capturePoPageCanvases();
-      const title = sanitizeForFilename(opts?.title || effectivePoNo || 'Purchase Order');
+      const title = sanitizeForFilename(opts?.title || effectivePoNo || orderLabel);
       const pageImages = canvases
-        .map((canvas) => `<section class="print-page"><img src="${canvas.toDataURL('image/png')}" alt="Purchase Order page" /></section>`)
+        .map((canvas) => `<section class="print-page"><img src="${canvas.toDataURL('image/png')}" alt="${orderLabel} page" /></section>`)
         .join('');
 
       w.document.open();
@@ -2393,13 +2564,13 @@ export function MakePurchaseOrderPopup({
       w.onafterprint = closer;
       globalThis.setTimeout(() => w.print(), 100);
     } catch (error) {
-      console.error('Failed to prepare Purchase Order print', error);
+      console.error(`Failed to prepare ${orderLabel} print`, error);
       try {
         w?.close();
       } catch {
         // ignore
       }
-      showTemporaryError('Failed to prepare the Purchase Order for printing.');
+      showTemporaryError(`Failed to prepare the ${orderLabel} for printing.`);
     } finally {
       setPrinting(false);
     }
@@ -2421,12 +2592,13 @@ export function MakePurchaseOrderPopup({
         pdf.addImage(imageData, 'PNG', 0, 0, pageWidth, pageHeight, undefined, 'FAST');
       }
 
-      const filename = sanitizeForFilename(effectivePoNo || 'purchase-order') || 'purchase-order';
+      const fallbackFilename = isWorkOrder ? 'work-order' : 'purchase-order';
+      const filename = sanitizeForFilename(effectivePoNo || fallbackFilename) || fallbackFilename;
       pdf.save(`${filename}.pdf`);
-      toast.success('Purchase Order PDF downloaded.');
+      toast.success(`${orderLabel} PDF downloaded.`);
     } catch (error) {
-      console.error('Failed to generate Purchase Order PDF', error);
-      showTemporaryError('Failed to generate the Purchase Order PDF.');
+      console.error(`Failed to generate ${orderLabel} PDF`, error);
+      showTemporaryError(`Failed to generate the ${orderLabel} PDF.`);
     } finally {
       setPrinting(false);
     }
@@ -2465,14 +2637,17 @@ export function MakePurchaseOrderPopup({
         body: JSON.stringify({
           pr_number: prNo,
           vendor_id: vId,
+          order_type: isWorkOrder ? 'SPR' : 'PR',
           comparison_id: comparisonId || undefined,
           purchase_quote: {
             ...(p1 as any),
             amendmentNo: effectiveAmendmentNo,
-            required_purchase_documents: normalizePurchaseFlowDocuments(p1.requiredPurchaseDocuments),
+            required_purchase_documents: normalizeOrderFlowDocuments(p1.requiredPurchaseDocuments, isWorkOrder),
             vendor_id: vId,
             vendor_name: vendorNameFromComparative,
             authorizedSealAttachedAt: authorizedSealAttachedAt || '',
+            order_lines: orderLines,
+            order_charges: orderCharges,
           },
           other_terms_and_condition: {
             ...(p2 as any),
@@ -2489,7 +2664,7 @@ export function MakePurchaseOrderPopup({
       }
 
       setDraftStatus('saved');
-      toast.success('PO draft saved');
+      toast.success(`${orderShortLabel} draft saved`);
     } catch (e: any) {
       setDraftStatus('idle');
       const msg = String(e?.message ?? e ?? '').trim();
@@ -2502,12 +2677,21 @@ export function MakePurchaseOrderPopup({
 
   const reviewDraft = () => {
     const missing: string[] = [];
-    if (!safe(p1.poDate)) missing.push('PO Date');
-    if (!safe(p1.deliveryDate)) missing.push('Delivery Date');
+    if (!safe(p1.poDate)) missing.push(`${orderShortLabel} Date`);
+    if (!safe(p1.deliveryDate)) missing.push(isWorkOrder ? 'Completion Date' : 'Delivery Date');
     if (!safe(p1.clusterId)) missing.push('Cluster');
-    if (!safe(p1.buyerBuildingNo)) missing.push('Buyer registered office');
+    if (!safe(p1.buyerBuildingNo)) missing.push(isWorkOrder ? 'Company / work-site address' : 'Buyer registered office');
     if (!safe(p1.paymentTerms)) missing.push('Payment Terms');
-    if (!safe(p2.supplierFinalQuotationNo)) missing.push('Supplier Quotation No.');
+    if (!safe(p2.supplierFinalQuotationNo)) missing.push(`${partyLabel} Quotation No.`);
+    if (isWorkOrder && orderLines.length === 0) missing.push('at least one Service row');
+    if (isWorkOrder) {
+      const incompleteIndex = orderLines.findIndex((line) => (
+        !safe(line.name) || !safe(line.uom) || numOr0(line.quantity) <= 0 || !safe(line.unitRate)
+      ));
+      if (incompleteIndex >= 0) missing.push(`Service row ${incompleteIndex + 1}`);
+      const incompleteChargeIndex = orderCharges.findIndex((row) => !safe(row.label) || !safe(row.amount));
+      if (incompleteChargeIndex >= 0) missing.push(`Total row ${incompleteChargeIndex + 1}`);
+    }
     if (missing.length) {
       showTemporaryError(`Complete required fields: ${missing.join(', ')}`);
       return;
@@ -2586,13 +2770,16 @@ export function MakePurchaseOrderPopup({
       const payload: any = {
         comparison_id: comparisonId,
         pr_number: prNo,
+        order_type: isWorkOrder ? 'SPR' : 'PR',
         purchase_quote: {
           ...(p1 as any),
           amendmentNo: effectiveAmendmentNo,
-          required_purchase_documents: normalizePurchaseFlowDocuments(p1.requiredPurchaseDocuments),
+          required_purchase_documents: normalizeOrderFlowDocuments(p1.requiredPurchaseDocuments, isWorkOrder),
           vendor_id: finalVendorId,
           vendor_name: vendorNameFromComparative,
           authorizedSealAttachedAt: authorizedSealAttachedAt || '',
+          order_lines: orderLines,
+          order_charges: orderCharges,
         },
         other_terms_and_condition: {
           ...(p2 as any),
@@ -2600,13 +2787,20 @@ export function MakePurchaseOrderPopup({
           ...annexurePayload,
         },
         annexure_details: buildAnnexureDetailsPayload(structuredAnnexures),
-        // Snapshot of item name/uom/qty at save time, so the PO Approvals queue
-        // and Purchase Flow's left panel can show what's being ordered without
+        // Snapshot of line name/uom/qty at save time, so the approvals queue
+        // and order flow can show what's being ordered without
         // re-joining back to the comparative statement.
-        item_details: ((comparative as any)?.items || []).map((item: any) => ({
-          name: safe(item?.partName) || 'Item not recorded',
-          uom: safe(item?.uom),
-          quantity: Number(item?.qty ?? 0) || 0,
+        item_details: orderLines.map((item) => ({
+          name: safe(item.name) || `${lineLabel} not recorded`,
+          description: safe(item.description),
+          uom: safe(item.uom),
+          quantity: numOr0(item.quantity),
+          unit_rate: numOr0(item.unitRate),
+          gst_percent: numOr0(item.gstPercent),
+        })),
+        order_charges: orderCharges.map((row) => ({
+          label: safe(row.label),
+          amount: numOr0(row.amount),
         })),
       };
 
@@ -2627,7 +2821,7 @@ export function MakePurchaseOrderPopup({
       onClose();
     } catch (e: any) {
       const msg = String(e?.message ?? e ?? '').trim();
-      showTemporaryError(`Failed to save purchase order${msg ? `: ${msg}` : ''}`);
+      showTemporaryError(`Failed to save ${orderLabel.toLowerCase()}${msg ? `: ${msg}` : ''}`);
     } finally {
       setSavingPo(false);
     }
@@ -2636,14 +2830,44 @@ export function MakePurchaseOrderPopup({
   if (!open) return null;
   if (!comparative) return null;
 
-  const qForVendor = (comparative.quotes || []).find((x: any) => safe(x?.vendorId) === resolvedVendorId);
+  const updateOrderLine = (id: string, patch: Partial<EditableOrderLine>) => {
+    setOrderLines((current) => current.map((line) => line.id === id ? { ...line, ...patch } : line));
+  };
 
-  const toggleRequiredDoc = (doc: (typeof DOCUMENT_REQUIRED_OPTIONS)[number], shouldInclude: boolean) => {
-    const current = selectedDocsFromText(String(p2.documentsRequired ?? ''));
+  const addOrderLine = () => {
+    setOrderLines((current) => [...current, {
+      id: newEditableOrderLineId(),
+      name: '',
+      description: '',
+      quantity: '1',
+      uom: '',
+      unitRate: '0',
+      gstPercent: p2.taxGstPercent || '0',
+    }]);
+  };
+
+  const removeOrderLine = (id: string) => {
+    setOrderLines((current) => current.filter((line) => line.id !== id));
+  };
+
+  const addOrderCharge = () => {
+    setOrderCharges((current) => [...current, { id: newEditableOrderChargeId(), label: '', amount: '0' }]);
+  };
+
+  const updateOrderCharge = (id: string, patch: Partial<EditableOrderCharge>) => {
+    setOrderCharges((current) => current.map((row) => row.id === id ? { ...row, ...patch } : row));
+  };
+
+  const removeOrderCharge = (id: string) => {
+    setOrderCharges((current) => current.filter((row) => row.id !== id));
+  };
+
+  const toggleRequiredDoc = (doc: string, shouldInclude: boolean) => {
+    const current = selectedDocsFromText(String(p2.documentsRequired ?? ''), requiredCommercialDocuments);
     if (shouldInclude) current.add(doc);
     else current.delete(doc);
 
-    const ordered = DOCUMENT_REQUIRED_OPTIONS.filter((x) => current.has(x));
+    const ordered = requiredCommercialDocuments.filter((x) => current.has(x));
     setP2Field('documentsRequired', formatDocsList(ordered) as any);
   };
 
@@ -2713,8 +2937,8 @@ export function MakePurchaseOrderPopup({
       particular: 'Reference',
       detail: (
         <div className="grid gap-3 md:grid-cols-2">
-          <div><label className={formLabelClass}>Supplier Quotation No.</label><Input value={p2.supplierFinalQuotationNo} onChange={(event) => setP2Field('supplierFinalQuotationNo', event.target.value)} className={formInputClass} /></div>
-          <div><label className={formLabelClass}>Supplier Quotation Date</label><Input type="date" value={p2.supplierFinalQuotationDate} onChange={(event) => setP2Field('supplierFinalQuotationDate', event.target.value)} className={formInputClass} /></div>
+          <div><label className={formLabelClass}>{partyLabel} Quotation No.</label><Input value={p2.supplierFinalQuotationNo} onChange={(event) => setP2Field('supplierFinalQuotationNo', event.target.value)} className={formInputClass} /></div>
+          <div><label className={formLabelClass}>{partyLabel} Quotation Date</label><Input type="date" value={p2.supplierFinalQuotationDate} onChange={(event) => setP2Field('supplierFinalQuotationDate', event.target.value)} className={formInputClass} /></div>
         </div>
       ),
     },
@@ -2734,7 +2958,7 @@ export function MakePurchaseOrderPopup({
         </div>
       ),
     },
-    { no: 5, particular: 'Delivery Timelines', detail: editClauseTextarea('deliveryTimelines', p2.deliveryTimelines, 'Enter delivery timelines...', 92) },
+    { no: 5, particular: isWorkOrder ? 'Work Schedule / Completion Timeline' : 'Delivery Timelines', detail: editClauseTextarea('deliveryTimelines', p2.deliveryTimelines, isWorkOrder ? 'Enter mobilization, work schedule and completion timeline...' : 'Enter delivery timelines...', 92) },
     { no: 6, particular: 'Documents', detail: editClauseTextarea('documents', p2.documents, 'Enter documents / approval requirements...', 92) },
     {
       no: 7,
@@ -2780,7 +3004,7 @@ export function MakePurchaseOrderPopup({
       detail: (
         <div className="space-y-3">
           <div className="grid gap-2 sm:grid-cols-2">
-            {DOCUMENT_REQUIRED_OPTIONS.map((doc) => <label key={doc} className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-xs font-medium text-slate-700"><Checkbox checked={selectedDocsFromText(p2.documentsRequired).has(doc)} onCheckedChange={(checked) => toggleRequiredDoc(doc, Boolean(checked))} />{doc}</label>)}
+            {requiredCommercialDocuments.map((doc) => <label key={doc} className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-xs font-medium text-slate-700"><Checkbox checked={selectedDocsFromText(p2.documentsRequired, requiredCommercialDocuments).has(doc)} onCheckedChange={(checked) => toggleRequiredDoc(doc, Boolean(checked))} />{doc}</label>)}
           </div>
           {editClauseTextarea('documentsRequired', p2.documentsRequired, 'Enter documents required...', 92)}
         </div>
@@ -2794,23 +3018,23 @@ export function MakePurchaseOrderPopup({
         <style>{ANNEXURE_RICH_TEXT_CSS}</style>
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
           <h3 className="font-bold text-slate-900">Order Reference</h3>
-          <p className="mt-0.5 text-xs text-slate-500">Enter the primary PO, vendor and delivery information.</p>
+          <p className="mt-0.5 text-xs text-slate-500">Enter the primary {orderShortLabel}, {isWorkOrder ? 'contractor and work schedule' : 'vendor and delivery'} information.</p>
         </div>
         <div className="grid gap-4 p-5 md:grid-cols-2 lg:grid-cols-3">
           <div>
-            <label className={formLabelClass}>PO Number</label>
+            <label className={formLabelClass}>{orderShortLabel} Number</label>
             <Input value={p1.poNo} readOnly placeholder="Auto-generated on creation" className={`${formInputClass} bg-slate-50 text-slate-500`} />
           </div>
           <div>
-            <label className={formLabelClass}>PO Date *</label>
+            <label className={formLabelClass}>{orderShortLabel} Date *</label>
             <Input type="date" value={p1.poDate} onChange={(event) => setP1Field('poDate', event.target.value)} className={formInputClass} />
           </div>
           <div>
-            <label className={formLabelClass}>Approved Vendor</label>
+            <label className={formLabelClass}>Approved {partyLabel}</label>
             <Input value={vendorNameFromComparative || resolvedVendorId} readOnly className={`${formInputClass} bg-slate-50 font-semibold`} />
           </div>
           <div>
-            <label className={formLabelClass}>Vendor Code</label>
+            <label className={formLabelClass}>{partyLabel} Code</label>
             <Input value={resolvedVendorId} readOnly className={`${formInputClass} bg-slate-50 font-mono`} />
           </div>
           <div>
@@ -2827,7 +3051,7 @@ export function MakePurchaseOrderPopup({
             </Select>
           </div>
           <div>
-            <label className={formLabelClass}>Delivery Date *</label>
+            <label className={formLabelClass}>{isWorkOrder ? 'Completion Date' : 'Delivery Date'} *</label>
             <Input type="date" value={p1.deliveryDate} onChange={(event) => setP1Field('deliveryDate', event.target.value)} className={formInputClass} />
           </div>
           <div>
@@ -2835,20 +3059,20 @@ export function MakePurchaseOrderPopup({
             <Input value={p1.paymentTerms} onChange={(event) => setP1Field('paymentTerms', event.target.value)} className={formInputClass} />
           </div>
           <div>
-            <label className={formLabelClass}>Inco Terms</label>
+            <label className={formLabelClass}>{isWorkOrder ? 'Work Location / Basis' : 'Inco Terms'}</label>
             <Input value={p1.incoTerms} onChange={(event) => setP1Field('incoTerms', event.target.value)} className={formInputClass} />
           </div>
         </div>
         <div className="border-t border-slate-200 px-5 py-5">
           <div className="mb-3">
-            <h4 className="text-sm font-bold text-slate-900">Required Purchase Documents</h4>
+            <h4 className="text-sm font-bold text-slate-900">Required {orderLabel} Documents</h4>
             <p className="mt-1 text-xs text-slate-500">
-              Selected documents will be available as upload steps in Purchase Flow. PO Acceptance is mandatory.
+              Selected documents will be available as upload steps in {flowLabel}. {orderShortLabel} Acceptance is mandatory.
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {PURCHASE_FLOW_DOCUMENT_OPTIONS.map((option) => {
-              const selectedDocuments = normalizePurchaseFlowDocuments(p1.requiredPurchaseDocuments);
+            {selectedOrderDocuments.map((option) => {
+              const selectedDocuments = normalizeOrderFlowDocuments(p1.requiredPurchaseDocuments, isWorkOrder);
               const checked = selectedDocuments.includes(option.value);
               return (
                 <label
@@ -2866,7 +3090,7 @@ export function MakePurchaseOrderPopup({
                       const next = new Set(selectedDocuments);
                       if (nextChecked) next.add(option.value);
                       else next.delete(option.value);
-                      setP1Field('requiredPurchaseDocuments', normalizePurchaseFlowDocuments([...next]));
+                      setP1Field('requiredPurchaseDocuments', normalizeOrderFlowDocuments([...next], isWorkOrder));
                     }}
                   />
                   <span className="flex-1">{option.label}</span>
@@ -2885,42 +3109,50 @@ export function MakePurchaseOrderPopup({
       <section style={{ order: 4 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-5 py-4">
           <div>
-            <h3 className="font-bold text-slate-900">Item Details</h3>
-            <p className="mt-0.5 text-xs text-slate-500">Items and approved rates carried forward from the comparative statement.</p>
+            <h3 className="font-bold text-slate-900">{lineLabel} Details</h3>
+            <p className="mt-0.5 text-xs text-slate-500">{lineLabel}s and approved rates carried forward from the comparative statement.</p>
           </div>
-          <span className="rounded-full bg-[#e7f3ef] px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-[#0D3A35]">
-            {(comparative.items || []).length} {(comparative.items || []).length === 1 ? 'Item' : 'Items'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full bg-[#e7f3ef] px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-[#0D3A35]">
+              {orderLines.length} {orderLines.length === 1 ? lineLabel : `${lineLabel}s`}
+            </span>
+            {isWorkOrder ? (
+              <Button type="button" variant="outline" size="sm" onClick={addOrderLine} className="h-9 gap-1.5 border-[#b9d2cc] text-[#0D3A35] hover:bg-[#eef7f4]">
+                <Plus className="h-4 w-4" /> Add Service Row
+              </Button>
+            ) : null}
+          </div>
         </div>
-        {(comparative.items || []).length ? (
+        {orderLines.length ? (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] border-collapse text-sm">
+            <table className="w-full min-w-[900px] border-collapse text-sm">
               <thead className="bg-[#0D3A35] text-white">
                 <tr>
                   <th className="w-16 border-r border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">S. No.</th>
-                  <th className="px-4 py-3 text-center text-[11px] font-bold uppercase tracking-wider">Item Description</th>
+                  <th className="px-4 py-3 text-center text-[11px] font-bold uppercase tracking-wider">{lineLabel} Description</th>
                   <th className="w-28 border-l border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">Qty</th>
                   <th className="w-28 border-l border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">UOM</th>
                   <th className="w-36 border-l border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">Unit Rate</th>
                   <th className="w-40 border-l border-white/20 px-3 py-3 text-center text-[11px] font-bold uppercase tracking-wider">Total</th>
+                  {isWorkOrder ? <th className="w-16 border-l border-white/20 px-2 py-3 text-center text-[11px] font-bold uppercase tracking-wider">Action</th> : null}
                 </tr>
               </thead>
               <tbody>
-                {(comparative.items || []).map((item: any, index: number) => {
-                  const quantity = numOr0(item?.qty);
-                  const unitRate = numOr0((qForVendor as any)?.unitRateByItemId?.[item?.id]);
+                {orderLines.map((item, index) => {
+                  const quantity = numOr0(item.quantity);
+                  const unitRate = numOr0(item.unitRate);
                   const lineAmount = quantity * unitRate;
                   return (
-                    <tr key={safe(item?.id) || index} className="border-b border-slate-200 last:border-b-0">
+                    <tr key={item.id} className="border-b border-slate-200 last:border-b-0">
                       <td className="border-r border-slate-200 px-3 py-3 text-center font-semibold text-slate-500">{index + 1}</td>
                       <td className="px-4 py-3">
-                        <div className="font-semibold text-slate-900">{safe(item?.partName) || safe(item?.itemName) || 'Item not recorded'}</div>
-                        {safe(item?.description) || safe(item?.specification) ? <div className="mt-1 whitespace-pre-line text-xs leading-5 text-slate-500">{safe(item?.description) || safe(item?.specification)}</div> : null}
+                        {isWorkOrder ? <div className="space-y-2"><Input value={item.name} onChange={(event) => updateOrderLine(item.id, { name: event.target.value })} placeholder="Service description" className="h-10 rounded-lg border-slate-200" /><Input value={item.description} onChange={(event) => updateOrderLine(item.id, { description: event.target.value })} placeholder="Scope / specification (optional)" className="h-9 rounded-lg border-slate-200 text-xs" /></div> : <><div className="font-semibold text-slate-900">{item.name || `${lineLabel} not recorded`}</div>{item.description ? <div className="mt-1 whitespace-pre-line text-xs leading-5 text-slate-500">{item.description}</div> : null}</>}
                       </td>
-                      <td className="border-l border-slate-200 px-3 py-3 text-center font-semibold tabular-nums text-slate-900">{quantity}</td>
-                      <td className="border-l border-slate-200 px-3 py-3 text-center font-medium text-slate-700">{safe(item?.uom) || '—'}</td>
-                      <td className="border-l border-slate-200 px-3 py-3 text-center font-semibold tabular-nums text-slate-900">{unitRate ? inr(unitRate) : '—'}</td>
+                      <td className="border-l border-slate-200 px-3 py-3 text-center font-semibold tabular-nums text-slate-900">{isWorkOrder ? <Input inputMode="decimal" value={item.quantity} onChange={(event) => updateOrderLine(item.id, { quantity: event.target.value })} className="h-10 rounded-lg border-slate-200 text-center" /> : quantity}</td>
+                      <td className="border-l border-slate-200 px-3 py-3 text-center font-medium text-slate-700">{isWorkOrder ? <Input value={item.uom} onChange={(event) => updateOrderLine(item.id, { uom: event.target.value })} placeholder="UOM" className="h-10 rounded-lg border-slate-200 text-center" /> : item.uom || '—'}</td>
+                      <td className="border-l border-slate-200 px-3 py-3 text-center font-semibold tabular-nums text-slate-900">{isWorkOrder ? <Input inputMode="decimal" value={item.unitRate} onChange={(event) => updateOrderLine(item.id, { unitRate: event.target.value })} className="h-10 rounded-lg border-slate-200 text-center" /> : unitRate ? inr(unitRate) : '—'}</td>
                       <td className="border-l border-slate-200 px-3 py-3 text-center font-bold tabular-nums text-[#0D3A35]">{unitRate ? inr(lineAmount) : '—'}</td>
+                      {isWorkOrder ? <td className="border-l border-slate-200 px-2 py-3 text-center"><Button type="button" variant="ghost" size="icon" onClick={() => removeOrderLine(item.id)} className="h-9 w-9 text-red-500 hover:bg-red-50 hover:text-red-600" aria-label={`Remove service row ${index + 1}`}><Trash2 className="h-4 w-4" /></Button></td> : null}
                     </tr>
                   );
                 })}
@@ -2929,17 +3161,42 @@ export function MakePurchaseOrderPopup({
                 <tr>
                   <td colSpan={5} className="border-b border-r border-slate-300 px-4 py-2 text-left text-xs font-bold text-slate-700">Basic Order Value</td>
                   <td className="border-b border-slate-300 px-3 py-2 text-center font-bold tabular-nums text-slate-900">{computedTotals ? inr(computedTotals.base) : '—'}</td>
+                  {isWorkOrder ? <td className="border-b border-l border-slate-300" /> : null}
                 </tr>
                 <tr>
                   <td colSpan={5} className="border-b border-r border-slate-300 px-4 py-2 text-left text-xs font-bold text-slate-700">GST</td>
                   <td className="border-b border-slate-300 px-3 py-2 text-center font-bold tabular-nums text-slate-900">{computedTotals ? inr(computedTotals.tax) : '—'}</td>
+                  {isWorkOrder ? <td className="border-b border-l border-slate-300" /> : null}
                 </tr>
+                {computedTotals?.freight ? <tr><td colSpan={5} className="border-b border-r border-slate-300 px-4 py-2 text-left text-xs font-bold text-slate-700">Freight Charges</td><td className="border-b border-slate-300 px-3 py-2 text-center font-bold tabular-nums text-slate-900">{inr(computedTotals.freight)}</td>{isWorkOrder ? <td className="border-b border-l border-slate-300" /> : null}</tr> : null}
+                {computedTotals?.other ? <tr><td colSpan={5} className="border-b border-r border-slate-300 px-4 py-2 text-left text-xs font-bold text-slate-700">Other Charges</td><td className="border-b border-slate-300 px-3 py-2 text-center font-bold tabular-nums text-slate-900">{inr(computedTotals.other)}</td>{isWorkOrder ? <td className="border-b border-l border-slate-300" /> : null}</tr> : null}
+                {isWorkOrder ? orderCharges.map((row, index) => (
+                  <tr key={row.id} className="bg-white">
+                    <td colSpan={5} className="border-b border-r border-slate-300 px-3 py-2">
+                      <Input value={row.label} onChange={(event) => updateOrderCharge(row.id, { label: event.target.value })} placeholder={`Additional charge / deduction ${index + 1}`} className="h-10 rounded-lg border-slate-200 font-semibold" />
+                    </td>
+                    <td className="border-b border-slate-300 px-3 py-2">
+                      <Input inputMode="decimal" value={row.amount} onChange={(event) => updateOrderCharge(row.id, { amount: event.target.value })} placeholder="0.00" className="h-10 rounded-lg border-slate-200 text-center font-semibold tabular-nums" />
+                    </td>
+                    <td className="border-b border-l border-slate-300 px-2 py-2 text-center">
+                      <Button type="button" variant="ghost" size="icon" onClick={() => removeOrderCharge(row.id)} className="h-9 w-9 text-red-500 hover:bg-red-50 hover:text-red-600" aria-label={`Remove additional total row ${index + 1}`}><Trash2 className="h-4 w-4" /></Button>
+                    </td>
+                  </tr>
+                )) : null}
+                {isWorkOrder ? (
+                  <tr className="bg-white">
+                    <td colSpan={7} className="border-b border-slate-300 px-3 py-2">
+                      <Button type="button" variant="outline" size="sm" onClick={addOrderCharge} className="h-9 gap-1.5 border-[#b9d2cc] text-[#0D3A35] hover:bg-[#eef7f4]"><Plus className="h-4 w-4" /> Add Total Row</Button>
+                    </td>
+                  </tr>
+                ) : null}
                 <tr>
                   <td colSpan={5} className="border-r border-slate-300 px-4 py-2 text-left text-xs font-black text-[#0D3A35]">Total Order Value</td>
                   <td className="px-3 py-2 text-center font-black tabular-nums text-[#0D3A35]">{computedTotals ? inr(computedTotals.gross) : '—'}</td>
+                  {isWorkOrder ? <td className="border-l border-slate-300" /> : null}
                 </tr>
                 <tr className="bg-white">
-                  <td colSpan={6} className="px-4 py-2.5 text-center text-xs font-semibold italic text-slate-700">
+                  <td colSpan={isWorkOrder ? 7 : 6} className="px-4 py-2.5 text-center text-xs font-semibold italic text-slate-700">
                     Amount - {amountInIndianWords(computedTotals?.gross || 0)}
                   </td>
                 </tr>
@@ -2947,7 +3204,7 @@ export function MakePurchaseOrderPopup({
             </table>
           </div>
         ) : (
-          <div className="px-5 py-8 text-center text-sm text-slate-500">No approved item details were found in this comparative statement.</div>
+          <div className="px-5 py-8 text-center text-sm text-slate-500">No {lineLabel.toLowerCase()} rows added.{isWorkOrder ? ' Use “Add Service Row” to create one.' : ''}</div>
         )}
       </section>
 
@@ -2955,16 +3212,16 @@ export function MakePurchaseOrderPopup({
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="font-bold text-slate-900">Supplier’s Registered Details</h3>
+              <h3 className="font-bold text-slate-900">{partyLabel}’s Registered Details</h3>
               <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${supplierDetailsLoading ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
                 {supplierDetailsLoading ? 'Loading vendor data…' : 'Auto-filled'}
               </span>
             </div>
           </div>
           <div className="grid gap-4 p-5 sm:grid-cols-2">
-            <div className="sm:col-span-2"><label className={formLabelClass}>Supplier’s Name</label><Input value={p1.vendorName} onChange={(event) => setP1Field('vendorName', event.target.value)} placeholder={vendorNameFromComparative} className={formInputClass} /></div>
+            <div className="sm:col-span-2"><label className={formLabelClass}>{partyLabel}’s Name</label><Input value={p1.vendorName} onChange={(event) => setP1Field('vendorName', event.target.value)} placeholder={vendorNameFromComparative} className={formInputClass} /></div>
             <div className="sm:col-span-2"><label className={formLabelClass}>Registered Address</label><textarea value={p1.vendorAddr1} onChange={(event) => setP1Field('vendorAddr1', event.target.value)} className={formTextareaClass} /></div>
-            <div><label className={formLabelClass}>Name</label><Input value={p1.vendorContactName} onChange={(event) => setP1Field('vendorContactName', event.target.value)} placeholder="Supplier contact person" className={formInputClass} /></div>
+            <div><label className={formLabelClass}>Name</label><Input value={p1.vendorContactName} onChange={(event) => setP1Field('vendorContactName', event.target.value)} placeholder={`${partyLabel} contact person`} className={formInputClass} /></div>
             <div><label className={formLabelClass}>State / UT</label><Input value={p1.vendorState} onChange={(event) => setP1Field('vendorState', event.target.value)} className={formInputClass} /></div>
             <div className="sm:col-span-2"><label className={formLabelClass}>Place of Business</label><Input value={p1.vendorPlaceOfBusiness} onChange={(event) => setP1Field('vendorPlaceOfBusiness', event.target.value)} className={formInputClass} /></div>
             <div><label className={formLabelClass}>Mobile Number</label><Input value={p1.vendorMobile} onChange={(event) => setP1Field('vendorMobile', event.target.value)} className={formInputClass} /></div>
@@ -2998,17 +3255,17 @@ export function MakePurchaseOrderPopup({
       <section style={{ order: 6 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
           <h3 className="font-bold text-slate-900">Commercial Terms</h3>
-          <p className="mt-0.5 text-xs text-slate-500">These details will appear in the PO and its annexures.</p>
+          <p className="mt-0.5 text-xs text-slate-500">These details will appear in the {orderShortLabel} and its annexures.</p>
         </div>
         <div className="hidden">
-          <div><label className={formLabelClass}>Supplier Quotation No. *</label><Input value={p2.supplierFinalQuotationNo} onChange={(event) => setP2Field('supplierFinalQuotationNo', event.target.value)} className={formInputClass} /></div>
-          <div><label className={formLabelClass}>Supplier Quotation Date</label><Input type="date" value={p2.supplierFinalQuotationDate} onChange={(event) => setP2Field('supplierFinalQuotationDate', event.target.value)} className={formInputClass} /></div>
+          <div><label className={formLabelClass}>{partyLabel} Quotation No. *</label><Input value={p2.supplierFinalQuotationNo} onChange={(event) => setP2Field('supplierFinalQuotationNo', event.target.value)} className={formInputClass} /></div>
+          <div><label className={formLabelClass}>{partyLabel} Quotation Date</label><Input type="date" value={p2.supplierFinalQuotationDate} onChange={(event) => setP2Field('supplierFinalQuotationDate', event.target.value)} className={formInputClass} /></div>
           <div className="md:col-span-2"><label className={formLabelClass}>Scope of Work</label><textarea value={p2.scopeOfWork} onChange={(event) => setP2Field('scopeOfWork', event.target.value)} className={formTextareaClass} /></div>
           <div className="md:col-span-2"><label className={formLabelClass}>Basis of Price</label><textarea value={p2.basisOfPrice} onChange={(event) => setP2Field('basisOfPrice', event.target.value)} className={formTextareaClass} /></div>
           <div><label className={formLabelClass}>GST %</label><Input inputMode="decimal" value={p2.taxGstPercent} onChange={(event) => { setP2Field('taxGstPercent', event.target.value); setP2Field('taxAutoCalcEnabled', true); }} className={formInputClass} /></div>
           <div><label className={formLabelClass}>Other Tax %</label><Input inputMode="decimal" value={p2.taxOtherPercent} onChange={(event) => { setP2Field('taxOtherPercent', event.target.value); setP2Field('taxAutoCalcEnabled', true); }} className={formInputClass} /></div>
           <div className="md:col-span-2"><label className={formLabelClass}>Tax Terms</label><textarea value={p2.taxAutoCalcEnabled ? taxesAutoText : p2.taxes} onChange={(event) => setP2Field('taxes', event.target.value)} readOnly={p2.taxAutoCalcEnabled} className={`${formTextareaClass} ${p2.taxAutoCalcEnabled ? 'bg-slate-50' : ''}`} /></div>
-          <div className="md:col-span-2"><label className={formLabelClass}>Delivery Timelines</label><textarea value={p2.deliveryTimelines} onChange={(event) => setP2Field('deliveryTimelines', event.target.value)} className={formTextareaClass} /></div>
+          <div className="md:col-span-2"><label className={formLabelClass}>{isWorkOrder ? 'Work Schedule / Completion Timeline' : 'Delivery Timelines'}</label><textarea value={p2.deliveryTimelines} onChange={(event) => setP2Field('deliveryTimelines', event.target.value)} className={formTextareaClass} /></div>
           <div className="md:col-span-2"><label className={formLabelClass}>Documents</label><textarea value={p2.documents} onChange={(event) => setP2Field('documents', event.target.value)} className={formTextareaClass} /></div>
 
           <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
@@ -3064,9 +3321,9 @@ export function MakePurchaseOrderPopup({
           <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
             <label className={formLabelClass}>Documents Required</label>
             <div className="mb-3 grid gap-2 sm:grid-cols-2">
-              {DOCUMENT_REQUIRED_OPTIONS.map((doc) => (
+              {requiredCommercialDocuments.map((doc) => (
                 <label key={doc} className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs font-medium text-slate-700">
-                  <Checkbox checked={selectedDocsFromText(p2.documentsRequired).has(doc)} onCheckedChange={(checked) => toggleRequiredDoc(doc, Boolean(checked))} />
+                  <Checkbox checked={selectedDocsFromText(p2.documentsRequired, requiredCommercialDocuments).has(doc)} onCheckedChange={(checked) => toggleRequiredDoc(doc, Boolean(checked))} />
                   {doc}
                 </label>
               ))}
@@ -3141,7 +3398,7 @@ export function MakePurchaseOrderPopup({
 
         <div className="border-t border-slate-200 bg-slate-50 p-5">
           <div className="mb-4">
-            <h3 className="font-bold text-slate-900">Delivery of Documents Correspondence</h3>
+            <h3 className="font-bold text-slate-900">{isWorkOrder ? 'Work Documentation Correspondence' : 'Delivery of Documents Correspondence'}</h3>
             <p className="mt-0.5 text-xs text-slate-500">This correspondence is printed immediately after the Commercial Terms table.</p>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
@@ -3162,13 +3419,13 @@ export function MakePurchaseOrderPopup({
       <section style={{ order: 3 }}>
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
-            <h3 className="font-bold text-slate-900">PO Covering Letter</h3>
-            <p className="mt-0.5 text-xs text-slate-500">Enter the attention, project, subject and formal order communication shown on the Purchase Order.</p>
+            <h3 className="font-bold text-slate-900">{orderShortLabel} Covering Letter</h3>
+            <p className="mt-0.5 text-xs text-slate-500">Enter the attention, project, subject and formal order communication shown on the {orderLabel}.</p>
           </div>
           <div className="grid gap-4 p-5 sm:grid-cols-2">
             <div><label className={formLabelClass}>Kind Attention</label><Input value={p1.coverKindAttention || ''} onChange={(event) => setP1Field('coverKindAttention', event.target.value)} placeholder="Mr. / Ms. and designation" className={formInputClass} /></div>
             <div><label className={formLabelClass}>Project</label><Input value={p1.coverProject || ''} onChange={(event) => setP1Field('coverProject', event.target.value)} placeholder="Project name" className={formInputClass} /></div>
-            <div className="sm:col-span-2"><label className={formLabelClass}>Subject</label><Input value={p1.coverSubject || ''} onChange={(event) => setP1Field('coverSubject', event.target.value)} placeholder="Purchase Order for supply of..." className={formInputClass} /></div>
+            <div className="sm:col-span-2"><label className={formLabelClass}>Subject</label><Input value={p1.coverSubject || ''} onChange={(event) => setP1Field('coverSubject', event.target.value)} placeholder={isWorkOrder ? 'Work Order for execution of...' : 'Purchase Order for supply of...'} className={formInputClass} /></div>
             <div className="sm:col-span-2"><label className={formLabelClass}>Salutation</label><Input value={p1.coverSalutation || ''} onChange={(event) => setP1Field('coverSalutation', event.target.value)} placeholder="Dear Sir," className={formInputClass} /></div>
             <div className="sm:col-span-2"><label className={formLabelClass}>Order Introduction</label><textarea value={p1.coverOrderIntroduction || ''} onChange={(event) => setP1Field('coverOrderIntroduction', event.target.value)} placeholder="Kindly consider this as our official order..." className={`${formTextareaClass} min-h-[100px]`} /></div>
             <div className="sm:col-span-2"><label className={formLabelClass}>Commercial Reference / Order Paragraph</label><textarea value={p1.coverCommercialReference || ''} onChange={(event) => setP1Field('coverCommercialReference', event.target.value)} placeholder="With reference to various discussions held with the supplier..." className={`${formTextareaClass} min-h-[130px]`} /></div>
@@ -3179,7 +3436,7 @@ export function MakePurchaseOrderPopup({
       <section style={{ order: 5 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
           <h3 className="font-bold text-slate-900">Authorization</h3>
-          <p className="mt-0.5 text-xs text-slate-500">Signatory details shown after the item table in the Draft PO.</p>
+          <p className="mt-0.5 text-xs text-slate-500">Signatory details shown after the {lineLabel.toLowerCase()} table in the Draft {orderShortLabel}.</p>
         </div>
         <div className="grid gap-4 p-5 md:grid-cols-3">
           <div><label className={formLabelClass}>Prepared By</label><Input value={p1.preparedBy} onChange={(event) => setP1Field('preparedBy', event.target.value)} className={formInputClass} /></div>
@@ -3194,7 +3451,7 @@ export function MakePurchaseOrderPopup({
         <style>{ANNEXURE_RICH_TEXT_CSS}</style>
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
           <h3 className="font-bold text-slate-900">Additional Clauses &amp; Tables</h3>
-          <p className="mt-0.5 text-xs text-slate-500">Independent PO content printed on dedicated pages immediately before Annexure-I.</p>
+          <p className="mt-0.5 text-xs text-slate-500">Independent {orderShortLabel} content printed on dedicated pages immediately before Annexure-I.</p>
         </div>
 
         <div className="grid gap-4 border-b border-slate-200 bg-white p-5 md:grid-cols-[minmax(0,1fr)_220px]">
@@ -3536,7 +3793,7 @@ export function MakePurchaseOrderPopup({
       <section style={{ order: 9 }} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
           <h3 className="font-bold text-slate-900">Annexure - {legalAnnexureNumber}</h3>
-          <p className="mt-0.5 text-xs text-slate-500">Complete General Terms and Conditions attached to the Purchase Order.</p>
+          <p className="mt-0.5 text-xs text-slate-500">Complete General Terms and Conditions attached to the {orderLabel}.</p>
         </div>
         <div className="grid gap-4 p-5">
           <div><label className={formLabelClass}>Annexure Title</label><Input value={withAnnexureNumber(p4.annexureTitle, defaultPage4().annexureTitle, legalAnnexureNumber)} onChange={(event) => setP4Field('annexureTitle', event.target.value)} className={formInputClass} /></div>
@@ -3578,8 +3835,8 @@ export function MakePurchaseOrderPopup({
 
   const renderPoReportFooter = (pageNumber: number, label: string) => (
     <div className="mt-5 grid grid-cols-3 border-t border-slate-300 pt-2 text-[8px] text-slate-500">
-      <span>System-generated Purchase Order</span>
-      <span className="text-center">PO No.: {effectivePoNo || 'Draft'}{amendmentLabel ? ` · ${amendmentLabel}` : ''}</span>
+      <span>System-generated {orderLabel}</span>
+      <span className="text-center">{orderShortLabel} No.: {effectivePoNo || 'Draft'}{amendmentLabel ? ` · ${amendmentLabel}` : ''}</span>
       <span className="text-right">{label} · Page {pageNumber} of {totalReportPages}</span>
     </div>
   );
@@ -3592,7 +3849,7 @@ export function MakePurchaseOrderPopup({
     return (
       <div className="po-report-sheet po-terms-report-sheet po-draft-font-11 mx-auto flex h-[1123px] min-h-[1123px] max-h-[1123px] w-[794px] max-w-full flex-col overflow-hidden border border-slate-300 bg-white p-5 font-sans text-[11px] shadow-sm">
         {renderPoSectionHeader(
-          continued ? 'Purchase Order — Terms & Conditions (Continued)' : 'Purchase Order — Terms & Conditions',
+          continued ? `${orderLabel} — Terms & Conditions (Continued)` : `${orderLabel} — Terms & Conditions`,
           poReferenceLabel
         )}
         {rows.length ? <div className="border border-gray-300">
@@ -3648,7 +3905,7 @@ export function MakePurchaseOrderPopup({
       <Fragment>
         <div className="mt-4 border border-slate-300 px-5 py-4 text-[11px] text-slate-900">
           <h3 className="mb-3 text-[12px] font-extrabold uppercase underline underline-offset-2">
-            Delivery of Documents Correspondence:
+            {isWorkOrder ? 'Work Documentation Correspondence:' : 'Delivery of Documents Correspondence:'}
           </h3>
           <div className="grid grid-cols-[145px_12px_minmax(0,1fr)] gap-y-1 leading-5">
             {correspondenceRows.map(([label, value]) => (
@@ -3689,7 +3946,7 @@ export function MakePurchaseOrderPopup({
   };
 
   const reportPageLabel = (pageNumber: number) => {
-    if (pageNumber === 1) return 'Purchase Order';
+    if (pageNumber === 1) return orderLabel;
     if (pageNumber < preAnnexureStartPage) {
       return pageNumber === 2 ? 'Terms & Conditions' : 'Terms & Conditions — Continued';
     }
@@ -3710,14 +3967,14 @@ export function MakePurchaseOrderPopup({
   const renderPageContent = (p: number) =>
     p === 1 ? (
       <div className="po-report-sheet po-draft-font-11 mx-auto min-h-[1123px] w-[794px] max-w-full border border-slate-300 bg-white p-5 font-sans text-[11px] shadow-sm">
-        {renderPoReportHeader(effectiveAmendmentNo > 0 ? `Purchase Order — ${amendmentLabel}` : 'Purchase Order', 'Commercial order and supply details')}
+        {renderPoReportHeader(effectiveAmendmentNo > 0 ? `${orderLabel} — ${amendmentLabel}` : orderLabel, isWorkOrder ? 'Service scope, schedule and commercial details' : 'Commercial order and supply details')}
 
         {/* ── PO REFERENCE BLOCK ── */}
         <div className="mb-4 grid grid-cols-2 border-l border-t border-slate-300 sm:grid-cols-4">
           {[
-            ['PO Number', `${effectivePoNo || 'Draft'}${amendmentLabel ? ` · ${amendmentLabel}` : ''}`],
-            ['PO Date', p1.poDate || '—'],
-            ['Vendor Code', resolvedVendorId || '—'],
+            [`${orderShortLabel} Number`, `${effectivePoNo || 'Draft'}${amendmentLabel ? ` · ${amendmentLabel}` : ''}`],
+            [`${orderShortLabel} Date`, p1.poDate || '—'],
+            [`${partyLabel} Code`, resolvedVendorId || '—'],
             ['Cluster', selectedCluster ? safe(selectedCluster?.cluster_name) || safe(selectedCluster?.name) || safe(selectedCluster?.cluster_id) || safe(selectedCluster?.id) : p1.clusterId || '—'],
           ].map(([label, value]) => (
             <div key={label} className="border-b border-r border-slate-300 px-3 py-2.5">
@@ -3731,10 +3988,10 @@ export function MakePurchaseOrderPopup({
         <div className="grid grid-cols-2 gap-0 border border-gray-300 mb-4">
           <div className="border-r border-gray-300">
             <div className="bg-[#0D3A35] py-1.5 text-center text-[10px] font-bold tracking-widest text-white">
-              SUPPLIER DETAILS
+              {partyLabel.toUpperCase()} DETAILS
             </div>
             <div className="min-h-[210px] p-3 text-[11px] leading-5 text-gray-900">
-              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">Supplier’s Name:</span><span>{p1.vendorName || vendorNameFromComparative || '—'}</span></div>
+              <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">{partyLabel}’s Name:</span><span>{p1.vendorName || vendorNameFromComparative || '—'}</span></div>
               <div className="grid min-h-[42px] grid-cols-[92px_minmax(0,1fr)] items-start gap-x-2"><span className="font-semibold text-gray-700">Address:</span><span className="whitespace-pre-wrap">{p1.vendorAddr1 || '—'}</span></div>
               <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">GSTIN:</span><span>{p1.vendorVatRegnNo || '—'}</span></div>
               <div className="grid min-h-5 grid-cols-[92px_minmax(0,1fr)] gap-x-2"><span className="font-semibold text-gray-700">PAN:</span><span>{p1.vendorPan || '—'}</span></div>
@@ -3797,7 +4054,7 @@ export function MakePurchaseOrderPopup({
             <thead>
               <tr className="h-10 bg-[#0D3A35] text-white">
                 <th className="whitespace-nowrap border-r border-gray-600 px-2 py-1 text-center align-middle font-semibold">S. No.</th>
-                <th className="border-r border-gray-600 px-3 py-1 text-center align-middle font-semibold">Item Description</th>
+                <th className="border-r border-gray-600 px-3 py-1 text-center align-middle font-semibold">{lineLabel} Description</th>
                 <th className="border-r border-gray-600 px-2 py-1 text-center align-middle font-semibold">Qty</th>
                 <th className="border-r border-gray-600 px-2 py-1 text-center align-middle font-semibold">UOM</th>
                 <th className="whitespace-nowrap border-r border-gray-600 px-2 py-1 text-center align-middle font-semibold">Unit Rate</th>
@@ -3805,16 +4062,16 @@ export function MakePurchaseOrderPopup({
               </tr>
             </thead>
             <tbody>
-              {(comparative.items || []).map((it: any, idx: number) => {
-                const unit = numOr0((qForVendor as any)?.unitRateByItemId?.[it.id]);
-                const quantity = numOr0(it.qty);
+              {orderLines.map((it, idx) => {
+                const unit = numOr0(it.unitRate);
+                const quantity = numOr0(it.quantity);
                 const total = quantity * unit;
-                const description = safe(it.description) || safe(it.specification);
+                const description = safe(it.description);
                 return (
                   <tr key={it.id || idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                     <td className="border-r border-t border-gray-300 px-2 py-2 text-center align-middle">{idx + 1}</td>
                     <td className="border-r border-t border-gray-300 px-3 py-2 align-top">
-                      <div className="font-bold text-gray-900">{safe(it.partName) || safe(it.itemName) || '—'}</div>
+                      <div className="font-bold text-gray-900">{safe(it.name) || '—'}</div>
                       {description ? <div className="mt-1 whitespace-pre-line leading-4 text-gray-600">{description}</div> : null}
                     </td>
                     <td className="border-r border-t border-gray-300 px-2 py-2 text-center align-top tabular-nums">{quantity}</td>
@@ -3834,6 +4091,14 @@ export function MakePurchaseOrderPopup({
                 <td colSpan={5} className="border-r border-gray-300 px-3 py-1.5 text-left">GST</td>
                 <td className="px-3 py-1.5 text-right tabular-nums">{computedTotals ? inr(computedTotals.tax) : '—'}</td>
               </tr>
+              {computedTotals?.freight ? <tr className="border-t border-gray-300 bg-gray-50 font-semibold"><td colSpan={5} className="border-r border-gray-300 px-3 py-1.5 text-left">Freight Charges</td><td className="px-3 py-1.5 text-right tabular-nums">{inr(computedTotals.freight)}</td></tr> : null}
+              {computedTotals?.other ? <tr className="border-t border-gray-300 bg-gray-50 font-semibold"><td colSpan={5} className="border-r border-gray-300 px-3 py-1.5 text-left">Other Charges</td><td className="px-3 py-1.5 text-right tabular-nums">{inr(computedTotals.other)}</td></tr> : null}
+              {orderCharges.map((row) => (
+                <tr key={row.id} className="border-t border-gray-300 bg-gray-50 font-semibold">
+                  <td colSpan={5} className="border-r border-gray-300 px-3 py-1.5 text-left">{safe(row.label) || 'Additional Charge / Deduction'}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{inr(numOr0(row.amount))}</td>
+                </tr>
+              ))}
               <tr className="border-t border-gray-300 bg-[#e7f3ef] font-black text-[#0D3A35]">
                 <td colSpan={5} className="border-r border-gray-300 px-3 py-1.5 text-left">Total Order Value</td>
                 <td className="px-3 py-1.5 text-right tabular-nums">{computedTotals ? inr(computedTotals.gross) : '—'}</td>
@@ -3911,7 +4176,7 @@ export function MakePurchaseOrderPopup({
             ))}
           </div>
         </div>
-        {renderPoReportFooter(1, 'Purchase Order')}
+        {renderPoReportFooter(1, orderLabel)}
       </div>
     ) : p >= 2 && p < preAnnexureStartPage ? (
       renderCommercialTermsPage(p)
@@ -3929,7 +4194,7 @@ export function MakePurchaseOrderPopup({
       );
     })() : p === -1 ? (
       <div className="po-report-sheet po-terms-report-sheet po-draft-font-11 mx-auto min-h-[1123px] w-[794px] max-w-full overflow-visible border border-slate-300 bg-white p-5 font-sans text-[11px] shadow-sm">
-        {renderPoSectionHeader(`Purchase Order${amendmentLabel ? ` — ${amendmentLabel}` : ''} — Terms & Conditions`, poReferenceLabel)}
+        {renderPoSectionHeader(`${orderLabel}${amendmentLabel ? ` — ${amendmentLabel}` : ''} — Terms & Conditions`, poReferenceLabel)}
 
         <div className="border border-gray-300">
           <style>{`
@@ -4083,7 +4348,7 @@ export function MakePurchaseOrderPopup({
 
               <tr className="bg-white">
                 <td className="px-3 py-1.5 text-center border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600">5)</td>
-                <td className="px-3 py-1.5 border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600">Delivery Timelines</td>
+                <td className="px-3 py-1.5 border-r border-t border-gray-300 font-semibold bg-gray-100 text-gray-600">{isWorkOrder ? 'Work Schedule / Completion Timeline' : 'Delivery Timelines'}</td>
                 <td className="px-3 py-1.5 border-t border-gray-300">
                   <textarea
                     value={p2.deliveryTimelines}
@@ -4334,8 +4599,8 @@ export function MakePurchaseOrderPopup({
       <div className="flex max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-[#d7e4e0] bg-white shadow-2xl">
         <div className="flex shrink-0 items-center justify-between border-b border-[#1b514a] bg-[#0D3A35] px-6 py-4 text-white">
           <div>
-            <div className="text-lg font-bold">{reviewOnly ? (documentStatus === 'approved' ? 'Approved Purchase Order' : 'Purchase Order Review') : revisionMode ? 'Revise Purchase Order' : 'Create Purchase Order'}</div>
-            <div className="mt-0.5 text-xs text-white/65">{prNumber || 'PR not recorded'} · {vendorNameFromComparative || resolvedVendorId}</div>
+            <div className="text-lg font-bold">{reviewOnly ? (documentStatus === 'approved' ? `Approved ${orderLabel}` : `${orderLabel} Review`) : revisionMode ? `Revise ${orderLabel}` : `Create ${orderLabel}`}</div>
+            <div className="mt-0.5 text-xs text-white/65">{prNumber || `${sourceRequestShortLabel} not recorded`} · {vendorNameFromComparative || resolvedVendorId}</div>
           </div>
           <div className="flex items-center gap-2">
             {workflowStep === 'draft' ? (
@@ -4357,9 +4622,9 @@ export function MakePurchaseOrderPopup({
         {!reviewOnly && <div className="shrink-0 border-b border-slate-200 bg-white px-6 py-3">
           <div className="mx-auto flex max-w-xl items-center justify-center">
             {[
-              { key: 'details', label: '1. Enter PO Details' },
-              { key: 'draft', label: '2. Review Draft PO' },
-              { key: 'create', label: revisionMode ? '3. Save Revision' : '3. Create PO' },
+              { key: 'details', label: `1. Enter ${orderShortLabel} Details` },
+              { key: 'draft', label: `2. Review Draft ${orderShortLabel}` },
+              { key: 'create', label: revisionMode ? '3. Save Revision' : `3. Create ${orderShortLabel}` },
             ].map((step, index) => {
               const active = step.key === workflowStep;
               const completed = workflowStep === 'draft' && step.key === 'details';
@@ -4384,7 +4649,7 @@ export function MakePurchaseOrderPopup({
                 .fc-po-draft-preview input, .fc-po-draft-preview textarea { border: 0 !important; box-shadow: none !important; pointer-events: none !important; }
               `}</style>
               <div className={`mb-3 flex items-center justify-between rounded-xl border px-4 py-2.5 ${documentStatus === 'approved' ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
-                <div><p className={`text-sm font-bold ${documentStatus === 'approved' ? 'text-emerald-800' : 'text-amber-800'}`}>{documentStatus === 'approved' ? 'Approved Purchase Order' : 'Draft Purchase Order'}{amendmentLabel ? ` · ${amendmentLabel}` : ''}</p><p className={`text-xs ${documentStatus === 'approved' ? 'text-emerald-700' : 'text-amber-700'}`}>{documentStatus === 'approved' ? `PO Number: ${effectivePoNo || 'Not recorded'}` : amendmentLabel ? `Review ${amendmentLabel} before saving and sending it for approval.` : 'Review all details before creating the final PO.'}</p></div>
+                <div><p className={`text-sm font-bold ${documentStatus === 'approved' ? 'text-emerald-800' : 'text-amber-800'}`}>{documentStatus === 'approved' ? `Approved ${orderLabel}` : `Draft ${orderLabel}`}{amendmentLabel ? ` · ${amendmentLabel}` : ''}</p><p className={`text-xs ${documentStatus === 'approved' ? 'text-emerald-700' : 'text-amber-700'}`}>{documentStatus === 'approved' ? `${orderShortLabel} Number: ${effectivePoNo || 'Not recorded'}` : amendmentLabel ? `Review ${amendmentLabel} before saving and sending it for approval.` : `Review all details before creating the final ${orderShortLabel}.`}</p></div>
                 <span className={`rounded-full px-3 py-1 text-xs font-black uppercase tracking-widest ${documentStatus === 'approved' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{documentStatus === 'approved' ? 'Approved' : 'Draft'}</span>
               </div>
               <div className="space-y-6">
@@ -4414,7 +4679,7 @@ export function MakePurchaseOrderPopup({
 
         <div className="flex shrink-0 items-center justify-between border-t border-slate-200 bg-white px-6 py-3">
           <div className="text-xs text-muted-foreground">
-            Vendor: <span className="font-medium text-foreground">{p1.vendorName.trim() || vendorNameFromComparative || '—'}</span>
+            {partyLabel}: <span className="font-medium text-foreground">{p1.vendorName.trim() || vendorNameFromComparative || '—'}</span>
             {computedTotals ? (
               <>
                 <span className="opacity-60"> • </span>
@@ -4435,7 +4700,7 @@ export function MakePurchaseOrderPopup({
                   {draftStatus === 'saving' ? 'Saving…' : draftStatus === 'saved' ? 'Draft Saved' : 'Save Draft'}
                 </Button>
                 <Button type="button" onClick={reviewDraft} className="gap-1.5 bg-[#0D3A35] text-white hover:bg-[#092e2a]">
-                  Review Draft PO <ChevronRight className="h-4 w-4" />
+                  Review Draft {orderShortLabel} <ChevronRight className="h-4 w-4" />
                 </Button>
               </>
             ) : (
@@ -4444,7 +4709,7 @@ export function MakePurchaseOrderPopup({
                   <ChevronLeft className="h-4 w-4" /> Edit Details
                 </Button>
                 <Button onClick={() => void handleConfirm()} disabled={printing || savingPo || !resolvedVendorId} className="bg-[#0D3A35] px-6 text-white hover:bg-[#092e2a]">
-                  {savingPo ? (revisionMode ? 'Saving Revision…' : 'Creating PO…') : (revisionMode ? 'Save Revision' : 'Create PO')}
+                  {savingPo ? (revisionMode ? 'Saving Revision…' : `Creating ${orderShortLabel}…`) : (revisionMode ? 'Save Revision' : `Create ${orderShortLabel}`)}
                 </Button>
               </>
             ))}
