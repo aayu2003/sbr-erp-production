@@ -137,7 +137,7 @@
             { "key": "work-verifier",   "label": "Work Verifier",    "path": "/work-verifier",    "icon": "ShieldCheck",    "enabled": true },
             { "key": "work-requisition-approver", "label": "Work Approver", "path": "/work-requisition-approver", "icon": "FileText", "enabled": true },
             { "key": "work-comparative", "label": "Comparative Statement", "path": "/work-comparative-statement", "icon": "FileText", "enabled": true },
-            { "key": "work-approver",   "label": "WO communication", "path": "/work-approver",    "icon": "FileCheck",      "enabled": true },
+            { "key": "work-approver",   "label": "WO - Order Approval Flow", "path": "/work-approver", "icon": "FileCheck", "enabled": true },
             { "key": "wo-creation",     "label": "WO Creation",      "path": "/wo-creation",      "icon": "FileText",       "enabled": true },
             { "key": "work-flow",       "label": "Work Flow",        "path": "/work-flow",        "icon": "FileText",       "enabled": true },
             { "key": "scope-of-work",   "label": "Scope of Work",    "path": "/scope-of-work",    "icon": "Link2",          "enabled": true }

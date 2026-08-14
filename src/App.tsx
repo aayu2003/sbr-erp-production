@@ -144,7 +144,7 @@ const App = () => (
           <Route path="/work-requisition" element={<AppLayout><WorkOrder /></AppLayout>} />
           <Route path="/wo-creation" element={<AppLayout><HOInbox orderTypeFilter="SPR" view="creation" title="WO Creation" /></AppLayout>} />
           <Route path="/work-verifier" element={<AppLayout><WorkOrderVerifier /></AppLayout>} />
-          <Route path="/work-approver" element={<AppLayout><HOInbox orderTypeFilter="SPR" view="approval" title="Work Approver" /></AppLayout>} />
+          <Route path="/work-approver" element={<AppLayout><HOInbox orderTypeFilter="SPR" view="approval" title="WO - Order Approval Flow" /></AppLayout>} />
           <Route path="/work-flow" element={<AppLayout><PurchaseFlow orderTypeFilter="SPR" title="Work Flow" /></AppLayout>} />
           <Route path="/scope-of-work" element={<AppLayout><ScopeOfWork /></AppLayout>} />
           <Route path="/wcc-module" element={<AppLayout><WccModule /></AppLayout>} />

@@ -35,6 +35,8 @@ type Props = {
   onUpdate: (indentId: string, patch: Partial<ComparativeModel>) => void;
   defaultOpen?: boolean;
   defaultTab?: 'indent' | 'comparative' | 'po';
+  approvalFlowOnly?: boolean;
+  creationFlow?: boolean;
 };
 
 type ApiIndentPerson = {
@@ -203,11 +205,12 @@ function InlineTracker({ steps }: { steps: Array<{ label: string; done: boolean;
   );
 }
 
-export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, defaultTab }: Props) {
+export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, defaultTab, approvalFlowOnly = false, creationFlow = false }: Props) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(Boolean(defaultOpen));
   const [tcApprovalOpen, setTcApprovalOpen] = useState(false);
   const [approving, setApproving] = useState(false);
+  const [approvingNfa, setApprovingNfa] = useState(false);
   const [makePoOpen, setMakePoOpen] = useState(false);
   const [poForwardDialogOpen, setPoForwardDialogOpen] = useState(false);
   const [poForwarding, setPoForwarding] = useState(false);
@@ -332,6 +335,18 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
 
   const vendors = useMemo(() => (Array.isArray(item?.vendors) ? item.vendors : []), [item]);
   const selectedVendorId = String(item?.hoSelectedVendorId ?? '').trim();
+  const selectedVendor = vendors.find((vendor) =>
+    [vendor.id, vendor.directoryVendorId].some((value) => String(value ?? '').trim() === selectedVendorId),
+  );
+  const selectedQuote = (item.quotes || []).find((quote) =>
+    String(quote.vendorId ?? '').trim() === String(selectedVendor?.id ?? selectedVendorId).trim(),
+  );
+  const selectedOrderValue = (item.items || []).reduce((sum, line) => {
+    const quantity = Number(line.qty) || 0;
+    const unitRate = Number(selectedQuote?.unitRateByItemId?.[line.id]) || 0;
+    const base = quantity * unitRate;
+    return sum + base + (base * (Number(line.gstPercent) || 0)) / 100;
+  }, 0) + Number(item.freightCharges?.[selectedVendor?.id || selectedVendorId] || 0) + Number(item.otherCharges?.[selectedVendor?.id || selectedVendorId] || 0);
   const canApprove = !isApproved;
 
   const tcAt = String((item as any)?.tcApprovedAt ?? '').trim();
@@ -350,6 +365,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
   const nfaDone = nfaStatusLower === 'approved';
   const poDone = poStatus === 'created' || poStatus === 'forwarded' || Boolean(poNo) || Boolean(poCreatedAt);
   const poForwarded = poStatus === 'forwarded';
+  const forwardedToOrderCreation = approvalFlowOnly && Boolean(String((item as any)?.hoForwardedAt ?? '').trim());
 
   useEffect(() => {
     // Best-effort: detect existing PO from backend so button states are correct on refresh.
@@ -617,6 +633,53 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
     }
   };
 
+  const approveNfaNow = async () => {
+    if (nfaDone || approvingNfa) return;
+    const comparisonId = String((item as any)?.comparisonId ?? '').trim();
+    if (!comparisonId) return toast.error('Missing comparison id for NFA approval');
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return toast.error('Missing API base URL');
+
+    setApprovingNfa(true);
+    try {
+      const response = await fetch(`${baseUrl}/purchase_flow/approve_NFA`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comparison_id: comparisonId }),
+      });
+      const body = await response.text().catch(() => '');
+      if (!response.ok) throw new Error(body || `HTTP ${response.status}`);
+      if (body) {
+        const normalizedBody = body.replace(/\bTrue\b/g, 'true').replace(/\bFalse\b/g, 'false').replace(/\bNone\b/g, 'null');
+        const result = JSON.parse(normalizedBody);
+        if (result?.success === false || String(result?.success).toLowerCase() === 'false') {
+          throw new Error(result?.message || 'NFA approval failed');
+        }
+      }
+      onUpdate(item.indentId, { nfaStatus: 'approved' } as any);
+      toast.success('NFA approved');
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to approve NFA');
+    } finally {
+      setApprovingNfa(false);
+    }
+  };
+
+  const forwardToOrderCreation = () => {
+    if (!nfaDone) return toast.error('Approve NFA first');
+    if (forwardedToOrderCreation) return;
+    const forwardedAt = new Date().toISOString();
+    try {
+      const storageKey = 'farmconnect.orderCreationForwarded.v1';
+      const saved = JSON.parse(window.localStorage.getItem(storageKey) || '{}');
+      window.localStorage.setItem(storageKey, JSON.stringify({ ...saved, [item.indentId]: forwardedAt }));
+    } catch {
+      // The in-memory status still updates if browser storage is unavailable.
+    }
+    onUpdate(item.indentId, { hoForwardedAt: forwardedAt } as any);
+    toast.success(`Forwarded to ${lastStepLabel} Creation`);
+  };
+
   const openMakePo = () => {
     const selectedVendorId = String(item?.hoSelectedVendorId ?? '').trim();
     if (!selectedVendorId) return toast.error('Select a vendor first');
@@ -652,9 +715,9 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
       sub: nfaDone ? (item.lastSavedAt ? fmt(item.lastSavedAt) : undefined) : undefined,
     },
     {
-      label: lastStepLabel,
-      done: poDone,
-      sub: poCreatedAt ? fmt(poCreatedAt) : undefined,
+      label: approvalFlowOnly ? `${lastStepLabel} Creation` : lastStepLabel,
+      done: approvalFlowOnly ? Boolean((item as any)?.hoForwardedAt) : poDone,
+      sub: approvalFlowOnly ? fmt(String((item as any)?.hoForwardedAt ?? '')) : (poCreatedAt ? fmt(poCreatedAt) : undefined),
     },
   ];
 
@@ -1144,7 +1207,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                   {item.comparisonNo || item.comparisonId || item.indentId}
                 </div>
                 <div className="mt-0.5 truncate text-[11px] font-medium text-slate-400">
-                  PR: {item.indentId}
+                  {isSPR ? 'SR' : 'PR'}: {item.indentId}
                 </div>
                 <div className="mt-1 truncate text-xs font-semibold text-slate-600">
                   {item.technicalRecommendationVendorId || item.hoSelectedVendorId || 'Vendor not selected'}
@@ -1178,13 +1241,33 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
               )) : <span className="text-xs text-slate-400">—</span>}
             </div>
 
-            {/* Workflow stages */}
-            {trackerSteps.map((step, index) => {
+            {/* Workflow stages on approval pages; creation pages show order inputs instead. */}
+            {creationFlow ? (
+              <>
+                <div className="min-w-0 text-left lg:text-center">
+                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-slate-400 lg:hidden">Approved Vendor</span>
+                  <p className="truncate text-xs font-bold text-slate-800" title={selectedVendor?.name || selectedVendorId}>
+                    {selectedVendor?.name || selectedVendorId || 'Not recorded'}
+                  </p>
+                  <p className="mt-1 truncate text-[10px] font-medium text-slate-400">{selectedVendor?.directoryVendorId || selectedVendor?.id || 'Vendor ID unavailable'}</p>
+                </div>
+                <div className="text-left lg:text-center">
+                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-slate-400 lg:hidden">Order Value</span>
+                  <p className="text-sm font-black tabular-nums text-[#0D3A35]">{new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(selectedOrderValue)}</p>
+                  <p className="mt-1 text-[10px] font-medium text-slate-400">Including GST & charges</p>
+                </div>
+                <div className="text-left lg:text-center">
+                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-slate-400 lg:hidden">Forwarded On</span>
+                  <p className="text-xs font-bold text-slate-700">{fmt(String((item as any)?.hoForwardedAt ?? '')) || 'Not recorded'}</p>
+                  <p className="mt-1 text-[10px] font-medium text-emerald-700">Ready for {lastStepLabel} creation</p>
+                </div>
+              </>
+            ) : trackerSteps.map((step, index) => {
               const firstIncomplete = trackerSteps.findIndex((candidate) => !candidate.done);
               const state: StepState = step.done ? 'done' : index === firstIncomplete ? 'active' : 'pending';
               return (
                 <div key={step.label} className="flex justify-start lg:justify-center">
-                  <StepPill label={index === 0 ? 'TC Approval' : index === 1 ? 'NFA Approval' : lastStepFull} state={state} sub={step.sub} />
+                  <StepPill label={index === 0 ? 'TC Approval' : index === 1 ? 'NFA Approval' : approvalFlowOnly ? `${lastStepLabel} Creation` : lastStepFull} state={state} sub={step.sub} />
                 </div>
               );
             })}
@@ -1193,9 +1276,23 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
             <div className="flex justify-start lg:justify-center" onClick={(e) => e.stopPropagation()}>
               <Button
                 type="button"
+                disabled={approvingNfa || forwardedToOrderCreation}
                 onClick={() => {
+                  if (creationFlow) {
+                    if (poDone) openEditPo();
+                    else openMakePo();
+                    return;
+                  }
                   if (canApprove) {
                     setTcApprovalOpen(true);
+                    return;
+                  }
+                  if (approvalFlowOnly && nfaDone) {
+                    forwardToOrderCreation();
+                    return;
+                  }
+                  if (approvalFlowOnly) {
+                    void approveNfaNow();
                     return;
                   }
                   if (nfaDone) {
@@ -1205,14 +1302,28 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                   const params = new URLSearchParams({ section: 'nfa', pr: item.indentId });
                   navigate(`/finance-admin-ops-indents?${params.toString()}`);
                 }}
-                className="h-9 gap-2 bg-[#0D3A35] px-4 text-white hover:bg-[#092e2a]"
+                className="h-9 gap-2 bg-[#0D3A35] px-4 text-white hover:bg-[#092e2a] disabled:bg-emerald-700 disabled:text-white disabled:opacity-100"
               >
-                {canApprove
+                {forwardedToOrderCreation
+                  ? <Check className="h-4 w-4" />
+                  : canApprove
                   ? <ClipboardList className="h-4 w-4" />
                   : nfaDone
                     ? <ShoppingCart className="h-4 w-4" />
                     : <SendHorizonal className="h-4 w-4" />}
-                {canApprove ? 'TC Approval' : nfaDone ? 'Forward to WO/PO' : 'Forward to NFA'}
+                {creationFlow
+                  ? poDone
+                    ? `View / Edit ${lastStepLabel}`
+                    : `Create ${lastStepLabel}`
+                  : forwardedToOrderCreation
+                  ? `Forwarded to ${lastStepLabel} Creation`
+                  : canApprove
+                  ? 'TC Approval'
+                  : approvalFlowOnly
+                    ? nfaDone
+                      ? `Forward to ${lastStepLabel} Creation`
+                      : approvingNfa ? 'Approving NFA…' : 'Approve NFA'
+                    : nfaDone ? 'Forward to WO/PO' : 'Forward to NFA'}
               </Button>
             </div>
           </div>
