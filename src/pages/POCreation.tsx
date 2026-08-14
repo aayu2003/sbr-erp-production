@@ -10,16 +10,89 @@ import { type ComparativeModel } from '@/components/purchase/ComparativeStatemen
 import getBaseUrl from '@/lib/config';
 import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 import { downloadPoRegisterAsPdf, printPoRegisterAsPdf, type PoRegisterPdfRow } from '@/lib/poRegisterPdf';
-import {
-  PO_APPROVALS_CHANGED_EVENT,
-  markPoRevisedForApproval,
-  readPoApprovals,
-  replyToPoApprovalQuestion,
-  saveCreatedPoForApproval,
-  sendPoForFinanceApproval,
-  type PoApprovalRecord,
-} from '@/lib/poApprovalStore';
 import { readUserProfile } from '@/lib/signatureDiary';
+
+type PoApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected';
+
+type PoApprovalQuestion = {
+  id: string;
+  question: string;
+  askedBy: string;
+  askedAt: string;
+  reply?: string;
+  repliedBy?: string;
+  repliedAt?: string;
+};
+
+type PoApprovalRecord = {
+  id: string;
+  poNumber: string;
+  orderType?: 'PR' | 'SPR';
+  prNumber: string;
+  comparisonId: string;
+  vendorId: string;
+  vendorName: string;
+  itemDetails: Array<{ name: string; uom: string; quantity: number }>;
+  status: PoApprovalStatus;
+  createdAt: string;
+  revisionNo?: number;
+  questions?: PoApprovalQuestion[];
+};
+
+// Mirrors the same admin_purchase_order -> PoApprovalRecord mapping used in
+// FinanceAdminOpsIndent.tsx — both pages read the same backend record.
+const mapAdminPurchaseOrderToRecord = (order: any): PoApprovalRecord => {
+  const quote = order?.purchase_quote && typeof order.purchase_quote === 'object' ? order.purchase_quote : {};
+  const directorApproval = order?.director_approval && typeof order.director_approval === 'object' ? order.director_approval : {};
+  const items: any[] = Array.isArray(order?.item_details) ? order.item_details : [];
+  const questions: any[] = Array.isArray(order?.approval_questions) ? order.approval_questions : [];
+  const orderNumber = String(order?.order_number ?? '').trim();
+  const status: PoApprovalStatus = (['draft', 'pending', 'approved', 'rejected'] as const)
+    .includes(directorApproval?.status) ? directorApproval.status : 'pending';
+  return {
+    id: orderNumber || `po-approval-${Date.now()}`,
+    poNumber: orderNumber,
+    orderType: order?.order_type === 'SPR' ? 'SPR' : 'PR',
+    prNumber: String(order?.pr_number ?? '').trim(),
+    comparisonId: String(order?.comparison_id ?? '').trim(),
+    vendorId: String(quote?.vendor_id ?? '').trim(),
+    vendorName: String(quote?.vendor_name ?? quote?.vendor_id ?? '').trim(),
+    itemDetails: items.map((item) => ({
+      name: String(item?.name ?? 'Item not recorded'),
+      uom: String(item?.uom ?? ''),
+      quantity: Number(item?.quantity ?? 0) || 0,
+    })),
+    status,
+    createdAt: String(order?.created_at ?? order?.updated_at ?? new Date().toISOString()),
+    revisionNo: Number(quote?.amendmentNo ?? 0) || 0,
+    questions: questions.map((q) => ({
+      id: String(q?.id ?? `po-question-${Date.now()}`),
+      question: String(q?.question ?? ''),
+      askedBy: String(q?.askedBy ?? ''),
+      askedAt: String(q?.askedAt ?? ''),
+      reply: q?.reply ? String(q.reply) : undefined,
+      repliedBy: q?.repliedBy ? String(q.repliedBy) : undefined,
+      repliedAt: q?.repliedAt ? String(q.repliedAt) : undefined,
+    })),
+  };
+};
+
+const fetchPoApprovalsFromBackend = async (): Promise<PoApprovalRecord[]> => {
+  try {
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) throw new Error('Missing API base URL');
+    const res = await fetch(`${baseUrl}/purchase_flow/get_all_purchase_orders`, {
+      headers: { Accept: 'application/json' },
+    });
+    const data: any = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.message || `HTTP ${res.status}`);
+    const orders: any[] = Array.isArray(data?.purchase_orders) ? data.purchase_orders : [];
+    return orders.map(mapAdminPurchaseOrderToRecord);
+  } catch (error: any) {
+    toast.error(error?.message || 'Failed to load PO approvals');
+    return [];
+  }
+};
 
 const safe = (value: unknown) => String(value ?? '').trim();
 const numberOrZero = (value: unknown) => {
@@ -139,33 +212,30 @@ export default function POCreation() {
   const [selected, setSelected] = useState<ComparativeModel | null>(null);
   const [selectedReviewOnly, setSelectedReviewOnly] = useState(false);
   const [createdOrders, setCreatedOrders] = useState<Record<string, string>>({});
-  const [poApprovalRecords, setPoApprovalRecords] = useState<PoApprovalRecord[]>(() => readPoApprovals());
+  const [poApprovalRecords, setPoApprovalRecords] = useState<PoApprovalRecord[]>([]);
   const [approvalPrompt, setApprovalPrompt] = useState<PoApprovalRecord | null>(null);
   const [questionReplyRecord, setQuestionReplyRecord] = useState<PoApprovalRecord | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  const [replyingQuestionId, setReplyingQuestionId] = useState<string | null>(null);
   const [pdfDownloading, setPdfDownloading] = useState(false);
   const [pdfPrinting, setPdfPrinting] = useState(false);
 
+  const refreshPoState = async () => {
+    const approvals = await fetchPoApprovalsFromBackend();
+    setPoApprovalRecords(approvals);
+    const ordersByPr: Record<string, string> = {};
+    approvals.forEach((record) => {
+      if (record.prNumber && !ordersByPr[record.prNumber]) ordersByPr[record.prNumber] = record.poNumber;
+    });
+    setCreatedOrders(ordersByPr);
+    setQuestionReplyRecord((current) => current
+      ? approvals.find((record) => record.poNumber === current.poNumber) || null
+      : null);
+    return approvals;
+  };
+
   useEffect(() => {
-    const refreshPoState = () => {
-      const approvals = readPoApprovals();
-      setPoApprovalRecords(approvals);
-      const ordersByPr: Record<string, string> = {};
-      approvals.forEach((record) => {
-        if (record.prNumber && !ordersByPr[record.prNumber]) ordersByPr[record.prNumber] = record.poNumber;
-      });
-      setCreatedOrders(ordersByPr);
-      setQuestionReplyRecord((current) => current
-        ? approvals.find((record) => record.poNumber === current.poNumber) || null
-        : null);
-    };
-    refreshPoState();
-    window.addEventListener(PO_APPROVALS_CHANGED_EVENT, refreshPoState);
-    window.addEventListener('storage', refreshPoState);
-    return () => {
-      window.removeEventListener(PO_APPROVALS_CHANGED_EVENT, refreshPoState);
-      window.removeEventListener('storage', refreshPoState);
-    };
+    void refreshPoState();
   }, []);
 
   useEffect(() => {
@@ -444,14 +514,21 @@ export default function POCreation() {
         documentStatus={selectedReviewOnly ? 'approved' : 'draft'}
         revisionMode={Boolean(!selectedReviewOnly && selectedApprovalRecord?.status === 'approved')}
         onClose={() => { setSelected(null); setSelectedReviewOnly(false); }}
-        onConfirm={({ indentId, poNo }) => {
+        onConfirm={async ({ indentId, poNo }) => {
           setCreatedOrders((current) => ({ ...current, [indentId]: poNo }));
           const source = selected;
-          const previousApproval = poApprovalRecords.find((record) => record.prNumber === indentId && record.poNumber === poNo)
-            || poApprovalRecords.find((record) => record.prNumber === indentId && record.status === 'approved');
+          const wasAlreadyApproved = poApprovalRecords.some(
+            (record) => record.prNumber === indentId && record.status === 'approved',
+          );
+
+          // The PO was already saved to the backend by MakePurchaseOrderPopup's
+          // own onConfirm handler — director_approval is set to "pending"
+          // automatically on every create/update, so just re-fetch to pick it up.
+          const refreshed = await refreshPoState();
           const approvedVendorId = safe(source?.hoSelectedVendorId);
           const vendorName = source?.vendors?.find((vendor) => safe(vendor.id) === approvedVendorId)?.name || approvedVendorId;
-          const savedApprovalRecord = saveCreatedPoForApproval({
+          const approvalRecord = refreshed.find((record) => record.poNumber === poNo) || {
+            id: poNo,
             poNumber: poNo,
             orderType: 'PR',
             prNumber: indentId,
@@ -463,15 +540,14 @@ export default function POCreation() {
               uom: safe(item.uom),
               quantity: numberOrZero(item.qty),
             })),
+            status: 'pending' as const,
             createdAt: new Date().toISOString(),
-          });
-          const approvalRecord = previousApproval?.status === 'approved'
-            ? markPoRevisedForApproval(poNo) || savedApprovalRecord
-            : savedApprovalRecord;
+          };
+
           setSelected(null);
           setSelectedReviewOnly(false);
           setApprovalPrompt(approvalRecord);
-          toast.success(previousApproval?.status === 'approved' ? `Purchase Order ${poNo} revised` : `Purchase Order ${poNo} created`);
+          toast.success(wasAlreadyApproved ? `Purchase Order ${poNo} revised` : `Purchase Order ${poNo} created`);
         }}
       />
 
@@ -515,13 +591,34 @@ export default function POCreation() {
                       <Button
                         type="button"
                         className="gap-2 bg-[#0D3A35] text-white hover:bg-[#092e2a]"
-                        disabled={!safe(replyDrafts[question.id])}
-                        onClick={() => {
+                        disabled={!safe(replyDrafts[question.id]) || replyingQuestionId === question.id}
+                        onClick={async () => {
                           if (!questionReplyRecord || !safe(replyDrafts[question.id])) return;
                           const repliedBy = readUserProfile().name?.trim() || 'PO Creator';
-                          replyToPoApprovalQuestion(questionReplyRecord.poNumber, question.id, replyDrafts[question.id], repliedBy);
-                          setReplyDrafts((current) => ({ ...current, [question.id]: '' }));
-                          toast.success('Reply submitted to Admin Ops Finance');
+                          setReplyingQuestionId(question.id);
+                          try {
+                            const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+                            if (!baseUrl) throw new Error('Missing API base URL');
+                            const res = await fetch(`${baseUrl}/purchase_flow/reply_po_approval_question`, {
+                              method: 'POST',
+                              headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                order_number: questionReplyRecord.poNumber,
+                                question_id: question.id,
+                                reply: replyDrafts[question.id],
+                                replied_by: repliedBy,
+                              }),
+                            });
+                            const data: any = await res.json().catch(() => null);
+                            if (!res.ok || !data?.success) throw new Error(data?.message || `HTTP ${res.status}`);
+                            await refreshPoState();
+                            setReplyDrafts((current) => ({ ...current, [question.id]: '' }));
+                            toast.success('Reply submitted to Admin Ops Finance');
+                          } catch (error: any) {
+                            toast.error(error?.message || 'Failed to submit reply');
+                          } finally {
+                            setReplyingQuestionId(null);
+                          }
                         }}
                       >
                         <Send className="h-4 w-4" /> Submit Reply
@@ -544,7 +641,7 @@ export default function POCreation() {
             <span className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-white/10">
               <Send className="h-5 w-5" />
             </span>
-            <DialogTitle className="text-xl font-bold text-white">Send for Approval?</DialogTitle>
+            <DialogTitle className="text-xl font-bold text-white">Sent for Approval</DialogTitle>
             <DialogDescription className="text-sm text-white/70">
               Purchase Order {approvalPrompt?.poNumber || '—'} has been {approvalPrompt?.revisionNo ? 'revised' : 'created'} successfully.
             </DialogDescription>
@@ -553,22 +650,16 @@ export default function POCreation() {
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
               <p className="text-xs font-bold uppercase tracking-[0.12em] text-slate-500">Approval Destination</p>
               <p className="mt-1 font-bold text-slate-950">Admin Ops Finance</p>
-              <p className="mt-1 text-sm text-slate-500">The {approvalPrompt?.revisionNo ? 'revised PO' : 'PO'} will appear in Finance Admin Ops under PO Approvals.</p>
+              <p className="mt-1 text-sm text-slate-500">The {approvalPrompt?.revisionNo ? 'revised PO' : 'PO'} has already been routed to Finance Admin Ops under PO Approvals — no further action needed here.</p>
             </div>
           </div>
           <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4 sm:justify-end">
-            <Button type="button" variant="outline" onClick={() => setApprovalPrompt(null)}>Not Now</Button>
             <Button
               type="button"
               className="gap-2 bg-[#0D3A35] text-white hover:bg-[#092e2a]"
-              onClick={() => {
-                if (!approvalPrompt) return;
-                sendPoForFinanceApproval(approvalPrompt.poNumber);
-                toast.success(`PO ${approvalPrompt.poNumber} sent to Admin Ops Finance for approval`);
-                setApprovalPrompt(null);
-              }}
+              onClick={() => setApprovalPrompt(null)}
             >
-              <Send className="h-4 w-4" /> Send for Approval
+              Done
             </Button>
           </DialogFooter>
         </DialogContent>

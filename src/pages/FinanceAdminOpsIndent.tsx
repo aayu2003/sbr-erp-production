@@ -36,15 +36,37 @@ import {
 } from '@/lib/signatureDiary';
 import { PRPreview } from '@/components/purchase/PRPreview';
 import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
+import { MakeWorkOrderPopup } from '@/components/ho-inbox/MakeWorkOrderPopup';
 import { type ComparativeModel } from '@/components/purchase/ComparativeStatementPreview';
-import {
-  addPoApprovalQuestion,
-  markPoForwardedToPurchaseFlow,
-  PO_APPROVALS_CHANGED_EVENT,
-  readPoApprovals,
-  reviewPoApproval,
-  type PoApprovalRecord,
-} from '@/lib/poApprovalStore';
+
+type PoApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected';
+
+type PoApprovalQuestion = {
+  id: string;
+  question: string;
+  askedBy: string;
+  askedAt: string;
+  reply?: string;
+  repliedBy?: string;
+  repliedAt?: string;
+};
+
+type PoApprovalRecord = {
+  id: string;
+  poNumber: string;
+  orderType?: 'PR' | 'SPR';
+  prNumber: string;
+  comparisonId: string;
+  vendorId: string;
+  vendorName: string;
+  itemDetails: Array<{ name: string; uom: string; quantity: number }>;
+  status: PoApprovalStatus;
+  createdAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  purchaseFlowForwardedAt?: string;
+  questions?: PoApprovalQuestion[];
+};
 
 const normalizePurchaseFlowDocuments = (value: unknown): string[] => {
   const source = Array.isArray(value) ? value : [];
@@ -71,6 +93,7 @@ const mapAdminPurchaseOrderToRecord = (order: any): PoApprovalRecord => {
   const quote = order?.purchase_quote && typeof order.purchase_quote === 'object' ? order.purchase_quote : {};
   const directorApproval = order?.director_approval && typeof order.director_approval === 'object' ? order.director_approval : {};
   const items: any[] = Array.isArray(order?.item_details) ? order.item_details : [];
+  const questions: any[] = Array.isArray(order?.approval_questions) ? order.approval_questions : [];
   const orderNumber = String(order?.order_number ?? '').trim();
   const status: PoApprovalRecord['status'] = (['draft', 'pending', 'approved', 'rejected'] as const)
     .includes(directorApproval?.status) ? directorApproval.status : 'pending';
@@ -91,6 +114,15 @@ const mapAdminPurchaseOrderToRecord = (order: any): PoApprovalRecord => {
     createdAt: String(order?.created_at ?? order?.updated_at ?? new Date().toISOString()),
     reviewedAt: directorApproval?.approval_time || directorApproval?.approval_date || undefined,
     reviewedBy: directorApproval?.staff_name || undefined,
+    questions: questions.map((q) => ({
+      id: String(q?.id ?? `po-question-${Date.now()}`),
+      question: String(q?.question ?? ''),
+      askedBy: String(q?.askedBy ?? ''),
+      askedAt: String(q?.askedAt ?? ''),
+      reply: q?.reply ? String(q.reply) : undefined,
+      repliedBy: q?.repliedBy ? String(q.repliedBy) : undefined,
+      repliedAt: q?.repliedAt ? String(q.repliedAt) : undefined,
+    })),
   };
 };
 
@@ -111,17 +143,30 @@ const fetchPoApprovalsFromBackend = async (): Promise<PoApprovalRecord[] | null>
   }
 };
 
-// Questions and the "forwarded to Purchase Flow" marker have no backend API yet,
-// so those two fields stay sourced from the local poApprovalStore cache.
-const mergeLocalOnlyFields = (records: PoApprovalRecord[], localRecords: PoApprovalRecord[]): PoApprovalRecord[] => {
-  const localByPoNumber = new Map(localRecords.map((record) => [record.poNumber, record]));
-  return records.map((record) => {
-    const local = localByPoNumber.get(record.poNumber);
-    return local
-      ? { ...record, questions: local.questions, purchaseFlowForwardedAt: local.purchaseFlowForwardedAt }
-      : record;
-  });
+// "Forwarded to Purchase Flow" isn't a stored flag — it's true whenever a
+// admin_purchase_flow row already exists for this order_number.
+const fetchForwardedOrderNumbers = async (): Promise<Set<string>> => {
+  try {
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return new Set();
+    const url = `${baseUrl}/purchase_flow/get_purchase_flows`;
+    let res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+    if (res.status === 405) res = await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } });
+    if (!res.ok) return new Set();
+    const data: any = await res.json().catch(() => null);
+    const flows: any[] = Array.isArray(data?.purchase_flows) ? data.purchase_flows : [];
+    return new Set(flows.map((flow) => String(flow?.order_number ?? '').trim()).filter(Boolean));
+  } catch {
+    return new Set();
+  }
 };
+
+const mergeForwardedStatus = (records: PoApprovalRecord[], forwardedOrderNumbers: Set<string>): PoApprovalRecord[] =>
+  records.map((record) =>
+    forwardedOrderNumbers.has(record.poNumber)
+      ? { ...record, purchaseFlowForwardedAt: record.purchaseFlowForwardedAt || 'forwarded' }
+      : record,
+  );
 
 type NfaApiItemRow = {
   item_name?: string;
@@ -654,6 +699,7 @@ type FinanceAdminOpsIndentProps = {
 };
 
 const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
+  const OrderPopup = orderTypeFilter === 'SPR' ? MakeWorkOrderPopup : MakePurchaseOrderPopup;
   const navigate = useNavigate();
   const [indents, setIndents] = useState<Indent[]>(initialIndents);
   const [search, setSearch] = useState('');
@@ -666,11 +712,12 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
   const [nfas, setNfas] = useState<NfaApiRow[]>([]);
   const [nfaApprovalsMap, setNfaApprovalsMap] = useState<Record<string, boolean>>({});
 
-  const [activeSection, setActiveSection] = useState<'indents' | 'nfa' | 'mrf' | 'po-approvals'>('nfa');
-  const [poApprovals, setPoApprovals] = useState<PoApprovalRecord[]>(() => readPoApprovals());
+  const [activeSection, setActiveSection] = useState<'indents' | 'nfa' | 'mrf' | 'po-approvals'>(orderTypeFilter === 'SPR' ? 'indents' : 'nfa');
+  const [poApprovals, setPoApprovals] = useState<PoApprovalRecord[]>([]);
   const [previewPoApproval, setPreviewPoApproval] = useState<PoApprovalRecord | null>(null);
   const [questionPoApproval, setQuestionPoApproval] = useState<PoApprovalRecord | null>(null);
   const [poQuestion, setPoQuestion] = useState('');
+  const [askingQuestion, setAskingQuestion] = useState(false);
   const [forwardingPoNumber, setForwardingPoNumber] = useState<string | null>(null);
   const [decidingPoNumber, setDecidingPoNumber] = useState<string | null>(null);
 
@@ -686,31 +733,17 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
   }, []);
 
   const refreshPoApprovals = async () => {
-    const backendRecords = await fetchPoApprovalsFromBackend();
-    const merged = mergeLocalOnlyFields(backendRecords ?? readPoApprovals(), readPoApprovals());
+    const [backendRecords, forwardedOrderNumbers] = await Promise.all([
+      fetchPoApprovalsFromBackend(),
+      fetchForwardedOrderNumbers(),
+    ]);
+    const merged = mergeForwardedStatus(backendRecords ?? [], forwardedOrderNumbers);
     setPoApprovals(merged);
     return merged;
   };
 
   useEffect(() => {
     void refreshPoApprovals();
-
-    // Questions and the forwarded-marker are still local-only, so keep syncing
-    // those two fields onto whatever we last loaded from the backend.
-    const handleLocalChange = () => {
-      setPoApprovals((current) => mergeLocalOnlyFields(current, readPoApprovals()));
-      setQuestionPoApproval((current) => {
-        if (!current) return null;
-        const local = readPoApprovals().find((record) => record.poNumber === current.poNumber);
-        return local ? { ...current, questions: local.questions } : current;
-      });
-    };
-    window.addEventListener(PO_APPROVALS_CHANGED_EVENT, handleLocalChange);
-    window.addEventListener('storage', handleLocalChange);
-    return () => {
-      window.removeEventListener(PO_APPROVALS_CHANGED_EVENT, handleLocalChange);
-      window.removeEventListener('storage', handleLocalChange);
-    };
   }, []);
 
   // Load NFA list from backend
@@ -742,6 +775,8 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
   // that's still waiting on TC Approval (in PO Communication) doesn't look like it
   // silently vanished just because it hasn't reached NFA yet.
   const [tcPending, setTcPending] = useState<NfaApiRow[]>([]);
+  const [tcVendorSelections, setTcVendorSelections] = useState<Record<string, string>>({});
+  const [approvingTcId, setApprovingTcId] = useState<string | null>(null);
   useEffect(() => {
     const loadTc = async () => {
       try {
@@ -774,6 +809,37 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
       return tcStatus !== 'approved' && !approvedVendorId;
     });
   }, [tcPending, orderTypeFilter]);
+
+  const approveComparativeTc = async (record: NfaApiRow) => {
+    const comparisonId = String(record.comparison_id ?? record.comparision_id ?? '').trim();
+    const recordKey = comparisonId || String(record.pr_number ?? '').trim();
+    const approvedVendorId = String(tcVendorSelections[recordKey] ?? '').trim();
+    if (!comparisonId) { toast.error('Missing comparison ID'); return; }
+    if (!approvedVendorId) { toast.error('Select a vendor before approving the comparative statement'); return; }
+
+    setApprovingTcId(recordKey);
+    try {
+      const BASE_URL = getBaseUrl().replace(/\/$/, '');
+      const response = await fetch(`${BASE_URL}/purchase_flow/approve_TC`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comparison_id: comparisonId, approved_vendor_id: approvedVendorId }),
+      });
+      const body = await response.text().catch(() => '');
+      if (!response.ok) throw new Error(body || `HTTP ${response.status}`);
+      setTcPending((current) => current.map((item) => {
+        const itemComparisonId = String(item.comparison_id ?? item.comparision_id ?? '').trim();
+        return itemComparisonId === comparisonId
+          ? { ...item, TC_status: 'approved', approved_vendor_id: approvedVendorId }
+          : item;
+      }));
+      toast.success('Comparative statement approved. Technical vendor selection recorded.');
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to approve comparative statement');
+    } finally {
+      setApprovingTcId(null);
+    }
+  };
 
   // Load MRFs from HRMS
   useEffect(() => {
@@ -893,7 +959,14 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
 
         const arr = json.finance_ops_indents ?? json.admin_ops_indents ?? json.finance_admin_ops_indents ?? [];
         const list: Indent[] = (arr || []).map((r: any, idx: number) => {
-          const isSpr = Boolean(r.indent_data?.area_of_service || r.indent_data?.name_of_service);
+          const declaredIndentType = String(r.indent_type ?? r.order_type ?? '').trim().toUpperCase();
+          const requisitionNumber = String(r.pr_number ?? '').trim().toUpperCase();
+          const isSpr = declaredIndentType === 'SPR' || requisitionNumber.includes('/SPR/') || requisitionNumber.includes('/SR/') || Boolean(
+            r.indent_data?.area_of_service ||
+            r.indent_data?.name_of_service ||
+            r.indent_data?.service_category ||
+            r.indent_data?.service_activity,
+          );
 
           const items: PRLineItem[] = isSpr ? [] : (r.indent_data?.item_row || []).map((it: any, i: number) => ({
             id: `${r.pr_number ?? 'api'}-li-${i}`,
@@ -1001,6 +1074,10 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
         (li) =>
           (li.partName ?? '').toLowerCase().includes(q) ||
           (li.itemCode ?? '').toLowerCase().includes(q),
+      ) ||
+      (it.sprItems ?? []).some((service) =>
+        (service.serviceDescription ?? '').toLowerCase().includes(q) ||
+        (service.proposedVendors ?? '').toLowerCase().includes(q),
       )),
     );
   }, [indents, orderTypeFilter, search]);
@@ -1055,9 +1132,8 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
         const flowData: any = await flowsResponse.json().catch(() => null);
         const existingFlows = Array.isArray(flowData?.purchase_flows) ? flowData.purchase_flows : [];
         if (existingFlows.some((flow: any) => String(flow?.order_number ?? '').trim() === record.poNumber)) {
-          markPoForwardedToPurchaseFlow(record.poNumber);
-          setPoApprovals(readPoApprovals());
-          toast.success(`PO ${record.poNumber} is already available in Purchase Flow`);
+          setPoApprovals((current) => current.map((r) => r.poNumber === record.poNumber ? { ...r, purchaseFlowForwardedAt: r.purchaseFlowForwardedAt || 'forwarded' } : r));
+          toast.success(`${record.orderType === 'SPR' ? 'WO' : 'PO'} ${record.poNumber} is already available in ${record.orderType === 'SPR' ? 'Work' : 'Purchase'} Flow`);
           return true;
         }
       }
@@ -1106,12 +1182,11 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
         throw new Error(result?.message || result?.error || `Forwarding failed (HTTP ${response.status})`);
       }
 
-      markPoForwardedToPurchaseFlow(record.poNumber);
-      setPoApprovals(readPoApprovals());
-      toast.success(`PO ${record.poNumber} forwarded to Purchase Flow`);
+      setPoApprovals((current) => current.map((r) => r.poNumber === record.poNumber ? { ...r, purchaseFlowForwardedAt: r.purchaseFlowForwardedAt || 'forwarded' } : r));
+      toast.success(`${record.orderType === 'SPR' ? 'WO' : 'PO'} ${record.poNumber} forwarded to ${record.orderType === 'SPR' ? 'Work' : 'Purchase'} Flow`);
       return true;
     } catch (error: any) {
-      toast.error(error?.message || `Failed to forward PO ${record.poNumber} to Purchase Flow`);
+      toast.error(error?.message || `Failed to forward ${record.orderType === 'SPR' ? 'WO' : 'PO'} ${record.poNumber} to ${record.orderType === 'SPR' ? 'Work' : 'Purchase'} Flow`);
       return false;
     } finally {
       setForwardingPoNumber(null);
@@ -1342,14 +1417,14 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
     sectionContent = (
       <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
         <div className="border-b border-slate-100 px-5 py-5">
-          <h2 className="text-lg font-bold text-slate-950">Purchase Approver Register</h2>
-          <p className="mt-1 text-sm font-medium text-slate-500">{filtered.length} purchase requisition{filtered.length === 1 ? '' : 's'} available for finance review</p>
+          <h2 className="text-lg font-bold text-slate-950">{orderTypeFilter === 'SPR' ? 'Work Approver Register' : 'Purchase Approver Register'}</h2>
+          <p className="mt-1 text-sm font-medium text-slate-500">{filtered.length} {orderTypeFilter === 'SPR' ? 'service' : 'purchase'} requisition{filtered.length === 1 ? '' : 's'} available for finance review</p>
         </div>
         {filtered.length === 0 ? (
           <div className="flex min-h-[300px] flex-col items-center justify-center px-6 py-12 text-center">
             <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400"><FileText className="h-7 w-7" /></span>
             <h3 className="mt-4 text-base font-bold text-slate-900">No finance indents found</h3>
-            <p className="mt-1 text-sm text-slate-500">Try another PR number, project, item or requester.</p>
+            <p className="mt-1 text-sm text-slate-500">Try another {orderTypeFilter === 'SPR' ? 'SR' : 'PR'} number, project, {orderTypeFilter === 'SPR' ? 'service' : 'item'} or requester.</p>
           </div>
         ) : (
         <div className="overflow-x-auto">
@@ -1357,8 +1432,8 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
             <thead className="bg-[#0D3A35] text-white">
               <tr>
                 {[
-                  ['PR Number', 'w-[13%]'], ['Project', 'w-[16%]'], ['Department', 'w-[12%]'],
-                  ['Item Details', 'w-[20%]'], ['Indented By', 'w-[15%]'], ['Date', 'w-[9%]'],
+                  [orderTypeFilter === 'SPR' ? 'SR Number' : 'PR Number', 'w-[13%]'], ['Project', 'w-[16%]'], ['Department', 'w-[12%]'],
+                  [orderTypeFilter === 'SPR' ? 'Service Details' : 'Item Details', 'w-[20%]'], ['Indented By', 'w-[15%]'], ['Date', 'w-[9%]'],
                   ['Status', 'w-[7%]'], ['Action', 'w-[8%]'],
                 ].map(([label, width]) => <th key={label} className={`${width} px-3 py-4 text-center text-[12px] font-bold uppercase tracking-[0.07em] text-white/90`}>{label}</th>)}
               </tr>
@@ -1414,9 +1489,9 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-5">
           <div>
             <h2 className="flex items-center gap-2 text-lg font-bold text-slate-950">
-              <ShoppingCart className="h-5 w-5 text-[#0D3A35]" /> Purchase Order Approval Register
+              <ShoppingCart className="h-5 w-5 text-[#0D3A35]" /> {orderTypeFilter === 'SPR' ? 'Work Order Approval Register' : 'Purchase Order Approval Register'}
             </h2>
-            <p className="mt-1 text-sm font-medium text-slate-500">Purchase orders sent to Admin Ops Finance for review</p>
+            <p className="mt-1 text-sm font-medium text-slate-500">{orderTypeFilter === 'SPR' ? 'Work orders' : 'Purchase orders'} sent to Admin Ops Finance for review</p>
           </div>
           <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-bold text-amber-700">
             {poApprovals.filter((record) => record.status === 'pending').length} Pending
@@ -1426,8 +1501,8 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
         {filteredPoApprovals.length === 0 ? (
           <div className="flex min-h-[300px] flex-col items-center justify-center px-6 py-12 text-center">
             <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400"><ShoppingCart className="h-7 w-7" /></span>
-            <h3 className="mt-4 text-base font-bold text-slate-900">No purchase orders awaiting review</h3>
-            <p className="mt-1 text-sm text-slate-500">POs appear here after “Send for Approval” is selected during PO creation.</p>
+            <h3 className="mt-4 text-base font-bold text-slate-900">No {orderTypeFilter === 'SPR' ? 'work' : 'purchase'} orders awaiting review</h3>
+            <p className="mt-1 text-sm text-slate-500">{orderTypeFilter === 'SPR' ? 'WOs' : 'POs'} appear here after “Send for Approval” is selected during {orderTypeFilter === 'SPR' ? 'WO' : 'PO'} creation.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -1435,7 +1510,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
               <thead className="bg-[#0D3A35] text-white">
                 <tr>
                   {[
-                    ['PO Number', 'w-[14%]'], ['PR Number', 'w-[13%]'], ['Vendor', 'w-[18%]'],
+                    [orderTypeFilter === 'SPR' ? 'WO Number' : 'PO Number', 'w-[14%]'], [orderTypeFilter === 'SPR' ? 'SR Number' : 'PR Number', 'w-[13%]'], ['Vendor', 'w-[18%]'],
                     ['Item Details', 'w-[21%]'], ['Sent On', 'w-[11%]'], ['Status', 'w-[8%]'], ['Action', 'w-[16%]'],
                   ].map(([label, width]) => (
                     <th key={label} className={`${width} px-3 py-4 text-center text-[12px] font-bold uppercase tracking-[0.07em] text-white/90`}>{label}</th>
@@ -1478,7 +1553,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
                           variant="outline"
                           size="icon"
                           className="h-9 w-9 rounded-xl border-slate-200 text-[#0D3A35] hover:bg-[#0D3A35]/5"
-                          title="View Draft PO"
+                          title={`View Draft ${orderTypeFilter === 'SPR' ? 'WO' : 'PO'}`}
                           onClick={() => setPreviewPoApproval(record)}
                         >
                           <Eye className="h-4 w-4" />
@@ -1501,7 +1576,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
                             variant="outline"
                             size="icon"
                             className="h-9 w-9 rounded-xl border-red-200 text-red-600 hover:bg-red-50"
-                            title="Reject PO"
+                            title={`Reject ${orderTypeFilter === 'SPR' ? 'WO' : 'PO'}`}
                             disabled={decidingPoNumber === record.poNumber}
                             onClick={async () => {
                               const reviewer = readUserProfile().name?.trim() || 'Admin Ops Finance';
@@ -1516,11 +1591,10 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
                                 });
                                 const data: any = await res.json().catch(() => null);
                                 if (!res.ok || !data?.success) throw new Error(data?.message || `HTTP ${res.status}`);
-                                reviewPoApproval(record.poNumber, 'rejected', reviewer);
                                 await refreshPoApprovals();
-                                toast.success(`PO ${record.poNumber} rejected`);
+                                toast.success(`${orderTypeFilter === 'SPR' ? 'WO' : 'PO'} ${record.poNumber} rejected`);
                               } catch (error: any) {
-                                toast.error(error?.message || `Failed to reject PO ${record.poNumber}`);
+                                toast.error(error?.message || `Failed to reject ${orderTypeFilter === 'SPR' ? 'WO' : 'PO'} ${record.poNumber}`);
                               } finally {
                                 setDecidingPoNumber(null);
                               }
@@ -1532,7 +1606,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
                             type="button"
                             size="icon"
                             className="h-9 w-9 rounded-xl bg-[#0D3A35] text-white hover:bg-[#092e2a]"
-                            title="Approve PO"
+                            title={`Approve ${orderTypeFilter === 'SPR' ? 'WO' : 'PO'}`}
                             disabled={forwardingPoNumber === record.poNumber || decidingPoNumber === record.poNumber}
                             onClick={async () => {
                               const reviewer = readUserProfile().name?.trim() || 'Admin Ops Finance';
@@ -1547,12 +1621,11 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
                                 });
                                 const data: any = await res.json().catch(() => null);
                                 if (!res.ok || !data?.success) throw new Error(data?.message || `HTTP ${res.status}`);
-                                reviewPoApproval(record.poNumber, 'approved', reviewer);
                                 await refreshPoApprovals();
-                                toast.success(`PO ${record.poNumber} approved`);
+                                toast.success(`${orderTypeFilter === 'SPR' ? 'WO' : 'PO'} ${record.poNumber} approved`);
                                 await forwardApprovedPoToPurchaseFlow({ ...record, status: 'approved' });
                               } catch (error: any) {
-                                toast.error(error?.message || `Failed to approve PO ${record.poNumber}`);
+                                toast.error(error?.message || `Failed to approve ${orderTypeFilter === 'SPR' ? 'WO' : 'PO'} ${record.poNumber}`);
                               } finally {
                                 setDecidingPoNumber(null);
                               }
@@ -1566,7 +1639,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
                             type="button"
                             size="icon"
                             className="h-9 w-9 rounded-xl bg-[#0D3A35] text-white hover:bg-[#092e2a]"
-                            title="Forward to Purchase Flow"
+                            title={`Forward to ${orderTypeFilter === 'SPR' ? 'Work' : 'Purchase'} Flow`}
                             disabled={forwardingPoNumber === record.poNumber}
                             onClick={() => void forwardApprovedPoToPurchaseFlow(record)}
                           >
@@ -1577,7 +1650,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
                       {record.status !== 'pending' && (
                         <div className="mt-2 text-center text-[11px] font-medium text-slate-500">
                           <p>{record.reviewedBy || 'Admin Ops Finance'} · {record.reviewedAt ? formatDateDDMMYYYY(record.reviewedAt) : ''}</p>
-                          {record.purchaseFlowForwardedAt ? <p className="mt-0.5 font-bold text-emerald-700">Forwarded to Purchase Flow</p> : null}
+                          {record.purchaseFlowForwardedAt ? <p className="mt-0.5 font-bold text-emerald-700">Forwarded to {orderTypeFilter === 'SPR' ? 'Work' : 'Purchase'} Flow</p> : null}
                         </div>
                       )}
                     </td>
@@ -1752,18 +1825,71 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
       <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
         <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold text-gray-900">NFA (Note For Approval)</h2>
-            <p className="text-xs text-gray-500">For information only (corporate procedure). Your task: approve & forward the finalized quotation.</p>
+            <h2 className="text-sm font-semibold text-gray-900">{orderTypeFilter === 'SPR' ? 'Comparative Statement Approval' : 'NFA (Note For Approval)'}</h2>
+            <p className="text-xs text-gray-500">{orderTypeFilter === 'SPR' ? 'Review the finalized service comparative statement and approve it for Work Order processing.' : 'For information only (corporate procedure). Your task: approve & forward the finalized quotation.'}</p>
           </div>
         </div>
 
-        {pendingTcApprovals.length > 0 && (
+        {orderTypeFilter === 'SPR' && pendingTcApprovals.length > 0 && (
+          <div className="border-b border-slate-100 p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Pending Technical Comparison Approval</h3>
+                <p className="mt-0.5 text-xs text-slate-500">Review the quoted vendors and select the vendor approved for Work Order processing.</p>
+              </div>
+              <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-bold text-amber-700">{pendingTcApprovals.length} Pending</span>
+            </div>
+            <div className="space-y-3">
+              {pendingTcApprovals.map((record, index) => {
+                const comparisonId = String(record.comparison_id ?? record.comparision_id ?? '').trim();
+                const prNumber = String(record.pr_number ?? '').trim();
+                const recordKey = comparisonId || prNumber || `tc-${index}`;
+                const vendors = Array.isArray(record.quoters) ? record.quoters.filter((vendor) => String(vendor.vendor_id ?? '').trim()) : [];
+                return (
+                  <div key={recordKey} className="grid gap-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4 lg:grid-cols-[minmax(220px,1fr)_minmax(320px,1.4fr)_auto] lg:items-center">
+                    <div>
+                      <p className="text-sm font-bold text-[#0D3A35]">{prNumber || 'SR not recorded'}</p>
+                      <p className="mt-1 text-xs font-medium text-slate-500">Comparative: {comparisonId || 'Not recorded'}</p>
+                      <p className="mt-1 text-xs text-slate-500">{(record.item_row || []).map((item) => item.item_name).filter(Boolean).join(', ') || 'Service details not recorded'}</p>
+                    </div>
+                    <label className="block">
+                      <span className="mb-1.5 block text-xs font-bold text-slate-600">Approved Vendor</span>
+                      <select
+                        value={tcVendorSelections[recordKey] || ''}
+                        onChange={(event) => setTcVendorSelections((current) => ({ ...current, [recordKey]: event.target.value }))}
+                        className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10"
+                      >
+                        <option value="">Select vendor</option>
+                        {vendors.map((vendor) => (
+                          <option key={String(vendor.vendor_id)} value={String(vendor.vendor_id)}>
+                            {String(vendor.vendor_id)} · {formatCurrency(Number(vendor.total_amount ?? 0) || 0)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <Button
+                      type="button"
+                      onClick={() => void approveComparativeTc(record)}
+                      disabled={!tcVendorSelections[recordKey] || approvingTcId === recordKey}
+                      className="h-11 gap-2 rounded-xl bg-[#0D3A35] px-5 font-bold text-white hover:bg-[#092e2a]"
+                    >
+                      {approvingTcId === recordKey ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                      Approve Comparative
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {orderTypeFilter !== 'SPR' && pendingTcApprovals.length > 0 && (
           <div className="mx-4 mt-3 flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-start gap-2 text-sm text-amber-800">
               <Clock3 className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
                 <span className="font-bold">{pendingTcApprovals.length}</span> comparative statement{pendingTcApprovals.length === 1 ? '' : 's'} forwarded but still awaiting{' '}
-                <span className="font-bold">TC Approval</span> in PO Communication — they won't appear here until that's done.
+                <span className="font-bold">TC Approval</span> in {orderTypeFilter === 'SPR' ? 'Work Order Approval' : 'PO Communication'} — they won't appear here until that's done.
               </span>
             </div>
             <Button
@@ -1771,16 +1897,16 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
               size="sm"
               variant="outline"
               className="shrink-0 self-start border-amber-300 bg-white text-amber-800 hover:bg-amber-100 sm:self-auto"
-              onClick={() => navigate('/ho')}
+              onClick={() => navigate(orderTypeFilter === 'SPR' ? '/work-approver' : '/ho')}
             >
-              Go to PO Communication
+              Go to {orderTypeFilter === 'SPR' ? 'Work Order Approval' : 'PO Communication'}
             </Button>
           </div>
         )}
 
         <div className="grid grid-cols-[minmax(220px,3fr)_minmax(320px,5fr)_minmax(220px,3fr)] gap-2 bg-[#0D3A35] px-4 py-4 text-xs font-bold uppercase tracking-[0.07em] text-white/90">
-          <div>PR No / Project</div>
-          <div>Finalized Quotation (HO Selected)</div>
+          <div>{orderTypeFilter === 'SPR' ? 'SR No.' : 'PR No.'} / Project</div>
+          <div>Finalized {orderTypeFilter === 'SPR' ? 'Service Comparative Statement' : 'Quotation (HO Selected)'}</div>
           <div className="text-right">Approval</div>
         </div>
 
@@ -1839,7 +1965,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
           })}
 
           {filteredNfas.length === 0 && (
-            <div className="px-4 py-6 text-sm text-gray-500 text-center">No NFA found.</div>
+            <div className="px-4 py-6 text-sm text-gray-500 text-center">No {orderTypeFilter === 'SPR' ? 'comparative statements' : 'NFA notes'} found.</div>
           )}
         </div>
       </div>
@@ -1850,9 +1976,9 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
     <div className="min-h-screen space-y-6 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
       <header className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm font-bold text-emerald-700"><FileText className="h-4 w-4" />Procurement · Purchase Order</div>
-          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">Purchase Approver</h1>
-          <p className="mt-2 text-base font-medium text-slate-600">Review indents, workforce requests and finalized quotations before approval</p>
+          <div className="flex items-center gap-2 text-sm font-bold text-emerald-700"><FileText className="h-4 w-4" />Procurement · {orderTypeFilter === 'SPR' ? 'Work Order' : 'Purchase Order'}</div>
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-950">{orderTypeFilter === 'SPR' ? 'Work Approver' : 'Purchase Approver'}</h1>
+          <p className="mt-2 text-base font-medium text-slate-600">Review and approve {orderTypeFilter === 'SPR' ? 'service requisitions, comparative statements and work orders' : 'indents, workforce requests and finalized quotations'}</p>
         </div>
         <Button variant="outline" onClick={() => setConfigOpen(true)} className="h-11 gap-2 rounded-xl border-[#0D3A35]/15 bg-white px-4 font-bold text-[#0D3A35] shadow-sm hover:bg-[#0D3A35]/5">
           <Settings className="h-4 w-4" />
@@ -1867,39 +1993,39 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
             className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'indents' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('indents')}
           >
-            Indents ({filtered.length})
+            {orderTypeFilter === 'SPR' ? 'Service Requisition' : 'Indents'} ({filtered.length})
           </button>
           <button
             type="button"
             className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'nfa' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('nfa')}
           >
-            NFA Notes
+            {orderTypeFilter === 'SPR' ? 'Comparative Statement' : 'NFA Notes'} ({filteredNfas.length})
           </button>
           <button
             type="button"
             className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'po-approvals' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('po-approvals')}
           >
-            PO Approvals ({poApprovals.filter((record) => record.status === 'pending').length})
+            {orderTypeFilter === 'SPR' ? 'Work Order' : 'PO Approvals'} ({filteredPoApprovals.filter((record) => record.status === 'pending').length})
           </button>
-          <button
+          {orderTypeFilter !== 'SPR' && <button
             type="button"
             className={`rounded-lg px-4 py-2 text-sm font-bold transition ${activeSection === 'mrf' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
             onClick={() => setActiveSection('mrf')}
           >
             MRF ({mrfRecords.length})
-          </button>
+          </button>}
         </div>
         <div className="relative w-full lg:w-[390px]">
           <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-          <Input placeholder={activeSection === 'po-approvals' ? 'Search PO, PR, vendor or item' : 'Search PR no., project, item or requester'} className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7] pl-10 shadow-none focus-visible:ring-[#0D3A35]/20" value={search} onChange={(event) => setSearch(event.target.value)} />
+          <Input placeholder={activeSection === 'po-approvals' ? `Search ${orderTypeFilter === 'SPR' ? 'WO, SR' : 'PO, PR'}, vendor or item` : activeSection === 'nfa' ? `Search ${orderTypeFilter === 'SPR' ? 'SR, vendor or service' : 'PR, vendor or item'}` : `Search ${orderTypeFilter === 'SPR' ? 'SR' : 'PR'} no., project, ${orderTypeFilter === 'SPR' ? 'service' : 'item'} or requester`} className="h-11 rounded-xl border-slate-200 bg-[#fbfaf7] pl-10 shadow-none focus-visible:ring-[#0D3A35]/20" value={search} onChange={(event) => setSearch(event.target.value)} />
         </div>
       </section>
 
       {sectionContent}
 
-      <MakePurchaseOrderPopup
+      <OrderPopup
         open={Boolean(previewPoApproval)}
         comparative={previewPoComparative}
         vendorId={previewPoApproval?.vendorId}
@@ -1953,16 +2079,30 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
             <Button
               type="button"
               className="gap-2 bg-[#0D3A35] text-white hover:bg-[#092e2a]"
-              disabled={!poQuestion.trim()}
-              onClick={() => {
+              disabled={!poQuestion.trim() || askingQuestion}
+              onClick={async () => {
                 if (!questionPoApproval || !poQuestion.trim()) return;
                 const askedBy = readUserProfile().name?.trim() || 'Admin Ops Finance';
-                addPoApprovalQuestion(questionPoApproval.poNumber, poQuestion, askedBy);
-                const refreshed = readPoApprovals();
-                setPoApprovals(refreshed);
-                setQuestionPoApproval(refreshed.find((record) => record.poNumber === questionPoApproval.poNumber) || null);
-                setPoQuestion('');
-                toast.success(`Question raised against PO ${questionPoApproval.poNumber}`);
+                setAskingQuestion(true);
+                try {
+                  const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+                  if (!baseUrl) throw new Error('Missing API base URL');
+                  const res = await fetch(`${baseUrl}/purchase_flow/add_po_approval_question`, {
+                    method: 'POST',
+                    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ order_number: questionPoApproval.poNumber, question: poQuestion, asked_by: askedBy }),
+                  });
+                  const data: any = await res.json().catch(() => null);
+                  if (!res.ok || !data?.success) throw new Error(data?.message || `HTTP ${res.status}`);
+                  const refreshed = await refreshPoApprovals();
+                  setQuestionPoApproval(refreshed.find((record) => record.poNumber === questionPoApproval.poNumber) || null);
+                  setPoQuestion('');
+                  toast.success(`Question raised against PO ${questionPoApproval.poNumber}`);
+                } catch (error: any) {
+                  toast.error(error?.message || 'Failed to raise question');
+                } finally {
+                  setAskingQuestion(false);
+                }
               }}
             >
               <Send className="h-4 w-4" /> Raise Question

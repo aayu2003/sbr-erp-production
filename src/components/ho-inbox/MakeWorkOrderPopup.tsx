@@ -12,7 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { type ComparativeModel } from '@/components/purchase/ComparativeStatementPreview';
 import logoUrl from '@/Assets/3f-logo.png';
-import annexure2TermsRaw from '@/Assets/general-terms-annexure-2.txt?raw';
+import annexure2TermsRaw from '@/Assets/general-terms-annexure-2-wo.txt?raw';
 import getBaseUrl from '@/lib/config';
 
 type Props = {
@@ -346,9 +346,15 @@ const normalizeOrderFlowDocuments = (value: unknown, isWorkOrder: boolean): stri
 };
 
 const formatTaxTermsText = (gstPct: number, otherPct: number) => {
-  const gst = `${gstPct.toFixed(gstPct % 1 === 0 ? 0 : 2)}%`;
   const other = otherPct > 0 ? `${otherPct.toFixed(otherPct % 1 === 0 ? 0 : 2)}%` : '';
 
+  if (gstPct <= 0) {
+    return other
+      ? `GST shall not be applicable under this Work Order. Other taxes/duties @ ${other} (if applicable) shall be paid.`
+      : 'GST shall not be applicable under this Work Order.';
+  }
+
+  const gst = `${gstPct.toFixed(gstPct % 1 === 0 ? 0 : 2)}%`;
   if (other) {
     return `GST @ ${gst} as applicable shall be paid. Other taxes/duties @ ${other} (if applicable) shall be paid.`;
   }
@@ -741,6 +747,7 @@ type Page2State = {
   ldAutoEnabled: boolean;
   ldPerWeekPercent: string;
   ldMaxPercent: string;
+  dieselClause: string;
   remarks: string;
   siteBillingAddress: string;
   documentsRequired: string;
@@ -767,7 +774,7 @@ const defaultPage2 = (isWorkOrder = false): Page2State => ({
     : 'Ex – Works, Supplier’s Godown, C/o. Amriyt Agrotech, Jeora Village, Durg, Chhattisgarh.\nTransportation up to Project Site shall be in the scope of Buyer.',
   taxes: '',
   taxAutoCalcEnabled: false,
-  taxGstPercent: '5',
+  taxGstPercent: '0',
   taxOtherPercent: '',
   deliveryTimelines: isWorkOrder
     ? 'Time is the essence of this Work Order. The contractor shall mobilize and commence work on the agreed start date, follow the approved work schedule and complete all services by the specified completion date.'
@@ -801,6 +808,7 @@ const defaultPage2 = (isWorkOrder = false): Page2State => ({
   ldAutoEnabled: false,
   ldPerWeekPercent: '1',
   ldMaxPercent: '10',
+  dieselClause: 'Diesel required for execution of this Work Order shall be issued/arranged by the Owner and shall be recovered from the Contractor\'s RA Bills at actuals. Any consumption in excess of the agreed norm shall be recovered from the Contractor at actual cost.',
   remarks:
     '1) Price breakup Annexure-1\n2) All the other terms are as per attached General terms and conditions Annexure 2.',
   siteBillingAddress:
@@ -998,7 +1006,7 @@ const ANNEXURE_RICH_TEXT_CSS = `
   .po-draft-font-11 .annexure-rich-content blockquote { font-size: 11px !important; }
 `;
 
-export function MakePurchaseOrderPopup({
+export function MakeWorkOrderPopup({
   open,
   comparative,
   vendorId,
@@ -1012,7 +1020,9 @@ export function MakePurchaseOrderPopup({
   revisionMode = false,
   documentStatus = 'draft',
 }: Props) {
-  const isWorkOrder = safe((comparative as any)?.indent_type).toUpperCase() === 'SPR';
+  // This component is dedicated to the Work Order flow, so it always renders as
+  // a WO regardless of whether the caller populated comparative.indent_type.
+  const isWorkOrder = true;
   const orderLabel = isWorkOrder ? 'Work Order' : 'Purchase Order';
   const orderShortLabel = isWorkOrder ? 'WO' : 'PO';
   const sourceRequestShortLabel = isWorkOrder ? 'SR' : 'PR';
@@ -2176,13 +2186,14 @@ export function MakePurchaseOrderPopup({
     { no: 9, particular: 'Inspection', details: safe(p2.inspection) || '—' },
     { no: 10, particular: 'Warranty / Guarantee', details: safe(p2.warranty) || '—' },
     { no: 11, particular: 'LD / Penalty', details: safe(p2.ldAutoEnabled ? ldAutoText : p2.ldPenalty) || '—' },
-    { no: 12, particular: 'Remarks', details: safe(p2.remarks) || '—' },
-    { no: 13, particular: 'Site & Billing Address', details: safe(p2.siteBillingAddress) || '—' },
-    { no: 14, particular: 'Documents Required', details: safe(p2.documentsRequired) || '—' },
+    { no: 12, particular: 'Diesel', details: safe(p2.dieselClause) || '—' },
+    { no: 13, particular: 'Remarks', details: safe(p2.remarks) || '—' },
+    { no: 14, particular: 'Site & Billing Address', details: safe(p2.siteBillingAddress) || '—' },
+    { no: 15, particular: 'Documents Required', details: safe(p2.documentsRequired) || '—' },
     ...(Array.isArray(p1.customFields) ? p1.customFields : [])
       .filter((field) => safe(field.label) || safe(field.value))
       .map((field, index) => ({
-        no: 15 + index,
+        no: 16 + index,
         particular: safe(field.label) || 'Additional Term',
         details: safe(field.value) || '—',
       })),
@@ -2996,10 +3007,11 @@ export function MakePurchaseOrderPopup({
         </div>
       ),
     },
-    { no: 12, particular: 'Remarks', detail: editClauseTextarea('remarks', p2.remarks, 'Enter remarks...') },
-    { no: 13, particular: 'Site & Billing Address', detail: editClauseTextarea('siteBillingAddress', p2.siteBillingAddress, 'Enter site & billing address...', 180) },
+    { no: 12, particular: 'Diesel', detail: editClauseTextarea('dieselClause', p2.dieselClause, 'Enter diesel issuance / recovery terms...', 92) },
+    { no: 13, particular: 'Remarks', detail: editClauseTextarea('remarks', p2.remarks, 'Enter remarks...') },
+    { no: 14, particular: 'Site & Billing Address', detail: editClauseTextarea('siteBillingAddress', p2.siteBillingAddress, 'Enter site & billing address...', 180) },
     {
-      no: 14,
+      no: 15,
       particular: 'Documents Required',
       detail: (
         <div className="space-y-3">

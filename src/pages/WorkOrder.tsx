@@ -133,6 +133,8 @@ type ApiBudgetLineItem = {
   total_value: number;
   utilized_amount: number;
   savings: number;
+  amount_in_pipeline?: number;
+  remaining_amount?: number;
 };
 
 type BudgetLineItemSelection = {
@@ -258,6 +260,24 @@ const emptyRow = (): ServiceRow => ({
   remarks: '',
 });
 
+const serviceRequisitionFinancialYear = (dateValue: string | Date = new Date()) => {
+  const date = dateValue instanceof Date ? dateValue : new Date(`${dateValue}T00:00:00`);
+  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
+  const year = safeDate.getFullYear();
+  const startYear = safeDate.getMonth() >= 3 ? year : year - 1;
+  return `${String(startYear).slice(-2)}-${String(startYear + 1).slice(-2)}`;
+};
+
+const nextServiceRequisitionNo = (records: WorkOrderRecord[], dateValue: string | Date = new Date()) => {
+  const prefix = `SBRPL/SR/${serviceRequisitionFinancialYear(dateValue)}/`;
+  const highestSequence = records.reduce((highest, record) => {
+    if (!record.sprNo.startsWith(prefix)) return highest;
+    const sequence = Number(record.sprNo.slice(prefix.length));
+    return Number.isInteger(sequence) ? Math.max(highest, sequence) : highest;
+  }, 0);
+  return `${prefix}${String(highestSequence + 1).padStart(3, '0')}`;
+};
+
 const emptyForm = (): WorkOrderForm => ({
   plant: '',
   sprDate: new Date().toISOString().slice(0, 10),
@@ -271,6 +291,17 @@ const emptyForm = (): WorkOrderForm => ({
 
 const INR = (n: number) =>
   '₹ ' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const budgetLineCurrentBalance = (line: ApiBudgetLineItem) => {
+  if (line.remaining_amount !== undefined && line.remaining_amount !== null) {
+    const remaining = Number(line.remaining_amount);
+    if (Number.isFinite(remaining)) return Math.max(remaining, 0);
+  }
+  const totalValue = Number(line.total_value) || 0;
+  const pipelineAmount = Number(line.amount_in_pipeline) || 0;
+  const utilizedValue = (Number(line.utilized_amount) || 0) * (Number(line.rate_per_unit) || 0);
+  return Math.max(totalValue - pipelineAmount - utilizedValue, 0);
+};
 
 const calcRowGst = (row: ServiceRow) =>
   (Number(row.approxValue) || 0) * ((Number(row.gstPercent) || 0) / 100);
@@ -379,14 +410,14 @@ const recordToPdfData = (record: WorkOrderRecord): WorkRequisitionPdfData => ({
   approvedByTimestamp: record.approvedByTimestamp,
 });
 
-const ServiceRequisitionPdfPreview = ({ data }: { data: WorkRequisitionPdfData }) => {
+export const ServiceRequisitionPdfPreview = ({ data }: { data: WorkRequisitionPdfData }) => {
   const subtotal = data.services.reduce((sum, service) => sum + Number(service.approxValue || 0), 0);
   const gst = data.services.reduce((sum, service) => sum + Number(service.gstAmount || 0), 0);
   const display = (value?: string) => String(value || '').trim() || 'Not Recorded';
   const date = (value?: string) => value ? formatDateDDMMYYYY(value) : '—';
 
   return (
-    <article className="min-h-[742px] w-[1050px] overflow-hidden border border-slate-300 bg-white p-5 font-sans text-[9px] text-slate-700 shadow-xl">
+    <article className="flex h-[1050px] w-[742px] flex-col overflow-hidden border border-slate-300 bg-white p-5 font-sans text-[9px] text-slate-700 shadow-xl">
       <header className="text-center">
         <img src={logo3f} alt="Sai Bioresources" className="mx-auto h-12 w-auto object-contain" />
         <h2 className="mt-1.5 text-[16px] font-black tracking-[0.04em] text-[#142D4C]">SAI BIORESOURCES PRIVATE LIMITED</h2>
@@ -396,7 +427,7 @@ const ServiceRequisitionPdfPreview = ({ data }: { data: WorkRequisitionPdfData }
         <div className="mt-2 bg-[#0D3A35] px-4 py-2 text-[12px] font-black uppercase tracking-[0.16em] text-white">Service Purchase Requisition (SPR)</div>
       </header>
 
-      <section className="grid grid-cols-6 border-l border-t border-slate-300">
+      <section className="grid grid-cols-3 border-l border-t border-slate-300">
         {[
           ['SR Number', data.sprNo || 'Not Generated'], ['SR Date', date(data.sprDate)], ['Department', display(data.plant)],
           ['Service Category', display(data.areaOfService)], ['Service / Activity', display(data.functionName)], ['Engagement Type', display(data.natureOfService)],
@@ -426,7 +457,7 @@ const ServiceRequisitionPdfPreview = ({ data }: { data: WorkRequisitionPdfData }
 
       <section className="mt-3 border border-slate-300"><div className="border-b border-slate-300 bg-slate-100 px-3 py-1.5 text-[8px] font-black uppercase">Approval Details</div><div className="grid grid-cols-[1fr_1.4fr_1.6fr_.8fr] bg-[#0D3A35] text-center text-[7px] font-bold uppercase text-white">{['Approval Stage', 'Name / ID', 'Digital Signature', 'Date'].map((heading) => <div key={heading} className="border-r border-white/20 px-2 py-1.5 last:border-r-0">{heading}</div>)}</div>{[['Indentor Engineer', data.indentedBy, data.indentedBySignature, data.indentedByTimestamp], ['Department HOD', data.forwardedBy, data.forwardedBySignature, data.forwardedByTimestamp], ['Plant Head', data.approvedBy, data.approvedBySignature, data.approvedByTimestamp]].map(([stage, person, signature, timestamp]) => <div key={stage} className="grid grid-cols-[1fr_1.4fr_1.6fr_.8fr] border-b border-slate-200 last:border-b-0"><div className="border-r border-slate-200 px-2 py-2 font-bold">{stage}</div><div className="border-r border-slate-200 px-2 py-2 text-center">{person || 'Pending'}</div><div className="border-r border-slate-200 px-2 py-2 text-center">{signature || 'Pending'}</div><div className="px-2 py-2 text-center">{timestamp ? date(timestamp) : '—'}</div></div>)}</section>
 
-      <footer className="mt-4 grid grid-cols-3 border-t border-slate-300 pt-2 text-[7px] text-slate-500"><span>System-generated Service Purchase Requisition</span><span className="text-center">SR No.: {data.sprNo || 'Draft'}</span><span className="text-right">Page 1</span></footer>
+      <footer className="mt-auto grid grid-cols-3 border-t border-slate-300 pt-2 text-[7px] text-slate-500"><span>System-generated Service Purchase Requisition</span><span className="text-center">SR No.: {data.sprNo || 'Draft'}</span><span className="text-right">Page 1</span></footer>
     </article>
   );
 };
@@ -453,10 +484,12 @@ const BudgetHeadPickerModal = ({
   open,
   onClose,
   onSave,
+  requiredAmount,
 }: {
   open: boolean;
   onClose: () => void;
   onSave: (selection: BudgetHeadSelection) => void;
+  requiredAmount: number;
   initial?: BudgetHeadSelection | null;
 }) => {
   const [step, setStep] = React.useState<1 | 2>(1);
@@ -514,7 +547,10 @@ const BudgetHeadPickerModal = ({
   }, [selectedBudget]);
 
   const toggleLineItem = (id: string) =>
-    setLineItemSelections((prev) => ({ ...prev, [id]: { ...prev[id], checked: !prev[id].checked } }));
+    setLineItemSelections((prev) => {
+      const current = prev[id] ?? { checked: false, amount: 0 };
+      return { ...prev, [id]: { ...current, checked: !current.checked } };
+    });
 
   const updateAmount = (id: string, amount: number) =>
     setLineItemSelections((prev) => ({ ...prev, [id]: { ...prev[id], amount } }));
@@ -541,6 +577,21 @@ const BudgetHeadPickerModal = ({
     if (selected.length === 0) { toast.error('Select at least one line item'); return; }
     const unfilled = selected.filter((s) => !s.amount);
     if (unfilled.length > 0) { toast.error(`Enter indent amount for: ${unfilled.map((s) => s.name).join(', ')}`); return; }
+    const overdrawn = selected.filter((selection) => {
+      const source = lineItems.find((line) => line.line_item_id === selection.id);
+      return source && selection.amount > budgetLineCurrentBalance(source) + 0.01;
+    });
+    if (overdrawn.length > 0) {
+      toast.error(`Allocation exceeds current balance for: ${overdrawn.map((s) => s.name).join(', ')}`);
+      return;
+    }
+    const allocated = selected.reduce((sum, selection) => sum + selection.amount, 0);
+    if (requiredAmount > 0 && Math.abs(allocated - requiredAmount) > 0.01) {
+      toast.error(allocated < requiredAmount
+        ? `${INR(requiredAmount - allocated)} is still left to allocate`
+        : `Allocation exceeds the required amount by ${INR(allocated - requiredAmount)}`);
+      return;
+    }
 
     onSave({ budgetId: selectedBudget!.budget_id, budgetName: selectedBudget!.budget_name, lineItems: selected });
     onClose();
@@ -550,42 +601,77 @@ const BudgetHeadPickerModal = ({
   const totalAllocated = lineItems
     .filter((li) => lineItemSelections[li.line_item_id]?.checked)
     .reduce((s, li) => s + (lineItemSelections[li.line_item_id]?.amount ?? 0), 0);
+  const balanceToChoose = Math.max(requiredAmount - totalAllocated, 0);
+  const excessAllocated = Math.max(totalAllocated - requiredAmount, 0);
+  const allocationComplete = requiredAmount > 0 && Math.abs(totalAllocated - requiredAmount) <= 0.01;
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">
-        <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left">
-          <DialogTitle className="text-xl font-black text-white">{step === 1 ? 'Select Budget' : 'Select Budget Line Items'}</DialogTitle>
-          <p className="text-sm font-medium text-white/65">Allocate this service requisition against an approved budget.</p>
+      <DialogContent className="flex max-h-[94vh] w-[96vw] max-w-[1400px] flex-col overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 font-sans shadow-2xl [&>button]:right-5 [&>button]:top-5 [&>button]:text-white/70 [&>button:hover]:text-white">
+        <DialogHeader className="shrink-0 bg-[#0D3A35] px-6 py-5 pr-16 text-left">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <DialogTitle className="font-display text-xl font-extrabold tracking-tight text-white">{step === 1 ? 'Select Budget' : 'Allocate Budget Line Items'}</DialogTitle>
+              <p className="mt-1 text-sm font-medium text-white/65">Link the Service Requisition value to approved and available budget lines.</p>
+            </div>
+            <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.08em] text-white/80">
+              Step {step} of 2
+            </span>
+          </div>
         </DialogHeader>
 
         {step === 1 && (
-          <div className="max-h-[68vh] space-y-2 overflow-y-auto p-6">
-            <p className="mb-3 text-xs text-slate-500">Choose the budget to link to this service requisition.</p>
+          <div className="min-h-0 flex-1 overflow-y-auto p-6">
+            <div className="mb-5 rounded-2xl border border-[#147D6F]/15 bg-[#E9F3F0] px-4 py-3">
+              <p className="text-xs font-black uppercase tracking-[0.08em] text-[#0D3A35]">Approved budgets</p>
+              <p className="mt-1 text-xs text-slate-600">Choose one budget to view its available line-item balances.</p>
+            </div>
             {budgetsLoading ? (
-              <div className="flex items-center justify-center py-10"><Loader2 className="w-5 h-5 animate-spin text-green-600" /><span className="text-xs text-gray-500 ml-2">Loading budgets…</span></div>
+              <div className="flex items-center justify-center py-16"><Loader2 className="h-5 w-5 animate-spin text-[#147D6F]" /><span className="ml-2 text-xs text-slate-500">Loading budgets…</span></div>
             ) : budgetsError ? (
-              <div className="text-xs text-red-500 text-center py-8">{budgetsError}</div>
+              <div className="rounded-xl border border-rose-200 bg-rose-50 py-10 text-center text-xs font-semibold text-rose-600">{budgetsError}</div>
             ) : budgets.length === 0 ? (
-              <div className="text-xs text-gray-400 text-center py-8">No budgets found</div>
+              <div className="rounded-xl border border-dashed border-slate-300 bg-white py-12 text-center text-xs text-slate-400">No approved budgets found</div>
             ) : (
-              budgets.map((b) => (
+              <div className="grid gap-3 md:grid-cols-2">
+              {budgets.map((b) => (
                 <button key={b.budget_id} type="button" onClick={() => { setSelectedBudget(b); setStep(2); }}
-                  className="w-full text-left rounded-lg border border-gray-200 bg-white px-4 py-3 hover:border-green-400 hover:bg-green-50 transition-colors group">
-                  <p className="text-sm font-semibold text-gray-800 group-hover:text-green-700">{b.budget_name}</p>
-                  <p className="text-xs text-gray-400 mt-0.5">{b.crop_season} · FY {b.financial_year_start}–{b.financial_year_end} · {b.status}</p>
+                  className="group rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-[#147D6F]/40 hover:shadow-md">
+                  <div className="flex items-start justify-between gap-3">
+                    <div><p className="text-sm font-black text-slate-800 group-hover:text-[#0D3A35]">{b.budget_name}</p><p className="mt-1 text-xs text-slate-400">{b.crop_season} · FY {b.financial_year_start}–{b.financial_year_end}</p></div>
+                    <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase text-emerald-700">{b.status}</span>
+                  </div>
+                  <p className="mt-4 text-[11px] font-bold text-[#147D6F]">View line-item balances →</p>
                 </button>
-              ))
+              ))}
+              </div>
             )}
           </div>
         )}
 
         {step === 2 && selectedBudget && (
-          <div className="max-h-[68vh] space-y-3 overflow-y-auto p-6">
-            <div className="flex items-center gap-3">
-              <button type="button" onClick={() => setStep(1)} className="text-xs text-gray-400 hover:text-gray-700 underline">← Back</button>
-              <span className="text-sm font-bold text-gray-800">{selectedBudget.budget_name}</span>
-              <span className="text-xs text-gray-400">{selectedBudget.crop_season} · FY {selectedBudget.financial_year_start}–{selectedBudget.financial_year_end}</span>
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5 sm:p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <button type="button" onClick={() => setStep(1)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500 transition hover:border-[#147D6F]/30 hover:bg-[#E9F3F0] hover:text-[#0D3A35]">← Back</button>
+                <div><p className="text-sm font-black text-slate-800">{selectedBudget.budget_name}</p><p className="mt-0.5 text-xs text-slate-400">{selectedBudget.crop_season} · FY {selectedBudget.financial_year_start}–{selectedBudget.financial_year_end}</p></div>
+              </div>
+              <span className="rounded-full bg-slate-200/70 px-3 py-1.5 text-[11px] font-bold text-slate-600">{checkedCount} line{checkedCount === 1 ? '' : 's'} selected</span>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="rounded-2xl border border-[#147D6F]/20 bg-[#E9F3F0] px-4 py-3">
+                <p className="text-[10px] font-black uppercase tracking-[0.08em] text-[#147D6F]">Amount to allocate</p>
+                <p className="mt-1 text-lg font-black text-[#0D3A35]">{INR(requiredAmount)}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                <p className="text-[10px] font-black uppercase tracking-[0.08em] text-slate-400">Allocated</p>
+                <p className="mt-1 text-lg font-black text-slate-800">{INR(totalAllocated)}</p>
+              </div>
+              <div className={cn('rounded-2xl border px-4 py-3', excessAllocated > 0 ? 'border-rose-200 bg-rose-50' : allocationComplete ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50')}>
+                <p className={cn('text-[10px] font-black uppercase tracking-[0.08em]', excessAllocated > 0 ? 'text-rose-600' : allocationComplete ? 'text-emerald-600' : 'text-amber-600')}>{excessAllocated > 0 ? 'Excess allocated' : 'Balance to choose'}</p>
+                <p className={cn('mt-1 text-lg font-black', excessAllocated > 0 ? 'text-rose-700' : allocationComplete ? 'text-emerald-700' : 'text-amber-700')}>{INR(excessAllocated > 0 ? excessAllocated : balanceToChoose)}</p>
+              </div>
             </div>
 
             {lineItemsLoading ? (
@@ -593,15 +679,15 @@ const BudgetHeadPickerModal = ({
             ) : lineItemsError ? (
               <div className="text-xs text-red-500 text-center py-10">{lineItemsError}</div>
             ) : lineItems.length === 0 ? (
-              <div className="text-xs text-gray-400 text-center py-10">No line items found for this budget</div>
+              <div className="rounded-xl border border-dashed border-slate-300 bg-white py-12 text-center text-xs text-slate-400">No line items found for this budget</div>
             ) : (
-              <div className="overflow-auto rounded-lg border border-gray-200 max-h-[420px]">
-                <table className="w-full text-xs border-collapse">
+              <div className="max-h-[430px] overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <table className="min-w-[1340px] w-full border-collapse font-sans text-xs">
                   <thead>
-                    <tr className="bg-gray-100 sticky top-0 z-10">
-                      <th className="w-9 px-2 py-2.5 border-b border-gray-200" />
-                      {['Line #', 'Category', 'Line Item', 'UoM', 'Qty / Acre', 'Acres', 'Total Qty', 'Rate / Unit', 'Total Value', 'Indent Amount (₹) *'].map((h) => (
-                        <th key={h} className="px-3 py-2.5 text-left font-semibold text-gray-500 border-b border-gray-200 whitespace-nowrap">{h}</th>
+                    <tr className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur">
+                      <th className="w-10 border-b border-slate-200 px-2 py-3" />
+                      {['Line #', 'Category', 'Line Item', 'UoM', 'Qty / Acre', 'Acres', 'Total Qty', 'Rate / Unit', 'Budget Value', 'Current Balance', 'Amount to Allocate *'].map((h) => (
+                        <th key={h} className={cn('whitespace-nowrap border-b border-slate-200 px-3 py-3 font-bold uppercase tracking-[0.035em] text-slate-500', ['Qty / Acre', 'Acres', 'Total Qty', 'Rate / Unit', 'Budget Value', 'Current Balance', 'Amount to Allocate *'].includes(h) ? 'text-right' : 'text-left')}>{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -609,31 +695,37 @@ const BudgetHeadPickerModal = ({
                     {lineItems.map((li, idx) => {
                       const sel = lineItemSelections[li.line_item_id];
                       const isChecked = sel?.checked ?? false;
+                      const currentBalance = budgetLineCurrentBalance(li);
+                      const balanceAfterAllocation = Math.max(currentBalance - (sel?.amount ?? 0), 0);
                       return (
                         <tr key={li.line_item_id} onClick={() => toggleLineItem(li.line_item_id)}
-                          className={`cursor-pointer border-b border-gray-100 transition-colors ${isChecked ? 'bg-green-50 hover:bg-green-100' : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/60 hover:bg-gray-100'}`}>
-                          <td className="px-2 py-2.5 text-center" onClick={(e) => e.stopPropagation()}>
-                            <input type="checkbox" checked={isChecked} onChange={() => toggleLineItem(li.line_item_id)} className="w-3.5 h-3.5 accent-green-600" />
+                          className={cn('cursor-pointer border-b border-slate-100 transition-colors', isChecked ? 'bg-[#E9F3F0] hover:bg-[#DCEDE8]' : idx % 2 === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/50 hover:bg-slate-100')}>
+                          <td className="px-2 py-3 text-center" onClick={(e) => e.stopPropagation()}>
+                            <input type="checkbox" checked={isChecked} onChange={() => toggleLineItem(li.line_item_id)} className="h-4 w-4 accent-[#147D6F]" />
                           </td>
-                          <td className="px-3 py-2.5 font-mono text-gray-500 font-semibold">{idx + 1}</td>
-                          <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{li.category}</td>
-                          <td className="px-3 py-2.5 font-medium text-gray-900 min-w-[160px]">{li.line_item}</td>
-                          <td className="px-3 py-2.5 text-center text-gray-600">{li.UoM}</td>
-                          <td className="px-3 py-2.5 text-right font-mono text-gray-700">{li.quantity_per_acre?.toLocaleString() ?? '—'}</td>
-                          <td className="px-3 py-2.5 text-right font-mono text-gray-700">{li.total_acres?.toLocaleString() ?? '—'}</td>
-                          <td className="px-3 py-2.5 text-right font-mono text-gray-700">{li.total_quantity?.toLocaleString() ?? '—'}</td>
-                          <td className="px-3 py-2.5 text-right font-mono text-gray-700">{INR(li.rate_per_unit)}</td>
-                          <td className="px-3 py-2.5 text-right font-mono font-semibold text-gray-800">{INR(li.total_value)}</td>
-                          <td className="px-3 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
+                          <td className="px-3 py-3 font-semibold tabular-nums text-slate-500">{idx + 1}</td>
+                          <td className="whitespace-nowrap px-3 py-3 text-slate-600">{li.category}</td>
+                          <td className="min-w-[190px] px-3 py-3 font-bold text-slate-900">{li.line_item}</td>
+                          <td className="px-3 py-3 text-center text-slate-600">{li.UoM}</td>
+                          <td className="px-3 py-3 text-right font-medium tabular-nums text-slate-700">{Number(li.quantity_per_acre || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-3 text-right font-medium tabular-nums text-slate-700">{Number(li.total_acres || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-3 text-right font-medium tabular-nums text-slate-700">{Number(li.total_quantity || 0).toLocaleString('en-IN')}</td>
+                          <td className="whitespace-nowrap px-3 py-3 text-right font-medium tabular-nums text-slate-700">{INR(Number(li.rate_per_unit) || 0)}</td>
+                          <td className="whitespace-nowrap px-3 py-3 text-right font-bold tabular-nums text-slate-800">{INR(Number(li.total_value) || 0)}</td>
+                          <td className="whitespace-nowrap bg-emerald-50/60 px-3 py-3 text-right"><p className="font-bold tabular-nums text-emerald-700">{INR(currentBalance)}</p><p className="mt-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-600/60">Available now</p></td>
+                          <td className="min-w-[185px] px-3 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                             {isChecked ? (
-                              <input type="number" min={1}
-                                value={sel!.amount === 0 ? '' : sel!.amount}
-                                placeholder="Enter amount"
-                                onChange={(e) => updateAmount(li.line_item_id, Number(e.target.value))}
-                                className={`w-36 border rounded px-2 py-1 text-xs text-right bg-white focus:outline-none focus:ring-2 font-mono ${!sel!.amount ? 'border-red-300 focus:ring-red-400 placeholder-red-300' : 'border-green-300 focus:ring-green-500'}`}
-                              />
+                              <div className="space-y-1.5">
+                                <input type="number" min={0} max={currentBalance} step="0.01"
+                                  value={sel!.amount === 0 ? '' : sel!.amount}
+                                  placeholder="Enter amount"
+                                  onChange={(e) => updateAmount(li.line_item_id, Math.max(0, Number(e.target.value)))}
+                                  className={cn('h-9 w-full rounded-lg border bg-white px-2.5 text-right font-sans text-xs font-bold tabular-nums outline-none transition focus:ring-2', !sel!.amount ? 'border-amber-300 placeholder:text-amber-400 focus:border-amber-400 focus:ring-amber-200' : sel!.amount > currentBalance ? 'border-rose-400 text-rose-700 focus:ring-rose-200' : 'border-[#147D6F]/40 text-[#0D3A35] focus:border-[#147D6F] focus:ring-[#147D6F]/15')}
+                                />
+                                <p className={cn('text-[9px] font-bold', sel!.amount > currentBalance ? 'text-rose-600' : 'text-slate-400')}>{sel!.amount > currentBalance ? `Exceeds by ${INR(sel!.amount - currentBalance)}` : `Balance after: ${INR(balanceAfterAllocation)}`}</p>
+                              </div>
                             ) : (
-                              <span className="text-gray-300 font-mono text-[10px]">—</span>
+                              <span className="text-[10px] font-medium text-slate-300">Select line</span>
                             )}
                           </td>
                         </tr>
@@ -642,12 +734,12 @@ const BudgetHeadPickerModal = ({
                   </tbody>
                   {checkedCount > 0 && (
                     <tfoot>
-                      <tr className="bg-green-50 border-t-2 border-green-300">
-                        <td colSpan={10} className="px-3 py-2.5 text-right text-xs font-bold text-gray-700">
-                          {checkedCount} item{checkedCount !== 1 ? 's' : ''} selected — Total Indent Amount
+                      <tr className="sticky bottom-0 border-t-2 border-[#147D6F]/30 bg-[#E9F3F0]">
+                        <td colSpan={11} className="px-3 py-3 text-right text-xs font-black text-slate-700">
+                          {checkedCount} line{checkedCount !== 1 ? 's' : ''} selected · Total allocation
                         </td>
-                        <td className="px-3 py-2.5 text-right text-xs font-bold text-green-700 font-mono">
-                          {totalAllocated > 0 ? INR(totalAllocated) : <span className="text-red-400">Enter amounts ↑</span>}
+                        <td className="px-3 py-3 text-right text-xs font-extrabold tabular-nums text-[#0D3A35]">
+                          {totalAllocated > 0 ? INR(totalAllocated) : <span className="text-amber-600">Enter amounts ↑</span>}
                         </td>
                       </tr>
                     </tfoot>
@@ -658,10 +750,17 @@ const BudgetHeadPickerModal = ({
           </div>
         )}
 
-        <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
-          <Button variant="outline" className="rounded-xl" onClick={onClose}>Cancel</Button>
+        <DialogFooter className="shrink-0 border-t border-slate-200 bg-white px-6 py-4 sm:items-center sm:justify-between">
+          <div className="mr-auto text-left">
+            {step === 2 && (
+              <p className={cn('text-xs font-bold', allocationComplete ? 'text-emerald-600' : excessAllocated > 0 ? 'text-rose-600' : 'text-slate-400')}>
+                {allocationComplete ? '✓ Required amount fully allocated' : excessAllocated > 0 ? `Reduce allocation by ${INR(excessAllocated)}` : requiredAmount <= 0 ? 'Enter the Service Requisition value before allocating a budget.' : `${INR(balanceToChoose)} remains to be allocated.`}
+              </p>
+            )}
+          </div>
+          <Button variant="outline" className="rounded-xl border-slate-200 px-5 font-bold text-slate-600" onClick={onClose}>Cancel</Button>
           {step === 2 && (
-            <Button className="rounded-xl bg-[#0D3A35] text-white hover:bg-[#092b27]" onClick={handleSave} disabled={checkedCount === 0 || lineItemsLoading}>
+            <Button className="rounded-xl bg-[#0D3A35] px-5 font-black text-white hover:bg-[#092b27]" onClick={handleSave} disabled={checkedCount === 0 || lineItemsLoading || !allocationComplete}>
               Save Selection{checkedCount > 0 ? ` (${checkedCount})` : ''}
             </Button>
           )}
@@ -834,7 +933,8 @@ const WorkOrder = () => {
             const hasFwd = Boolean(r.forwarded_by?.signature);
             const hasApproved = Boolean(r.approved_by?.signature);
             const status: WorkOrderRecord['status'] = hasApproved ? 'Approved' : hasFwd ? 'Submitted' : 'Draft';
-            const serviceRows: ApiServiceRow[] = (r.indent_data?.item_row || []).map((it: any) => ({
+            const rawServiceRows: any[] = r.indent_data?.item_row || [];
+            const serviceRows: ApiServiceRow[] = rawServiceRows.map((it: any) => ({
               srNo: it.sr_no ?? 1,
               serviceDescription: it.service_description ?? '',
               uom: it.uom ?? '',
@@ -862,8 +962,13 @@ const WorkOrder = () => {
             return {
               id: r.pr_number ?? date,
               sprNo: r.pr_number ?? '',
-              sprDate: date,
-              plant: r.indent_data?.project ?? '',
+              sprDate: r.indent_data?.requisition_date ?? rawServiceRows[0]?.requisition_date ?? date,
+              plant: r.indent_data?.project
+                ?? r.project
+                ?? r.indent_data?.department
+                ?? r.department
+                ?? rawServiceRows[0]?.requisition_department
+                ?? '',
               areaOfService: r.indent_data?.area_of_service ?? '',
               func: r.indent_data?.function ?? '',
               natureOfService: r.indent_data?.name_of_service ?? '',
@@ -910,6 +1015,7 @@ const WorkOrder = () => {
         record.areaOfService,
         record.func,
         record.natureOfService,
+        ...(record.serviceRows || []).map((row) => row.serviceDescription),
       ].some((value) => value?.toLowerCase().includes(needle));
       return matchesStatus && matchesQuery;
     });
@@ -1072,7 +1178,7 @@ const WorkOrder = () => {
             <table className="min-w-[1120px] w-full text-sm">
               <thead className="bg-[#0D3A35] text-white">
                 <tr>
-                  {['SR No.', 'Date', 'Department', 'Category / Activity', 'Engagement Type', 'Status', 'Actions'].map((h) => (
+                  {['SR No.', 'Date', 'Department', 'Service Items', 'Engagement Type', 'Status', 'Actions'].map((h) => (
                     <th key={h} className="px-5 py-3.5 text-left text-[11px] font-semibold uppercase tracking-[0.12em]">{h}</th>
                   ))}
                 </tr>
@@ -1085,10 +1191,26 @@ const WorkOrder = () => {
                     <tr key={r.id} className="transition-colors hover:bg-slate-50/80">
                       <td className="px-5 py-4 font-semibold text-[#0D3A35]">{r.sprNo || '—'}</td>
                       <td className="whitespace-nowrap px-5 py-4 text-slate-600">{r.sprDate || '—'}</td>
-                      <td className="max-w-52 px-5 py-4 text-slate-600"><span className="line-clamp-2">{r.plant}</span></td>
-                      <td className="px-5 py-4 text-slate-600">
-                        <p className="font-medium text-slate-700">{r.areaOfService || '—'}</p>
-                        {r.func && <p className="mt-0.5 text-xs text-slate-400">{r.func}</p>}
+                      <td className="max-w-52 px-5 py-4 text-slate-600">
+                        <span className={cn('line-clamp-2', !r.plant && 'italic text-slate-400')}>{r.plant || 'Not Recorded'}</span>
+                      </td>
+                      <td className="min-w-[260px] px-5 py-4 text-slate-600">
+                        {r.serviceRows?.length ? (
+                          <div className="space-y-1.5">
+                            {r.serviceRows.slice(0, 3).map((item) => (
+                              <div key={`${r.id}-${item.srNo}`} className="flex items-start gap-2">
+                                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-[#E9F3F0] text-[10px] font-black text-[#0D3A35]">{item.srNo}</span>
+                                <div className="min-w-0">
+                                  <p className="line-clamp-1 font-semibold text-slate-700">{item.serviceDescription || 'Unnamed service'}</p>
+                                  <p className="text-[11px] text-slate-400">{Number(item.quantity || 0).toLocaleString('en-IN')} {item.uom || ''}</p>
+                                </div>
+                              </div>
+                            ))}
+                            {r.serviceRows.length > 3 && <p className="pl-7 text-[11px] font-bold text-[#147D6F]">+{r.serviceRows.length - 3} more item{r.serviceRows.length - 3 === 1 ? '' : 's'}</p>}
+                          </div>
+                        ) : (
+                          <span className="italic text-slate-400">No items recorded</span>
+                        )}
                       </td>
                       <td className="max-w-60 px-5 py-4 text-slate-600"><span className="line-clamp-2">{r.natureOfService || '—'}</span></td>
                       <td className="px-5 py-4">
@@ -1132,13 +1254,23 @@ const WorkOrder = () => {
 
       {/* SPR Preview Dialog */}
       <Dialog open={Boolean(previewRecord)} onOpenChange={(v) => { if (!v) setPreviewRecord(null); }}>
-        <DialogContent className="flex max-h-[94vh] w-[96vw] max-w-[1280px] flex-col gap-0 overflow-hidden rounded-2xl border-0 bg-slate-100 p-0 shadow-2xl">
-          <DialogHeader className="shrink-0 bg-[#0D3A35] px-6 py-5 text-left text-white">
-            <DialogTitle className="text-white">Service Requisition Preview — {previewRecord?.sprNo}</DialogTitle>
-            <p className="text-xs text-white/65">Review the complete Service Purchase Requisition before attaching your signature.</p>
+        <DialogContent className="flex max-h-[96vh] w-[96vw] max-w-[1040px] flex-col gap-0 overflow-hidden rounded-2xl border-0 bg-slate-100 p-0 shadow-2xl [&>button]:right-5 [&>button]:top-5 [&>button]:text-white/70 [&>button:hover]:text-white">
+          <DialogHeader className="shrink-0 bg-[#0D3A35] px-6 py-5 pr-16 text-left text-white">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="mb-1 text-[10px] font-black uppercase tracking-[0.16em] text-emerald-200/80">Procurement · Service Requisition</p>
+                <DialogTitle className="font-display text-xl font-extrabold tracking-tight text-white">SR Preview</DialogTitle>
+                <p className="mt-1 text-xs font-medium text-white/65">Review the branded A4 document before printing or attaching your signature.</p>
+              </div>
+              <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-bold text-white/85">{previewRecord?.sprNo}</span>
+            </div>
           </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-auto p-4 sm:p-6">
-            {previewRecord && <SprPreview record={previewRecord} />}
+          <div className="min-h-0 flex-1 overflow-auto bg-slate-200/60 p-4 sm:p-6">
+            {previewRecord && (
+              <div className="mx-auto w-fit origin-top" style={{ zoom: 0.78 }}>
+                <ServiceRequisitionPdfPreview data={recordToPdfData(previewRecord)} />
+              </div>
+            )}
           </div>
           {previewRecord && (
             <DialogFooter className="shrink-0 border-t border-slate-200 bg-white px-6 py-4">
@@ -1167,6 +1299,7 @@ const WorkOrder = () => {
 
       {modalOpen && (
         <WorkOrderModal
+          existingRecords={records}
           onClose={() => setModalOpen(false)}
           onSave={(rec) => { setRecords((p) => [rec, ...p]); setModalOpen(false); }}
         />
@@ -1179,13 +1312,21 @@ const WorkOrder = () => {
 // WORK ORDER MODAL — live SPR document with inline editing
 // ─────────────────────────────────────────────────────────────
 const WorkOrderModal = ({
+  existingRecords,
   onClose,
   onSave,
 }: {
+  existingRecords: WorkOrderRecord[];
   onClose: () => void;
   onSave: (rec: WorkOrderRecord) => void;
 }) => {
-  const [form, setForm] = useState<WorkOrderForm>(emptyForm());
+  const [form, setForm] = useState<WorkOrderForm>(() => {
+    const initialForm = emptyForm();
+    return {
+      ...initialForm,
+      sprNo: nextServiceRequisitionNo(existingRecords, initialForm.sprDate),
+    };
+  });
   const [saving, setSaving] = useState(false);
   const [budgetPickerOpen, setBudgetPickerOpen] = useState(false);
   const [budgetHeadSelection, setBudgetHeadSelection] = useState<BudgetHeadSelection | null>(null);
@@ -1279,7 +1420,11 @@ const WorkOrderModal = ({
         area_of_service: form.areaOfService,
         function: resolvedActivity,
         name_of_service: form.natureOfService,
-        item_row: activeRows.map(toWorkOrderRow),
+        item_row: activeRows.map((row, index) => ({
+          ...toWorkOrderRow(row, index),
+          requisition_department: form.plant.trim(),
+          requisition_date: form.sprDate,
+        })),
         ...(budgetHeadSelection && {
           budget_head: {
             budget_id: budgetHeadSelection.budgetId,
@@ -1366,8 +1511,8 @@ const WorkOrderModal = ({
           </div>
         </div>
 
-        <div className="grid min-h-0 flex-1 lg:grid-cols-[1.05fr_.95fr]">
-          <div className="min-h-0 space-y-5 overflow-y-auto p-4 sm:p-6">
+        <div className="grid min-h-0 flex-1 lg:grid-cols-[.95fr_1.05fr]">
+          <div className="min-h-0 space-y-5 overflow-y-auto p-4 sm:p-6 lg:order-2">
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="mb-4 flex items-center gap-2">
               <ClipboardCheck className="h-4 w-4 text-[#147D6F]" />
@@ -1380,13 +1525,32 @@ const WorkOrderModal = ({
               </div>
               <div>
                 <label className={labelClass}>SR No. *</label>
-                <input value={form.sprNo} onChange={(event) => set('sprNo', event.target.value)} className={fieldClass} placeholder="SR/2026/001" />
+                <input
+                  value={form.sprNo}
+                  readOnly
+                  aria-readonly="true"
+                  className={cn(fieldClass, 'cursor-not-allowed bg-slate-50 font-semibold text-[#0D3A35]')}
+                  title="Automatically generated from the financial year and next available sequence"
+                />
+                <p className="mt-1.5 text-[11px] font-medium text-slate-400">Auto-generated using the requisition financial year.</p>
               </div>
               <div>
                 <label className={labelClass}>Requisition Date *</label>
                 <div className="relative">
                   <CalendarDays className="pointer-events-none absolute left-3 top-1/2 mt-0.5 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                  <input type="date" value={form.sprDate} onChange={(event) => set('sprDate', event.target.value)} className={cn(fieldClass, 'pl-9')} />
+                  <input
+                    type="date"
+                    value={form.sprDate}
+                    onChange={(event) => {
+                      const sprDate = event.target.value;
+                      setForm((current) => ({
+                        ...current,
+                        sprDate,
+                        sprNo: nextServiceRequisitionNo(existingRecords, sprDate),
+                      }));
+                    }}
+                    className={cn(fieldClass, 'pl-9')}
+                  />
                 </div>
               </div>
             </div>
@@ -1459,7 +1623,7 @@ const WorkOrderModal = ({
                     <div>
                       <label className={labelClass}>UoM *</label>
                       {customUomRows.has(row.id) ? (
-                        <div className="flex gap-2">
+                        <div className="space-y-2">
                           <input
                             value={row.uom}
                             onChange={(event) => setRow(row.id, 'uom', event.target.value)}
@@ -1477,7 +1641,7 @@ const WorkOrderModal = ({
                               });
                               setRow(row.id, 'uom', '');
                             }}
-                            className="shrink-0 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-500 hover:bg-slate-50"
+                            className="flex h-9 w-full items-center justify-center rounded-lg border border-slate-200 px-2 text-[11px] font-bold text-slate-500 transition hover:border-[#147D6F]/30 hover:bg-[#E9F3F0] hover:text-[#0D3A35]"
                           >
                             Choose from list
                           </button>
@@ -1553,7 +1717,7 @@ const WorkOrderModal = ({
               </div>
               {budgetHeadSelection ? (
                 <div className="space-y-2 p-4">
-                  {budgetHeadSelection.lineItems.map((line) => <div key={line.id} className="flex items-start justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2.5 text-xs"><div><p className="font-bold text-slate-700">{line.name}</p><p className="mt-0.5 text-slate-400">{budgetHeadSelection.budgetName} · {line.category}</p></div><span className="whitespace-nowrap font-mono font-black text-[#0D3A35]">{INR(line.amount)}</span></div>)}
+                  {budgetHeadSelection.lineItems.map((line) => <div key={line.id} className="flex items-start justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2.5 text-xs"><div><p className="font-bold text-slate-700">{line.name}</p><p className="mt-0.5 text-slate-400">{budgetHeadSelection.budgetName} · {line.category}</p></div><span className="whitespace-nowrap font-extrabold tabular-nums text-[#0D3A35]">{INR(line.amount)}</span></div>)}
                   <div className="border-t border-slate-100 pt-2 text-right text-xs font-black text-emerald-700">Allocated: {INR(budgetHeadSelection.lineItems.reduce((sum, line) => sum + line.amount, 0))}</div>
                 </div>
               ) : <button type="button" onClick={() => setBudgetPickerOpen(true)} className="w-full px-5 py-8 text-sm font-semibold text-slate-400 transition hover:bg-[#E9F3F0]/40 hover:text-[#147D6F]">No budget linked · Click to select</button>}
@@ -1575,7 +1739,7 @@ const WorkOrderModal = ({
           </section>
           </div>
 
-          <aside className="hidden min-h-0 overflow-y-auto border-l border-slate-200 bg-slate-100 p-5 lg:block">
+          <aside className="hidden min-h-0 overflow-y-auto border-r border-slate-200 bg-slate-100 p-5 lg:order-1 lg:block">
             <div className="sticky top-0 z-10 mb-3 flex items-center justify-between rounded-xl border border-slate-200 bg-white/95 px-4 py-3 shadow-sm backdrop-blur">
               <div>
                 <p className="text-xs font-black uppercase tracking-[0.1em] text-[#0D3A35]">Live SR PDF Preview</p>
@@ -1583,8 +1747,8 @@ const WorkOrderModal = ({
               </div>
               <Button type="button" variant="outline" size="sm" onClick={() => void handlePrint()} className="h-8 gap-1.5 rounded-lg border-slate-200 text-[11px] font-bold text-[#0D3A35]"><Printer className="h-3.5 w-3.5" /> Print</Button>
             </div>
-            <div className="overflow-hidden rounded-xl border border-slate-200 bg-slate-200/60 p-3">
-              <div className="origin-top-left" style={{ zoom: 0.59 }}>
+            <div className="flex justify-center overflow-hidden rounded-xl border border-slate-200 bg-slate-200/60 p-3">
+              <div className="origin-top" style={{ zoom: 0.78 }}>
                 <ServiceRequisitionPdfPreview data={livePdfData} />
               </div>
             </div>
@@ -1608,6 +1772,7 @@ const WorkOrderModal = ({
         open={budgetPickerOpen}
         onClose={() => setBudgetPickerOpen(false)}
         onSave={(sel) => setBudgetHeadSelection(sel)}
+        requiredAmount={total}
       />
     </div>
   );

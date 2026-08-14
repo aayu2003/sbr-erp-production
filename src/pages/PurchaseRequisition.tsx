@@ -891,8 +891,6 @@ const SprPreview = ({
   );
 };
 
-const COMPARATIVE_KEY = 'farmconnect.prComparative.v1';
-
 type ComparativeVendor = {
   id: string;
   name: string;
@@ -973,28 +971,62 @@ type Comparative = {
   isDraft?: boolean;
 };
 
-const readComparatives = (): Record<string, Comparative> => {
+const fetchComparativeForPreview = async (prNumber: string): Promise<Comparative | null> => {
+  const baseUrl = getApiBaseUrl();
+  if (!baseUrl || !prNumber) return null;
   try {
-    const raw = window.localStorage.getItem(COMPARATIVE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-};
+    const res = await fetch(`${baseUrl}/purchase_flow/get_comparative_statement_draft`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pr_number: prNumber }),
+    });
+    if (!res.ok) return null;
+    const data: any = await res.json().catch(() => null);
+    const row: any = Array.isArray(data?.items) ? data.items[0] : null;
+    if (!row) return null;
 
-const latestComparative = (...candidates: Array<Comparative | null | undefined>): Comparative | null => {
-  const available = candidates.filter(Boolean) as Comparative[];
-  if (!available.length) return null;
-  return available.sort((left, right) => {
-    const leftRevision = Number(left.revision || String(left.comparisonNo || '').match(/\/R(\d+)$/i)?.[1] || 0);
-    const rightRevision = Number(right.revision || String(right.comparisonNo || '').match(/\/R(\d+)$/i)?.[1] || 0);
-    if (leftRevision !== rightRevision) return rightRevision - leftRevision;
-    const leftSaved = new Date(left.lastSavedAt || left.revisionDate || 0).getTime() || 0;
-    const rightSaved = new Date(right.lastSavedAt || right.revisionDate || 0).getTime() || 0;
-    return rightSaved - leftSaved;
-  })[0];
+    // Rows saved after the "meta" field was introduced carry the entire
+    // Comparative model; prefer it. Older rows only have item_row/quoters,
+    // so reconstruct a minimal preview from those instead.
+    const meta = row?.meta && typeof row.meta === 'object' ? row.meta : null;
+    if (meta && Array.isArray(meta.items) && meta.items.length) {
+      return meta as Comparative;
+    }
+
+    const itemRows: any[] = Array.isArray(row?.item_row) ? row.item_row : [];
+    const items: ComparativeItem[] = itemRows.map((it, idx) => ({
+      id: `it-${idx + 1}`,
+      srNo: idx + 1,
+      partName: str(it?.item_name),
+      uom: str(it?.UoM),
+      qty: numOr0(it?.quantity),
+      gstPercent: numOr0(it?.gst_percentage),
+    }));
+    const quoters: any[] = Array.isArray(row?.quoters) ? row.quoters : [];
+    const vendors: ComparativeVendor[] = quoters.map((q) => str(q?.vendor_id)).filter(Boolean).map((vid) => ({ id: vid, name: vid }));
+    const quotes: ComparativeQuote[] = quoters
+      .map((q) => {
+        const vendorId = str(q?.vendor_id);
+        const unitRateByItemId: Record<string, number> = {};
+        const costing = q?.item_costing && typeof q.item_costing === 'object' ? q.item_costing : {};
+        items.forEach((it) => {
+          const costRow = (costing as any)?.[it.partName || ''];
+          unitRateByItemId[it.id] = numOr0(costRow?.per_unit_costing);
+        });
+        return { vendorId, unitRateByItemId };
+      })
+      .filter((q) => q.vendorId);
+
+    return {
+      indentId: prNumber,
+      vendors,
+      items,
+      quotes,
+      lastSavedAt: str(row?.created_at),
+    };
+  } catch {
+    return null;
+  }
 };
 
 const numOr0 = (v: unknown) => {
@@ -1205,14 +1237,6 @@ const ComparativeStatementPreview = ({ c, showForwardedStamp }: { c: Comparative
   );
 };
 
-const writeComparatives = (all: Record<string, any>) => {
-  try {
-    window.localStorage.setItem(COMPARATIVE_KEY, JSON.stringify(all));
-  } catch {
-    // ignore
-  }
-};
-
 const normalize = (v: unknown) => str(v).toLowerCase();
 
 const indentMatchesSearch = (it: Indent, query: string) => {
@@ -1272,7 +1296,8 @@ const groupIndentsByDate = (list: Indent[]) => {
   return dates.map((date) => ({ date, indents: byDate[date] }));
 };
 
-const PurchaseRequisition = () => {
+const PurchaseRequisition = ({ indentTypeFilter = 'PR' }: { indentTypeFilter?: 'PR' | 'SPR' }) => {
+  const isWorkComparative = indentTypeFilter === 'SPR';
   const navigate = useNavigate();
   const [indents, setIndents] = useState<Indent[]>([]);
   const [open, setOpen] = useState(false);
@@ -1440,10 +1465,14 @@ const PurchaseRequisition = () => {
       setPreviewComparative(null);
       return;
     }
-    const all = readComparatives();
-    const key1 = str(previewIndent.id);
-    const key2 = str(previewIndent.prNo);
-    setPreviewComparative(latestComparative((all as any)[key1], (all as any)[key2]));
+    let cancelled = false;
+    const prNumber = str(previewIndent.prNo) || str(previewIndent.id);
+    void fetchComparativeForPreview(prNumber).then((c) => {
+      if (!cancelled) setPreviewComparative(c);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [previewIndent]);
 
   const labelForQuotationStatus = (s: QuotationStatus) => {
@@ -1543,7 +1572,7 @@ const PurchaseRequisition = () => {
         purchaseOrder: { id: genId(), date: today(), totalValue: total, items: selected },
       };
     }));
-    toast.success('Purchase Order created');
+    toast.success(`${isWorkComparative ? 'Work' : 'Purchase'} Order created`);
   };
 
   const raisePR = (id: string) => {
@@ -1605,27 +1634,8 @@ const PurchaseRequisition = () => {
       toast.error('Already forwarded. Quotations are locked.');
       return;
     }
-    const all = readComparatives();
-    if (!all[indent.id]) {
-      all[indent.id] = {
-        indentId: indent.id,
-        title: `Vendor Comparative Statement for ${indent.project}`,
-        gstPercent: 18,
-        vendors: [
-          { id: genId(), name: 'VENDOR 1' },
-          { id: genId(), name: 'VENDOR 2' },
-        ],
-        items: indent.items.map((li) => ({
-          id: li.id,
-          srNo: li.srNo,
-          partName: li.partName,
-          uom: li.uom,
-          qty: netPrQty(li),
-        })),
-        quotes: [],
-      };
-      writeComparatives(all);
-    }
+    // No pre-seeding here — the quotation page itself seeds a fresh comparative
+    // (from the indent API) the first time it opens with nothing saved yet.
     const typeSegment = indent.indentType === 'SPR' ? 'SPR' : 'PR';
     navigate(`/purchase-requisition/${typeSegment}/${encodeURIComponent(indent.id)}/quotation`);
   };
@@ -1635,11 +1645,16 @@ const PurchaseRequisition = () => {
     navigate(`/purchase-requisition/${typeSegment}/${encodeURIComponent(indent.id)}/quotation?revise=1`);
   };
 
+  const scopedIndents = useMemo(
+    () => indents.filter((indent) => (indent.indentType || 'PR') === indentTypeFilter),
+    [indentTypeFilter, indents],
+  );
+
   const indentsAfterSearch = useMemo(() => {
     const q = str(searchQuery);
-    if (!q) return indents;
-    return indents.filter((it) => indentMatchesSearch(it, q));
-  }, [indents, searchQuery]);
+    if (!q) return scopedIndents;
+    return scopedIndents.filter((it) => indentMatchesSearch(it, q));
+  }, [scopedIndents, searchQuery]);
 
   const newIndents = useMemo(() => indentsAfterSearch.filter((it) => it.status !== 'po'), [indentsAfterSearch]);
   const processIndents = useMemo(
@@ -1669,15 +1684,15 @@ const PurchaseRequisition = () => {
     <div className="min-h-screen space-y-7 bg-[#fbfcfd] p-4 text-slate-900 sm:p-6 lg:p-8">
       <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
         <div>
-          <p className="text-sm font-bold text-emerald-700">Purchase Operations</p>
-          <h1 className="mt-3 text-3xl font-black tracking-tight text-slate-950">Comparative Statement</h1>
-          <p className="mt-3 text-base font-medium text-slate-600">Create and manage commercial comparative statements against every purchase requisition raised in the system.</p>
+          <p className="text-sm font-bold text-emerald-700">{isWorkComparative ? 'Work Order Operations' : 'Purchase Order Operations'}</p>
+          <h1 className="mt-3 text-3xl font-black tracking-tight text-slate-950">{isWorkComparative ? 'Work Comparative Statement' : 'Purchase Comparative Statement'}</h1>
+          <p className="mt-3 text-base font-medium text-slate-600">Create and manage commercial comparative statements against every {isWorkComparative ? 'service requisition' : 'purchase requisition'} raised in the system.</p>
         </div>
       </div>
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: 'Purchase Requisitions', value: comparativeSummary.total, hint: 'All PRs available for comparison', Icon: ClipboardList, tone: 'bg-[#0D3A35]/10 text-[#0D3A35]' },
+          { label: isWorkComparative ? 'Service Requisitions' : 'Purchase Requisitions', value: comparativeSummary.total, hint: `All ${isWorkComparative ? 'SRs' : 'PRs'} available for comparison`, Icon: ClipboardList, tone: 'bg-[#0D3A35]/10 text-[#0D3A35]' },
           { label: 'Not Started', value: comparativeSummary.notStarted, hint: 'Comparative statement pending', Icon: FileText, tone: 'bg-blue-50 text-blue-700' },
           { label: 'Draft / Saved', value: comparativeSummary.inProgress, hint: 'Statements being prepared', Icon: Clock3, tone: 'bg-amber-50 text-amber-700' },
           { label: 'Forwarded', value: comparativeSummary.forwarded, hint: 'Sent for HO processing', Icon: ShoppingCart, tone: 'bg-emerald-50 text-emerald-700' },
@@ -1696,14 +1711,14 @@ const PurchaseRequisition = () => {
           <div className="flex flex-col gap-4 border-b border-slate-200 p-5 xl:flex-row xl:items-center xl:justify-between">
             <div className="relative w-full xl:max-w-xl">
               <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <Input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search PR number, project, requester or item" className="h-12 rounded-xl border-slate-200 bg-slate-50 pl-11 font-semibold focus-visible:ring-emerald-100" />
+              <Input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder={`Search ${isWorkComparative ? 'SR' : 'PR'} number, department, requester or ${isWorkComparative ? 'service' : 'item'}`} className="h-12 rounded-xl border-slate-200 bg-slate-50 pl-11 font-semibold focus-visible:ring-emerald-100" />
             </div>
             <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-1">
           <button
             onClick={() => setActiveTab('new')}
             className={`rounded-lg px-4 py-2.5 text-sm font-black transition ${activeTab === 'new' ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
           >
-            All PRs ({newIndents.length})
+            All {isWorkComparative ? 'SRs' : 'PRs'} ({newIndents.length})
           </button>
           <button
             onClick={() => setActiveTab('process')}
@@ -1853,7 +1868,7 @@ const PurchaseRequisition = () => {
               </Fragment>
             ))}
             {activeTab === 'new' && newGroups.length === 0 && (
-              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><ClipboardList className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No purchase requisitions found</p><p className="mt-1 text-sm font-semibold text-slate-400">Raised and approved purchase requisitions will appear here for comparative statement preparation.</p></div>
+              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><ClipboardList className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No {isWorkComparative ? 'service' : 'purchase'} requisitions found</p><p className="mt-1 text-sm font-semibold text-slate-400">Raised and approved {isWorkComparative ? 'service' : 'purchase'} requisitions will appear here for comparative statement preparation.</p></div>
             )}
 
             {activeTab === 'process' && processGroups.map((g) => (
@@ -1937,7 +1952,7 @@ const PurchaseRequisition = () => {
                             className={`h-10 gap-2 rounded-xl font-black ${it.items.some(li => !(li.quotes && li.quotes.length > 0)) ? 'bg-slate-100 text-slate-400' : 'bg-[#0D3A35] text-white hover:bg-[#092b27]'}`}
                             disabled={it.items.some(li => !(li.quotes && li.quotes.length > 0))}
                           >
-                            <Plus className="w-4 h-4" /> Create PO
+                            <Plus className="w-4 h-4" /> Create {isWorkComparative ? 'WO' : 'PO'}
                           </Button>
                         </div>
                       </div>
@@ -1987,7 +2002,7 @@ const PurchaseRequisition = () => {
 
             {activeTab === 'po' && poGroups.map((g) => (
               <Fragment key={`po-${g.date}`}>
-                <div className="border-y border-slate-200 bg-slate-50 px-5 py-2.5 text-xs font-black uppercase tracking-[0.12em] text-slate-500">PO Date · {formatDisplayDate(g.date)}</div>
+                <div className="border-y border-slate-200 bg-slate-50 px-5 py-2.5 text-xs font-black uppercase tracking-[0.12em] text-slate-500">{isWorkComparative ? 'WO' : 'PO'} Date · {formatDisplayDate(g.date)}</div>
                 {g.indents.map((it) => {
                   const pr = str(it.prNo || it.id);
                   const qs = quotationStatusByPr[pr];
@@ -1999,9 +2014,9 @@ const PurchaseRequisition = () => {
                   return (
                     <div key={it.id} className={`relative flex flex-col gap-4 px-5 py-5 transition hover:bg-slate-50/70 xl:flex-row xl:items-center xl:justify-between ${forwarded ? 'bg-emerald-50/70' : ''}`}>
                       <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-sm font-black text-[#0D3A35]">{it.prNo}</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase text-emerald-700">PO Created</span></div>
+                        <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-sm font-black text-[#0D3A35]">{it.prNo}</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase text-emerald-700">{isWorkComparative ? 'WO' : 'PO'} Created</span></div>
                         <div className="mt-2 truncate text-base font-black text-slate-900">{it.project}</div>
-                        <div className="mt-2 text-xs font-semibold text-slate-500">PO Date: {formatDisplayDate(it.purchaseOrder?.date)} · Total: <span className="font-black text-slate-700">{it.purchaseOrder ? formatInr(it.purchaseOrder.totalValue) : '—'}</span></div>
+                        <div className="mt-2 text-xs font-semibold text-slate-500">{isWorkComparative ? 'WO' : 'PO'} Date: {formatDisplayDate(it.purchaseOrder?.date)} · Total: <span className="font-black text-slate-700">{it.purchaseOrder ? formatInr(it.purchaseOrder.totalValue) : '—'}</span></div>
                         <div className="mt-1 text-xs font-semibold text-slate-500">
                           Comparative Statement:{' '}
                           {qLoading ? (
@@ -2040,7 +2055,7 @@ const PurchaseRequisition = () => {
                           {forwarding ? 'Forwarding…' : forwarded ? 'Forwarded' : 'Forward'}
                         </Button>
                         <Button variant="outline" onClick={() => setPreviewIndent(it)} className="h-10 gap-2 rounded-xl border-slate-200 font-bold text-[#0D3A35]">
-                          <FilePlus className="w-4 h-4" /> View PO
+                          <FilePlus className="w-4 h-4" /> View {isWorkComparative ? 'WO' : 'PO'}
                         </Button>
                         <Button
                           variant="outline"
@@ -2058,7 +2073,7 @@ const PurchaseRequisition = () => {
               </Fragment>
             ))}
             {activeTab === 'po' && poGroups.length === 0 && (
-              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><PackageCheck className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No purchase orders created</p><p className="mt-1 text-sm font-semibold text-slate-400">Converted requisitions will be listed in this tab.</p></div>
+              <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center"><PackageCheck className="h-10 w-10 text-slate-300" /><p className="mt-4 font-black text-slate-700">No {isWorkComparative ? 'work' : 'purchase'} orders created</p><p className="mt-1 text-sm font-semibold text-slate-400">Converted requisitions will be listed in this tab.</p></div>
             )}
           </div>
         </div>

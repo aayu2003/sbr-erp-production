@@ -6,14 +6,18 @@ import { Button } from '@/components/ui/button';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
 import { formatDateDDMMYYYY, formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
-import { markPoForwardedToPurchaseFlow, readPoApprovals } from '@/lib/poApprovalStore';
 import { getGrnsByOrder, type GRNRecord } from '@/lib/grnApi';
 import { buildGrnPdfBlob } from '@/lib/grnPdf';
 import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
+import { MakeWorkOrderPopup } from '@/components/ho-inbox/MakeWorkOrderPopup';
 
 type LeftPanelInfo = {
   pr_number?: string;
   approved_vendor_id?: string;
+  // Fallback item source for POs whose own item_details snapshot is empty
+  // (e.g. saved before that field existed) — the comparative statement's
+  // item_row is always populated.
+  item_row?: Array<{ item_name?: string; UoM?: string; uom?: string; quantity?: number }>;
   vendor_details?: {
     nature_of_vendor?: string;
     aadhar_card_number?: string;
@@ -44,6 +48,10 @@ type LeftPanelInfo = {
     gst_number?: string;
     vendor_address?: string;
     e_mail_id?: string;
+    contact_person_name?: string;
+    contact_name?: string;
+    authorized_person_name?: string;
+    representative_name?: string;
   } | null;
 };
 
@@ -59,6 +67,10 @@ type PurchaseOrderDetails = {
   requiredDocuments: string[];
   itemDetails: Array<{ name: string; uom: string; quantity: number }>;
   docUrl: string;
+  vendorAddress: string;
+  vendorContactName: string;
+  vendorPhone: string;
+  vendorEmail: string;
 };
 
 type ApiPurchaseFlowStageEntry = {
@@ -122,6 +134,13 @@ const normalizeRequiredPurchaseDocuments = (value: unknown): string[] => {
 };
 
 const safeTrim = (v: unknown) => String(v ?? '').trim();
+
+const financialYearCode = (value: unknown) => {
+  const parsed = new Date(safeTrim(value));
+  const date = Number.isFinite(parsed.getTime()) ? parsed : new Date();
+  const startYear = date.getMonth() >= 3 ? date.getFullYear() : date.getFullYear() - 1;
+  return `${String(startYear).slice(-2)}-${String(startYear + 1).slice(-2)}`;
+};
 
 const asRecord = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
@@ -309,6 +328,60 @@ async function fetchPurchaseFlows(signal?: AbortSignal): Promise<ApiPurchaseFlow
 
   const list = (data as any)?.purchase_flows;
   return Array.isArray(list) ? (list as ApiPurchaseFlow[]) : [];
+}
+
+type PoApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected';
+
+type PoApprovalRecord = {
+  poNumber: string;
+  orderType?: 'PR' | 'SPR';
+  prNumber: string;
+  comparisonId: string;
+  vendorId: string;
+  vendorName: string;
+  itemDetails: Array<{ name: string; uom: string; quantity: number }>;
+  status: PoApprovalStatus;
+};
+
+// Mirrors the same admin_purchase_order -> PoApprovalRecord mapping used in
+// POCreation.tsx/FinanceAdminOpsIndent.tsx — all three read the same backend record.
+const mapAdminPurchaseOrderToApprovalRecord = (order: any): PoApprovalRecord => {
+  const quote = order?.purchase_quote && typeof order.purchase_quote === 'object' ? order.purchase_quote : {};
+  const directorApproval = order?.director_approval && typeof order.director_approval === 'object' ? order.director_approval : {};
+  const items: any[] = Array.isArray(order?.item_details) ? order.item_details : [];
+  const status: PoApprovalStatus = (['draft', 'pending', 'approved', 'rejected'] as const)
+    .includes(directorApproval?.status) ? directorApproval.status : 'pending';
+  return {
+    poNumber: safeTrim(order?.order_number),
+    orderType: order?.order_type === 'SPR' ? 'SPR' : 'PR',
+    prNumber: safeTrim(order?.pr_number),
+    comparisonId: safeTrim(order?.comparison_id),
+    vendorId: safeTrim(quote?.vendor_id),
+    vendorName: safeTrim(quote?.vendor_name) || safeTrim(quote?.vendor_id),
+    itemDetails: items.map((item) => ({
+      name: safeTrim(item?.name) || 'Item not recorded',
+      uom: safeTrim(item?.uom),
+      quantity: Number(item?.quantity ?? 0) || 0,
+    })),
+    status,
+  };
+};
+
+async function fetchPoApprovalRecords(signal?: AbortSignal): Promise<PoApprovalRecord[]> {
+  const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+  if (!baseUrl) return [];
+  try {
+    const res = await fetch(`${baseUrl}/purchase_flow/get_all_purchase_orders`, {
+      headers: { Accept: 'application/json' },
+      signal,
+    });
+    if (!res.ok) return [];
+    const data: any = await res.json().catch(() => null);
+    const orders: any[] = Array.isArray(data?.purchase_orders) ? data.purchase_orders : [];
+    return orders.map(mapAdminPurchaseOrderToApprovalRecord);
+  } catch {
+    return [];
+  }
 }
 
 function UploadStepDocPopup({
@@ -1240,6 +1313,7 @@ type PurchaseFlowProps = {
 };
 
 export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowProps = {}) {
+  const OrderPopup = orderTypeFilter === 'SPR' ? MakeWorkOrderPopup : MakePurchaseOrderPopup;
   const [flows, setFlows] = useState<ApiPurchaseFlow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1260,6 +1334,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
   const [createFlowOpen, setCreateFlowOpen] = useState(false);
   const [flowRefreshNonce, setFlowRefreshNonce] = useState(0);
   const [forwardingSteps, setForwardingSteps] = useState<Set<string>>(new Set());
+  const [expandedItemFlowIds, setExpandedItemFlowIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'in-progress' | 'completed'>('all');
   const reconciliationAttemptsRef = useRef<Set<string>>(new Set());
@@ -1282,10 +1357,13 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
       (document) => {
         const requiredType = documentTypeKey(document);
         if (requiredType === 'grn') return false;
+        // A step of this type already exists — whether it's still pending or
+        // already uploaded — so there's nothing to backfill. Checking for an
+        // *empty* step only (the old behavior) treated an already-uploaded
+        // step as if the requirement were unmet, appending a duplicate empty
+        // step for the same document type once the original was completed.
         return !current.some((step) =>
-          documentTypeKey(step.documentType || step.document) === requiredType
-          && !step.docLink
-          && !isUploaded(step),
+          documentTypeKey(step.documentType || step.document) === requiredType,
         );
       },
     );
@@ -1363,6 +1441,13 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
   // Left panel enriched data — fetched per-row after the list renders
   const [leftPanelInfoMap, setLeftPanelInfoMap] = useState<Record<string, LeftPanelInfo>>({});
   const [leftPanelLoadingSet, setLeftPanelLoadingSet] = useState<Set<string>>(new Set());
+  // Tracks in-flight get_purchase_orders requests so PO Date/Delivery Date/
+  // Project Cluster can show a spinner instead of "—" while still loading.
+  const [poDetailsLoadingSet, setPoDetailsLoadingSet] = useState<Set<string>>(new Set());
+  // The indent itself is the original, always-populated item source — used as
+  // the final fallback when the comparative statement/PO's own item snapshots
+  // are empty (e.g. saved before those fields existed).
+  const [indentItemsByFlowId, setIndentItemsByFlowId] = useState<Record<string, Array<{ name: string; uom: string; quantity: number }>>>({});
 
   // Converts the current ordered steps array → { step_1: {...}, step_2: {...}, ... }
   const buildStepJson = (steps: PurchaseFlowStep[]) => {
@@ -1435,7 +1520,12 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
     copy.sort((a, b) => safeTrim((b as any)?.timestamp).localeCompare(safeTrim((a as any)?.timestamp)));
     return copy;
   }, [flows, orderTypeFilter]);
-  const poApprovalRecords = useMemo(() => readPoApprovals(), [flowRefreshNonce]);
+  const [poApprovalRecords, setPoApprovalRecords] = useState<PoApprovalRecord[]>([]);
+  useEffect(() => {
+    const ac = new AbortController();
+    void fetchPoApprovalRecords(ac.signal).then((records) => setPoApprovalRecords(records));
+    return () => ac.abort();
+  }, [flowRefreshNonce]);
 
   useEffect(() => {
     Object.entries(flowStepOverrides).forEach(([flowId, steps]) => {
@@ -1465,7 +1555,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
     if (loading) return;
 
     const liveOrderNumbers = new Set(rows.map((flow) => safeTrim(flow.order_number)).filter(Boolean));
-    const missingApprovals = readPoApprovals().filter((record) =>
+    const missingApprovals = poApprovalRecords.filter((record) =>
       (!orderTypeFilter || (orderTypeFilter === 'PR' && (!record.orderType || record.orderType === 'PR')) || (orderTypeFilter === 'SPR' && record.orderType === 'SPR'))
       &&
       record.status !== 'rejected'
@@ -1531,7 +1621,6 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
             throw new Error(result?.message || result?.error || `HTTP ${forwardResponse.status}`);
           }
 
-          markPoForwardedToPurchaseFlow(record.poNumber);
           forwardedCount += 1;
         } catch (error: any) {
           if (error?.name === 'AbortError') return;
@@ -1548,7 +1637,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
 
     void reconcile();
     return () => controller.abort();
-  }, [loading, orderTypeFilter, rows]);
+  }, [loading, orderTypeFilter, rows, poApprovalRecords]);
 
   // After all rows are in view, fetch left-panel info row by row (in parallel)
   useEffect(() => {
@@ -1556,6 +1645,23 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
     const ac = new AbortController();
     const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
     if (!baseUrl) return;
+
+    // Older purchase-order records can have an empty item_details snapshot and
+    // get_left_panel_info does not consistently return item_row. Load the TC
+    // register once as the authoritative legacy fallback for every visible row.
+    const comparativeRowsPromise = (async (): Promise<any[]> => {
+      const url = `${baseUrl}/purchase_flow/get_TC`;
+      const request = (method: 'GET' | 'POST') => fetch(url, {
+        method,
+        headers: { Accept: 'application/json' },
+        signal: ac.signal,
+      });
+      let response = await request('GET');
+      if (response.status === 405) response = await request('POST');
+      if (!response.ok) return [];
+      const payload: unknown = await response.json().catch(() => null);
+      return Array.isArray(payload) ? payload : [];
+    })().catch(() => []);
 
     rows.forEach(async (flow) => {
       const comparisonId = safeTrim((flow as any)?.comparison_id);
@@ -1571,11 +1677,58 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
         });
         if (!res.ok) return;
         const data: LeftPanelInfo = await res.json().catch(() => null);
-        if (data) setLeftPanelInfoMap((prev) => ({ ...prev, [flowId]: data }));
+        if (data) {
+          let enrichedData = data;
+          if (!Array.isArray(data.item_row) || data.item_row.length === 0) {
+            const comparativeRows = await comparativeRowsPromise;
+            const fallback = comparativeRows.find((entry: any) => (
+              safeTrim(entry?.comparison_id ?? entry?.comparision_id) === comparisonId
+              || safeTrim(entry?.pr_number) === safeTrim(data.pr_number ?? flow.pr_number)
+            ));
+            if (Array.isArray(fallback?.item_row) && fallback.item_row.length) {
+              enrichedData = { ...data, item_row: fallback.item_row };
+            }
+          }
+          setLeftPanelInfoMap((prev) => ({ ...prev, [flowId]: enrichedData }));
+        }
       } catch (e: any) {
         if (e?.name === 'AbortError') return;
       } finally {
         setLeftPanelLoadingSet((prev) => { const s = new Set(prev); s.delete(flowId); return s; });
+      }
+    });
+
+    return () => ac.abort();
+  }, [rows]);
+
+  // Fetch item name/uom/qty straight from the indent — the original, always-
+  // populated source, used as a fallback wherever the comparative statement's
+  // or PO's own item snapshot turns out to be empty.
+  useEffect(() => {
+    if (rows.length === 0) return;
+    const ac = new AbortController();
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return;
+
+    rows.forEach(async (flow) => {
+      const prNumberForFlow = safeTrim((flow as any)?.pr_number);
+      const comparisonId = safeTrim((flow as any)?.comparison_id);
+      const flowId = safeTrim((flow as any)?.flow_id) || comparisonId;
+      if (!prNumberForFlow || !flowId) return;
+
+      try {
+        const res = await fetch(`${baseUrl}/purchase_flow/get_indent_items`, {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pr_number: prNumberForFlow }),
+          signal: ac.signal,
+        });
+        if (!res.ok) return;
+        const data: any = await res.json().catch(() => null);
+        const items = normalizePoItemDetails(data?.items);
+        if (items.length) setIndentItemsByFlowId((prev) => ({ ...prev, [flowId]: items }));
+      } catch (e: any) {
+        if (e?.name === 'AbortError') return;
       }
     });
 
@@ -1597,6 +1750,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
         const prNumber = safeTrim((flow as any)?.pr_number) || safeTrim(leftPanelInfoMap[flowId]?.pr_number);
         if (!prNumber || !flowId || poRequirementLoadsRef.current.has(flowId)) return null;
         poRequirementLoadsRef.current.add(flowId);
+        setPoDetailsLoadingSet((prev) => new Set([...prev, flowId]));
         try {
           const res = await fetch(`${baseUrl}/purchase_flow/get_purchase_orders`, {
             method: 'POST',
@@ -1652,6 +1806,10 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
             paymentTerms: safeTrim(quote.paymentTerms || terms.paymentTerms || terms.payment_terms),
             shipToAddress: safeTrim(quote.shipToAddress || quote.ship_to_address),
             preparedBy: safeTrim(quote.preparedBy || quote.prepared_by),
+            vendorAddress: safeTrim(quote.vendorAddr1 || quote.vendor_address),
+            vendorContactName: safeTrim(quote.vendorContactName || quote.vendor_contact_name),
+            vendorPhone: safeTrim(quote.vendorMobile || quote.vendor_mobile || quote.vendor_contact),
+            vendorEmail: safeTrim(quote.vendorEmail || quote.vendor_email),
             requiredDocuments,
             itemDetails: normalizePoItemDetails(
               selectedOrder?.itemDetails,
@@ -1670,6 +1828,13 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
           poRequirementLoadsRef.current.delete(flowId);
           if (error?.name === 'AbortError') return null;
           return null;
+        } finally {
+          setPoDetailsLoadingSet((prev) => {
+            if (!prev.has(flowId)) return prev;
+            const next = new Set(prev);
+            next.delete(flowId);
+            return next;
+          });
         }
       }));
 
@@ -2063,6 +2228,29 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
   };
 
   const flowSummaries = rows.map((flow, index) => ({ flow, ...flowProgress(flow, index) }));
+  const { displayFlowIdByInternalId, displayComparisonIdByInternalId } = (() => {
+    const counters: Record<string, number> = {};
+    const flowLabels = new Map<string, string>();
+    const comparisonLabels = new Map<string, string>();
+    [...flowSummaries]
+      .sort((left, right) => {
+        const leftTime = Date.parse(safeTrim(left.flow.timestamp)) || 0;
+        const rightTime = Date.parse(safeTrim(right.flow.timestamp)) || 0;
+        return leftTime - rightTime || left.flowId.localeCompare(right.flowId);
+      })
+      .forEach(({ flow, flowId }) => {
+        const isWorkOrder = safeTrim(flow.order_type).toUpperCase() === 'SPR';
+        const flowPrefix = isWorkOrder ? 'WO-Flow' : 'PO-Flow';
+        const comparisonPrefix = isWorkOrder ? 'WO-VCS' : 'PO-VCS';
+        const year = financialYearCode(flow.timestamp);
+        const counterKey = `${flowPrefix}:${year}`;
+        counters[counterKey] = (counters[counterKey] || 0) + 1;
+        const sequence = String(counters[counterKey]).padStart(3, '0');
+        flowLabels.set(flowId, `SBRPL/${flowPrefix}/${year}/${sequence}`);
+        comparisonLabels.set(flowId, `SBRPL/${comparisonPrefix}/${year}/${sequence}`);
+      });
+    return { displayFlowIdByInternalId: flowLabels, displayComparisonIdByInternalId: comparisonLabels };
+  })();
   const completedFlowCount = flowSummaries.filter((entry) => entry.isCompleted).length;
   const pendingDocumentCount = flowSummaries.reduce(
     (total, entry) => total + Math.max(entry.steps.length - entry.completed, 0),
@@ -2074,6 +2262,8 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
     const query = searchQuery.trim().toLowerCase();
     if (!query) return true;
     const flowId = safeTrim(flow.flow_id) || safeTrim(flow.comparison_id);
+    const displayFlowId = displayFlowIdByInternalId.get(flowId);
+    const displayComparisonId = displayComparisonIdByInternalId.get(flowId);
     const info = leftPanelInfoMap[flowId];
     return [
       flow.pr_number,
@@ -2083,6 +2273,8 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
       info?.pr_number,
       info?.approved_vendor_id,
       info?.vendor_details?.vendor_name,
+      displayFlowId,
+      displayComparisonId,
     ].some((value) => safeTrim(value).toLowerCase().includes(query));
   });
 
@@ -2104,7 +2296,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
       ) : null}
 
       {poPreviewTarget ? (
-        <MakePurchaseOrderPopup
+        <OrderPopup
           open
           reviewOnly
           variant="modal"
@@ -2307,7 +2499,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                     </span>
                     <div className="min-w-0">
                       <p className="truncate text-xs font-bold uppercase tracking-[0.08em] text-slate-400">Flow ID</p>
-                      <p className="truncate text-sm font-bold text-slate-800">{flowId}</p>
+                      <p className="truncate text-sm font-bold text-slate-800">{displayFlowIdByInternalId.get(flowId) || flowId}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
@@ -2327,11 +2519,46 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                     const vendor = info?.vendor_details;
                     const approvedVendorId = info?.approved_vendor_id;
                     const poDetails = poDetailsByFlowId[flowId];
+                    const isPoDetailsLoading = poDetailsLoadingSet.has(flowId);
+                    const poDetailsLoadingSpinner = <RefreshCw className="h-3 w-3 animate-spin text-slate-400" />;
                     const approvalRecord = poApprovalRecords.find((record) =>
                       (displayOrder !== '—' && record.poNumber === displayOrder) || record.prNumber === effectivePrNumber,
                     );
-                    const itemDetails = poDetails?.itemDetails?.length ? poDetails.itemDetails : approvalRecord?.itemDetails || [];
+                    const itemDetails = normalizePoItemDetails(poDetails?.itemDetails, approvalRecord?.itemDetails, info?.item_row, indentItemsByFlowId[flowId]);
+                    const itemListCollapsed = !expandedItemFlowIds.has(flowId);
                     const approvedVendorName = vendor?.vendor_name || approvalRecord?.vendorName || approvedVendorId || 'Not recorded';
+                    const vendorRegisteredAddress = vendor?.address_for_place_of_supply_of_goods_services || vendor?.address;
+                    const approvedVendorAddress = safeTrim(vendor?.vendor_address) || [
+                      vendorRegisteredAddress?.plot_flat_unit_no_and_floor,
+                      vendorRegisteredAddress?.name_of_premises,
+                      vendorRegisteredAddress?.road,
+                      vendorRegisteredAddress?.taluka_locality,
+                      vendorRegisteredAddress?.district,
+                      vendorRegisteredAddress?.state,
+                      vendorRegisteredAddress?.pin_code,
+                    ].map(safeTrim).filter(Boolean).join(', ') || safeTrim(poDetails?.vendorAddress);
+                    const approvedVendorContactName = safeTrim(
+                      vendor?.contact_person_name
+                      || vendor?.contact_name
+                      || vendor?.authorized_person_name
+                      || vendor?.representative_name
+                      || poDetails?.vendorContactName,
+                    );
+                    const approvedVendorPhone = safeTrim(
+                      vendor?.vendor_contact || vendor?.address_for_place_of_supply_of_goods_services?.contact_number || poDetails?.vendorPhone,
+                    );
+                    const approvedVendorEmail = safeTrim(
+                      vendor?.e_mail_id || vendor?.address_for_place_of_supply_of_goods_services?.e_mail_id || poDetails?.vendorEmail,
+                    );
+
+                    if (isLoading) {
+                      return (
+                        <div className="flex w-full min-w-0 flex-col items-center justify-center gap-3 border-b border-slate-200 bg-[#f7faf9] px-4 py-4 lg:min-h-0 lg:border-b-0 lg:border-r" style={{ minHeight: 300 }}>
+                          <RefreshCw className="h-6 w-6 animate-spin text-[#0D3A35]" />
+                          <p className="text-xs font-semibold text-slate-500">Loading details…</p>
+                        </div>
+                      );
+                    }
 
                     return (
                   <div className="flex w-full min-w-0 flex-col gap-3 border-b border-slate-200 bg-[#f7faf9] px-4 py-4 lg:border-b-0 lg:border-r">
@@ -2356,13 +2583,12 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                       <div className="grid grid-cols-2 gap-x-3 gap-y-2 px-3 py-3">
                         {[
                           ['PO Number', poDetails?.poNumber || displayOrder],
-                          ['PO Date', poDetails?.poDate ? formatDateDDMMYYYY(poDetails.poDate) : '—'],
+                          ['PO Date', poDetails?.poDate ? formatDateDDMMYYYY(poDetails.poDate) : isPoDetailsLoading ? poDetailsLoadingSpinner : '—'],
                           ['PR Number', displayPr],
-                          ['Comparison ID', comparisonId || '—'],
+                          ['Comparison ID', displayComparisonIdByInternalId.get(flowId) || comparisonId || '—'],
                           ['Amendment', poDetails?.amendmentNo || '0'],
-                          ['Delivery Date', poDetails?.deliveryDate ? formatDateDDMMYYYY(poDetails.deliveryDate) : '—'],
-                          ['Project / Cluster', poDetails?.project || '—'],
-                          ['Prepared By', poDetails?.preparedBy || '—'],
+                          ['Delivery Date', poDetails?.deliveryDate ? formatDateDDMMYYYY(poDetails.deliveryDate) : isPoDetailsLoading ? poDetailsLoadingSpinner : '—'],
+                          ['Project / Cluster', poDetails?.project || (isPoDetailsLoading ? poDetailsLoadingSpinner : '—')],
                         ].map(([label, value]) => (
                           <div key={label} className="min-w-0">
                             <p className="text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400">{label}</p>
@@ -2370,22 +2596,6 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                           </div>
                         ))}
                       </div>
-                      {(poDetails?.paymentTerms || poDetails?.shipToAddress) && (
-                        <div className="space-y-2 border-t border-slate-100 px-3 py-3">
-                          {poDetails.paymentTerms && (
-                            <div>
-                              <p className="text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400">Payment Terms</p>
-                              <p className="mt-0.5 line-clamp-3 text-[10px] leading-relaxed text-slate-600">{poDetails.paymentTerms}</p>
-                            </div>
-                          )}
-                          {poDetails.shipToAddress && (
-                            <div>
-                              <p className="text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400">Ship To</p>
-                              <p className="mt-0.5 line-clamp-3 text-[10px] leading-relaxed text-slate-600">{poDetails.shipToAddress}</p>
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </div>
 
                     {/* Approved vendor name only */}
@@ -2393,10 +2603,18 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                       <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
                         <div className="text-[10px] font-bold uppercase tracking-widest text-[#0D3A35]">Approved Vendor</div>
                         <div className="mt-1 text-xs font-bold leading-relaxed text-slate-800">{approvedVendorName}</div>
-                      </div>
-                    ) : isLoading ? (
-                      <div className="space-y-2 rounded-lg border border-border bg-background px-3 py-2.5">
-                        <div className="h-2.5 w-2/3 rounded bg-muted animate-pulse" />
+                        <div className="mt-2 space-y-2 border-t border-slate-100 pt-2">
+                          <div>
+                            <div className="text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400">Vendor Address</div>
+                            <div className="mt-0.5 text-[10px] leading-relaxed text-slate-600">{approvedVendorAddress || 'Not recorded'}</div>
+                          </div>
+                          <div>
+                            <div className="text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400">Contact Person</div>
+                            <div className="mt-0.5 text-[10px] font-semibold text-slate-700">{approvedVendorContactName || 'Not recorded'}</div>
+                            {approvedVendorPhone ? <div className="mt-0.5 text-[10px] text-slate-600">Phone: {approvedVendorPhone}</div> : null}
+                            {approvedVendorEmail ? <div className="mt-0.5 break-all text-[10px] text-slate-600">Email: {approvedVendorEmail}</div> : null}
+                          </div>
+                        </div>
                       </div>
                     ) : (
                       <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
@@ -2407,14 +2625,27 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
 
                     {/* Item details */}
                     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                      <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-3 py-2">
+                      <button
+                        type="button"
+                        aria-expanded={!itemListCollapsed}
+                        onClick={() => setExpandedItemFlowIds((current) => {
+                          const next = new Set(current);
+                          if (next.has(flowId)) next.delete(flowId);
+                          else next.add(flowId);
+                          return next;
+                        })}
+                        className={`flex w-full items-center justify-between bg-slate-50 px-3 py-2 text-left transition hover:bg-slate-100 ${itemListCollapsed ? '' : 'border-b border-slate-100'}`}
+                      >
                         <span className="text-[10px] font-bold uppercase tracking-widest text-[#0D3A35]">Item Details</span>
-                        <span className="rounded-full bg-[#e7f3ef] px-2 py-0.5 text-[9px] font-bold text-[#0D3A35]">
-                          {itemDetails.length} {itemDetails.length === 1 ? 'Item' : 'Items'}
+                        <span className="flex items-center gap-1.5">
+                          <span className="rounded-full bg-[#e7f3ef] px-2 py-0.5 text-[9px] font-bold text-[#0D3A35]">
+                            {itemDetails.length} {itemDetails.length === 1 ? 'Item' : 'Items'}
+                          </span>
+                          {itemListCollapsed ? <ChevronRight className="h-3.5 w-3.5 text-slate-500" /> : <ChevronDown className="h-3.5 w-3.5 text-slate-500" />}
                         </span>
-                      </div>
-                      {itemDetails.length ? (
-                        <div className="divide-y divide-slate-100">
+                      </button>
+                      {!itemListCollapsed && (itemDetails.length ? (
+                        <div className={`divide-y divide-slate-100 ${itemDetails.length > 3 ? 'max-h-[168px] overflow-y-auto' : ''}`}>
                           {itemDetails.map((item, itemIndex) => (
                             <div key={`${item.name}-${itemIndex}`} className="grid grid-cols-[24px_minmax(0,1fr)_auto] items-start gap-2 px-3 py-2.5">
                               <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#edf5f2] text-[9px] font-black text-[#0D3A35]">{itemIndex + 1}</span>
@@ -2427,7 +2658,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                         </div>
                       ) : (
                         <div className="px-3 py-4 text-center text-[10px] text-slate-500">No item details recorded for this PO.</div>
-                      )}
+                      ))}
                     </div>
 
                     <div className="flex items-center justify-between gap-3 text-[10px] text-slate-500">
@@ -2516,7 +2747,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                                         className="pointer-events-none absolute left-0 top-0"
                                         style={{ width: 794, transform: 'scale(0.365)', transformOrigin: 'top left' }}
                                       >
-                                        <MakePurchaseOrderPopup
+                                        <OrderPopup
                                           open
                                           reviewOnly
                                           variant="inline"

@@ -12,7 +12,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { toast } from 'sonner';
 import { formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
 import logo3f from '@/Assets/3f-logo.png';
@@ -145,7 +144,6 @@ type Comparative = {
   baseAmountB?: Record<string, number>;
 };
 
-const KEY = 'farmconnect.prComparative.v1';
 const genId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
@@ -198,25 +196,6 @@ const SelectBox = ({ value, onChange, options }: { value: string; onChange: (val
   </select>
 );
 
-const readAll = (): Record<string, Comparative> => {
-  try {
-    const raw = window.localStorage.getItem(KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-};
-
-const writeAll = (all: Record<string, Comparative>) => {
-  try {
-    window.localStorage.setItem(KEY, JSON.stringify(all));
-  } catch {
-    // ignore
-  }
-};
-
 const inr = (n: number) => {
   try {
     return new Intl.NumberFormat('en-IN', {
@@ -248,34 +227,11 @@ type DirectoryVendor = {
   address?: string;
 };
 
-const VENDOR_DIR_KEY = 'farmconnect.vendorDirectory.v1';
-
 const DUMMY_DIRECTORY_VENDORS: DirectoryVendor[] = [
   { id: 'dv-1', name: 'CHHATTISGARH PORTABLE INFRATECH', phone: '9165271111', address: 'Bhilai, Chhattisgarh' },
   { id: 'dv-2', name: 'MAHAKAL PORTABLE CABIN & FABRICATION', phone: '9702430797', address: 'Durg, Chhattisgarh' },
   { id: 'dv-3', name: 'SHREE BALAJI FABRICATION WORKS', phone: '9000000000', address: 'Raipur, Chhattisgarh' },
 ];
-
-const readVendorDirectory = (): DirectoryVendor[] => {
-  try {
-    const raw = window.localStorage.getItem(VENDOR_DIR_KEY);
-    if (!raw) return DUMMY_DIRECTORY_VENDORS;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return DUMMY_DIRECTORY_VENDORS;
-    const mapped = parsed
-      .map((v: any) => ({
-        id: String(v?.id ?? ''),
-        name: String(v?.name ?? ''),
-        phone: v?.phone ? String(v.phone) : undefined,
-        address: v?.address ? String(v.address) : undefined,
-      }))
-      .filter((v: DirectoryVendor) => v.id && v.name.trim());
-
-    return mapped.length ? mapped : DUMMY_DIRECTORY_VENDORS;
-  } catch {
-    return DUMMY_DIRECTORY_VENDORS;
-  }
-};
 
 type GetVendorsApiVendor = {
   vendor_id?: unknown;
@@ -533,13 +489,9 @@ export default function QuotationComparative() {
     const load = async () => {
       try {
         const list = await fetchVendorsForDropdown();
-        if (list.length) {
-          setDirectoryVendors(list);
-          return;
-        }
-        setDirectoryVendors(readVendorDirectory());
+        setDirectoryVendors(list.length ? list : DUMMY_DIRECTORY_VENDORS);
       } catch {
-        setDirectoryVendors(readVendorDirectory());
+        setDirectoryVendors(DUMMY_DIRECTORY_VENDORS);
       }
     };
     void load();
@@ -595,31 +547,28 @@ export default function QuotationComparative() {
       }
       if (cancelled) return;
 
-      const localRevision = readAll()[normalizedIndentId];
-      if (localRevision && Number(localRevision.revision || 0) > 0) {
-        setModel({
-          ...localRevision,
-          indentDate: localRevision.indentDate || indentSeed?.indentDate,
-          department: localRevision.department || indentSeed?.department,
-          projectCluster: localRevision.projectCluster || indentSeed?.project,
-          deliveryLocation: localRevision.deliveryLocation || indentSeed?.deliveryLocation,
-          requiredByDate: localRevision.requiredByDate || indentSeed?.requiredByDate,
-          purposeRemarks: localRevision.purposeRemarks || indentSeed?.purpose,
-          preparedBy: localRevision.preparedBy || indentSeed?.preparedBy || 'SBR Admin',
-          charges: localRevision.charges || [],
-          comparisonParameters: localRevision.comparisonParameters?.length ? localRevision.comparisonParameters : makeStandardTerms(),
-          vendors: (localRevision.vendors || []).map((vendor) => ({ currency: 'INR', ...vendor })),
-          items: (localRevision.items || []).map((item) => ({ taxType: 'GST' as TaxType, ...item })),
-        });
-        return;
-      }
-
       // 1) Try server draft first (source of truth for last saved draft)
       try {
         const draft = await fetchComparativeDraft(normalizedIndentId);
         if (cancelled) return;
         if (draft) {
           const createdAt = safeTrim((draft as any)?.created_at);
+
+          // Rows saved after the "meta" field was introduced carry the entire
+          // Comparative model, so every field round-trips losslessly. Prefer
+          // it wholesale; only reconstruct field-by-field below for older
+          // rows saved before this existed.
+          const meta = (draft as any)?.meta;
+          if (meta && typeof meta === 'object' && Array.isArray(meta.items) && meta.items.length) {
+            setModel({
+              ...(meta as Comparative),
+              indentId: normalizedIndentId,
+              lastSavedAt: createdAt || (meta as Comparative).lastSavedAt,
+              lastSavedSource: createdAt ? 'server' : (meta as Comparative).lastSavedSource,
+            });
+            return;
+          }
+
           const itemRows: GetComparativeDraftItemRow[] = Array.isArray((draft as any)?.item_row)
             ? ((draft as any).item_row as GetComparativeDraftItemRow[])
             : [];
@@ -756,43 +705,11 @@ export default function QuotationComparative() {
           return;
         }
       } catch {
-        // ignore - we will fallback to local/empty
+        // ignore — no draft on the server (or it failed to load); start fresh below
       }
-
-      // 2) Fallback to local draft (older behavior)
-      const all = readAll();
       if (cancelled) return;
-      if (all[normalizedIndentId]) {
-        const saved = all[normalizedIndentId];
-        setModel({
-          ...saved,
-          title: ['Price Comparative Statement', 'Vendor Comparative Statement for SBR - CG'].includes(saved.title) ? 'Commercial Comparative Statement' : saved.title,
-          subTitle: saved.subTitle?.toLowerCase().includes('porta cabin') ? '' : saved.subTitle,
-          comparisonNo: saved.comparisonNo || comparisonNumberFor(normalizedIndentId),
-          indentDate: saved.indentDate || indentSeed?.indentDate,
-          department: saved.department || indentSeed?.department,
-          projectCluster: saved.projectCluster || indentSeed?.project,
-          deliveryLocation: saved.deliveryLocation || indentSeed?.deliveryLocation,
-          requiredByDate: saved.requiredByDate || indentSeed?.requiredByDate,
-          purposeRemarks: saved.purposeRemarks || indentSeed?.purpose,
-          requirementType: saved.requirementType || (saved.indentType === 'SPR' ? 'Service' : 'Goods'),
-          comparisonBasis: saved.comparisonBasis || 'Landed Cost',
-          quotationTemplate: saved.quotationTemplate || (saved.indentType === 'SPR' ? 'Service' : 'General Purchase'),
-          preparedBy: saved.preparedBy || indentSeed?.preparedBy || 'SBR Admin',
-          charges: saved.charges || [],
-          comparisonParameters: saved.comparisonParameters?.length ? saved.comparisonParameters : makeStandardTerms(),
-          technicalParameters: saved.technicalParameters || [],
-          scopeResponsibilities: saved.scopeResponsibilities || [],
-          technicalStatus: saved.technicalStatus || {},
-          commercialStatus: saved.commercialStatus || {},
-          awardStrategy: saved.awardStrategy || 'Single Vendor',
-          vendors: (saved.vendors || []).map((vendor) => ({ currency: 'INR', ...vendor })),
-          items: (saved.items || []).map((item) => ({ taxType: 'GST' as TaxType, ...item })),
-        });
-        return;
-      }
 
-      // 3) Finally, start fresh — seed items from the indent API
+      // 2) Finally, start fresh — seed items from the indent API
       const freshItems: PrItem[] = indentSeed?.items || [];
       const freshIndentType: 'PR' | 'SPR' = indentSeed?.indentType || 'PR';
       const freshMeta = indentSeed;
@@ -1178,17 +1095,6 @@ export default function QuotationComparative() {
     });
   };
 
-  const persist = (next: Comparative) => {
-    if (!normalizedIndentId) return;
-    const all = readAll();
-    // Vendor Status (L1/L2/...) is derived from totals, but persist it as well
-    // so reloads/export-like flows keep the same snapshot.
-    const vendorStatus: Record<string, string> = {};
-    for (const v of vendorOrder) vendorStatus[v.id] = vendorLTagByVendorId[v.id] || '';
-    all[normalizedIndentId] = { ...next, vendorStatus };
-    writeAll(all);
-  };
-
   type SaveComparativeDraftItemRow = {
     item_name: string;
     quantity: number;
@@ -1220,6 +1126,11 @@ export default function QuotationComparative() {
     pr_number: string;
     item_row: SaveComparativeDraftItemRow[];
     quoters: SaveComparativeDraftQuoter[];
+    // The full comparative model, so every field the backend doesn't otherwise
+    // model (revision info, comparison basis, award strategy, custom charges,
+    // technical/scope parameters, etc.) round-trips losslessly through the API
+    // instead of relying on local storage.
+    meta: Comparative;
   };
 
   type SaveComparativeFinalPayload = SaveComparativeDraftPayload & {
@@ -1299,6 +1210,7 @@ export default function QuotationComparative() {
       pr_number: prNumber,
       item_row,
       quoters,
+      meta: m,
     };
   };
 
@@ -1355,14 +1267,12 @@ export default function QuotationComparative() {
       return;
     }
 
-    // Always persist locally first so the user never loses progress.
-    const localSnapshot: Comparative = { ...model, isDraft: true, lastSavedAt: toIsoNow(), lastSavedSource: 'local' };
-    persist(localSnapshot);
-    setModel(localSnapshot);
+    const snapshot: Comparative = { ...model, isDraft: true, lastSavedAt: toIsoNow(), lastSavedSource: 'local' };
+    setModel(snapshot);
 
     setSavingDraft(true);
     try {
-      const payload = buildSaveDraftPayload(localSnapshot);
+      const payload = buildSaveDraftPayload(snapshot);
       const apiRes: any = await saveDraftToApi(payload);
 
       const serverSavedAt = safeTrim(apiRes?.created_at || apiRes?.updated_at || apiRes?.saved_at);
@@ -1377,11 +1287,18 @@ export default function QuotationComparative() {
       toast.success('Draft saved');
     } catch (e: any) {
       const msg = String(e?.message ?? e ?? '').trim();
-      toast.error(`Draft saved locally, but server save failed${msg ? `: ${msg}` : ''}`);
+      toast.error(`Failed to save draft${msg ? `: ${msg}` : ''}`);
     } finally {
       setSavingDraft(false);
     }
   };
+
+  // The technical recommendation is never a manual choice — it's always the
+  // vendor currently ranked L1 (lowest grand total) on the comparison.
+  const l1RecommendationVendor = useMemo(
+    () => eligibleRecommendationVendors.find((v) => v.status === 'L1'),
+    [eligibleRecommendationVendors],
+  );
 
   const askRecommendationAndSave = () => {
     if (!model) return;
@@ -1391,14 +1308,12 @@ export default function QuotationComparative() {
       return;
     }
 
-    // model.technicalRecommendationVendorId stores the DIRECTORY vendor_id.
-    // recommendationVendorId state stores the internal column vendorId (QuoteVendor.id).
-    const alreadyChosenDirectoryId = String(model.technicalRecommendationVendorId || '').trim();
-    const alreadyChosenInternalId = alreadyChosenDirectoryId
-      ? vendorOrder.find((v) => String(v.directoryVendorId || (v.isManual ? `MANUAL:${v.name}` : '')).trim() === alreadyChosenDirectoryId)?.id
-      : '';
-    const firstEligibleInternalId = eligibleRecommendationVendors[0]?.vendorId || '';
-    setRecommendationVendorId(alreadyChosenInternalId || firstEligibleInternalId);
+    if (!l1RecommendationVendor) {
+      toast.error('Enter vendor rates so an L1 (lowest cost) vendor can be determined');
+      return;
+    }
+
+    setRecommendationVendorId(l1RecommendationVendor.vendorId);
     setOpenRecommendation(true);
   };
 
@@ -1432,9 +1347,6 @@ export default function QuotationComparative() {
       lastSavedSource: 'local',
     };
 
-    // Always persist locally first so the user never loses progress.
-    persist(nextModel);
-
     setSavingFinal(true);
 
     const base = buildSaveDraftPayload(nextModel);
@@ -1451,7 +1363,7 @@ export default function QuotationComparative() {
       })
       .catch((e: any) => {
         const msg = String(e?.message ?? e ?? '').trim();
-        toast.error(`Saved locally, but server save failed${msg ? `: ${msg}` : ''}`);
+        toast.error(`Failed to save${msg ? `: ${msg}` : ''}`);
         setOpenRecommendation(false);
       })
       .finally(() => {
@@ -1459,8 +1371,9 @@ export default function QuotationComparative() {
       });
   };
 
-  const reviseComparativeStatement = () => {
+  const reviseComparativeStatement = async () => {
     if (!model) return;
+    if (savingDraft) return;
     const currentNumber = safeTrim(model.comparisonNo) || comparisonNumberFor(normalizedIndentId);
     const revisionMatch = currentNumber.match(/\/R(\d+)$/i);
     const currentRevision = Number(model.revision || revisionMatch?.[1] || 0);
@@ -1477,10 +1390,24 @@ export default function QuotationComparative() {
       lastSavedAt: toIsoNow(),
       lastSavedSource: 'local',
     };
-    persist(revised);
-    setModel(revised);
-    setOpenReviseConfirmation(false);
-    toast.success(`Revision R${nextRevision} created. Update the statement and save it for approval.`);
+
+    setSavingDraft(true);
+    try {
+      const apiRes: any = await saveDraftToApi(buildSaveDraftPayload(revised));
+      const serverSavedAt = safeTrim(apiRes?.created_at || apiRes?.updated_at || apiRes?.saved_at);
+      setModel({
+        ...revised,
+        lastSavedAt: serverSavedAt || revised.lastSavedAt,
+        lastSavedSource: serverSavedAt ? 'server' : revised.lastSavedSource,
+      });
+      setOpenReviseConfirmation(false);
+      toast.success(`Revision R${nextRevision} saved. Update the statement and save it for approval.`);
+    } catch (e: any) {
+      const msg = String(e?.message ?? e ?? '').trim();
+      toast.error(`Failed to save revision${msg ? `: ${msg}` : ''}`);
+    } finally {
+      setSavingDraft(false);
+    }
   };
 
   const statusBgClass = (value: string) => {
@@ -1653,9 +1580,9 @@ export default function QuotationComparative() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpenReviseConfirmation(false)}>Cancel</Button>
-            <Button className="gap-2 bg-[#0b463f] text-white hover:bg-[#083a34]" onClick={reviseComparativeStatement}>
-              <RotateCcw className="h-4 w-4" /> Create Revision
+            <Button variant="outline" onClick={() => setOpenReviseConfirmation(false)} disabled={savingDraft}>Cancel</Button>
+            <Button className="gap-2 bg-[#0b463f] text-white hover:bg-[#083a34]" onClick={() => void reviseComparativeStatement()} disabled={savingDraft}>
+              <RotateCcw className="h-4 w-4" /> {savingDraft ? 'Saving…' : 'Create Revision'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1699,39 +1626,26 @@ export default function QuotationComparative() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Technical Recommendation</DialogTitle>
-            <DialogDescription>Select one vendor quotation as the recommendation.</DialogDescription>
+            <DialogDescription>The lowest-cost (L1) vendor is always the technical recommendation.</DialogDescription>
           </DialogHeader>
 
-          {eligibleRecommendationVendors.length === 0 ? (
+          {!l1RecommendationVendor ? (
             <div className="text-sm text-muted-foreground">
               No vendors available to recommend. Select at least one vendor first.
             </div>
           ) : (
-            <RadioGroup value={recommendationVendorId} onValueChange={setRecommendationVendorId}>
-              {eligibleRecommendationVendors.map((v) => (
-                <label
-                  key={v.vendorId}
-                  className="flex items-center gap-3 rounded-md border border-border px-3 py-2"
-                >
-                  <RadioGroupItem value={v.vendorId} />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[11px] text-muted-foreground">
-                      Vendor ID: <span className="font-mono text-foreground">{v.vendorDirectoryId || '—'}</span>
-                    </div>
-                    <div className="text-sm font-medium truncate">{v.name || 'Vendor'}</div>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                      <span>
-                        Total: <span className="text-foreground">{v.total ? inr(v.total) : '—'}</span>
-                      </span>
-                      <span>
-                        Status:{' '}
-                        <span className="text-foreground font-medium">{v.status || '-'}</span>
-                      </span>
-                    </div>
-                  </div>
-                </label>
-              ))}
-            </RadioGroup>
+            <div className="flex items-center gap-3 rounded-md border border-[#0b463f]/30 bg-[#edf5f2] px-3 py-2">
+              <span className="rounded-full bg-[#0b463f] px-2 py-0.5 text-[11px] font-bold text-white">L1</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] text-muted-foreground">
+                  Vendor ID: <span className="font-mono text-foreground">{l1RecommendationVendor.vendorDirectoryId || '—'}</span>
+                </div>
+                <div className="text-sm font-medium truncate">{l1RecommendationVendor.name || 'Vendor'}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  Total: <span className="text-foreground">{l1RecommendationVendor.total ? inr(l1RecommendationVendor.total) : '—'}</span>
+                </div>
+              </div>
+            </div>
           )}
 
           <DialogFooter>
@@ -1740,7 +1654,7 @@ export default function QuotationComparative() {
             </Button>
             <Button
               onClick={confirmRecommendationAndSave}
-              disabled={eligibleRecommendationVendors.length === 0 || !recommendationVendorId || savingFinal}
+              disabled={!l1RecommendationVendor || !recommendationVendorId || savingFinal}
             >
               {savingFinal ? 'Saving…' : 'Confirm & Save'}
             </Button>
