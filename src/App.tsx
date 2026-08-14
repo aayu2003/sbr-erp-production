@@ -250,7 +250,7 @@ const App = () => (
             path="/ho"
             element={
               <AppLayout>
-                <HOInbox />
+                <HOInbox orderTypeFilter="PR" />
               </AppLayout>
             }
           />

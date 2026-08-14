@@ -28,6 +28,7 @@ import {
 import { PRPreview, type PRPreviewIndent, type PRPreviewLineItem } from '@/components/purchase/PRPreview';
 import { getBaseUrl } from '@/lib/config';
 import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
+import { MakeWorkOrderPopup } from '@/components/ho-inbox/MakeWorkOrderPopup';
 
 type Props = {
   item: ComparativeModel;
@@ -358,6 +359,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
   const hoLocked = Boolean((item as any)?.hoLocked);
 
   const isSPR = safeTrim(item.indent_type).toUpperCase() === 'SPR';
+  const OrderPopup = isSPR ? MakeWorkOrderPopup : MakePurchaseOrderPopup;
   const lastStepLabel = isSPR ? 'WO' : 'PO';
   const lastStepFull  = isSPR ? 'Work Order' : 'Purchase Order';
 
@@ -1060,7 +1062,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
         </DialogContent>
       </Dialog>
 
-      <MakePurchaseOrderPopup
+      <OrderPopup
         open={makePoOpen}
         comparative={item}
         onClose={() => {
@@ -1486,7 +1488,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                           {lastStepFull} Details
                         </div>
                         <div className="h-[600px] overflow-y-auto rounded-lg border border-border">
-                          <MakePurchaseOrderPopup
+                          <OrderPopup
                             open={open && activeTab === 'po'}
                             comparative={item}
                             vendorId={item.hoSelectedVendorId}

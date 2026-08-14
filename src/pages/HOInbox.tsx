@@ -272,38 +272,13 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
         const list: ApiTcComparative[] = Array.isArray(data) ? (data as ApiTcComparative[]) : [];
         const mapped = list.map(mapTcToModel).filter(Boolean) as ComparativeModel[];
 
-        // ── Step 2: resolve definitive order type for every item ───────────
-        // find_the_order_type is the authoritative source; runs in parallel.
-        const typeResults = await Promise.allSettled(
-          mapped.map(async (m) => {
-            try {
-              const r = await fetch(`${baseUrl}/purchase_flow/find_the_order_type`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Accept: 'application/json',
-                },
-                body: JSON.stringify({ pr_number: m.indentId }),
-                signal: ac.signal,
-              });
-              if (!r.ok) return m;
-              const d = await r.json().catch(() => null);
-              const orderType = safeTrim((d as any)?.order_type).toUpperCase() || undefined;
-              return orderType ? { ...m, indent_type: orderType } : m;
-            } catch {
-              return m;
-            }
-          })
-        );
-
-        const resolvedMapped = typeResults.map((r, i) =>
-          r.status === 'fulfilled' ? r.value : mapped[i]
-        );
-
-        // ── Step 3: overlay authoritative TC/NFA/PO status ──────────────────
-        // get_order_communication is the source of truth for whether a PO/WO
-        // was actually completed; get_TC's own status fields can go stale.
-        let withOrderStatus = resolvedMapped;
+        // ── Step 2: overlay authoritative type/TC/NFA/PO status ────────────
+        // get_order_communication is the single source of truth here — its
+        // indent_type always matches the order type (no separate
+        // find_the_order_type lookup needed), and it's authoritative for
+        // whether a PO/WO was actually completed since get_TC's own status
+        // fields can go stale.
+        let withOrderStatus = mapped;
         try {
           const ocUrl = `${baseUrl}/purchase_flow/get_order_communication`;
           const doOcFetch = (method: 'GET' | 'POST') =>
@@ -323,7 +298,7 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
               if (pr) byPrNumber[pr] = entry;
             }
 
-            withOrderStatus = resolvedMapped.map((m) => {
+            withOrderStatus = mapped.map((m) => {
               const entry = byPrNumber[safeTrim(m.indentId)];
               if (!entry) return m;
 
@@ -332,6 +307,7 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
               const approvedVendorId = safeTrim(entry.approved_vendor_id) || m.backendApprovedVendorId;
               const orderNumber = safeTrim(entry.order_number);
               const orderStatus = safeTrim(entry.order_status).toLowerCase();
+              const indentType = safeTrim(entry.indent_type).toUpperCase();
 
               return {
                 ...m,
@@ -341,16 +317,17 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
                 tcApprovedVendorId: tcStatus.toLowerCase() === 'approved' ? (approvedVendorId || m.tcApprovedVendorId) : m.tcApprovedVendorId,
                 poNo: orderNumber || m.poNo,
                 poStatus: orderStatus || m.poStatus,
+                indent_type: indentType || m.indent_type,
               };
             });
           }
         } catch (e: any) {
           if (e?.name !== 'AbortError') {
-            // Non-fatal: fall back to get_TC's own status fields.
+            // Non-fatal: fall back to get_TC's own indent_type/status fields.
           }
         }
 
-        // ── Step 4: index by indentId ────────────────────────────────────
+        // ── Step 3: index by indentId ────────────────────────────────────
         // No local overrides/snapshots anymore — mapTcToModel already folds in
         // the row's "meta" (the full comparative model, once saved by
         // QuotationComparative.tsx/SprQuotationComparative.tsx) so everything

@@ -9,6 +9,7 @@ import { formatDateDDMMYYYY, formatDateTimeDDMMYYYY } from '@/lib/dateFormat';
 import { getGrnsByOrder, type GRNRecord } from '@/lib/grnApi';
 import { buildGrnPdfBlob } from '@/lib/grnPdf';
 import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
+import { MakeWorkOrderPopup } from '@/components/ho-inbox/MakeWorkOrderPopup';
 
 type LeftPanelInfo = {
   pr_number?: string;
@@ -1312,6 +1313,7 @@ type PurchaseFlowProps = {
 };
 
 export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowProps = {}) {
+  const OrderPopup = orderTypeFilter === 'SPR' ? MakeWorkOrderPopup : MakePurchaseOrderPopup;
   const [flows, setFlows] = useState<ApiPurchaseFlow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2294,7 +2296,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
       ) : null}
 
       {poPreviewTarget ? (
-        <MakePurchaseOrderPopup
+        <OrderPopup
           open
           reviewOnly
           variant="modal"
@@ -2745,7 +2747,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                                         className="pointer-events-none absolute left-0 top-0"
                                         style={{ width: 794, transform: 'scale(0.365)', transformOrigin: 'top left' }}
                                       >
-                                        <MakePurchaseOrderPopup
+                                        <OrderPopup
                                           open
                                           reviewOnly
                                           variant="inline"

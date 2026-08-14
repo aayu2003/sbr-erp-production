@@ -36,6 +36,7 @@ import {
 } from '@/lib/signatureDiary';
 import { PRPreview } from '@/components/purchase/PRPreview';
 import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
+import { MakeWorkOrderPopup } from '@/components/ho-inbox/MakeWorkOrderPopup';
 import { type ComparativeModel } from '@/components/purchase/ComparativeStatementPreview';
 
 type PoApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected';
@@ -698,6 +699,7 @@ type FinanceAdminOpsIndentProps = {
 };
 
 const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
+  const OrderPopup = orderTypeFilter === 'SPR' ? MakeWorkOrderPopup : MakePurchaseOrderPopup;
   const navigate = useNavigate();
   const [indents, setIndents] = useState<Indent[]>(initialIndents);
   const [search, setSearch] = useState('');
@@ -2023,7 +2025,7 @@ const AdminOpsIndent = ({ orderTypeFilter }: FinanceAdminOpsIndentProps) => {
 
       {sectionContent}
 
-      <MakePurchaseOrderPopup
+      <OrderPopup
         open={Boolean(previewPoApproval)}
         comparative={previewPoComparative}
         vendorId={previewPoApproval?.vendorId}
