@@ -19,6 +19,8 @@ import { toast } from 'sonner';
 import { getBaseUrl } from '@/lib/config';
 import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 import { PRPreview as ThemedPRPreview } from '@/components/purchase/PRPreview';
+import { ServiceRequisitionPdfPreview } from '@/pages/WorkOrder';
+import type { WorkRequisitionPdfData } from '@/lib/workRequisitionPdf';
 import {
   readAdminOpsIndentConfig,
   writeAdminOpsIndentConfig,
@@ -99,6 +101,46 @@ type Indent = {
   sprItems?: SprLineItem[];
   status: 'pending' | 'forwarded';
 };
+
+const indentToServicePdfData = (
+  indent: Indent,
+  attachments?: SignatureDiary,
+  showDirectorSignature = false,
+): WorkRequisitionPdfData => ({
+  plant: indent.department || indent.project,
+  sprNo: indent.prNo,
+  sprDate: indent.date,
+  areaOfService: indent.areaOfService || '',
+  functionName: indent.func || '',
+  natureOfService: indent.natureOfService || '',
+  notes: indent.remarksNotes,
+  budgetHead: indent.budgetHead,
+  services: (indent.sprItems || []).map((item) => ({
+    srNo: item.srNo,
+    serviceDescription: item.serviceDescription,
+    uom: item.uom,
+    quantity: item.quantity,
+    startDate: item.startDate,
+    duration: item.duration,
+    completionDate: item.completionDate,
+    validity: item.validity,
+    servicesFrom: item.servicesFrom,
+    approxValue: item.approxValue,
+    gstPercent: item.gstPercent,
+    gstAmount: item.gstAmount,
+    proposedVendors: item.proposedVendors,
+    previousWO: item.previousWO,
+    remarks: item.remarks,
+  })),
+  indentedBy: indent.indentedBy,
+  indentedBySignature: attachments?.[indent.indentedBy]?.signature ? 'Digitally Signed' : indent.indentedBySignature,
+  indentedByTimestamp: indent.indentedByTimestamp,
+  forwardedBy: indent.forwardedBy,
+  forwardedBySignature: attachments?.[indent.forwardedBy]?.signature ? 'Digitally Signed' : indent.forwardedBySignature,
+  forwardedByTimestamp: indent.forwardedByTimestamp,
+  approvedBy: indent.directorsApproval,
+  approvedBySignature: showDirectorSignature && attachments?.[indent.directorsApproval]?.signature ? 'Digitally Signed' : '',
+});
 
 const netPrQty = (it: PRLineItem) =>
   Math.max(0, (it.totalQtyRequired || 0) - (it.lessQtyAvailableInStock || 0));
@@ -593,8 +635,9 @@ const AdminOpsIndent = ({ indentTypeFilter }: AdminOpsIndentProps) => {
         const json = await res.json();
         const list: Indent[] = (json.admin_ops_indents || []).map((r: any, idx: number) => {
           const isSpr = Boolean(r.indent_data?.area_of_service || r.indent_data?.name_of_service);
+          const rawItemRows: any[] = r.indent_data?.item_row || [];
 
-          const items: PRLineItem[] = isSpr ? [] : (r.indent_data?.item_row || []).map((it: any, i: number) => ({
+          const items: PRLineItem[] = isSpr ? [] : rawItemRows.map((it: any, i: number) => ({
             id: `${r.pr_number ?? 'api'}-li-${i}`,
             srNo: it.sr_no ?? i + 1,
             itemCode: it.item_code ?? '',
@@ -615,7 +658,7 @@ const AdminOpsIndent = ({ indentTypeFilter }: AdminOpsIndentProps) => {
             repairingPossibility: it.repairing_possibility ?? 'NA',
           }));
 
-          const sprItems: SprLineItem[] = isSpr ? (r.indent_data?.item_row || []).map((it: any, i: number) => ({
+          const sprItems: SprLineItem[] = isSpr ? rawItemRows.map((it: any, i: number) => ({
             id: `${r.pr_number ?? 'api'}-spr-${i}`,
             srNo: it.sr_no ?? i + 1,
             serviceDescription: it.service_description ?? '',
@@ -646,10 +689,17 @@ const AdminOpsIndent = ({ indentTypeFilter }: AdminOpsIndentProps) => {
           return {
             id: r.pr_number ?? `api-${idx}`,
             indentType: isSpr ? 'SPR' : 'PR',
-            project: r.indent_data?.project ?? '',
+            project: r.indent_data?.project ?? r.project ?? '',
             prNo: r.pr_number ?? '',
-            date: timestamp ? new Date(timestamp).toISOString().slice(0, 10) : (r.created_at ? new Date(r.created_at).toISOString().slice(0, 10) : ''),
-            department: r.department ?? '',
+            date: r.indent_data?.requisition_date
+              ?? rawItemRows[0]?.requisition_date
+              ?? (timestamp ? new Date(timestamp).toISOString().slice(0, 10) : (r.created_at ? new Date(r.created_at).toISOString().slice(0, 10) : '')),
+            department: r.indent_data?.department
+              ?? r.department
+              ?? rawItemRows[0]?.requisition_department
+              ?? r.indent_data?.project
+              ?? r.project
+              ?? '',
             indentedBy: indentedByName,
             indentedBySignature: signatureText,
             indentedByTimestamp: timestamp ? new Date(timestamp).toISOString().slice(0, 10) : '',
@@ -876,42 +926,48 @@ const AdminOpsIndent = ({ indentTypeFilter }: AdminOpsIndentProps) => {
       </section>
 
       <Dialog open={Boolean(previewIndent)} onOpenChange={(v) => { if (!v) setPreviewIndent(null); }}>
-        <DialogContent className="max-h-[92vh] max-w-[min(96vw,1280px)] overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl">
-          <DialogHeader className="bg-[#0D3A35] px-6 py-5 text-left">
-            <DialogTitle className="flex items-center gap-3 text-xl font-bold text-white"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10"><Eye className="h-5 w-5" /></span>{previewIndent?.indentType === 'SPR' ? 'SPR Preview' : 'PR Preview'}</DialogTitle>
-            <p className="mt-1 pl-[52px] text-sm text-white/70">Review the requisition, item values and complete approval trail.</p>
-          </DialogHeader>
-          <div className="max-h-[calc(92vh-154px)] overflow-auto px-5 py-5 sm:px-6">
-            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          {previewIndent && previewIndent.indentType === 'SPR' ? (
-            <SprPreview
-              indent={previewIndent}
-              attachments={attachments}
-              showDirectorSignature={Boolean(directorsAttachedMap[previewIndent.id])}
-            />
-          ) : previewIndent && (
-            <ThemedPRPreview
-              indent={{
-                project: previewIndent.project,
-                prNo: previewIndent.prNo,
-                date: previewIndent.date,
-                department: previewIndent.department,
-                indentedBy: previewIndent.indentedBy,
-                indentedBySignature: previewIndent.indentedBySignature,
-                indentedByTimestamp: previewIndent.indentedByTimestamp,
-                forwardedBy: previewIndent.forwardedBy,
-                forwardedBySignature: previewIndent.forwardedBySignature,
-                forwardedByTimestamp: previewIndent.forwardedByTimestamp,
-                directorsApproval: previewIndent.directorsApproval,
-                remarksNotes: previewIndent.remarksNotes,
-                budgetHead: previewIndent.budgetHead,
-                items: previewIndent.items,
-              }}
-              attachments={attachments}
-              showDirectorSignature={Boolean(directorsAttachedMap[previewIndent.id])}
-            />
-          )}
+        <DialogContent className="flex max-h-[96vh] w-[96vw] max-w-[1040px] flex-col overflow-hidden rounded-2xl border-0 bg-[#f6f8fa] p-0 shadow-2xl [&>button]:right-5 [&>button]:top-5 [&>button]:text-white/70 [&>button:hover]:text-white">
+          <DialogHeader className="shrink-0 bg-[#0D3A35] px-6 py-5 pr-16 text-left">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="mb-1 text-[10px] font-black uppercase tracking-[0.16em] text-emerald-200/80">Procurement · Work Verification</p>
+                <DialogTitle className="font-display text-xl font-extrabold tracking-tight text-white">{previewIndent?.indentType === 'SPR' ? 'SR Verification Preview' : 'PR Preview'}</DialogTitle>
+                <p className="mt-1 text-xs font-medium text-white/65">Review the complete requisition and approval trail before attaching verification.</p>
+              </div>
+              <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-bold text-white/85">{previewIndent?.prNo}</span>
             </div>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-auto bg-slate-200/60 p-4 sm:p-6">
+          {previewIndent && previewIndent.indentType === 'SPR' ? (
+            <div className="mx-auto w-fit origin-top" style={{ zoom: 0.78 }}>
+              <ServiceRequisitionPdfPreview
+                data={indentToServicePdfData(previewIndent, attachments, Boolean(directorsAttachedMap[previewIndent.id]))}
+              />
+            </div>
+          ) : previewIndent && (
+            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <ThemedPRPreview
+                indent={{
+                  project: previewIndent.project,
+                  prNo: previewIndent.prNo,
+                  date: previewIndent.date,
+                  department: previewIndent.department,
+                  indentedBy: previewIndent.indentedBy,
+                  indentedBySignature: previewIndent.indentedBySignature,
+                  indentedByTimestamp: previewIndent.indentedByTimestamp,
+                  forwardedBy: previewIndent.forwardedBy,
+                  forwardedBySignature: previewIndent.forwardedBySignature,
+                  forwardedByTimestamp: previewIndent.forwardedByTimestamp,
+                  directorsApproval: previewIndent.directorsApproval,
+                  remarksNotes: previewIndent.remarksNotes,
+                  budgetHead: previewIndent.budgetHead,
+                  items: previewIndent.items,
+                }}
+                attachments={attachments}
+                showDirectorSignature={Boolean(directorsAttachedMap[previewIndent.id])}
+              />
+            </div>
+          )}
           </div>
           {previewIndent && (
             <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
