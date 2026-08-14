@@ -1726,6 +1726,9 @@ export default function QuotationComparative() {
                       <input type="file" accept=".pdf,.png,.jpg,.jpeg" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => updateVendorField(v.id, 'attachmentUrl', String(reader.result || '')); reader.readAsDataURL(file); updateVendorField(v.id, 'attachmentName', file.name); }} />
                       Upload
                     </label>
+                    <button type="button" className="flex h-8 shrink-0 items-center justify-center rounded-md bg-white p-2 text-red-500 hover:bg-red-50" onClick={() => removeVendor(v.id)} aria-label={`Remove ${v.name || 'vendor'}`}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                   {v.isManual && <Input value={v.name || ''} onChange={(event) => updateVendorField(v.id, 'name', event.target.value)} placeholder="Enter vendor name" className="mt-1 h-7 bg-white px-2 text-[10px]" />}
                   <div className="mt-1 grid grid-cols-[1fr_82px] gap-1">
@@ -1795,6 +1798,9 @@ export default function QuotationComparative() {
                         <td className="border border-border px-3 py-2 text-center align-middle">
                           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">Unit Rate</div>
                           <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
                             className="h-9 text-center"
                             value={String(unit || '')}
                             onChange={(e) => setVendorRate(v.id, it.id, e.target.value)}
