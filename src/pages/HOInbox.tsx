@@ -27,6 +27,17 @@ type ApiTcQuoter = {
   warrenty_garantee?: unknown;
 };
 
+type ApiOrderCommunication = {
+  comparision_id?: unknown;
+  pr_number?: unknown;
+  TC_status?: unknown;
+  NFA_status?: unknown;
+  approved_vendor_id?: unknown;
+  indent_type?: unknown;
+  order_number?: unknown;
+  order_status?: unknown;
+};
+
 type ApiTcComparative = {
   created_at?: unknown;
   quoters?: unknown;
@@ -286,13 +297,63 @@ export default function HOInbox({ orderTypeFilter, view = 'all', title }: HOInbo
           r.status === 'fulfilled' ? r.value : mapped[i]
         );
 
-        // ── Step 3: index by indentId ────────────────────────────────────
+        // ── Step 3: overlay authoritative TC/NFA/PO status ──────────────────
+        // get_order_communication is the source of truth for whether a PO/WO
+        // was actually completed; get_TC's own status fields can go stale.
+        let withOrderStatus = resolvedMapped;
+        try {
+          const ocUrl = `${baseUrl}/purchase_flow/get_order_communication`;
+          const doOcFetch = (method: 'GET' | 'POST') =>
+            fetch(ocUrl, { method, headers: { Accept: 'application/json' }, signal: ac.signal });
+
+          let ocRes = await doOcFetch('GET');
+          if (ocRes.status === 405) ocRes = await doOcFetch('POST');
+
+          if (ocRes.ok) {
+            const ocData: unknown = await ocRes.json().catch(() => null);
+            const ocList: ApiOrderCommunication[] = Array.isArray((ocData as any)?.order_communication)
+              ? (ocData as any).order_communication
+              : [];
+            const byPrNumber: Record<string, ApiOrderCommunication> = {};
+            for (const entry of ocList) {
+              const pr = safeTrim(entry?.pr_number);
+              if (pr) byPrNumber[pr] = entry;
+            }
+
+            withOrderStatus = resolvedMapped.map((m) => {
+              const entry = byPrNumber[safeTrim(m.indentId)];
+              if (!entry) return m;
+
+              const tcStatus = safeTrim(entry.TC_status) || m.tcStatus;
+              const nfaStatus = safeTrim(entry.NFA_status) || m.nfaStatus;
+              const approvedVendorId = safeTrim(entry.approved_vendor_id) || m.backendApprovedVendorId;
+              const orderNumber = safeTrim(entry.order_number);
+              const orderStatus = safeTrim(entry.order_status).toLowerCase();
+
+              return {
+                ...m,
+                tcStatus,
+                nfaStatus,
+                backendApprovedVendorId: approvedVendorId,
+                tcApprovedVendorId: tcStatus.toLowerCase() === 'approved' ? (approvedVendorId || m.tcApprovedVendorId) : m.tcApprovedVendorId,
+                poNo: orderNumber || m.poNo,
+                poStatus: orderStatus || m.poStatus,
+              };
+            });
+          }
+        } catch (e: any) {
+          if (e?.name !== 'AbortError') {
+            // Non-fatal: fall back to get_TC's own status fields.
+          }
+        }
+
+        // ── Step 4: index by indentId ────────────────────────────────────
         // No local overrides/snapshots anymore — mapTcToModel already folds in
         // the row's "meta" (the full comparative model, once saved by
         // QuotationComparative.tsx/SprQuotationComparative.tsx) so everything
         // here is backend-derived.
         const next: Record<string, ComparativeModel> = {};
-        for (const m of resolvedMapped) {
+        for (const m of withOrderStatus) {
           next[m.indentId] = m;
         }
 

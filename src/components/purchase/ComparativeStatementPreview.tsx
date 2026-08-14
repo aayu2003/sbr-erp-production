@@ -100,6 +100,13 @@ export type ComparativeModel = {
 
   // Indent type — drives upload dialog heading (PR | SPR | WO | PO | …)
   indent_type?: 'PR' | 'SPR' | 'WO' | 'PO' | (string & {});
+
+  // Purchase order state — backend-authoritative when sourced from
+  // get_order_communication, otherwise filled in locally after PO creation.
+  poNo?: string;
+  poStatus?: string;
+  poCreatedAt?: string;
+  poDocUrl?: string;
 };
 
 const formatInr = (value: number) => {

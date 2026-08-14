@@ -348,7 +348,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
 
   const tcDone = tcStatusLower === 'approved' || Boolean(approvedVendorId);
   const nfaDone = nfaStatusLower === 'approved';
-  const poDone = poStatus === 'created' || poStatus === 'forwarded' || Boolean(poNo) || Boolean(poCreatedAt);
+  const poDone = poStatus === 'created' || poStatus === 'forwarded' || poStatus === 'completed' || Boolean(poNo) || Boolean(poCreatedAt);
   const poForwarded = poStatus === 'forwarded';
 
   useEffect(() => {

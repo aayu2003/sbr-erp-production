@@ -126,6 +126,12 @@ const normalizeRequiredPurchaseDocuments = (value: unknown): string[] => {
 
 const safeTrim = (v: unknown) => String(v ?? '').trim();
 
+const maskFlowId = (id: string) => {
+  const value = safeTrim(id);
+  if (!value) return '—';
+  return `${value.slice(0, 8)}${'*'.repeat(8)}`;
+};
+
 const asRecord = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
 
@@ -1339,10 +1345,13 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
       (document) => {
         const requiredType = documentTypeKey(document);
         if (requiredType === 'grn') return false;
+        // A step of this type already exists — whether it's still pending or
+        // already uploaded — so there's nothing to backfill. Checking for an
+        // *empty* step only (the old behavior) treated an already-uploaded
+        // step as if the requirement were unmet, appending a duplicate empty
+        // step for the same document type once the original was completed.
         return !current.some((step) =>
-          documentTypeKey(step.documentType || step.document) === requiredType
-          && !step.docLink
-          && !isUploaded(step),
+          documentTypeKey(step.documentType || step.document) === requiredType,
         );
       },
     );
@@ -1420,6 +1429,13 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
   // Left panel enriched data — fetched per-row after the list renders
   const [leftPanelInfoMap, setLeftPanelInfoMap] = useState<Record<string, LeftPanelInfo>>({});
   const [leftPanelLoadingSet, setLeftPanelLoadingSet] = useState<Set<string>>(new Set());
+  // Tracks in-flight get_purchase_orders requests so PO Date/Delivery Date/
+  // Project Cluster can show a spinner instead of "—" while still loading.
+  const [poDetailsLoadingSet, setPoDetailsLoadingSet] = useState<Set<string>>(new Set());
+  // The indent itself is the original, always-populated item source — used as
+  // the final fallback when the comparative statement/PO's own item snapshots
+  // are empty (e.g. saved before those fields existed).
+  const [indentItemsByFlowId, setIndentItemsByFlowId] = useState<Record<string, Array<{ name: string; uom: string; quantity: number }>>>({});
 
   // Converts the current ordered steps array → { step_1: {...}, step_2: {...}, ... }
   const buildStepJson = (steps: PurchaseFlowStep[]) => {
@@ -1643,6 +1659,40 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
     return () => ac.abort();
   }, [rows]);
 
+  // Fetch item name/uom/qty straight from the indent — the original, always-
+  // populated source, used as a fallback wherever the comparative statement's
+  // or PO's own item snapshot turns out to be empty.
+  useEffect(() => {
+    if (rows.length === 0) return;
+    const ac = new AbortController();
+    const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+    if (!baseUrl) return;
+
+    rows.forEach(async (flow) => {
+      const prNumberForFlow = safeTrim((flow as any)?.pr_number);
+      const comparisonId = safeTrim((flow as any)?.comparison_id);
+      const flowId = safeTrim((flow as any)?.flow_id) || comparisonId;
+      if (!prNumberForFlow || !flowId) return;
+
+      try {
+        const res = await fetch(`${baseUrl}/purchase_flow/get_indent_items`, {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pr_number: prNumberForFlow }),
+          signal: ac.signal,
+        });
+        if (!res.ok) return;
+        const data: any = await res.json().catch(() => null);
+        const items = normalizePoItemDetails(data?.items);
+        if (items.length) setIndentItemsByFlowId((prev) => ({ ...prev, [flowId]: items }));
+      } catch (e: any) {
+        if (e?.name === 'AbortError') return;
+      }
+    });
+
+    return () => ac.abort();
+  }, [rows]);
+
   // Read the document requirements saved in each PO. These are intentionally
   // separate from the commercial "Documents Required" clause and become
   // uploadable Purchase Flow steps only.
@@ -1658,6 +1708,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
         const prNumber = safeTrim((flow as any)?.pr_number) || safeTrim(leftPanelInfoMap[flowId]?.pr_number);
         if (!prNumber || !flowId || poRequirementLoadsRef.current.has(flowId)) return null;
         poRequirementLoadsRef.current.add(flowId);
+        setPoDetailsLoadingSet((prev) => new Set([...prev, flowId]));
         try {
           const res = await fetch(`${baseUrl}/purchase_flow/get_purchase_orders`, {
             method: 'POST',
@@ -1731,6 +1782,13 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
           poRequirementLoadsRef.current.delete(flowId);
           if (error?.name === 'AbortError') return null;
           return null;
+        } finally {
+          setPoDetailsLoadingSet((prev) => {
+            if (!prev.has(flowId)) return prev;
+            const next = new Set(prev);
+            next.delete(flowId);
+            return next;
+          });
         }
       }));
 
@@ -2368,7 +2426,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                     </span>
                     <div className="min-w-0">
                       <p className="truncate text-xs font-bold uppercase tracking-[0.08em] text-slate-400">Flow ID</p>
-                      <p className="truncate text-sm font-bold text-slate-800">{flowId}</p>
+                      <p className="truncate text-sm font-bold text-slate-800">{maskFlowId(flowId)}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
@@ -2388,11 +2446,22 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                     const vendor = info?.vendor_details;
                     const approvedVendorId = info?.approved_vendor_id;
                     const poDetails = poDetailsByFlowId[flowId];
+                    const isPoDetailsLoading = poDetailsLoadingSet.has(flowId);
+                    const poDetailsLoadingSpinner = <RefreshCw className="h-3 w-3 animate-spin text-slate-400" />;
                     const approvalRecord = poApprovalRecords.find((record) =>
                       (displayOrder !== '—' && record.poNumber === displayOrder) || record.prNumber === effectivePrNumber,
                     );
-                    const itemDetails = normalizePoItemDetails(poDetails?.itemDetails, approvalRecord?.itemDetails, info?.item_row);
+                    const itemDetails = normalizePoItemDetails(poDetails?.itemDetails, approvalRecord?.itemDetails, info?.item_row, indentItemsByFlowId[flowId]);
                     const approvedVendorName = vendor?.vendor_name || approvalRecord?.vendorName || approvedVendorId || 'Not recorded';
+
+                    if (isLoading) {
+                      return (
+                        <div className="flex w-full min-w-0 flex-col items-center justify-center gap-3 border-b border-slate-200 bg-[#f7faf9] px-4 py-4 lg:min-h-0 lg:border-b-0 lg:border-r" style={{ minHeight: 300 }}>
+                          <RefreshCw className="h-6 w-6 animate-spin text-[#0D3A35]" />
+                          <p className="text-xs font-semibold text-slate-500">Loading details…</p>
+                        </div>
+                      );
+                    }
 
                     return (
                   <div className="flex w-full min-w-0 flex-col gap-3 border-b border-slate-200 bg-[#f7faf9] px-4 py-4 lg:border-b-0 lg:border-r">
@@ -2417,13 +2486,12 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                       <div className="grid grid-cols-2 gap-x-3 gap-y-2 px-3 py-3">
                         {[
                           ['PO Number', poDetails?.poNumber || displayOrder],
-                          ['PO Date', poDetails?.poDate ? formatDateDDMMYYYY(poDetails.poDate) : '—'],
+                          ['PO Date', poDetails?.poDate ? formatDateDDMMYYYY(poDetails.poDate) : isPoDetailsLoading ? poDetailsLoadingSpinner : '—'],
                           ['PR Number', displayPr],
                           ['Comparison ID', comparisonId || '—'],
                           ['Amendment', poDetails?.amendmentNo || '0'],
-                          ['Delivery Date', poDetails?.deliveryDate ? formatDateDDMMYYYY(poDetails.deliveryDate) : '—'],
-                          ['Project / Cluster', poDetails?.project || '—'],
-                          ['Prepared By', poDetails?.preparedBy || '—'],
+                          ['Delivery Date', poDetails?.deliveryDate ? formatDateDDMMYYYY(poDetails.deliveryDate) : isPoDetailsLoading ? poDetailsLoadingSpinner : '—'],
+                          ['Project / Cluster', poDetails?.project || (isPoDetailsLoading ? poDetailsLoadingSpinner : '—')],
                         ].map(([label, value]) => (
                           <div key={label} className="min-w-0">
                             <p className="text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400">{label}</p>
@@ -2455,10 +2523,6 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                         <div className="text-[10px] font-bold uppercase tracking-widest text-[#0D3A35]">Approved Vendor</div>
                         <div className="mt-1 text-xs font-bold leading-relaxed text-slate-800">{approvedVendorName}</div>
                       </div>
-                    ) : isLoading ? (
-                      <div className="space-y-2 rounded-lg border border-border bg-background px-3 py-2.5">
-                        <div className="h-2.5 w-2/3 rounded bg-muted animate-pulse" />
-                      </div>
                     ) : (
                       <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
                         <div className="text-[10px] font-bold uppercase tracking-widest text-[#0D3A35]">Approved Vendor</div>
@@ -2475,7 +2539,7 @@ export default function PurchaseFlow({ orderTypeFilter, title }: PurchaseFlowPro
                         </span>
                       </div>
                       {itemDetails.length ? (
-                        <div className="divide-y divide-slate-100">
+                        <div className={`divide-y divide-slate-100 ${itemDetails.length > 3 ? 'max-h-[168px] overflow-y-auto' : ''}`}>
                           {itemDetails.map((item, itemIndex) => (
                             <div key={`${item.name}-${itemIndex}`} className="grid grid-cols-[24px_minmax(0,1fr)_auto] items-start gap-2 px-3 py-2.5">
                               <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#edf5f2] text-[9px] font-black text-[#0D3A35]">{itemIndex + 1}</span>
