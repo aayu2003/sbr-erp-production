@@ -17,13 +17,10 @@ import {
   User,
   Calendar,
   RefreshCw,
-  ScrollText,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
-import WccModal from '@/components/cultivation/WccModal';
-import WccCertificateReleasesModal from '@/components/cultivation/WccCertificateReleasesModal';
 
 const BASE_URL = getBaseUrl().replace(/\/$/, '');
 
@@ -195,8 +192,6 @@ const ScopeOfWork = () => {
   const [isLoadingScope, setIsLoadingScope] = useState(false);
   const [scopeRefreshKey, setScopeRefreshKey] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [isWccOpen, setIsWccOpen] = useState(false);
-  const [isCertificateReleasesOpen, setIsCertificateReleasesOpen] = useState(false);
   const [activities, setActivities] = useState<ApiCultivationActivity[]>([]);
   const [isLoadingActivities, setIsLoadingActivities] = useState(true);
 
@@ -393,24 +388,6 @@ const ScopeOfWork = () => {
     return Array.from(set);
   }, [scopeItems]);
 
-  // farm_id → full farm record, for the WCC modal's task-timeline map thumbnails
-  const farmsById = useMemo(() => {
-    const map: Record<string, ApiFarm> = {};
-    for (const f of farms) map[f.farm_id] = f;
-    return map;
-  }, [farms]);
-
-  // Earliest declared start_date / latest end_date across this vendor's scope — used to
-  // pre-fill the WCC date range with a sensible default.
-  const vendorScopeDateRange = useMemo(() => {
-    const starts = scopeItems.map(i => i.start_date).filter((d): d is string => !!d);
-    const ends = scopeItems.map(i => i.end_date).filter((d): d is string => !!d);
-    return {
-      start: starts.length ? starts.reduce((a, b) => (a < b ? a : b)) : undefined,
-      end: ends.length ? ends.reduce((a, b) => (a > b ? a : b)) : undefined,
-    };
-  }, [scopeItems]);
-
   const alreadyAssignedFarmIds = useMemo(
     () => new Set(scopeItems.map(s => s.land_id)),
     [scopeItems],
@@ -563,14 +540,6 @@ const ScopeOfWork = () => {
           </div>
         </div>
         <div className="flex items-center gap-2 self-start md:self-auto">
-          <button
-            type="button"
-            onClick={() => setIsCertificateReleasesOpen(true)}
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:border-emerald-200 hover:bg-emerald-50"
-          >
-            <ScrollText className="h-4 w-4 text-emerald-700" />
-            Certificate Releases
-          </button>
           <button
             type="button"
             onClick={() => setRefreshKey(k => k + 1)}
@@ -767,14 +736,6 @@ const ScopeOfWork = () => {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <StatusBadge status={selectedVendor.status} pulse />
-                    <button
-                      type="button"
-                      onClick={() => setIsWccOpen(true)}
-                      title={scopeItems.length === 0 ? 'No land scope for this vendor — evidence (if any) will come from their operational calendar work, e.g. rental vehicle log books' : undefined}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shadow-sm border border-emerald-200 bg-white text-emerald-800 hover:bg-emerald-50"
-                    >
-                      <FileCheck className="w-3.5 h-3.5" /> Create WCC
-                    </button>
                     <button
                       type="button"
                       onClick={openAssignModal}
@@ -1218,26 +1179,6 @@ const ScopeOfWork = () => {
         </div>
       )}
 
-      {/* ── WORK COMPLETION CERTIFICATE (WCC) ── */}
-      {isWccOpen && selectedVendor && (
-        <WccModal
-          vendorId={selectedVendor.vendor_id}
-          vendorName={selectedVendor.vendor_name}
-          vendorWoNumber={selectedVendor.wo_number}
-          landIds={scopeItems.map(item => item.land_id)}
-          activities={vendorScopeActivities}
-          farmsById={farmsById}
-          farmerNames={farmerNames}
-          scopeItems={scopeItems}
-          defaultStartDate={vendorScopeDateRange.start}
-          defaultEndDate={vendorScopeDateRange.end}
-          onClose={() => setIsWccOpen(false)}
-        />
-      )}
-
-      {isCertificateReleasesOpen && (
-        <WccCertificateReleasesModal onClose={() => setIsCertificateReleasesOpen(false)} />
-      )}
     </div>
   );
 };

@@ -7,12 +7,16 @@ import getBaseUrl from '@/lib/config';
 import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 import { cn } from '@/lib/utils';
 import WccWorkspace from '@/components/wcc/WccWorkspace';
+import WccCreateFlow, { type WccCreateFlowFarm } from '@/components/wcc/WccCreateFlow';
 import WccCertificatePreview, { type WccCertificateRecord } from '@/components/cultivation/WccCertificatePreview';
 import { WCC_WORK_TEMPLATES, calculateWccTotals, type WccEnterpriseDraft } from '@/lib/wccEnterprise';
 import { deleteLocalWccDraft, listLocalWccDrafts } from '@/lib/wccEnterpriseApi';
 
 const BASE_URL = getBaseUrl().replace(/\/$/, '');
-type FarmOption = { farm_id: string; farmer_id?: string; farmer_name?: string; block_id?: string; area?: number };
+// Superset of the old FarmOption shape — WccCreateFlow (map thumbnails on the vendor's
+// scope-of-work cards) needs land_data/land_plots too; /farmer_managment/get_farms already
+// returns them, this was just narrowed away before.
+type FarmOption = WccCreateFlowFarm & { farmer_id?: string; farmer_name?: string; block_id?: string; area?: number };
 type EnterpriseAnnexure = WccCertificateRecord['annexure'] & { enterprise?: WccEnterpriseDraft };
 
 const STATUS_META: Record<string, { label: string; tone: string; approver: string }> = {
@@ -51,7 +55,8 @@ export default function WccModule() {
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
   const [vendorFilter, setVendorFilter] = useState('all');
-  const [workspaceDraft, setWorkspaceDraft] = useState<WccEnterpriseDraft | null | undefined>(undefined);
+  const [workspaceDraft, setWorkspaceDraft] = useState<WccEnterpriseDraft | undefined>(undefined);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<WccCertificateRecord | null>(null);
   const [recordMode, setRecordMode] = useState<'view' | 'revise'>('view');
   const [auditRow, setAuditRow] = useState<RegisterRow | null>(null);
@@ -108,7 +113,7 @@ export default function WccModule() {
   }
 
   return <div className="min-h-screen space-y-6 bg-slate-50/70 p-4 font-sans sm:p-6 lg:p-8">
-    <header className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between"><div className="flex items-center gap-4"><div className="rounded-2xl bg-[#0D3A35] p-3.5 text-white shadow-[0_12px_28px_-12px_rgba(13,58,53,0.75)]"><FileCheck2 className="h-7 w-7" /></div><div><p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Procurement · Work Order</p><h1 className="text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">Work Completion Certificates</h1><p className="mt-1 max-w-2xl text-sm text-slate-500">Service completion, measurement, acceptance and payment-eligibility control for every contracted work category.</p></div></div><div className="flex gap-2"><button type="button" onClick={() => setWorkspaceDraft(null)} className="inline-flex items-center gap-2 rounded-xl bg-[#0D3A35] px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-[#092e2a]"><Plus className="h-4 w-4" /> Create WCC</button><button type="button" onClick={refresh} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700"><RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} /> Refresh</button></div></header>
+    <header className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between"><div className="flex items-center gap-4"><div className="rounded-2xl bg-[#0D3A35] p-3.5 text-white shadow-[0_12px_28px_-12px_rgba(13,58,53,0.75)]"><FileCheck2 className="h-7 w-7" /></div><div><p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-[#0D3A35]">Procurement · Work Order</p><h1 className="text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">Work Completion Certificates</h1><p className="mt-1 max-w-2xl text-sm text-slate-500">Service completion, measurement, acceptance and payment-eligibility control for every contracted work category.</p></div></div><div className="flex gap-2"><button type="button" onClick={() => setIsCreateOpen(true)} className="inline-flex items-center gap-2 rounded-xl bg-[#0D3A35] px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-[#092e2a]"><Plus className="h-4 w-4" /> Create WCC</button><button type="button" onClick={refresh} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700"><RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} /> Refresh</button></div></header>
 
     <section className="grid overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm sm:grid-cols-2 lg:grid-cols-4">{[
       ['Draft', counters.draft], ['Technical Verification', counters.technical], ['Commercial Verification', counters.commercial], ['Pending Approval', counters.approval], ['Approved', counters.approved], ['Changes Requested', counters.changes], ['Rejected / Reversed', counters.rejected], ['Total Current Certified Value', money(counters.value)],
@@ -120,6 +125,7 @@ export default function WccModule() {
 
     {selectedRecord && <WccCertificatePreview mode={recordMode} existingRecord={selectedRecord} onChanged={refresh} onClose={() => setSelectedRecord(null)} />}
     {auditRow && <AuditModal row={auditRow} onClose={() => setAuditRow(null)} />}
+    {isCreateOpen && <WccCreateFlow farms={farms} onClose={() => { setIsCreateOpen(false); refresh(); }} />}
   </div>;
 }
 
