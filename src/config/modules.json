@@ -140,7 +140,8 @@
             { "key": "work-approver",   "label": "WO - Order Approval Flow", "path": "/work-approver", "icon": "FileCheck", "enabled": true },
             { "key": "wo-creation",     "label": "WO Creation",      "path": "/wo-creation",      "icon": "FileText",       "enabled": true },
             { "key": "work-flow",       "label": "Work Flow",        "path": "/work-flow",        "icon": "FileText",       "enabled": true },
-            { "key": "scope-of-work",   "label": "Scope of Work",    "path": "/scope-of-work",    "icon": "Link2",          "enabled": true }
+            { "key": "scope-of-work",   "label": "Scope of Work",    "path": "/scope-of-work",    "icon": "Link2",          "enabled": true },
+            { "key": "wcc-module",      "label": "Work Completion Certificates", "path": "/wcc-module", "icon": "FileCheck2", "enabled": true }
           ]
         }
       ]
