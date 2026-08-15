@@ -10,6 +10,9 @@ type TaskStepType = 'inventory' | 'logistics' | 'inspection' | 'cultivation' | '
 
 type OnFieldTaskMode = 'cultivation' | 'non_cultivation';
 
+// Pseudo-vendor selectable when no vendor is in scope for the land — the task is done in-house
+const SELF_VENDOR_ID = 'self';
+
 interface TaskFlowStep {
   id: string;
   stepNumber: number;
@@ -860,7 +863,11 @@ const OnDemandTask = () => {
   const handleOnFieldVendorChange = (stepId: string, farmId: string, vendorId: string, vendorName: string, mode: OnFieldTaskMode) => {
     updateStepDetails(stepId, { vendorId, vendorName, onFieldActivity: '' });
     setExcludedPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
-    if (vendorId && mode === 'cultivation') fetchPlotsForStep(stepId, farmId, vendorId);
+    if (vendorId && vendorId !== SELF_VENDOR_ID && mode === 'cultivation') {
+      fetchPlotsForStep(stepId, farmId, vendorId);
+    } else {
+      setPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
+    }
   };
 
   const excludePlotFromStep = (stepId: string, plotId: string) =>
@@ -1802,8 +1809,6 @@ const OnDemandTask = () => {
                                           <div className="space-y-1">
                                             {scopeLoadingByStep[step.id] ? (
                                               <p className="text-[11px] text-slate-400 italic">Loading vendors…</p>
-                                            ) : scopeVendorIds.length === 0 ? (
-                                              <p className="text-[11px] text-slate-400 italic">No vendor scope for this land — assign one in Scope of Work.</p>
                                             ) : (
                                               <div className="flex flex-wrap gap-1">
                                                 {scopeVendorIds.map(vendorId => {
@@ -1820,7 +1825,17 @@ const OnDemandTask = () => {
                                                     </button>
                                                   );
                                                 })}
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleOnFieldVendorChange(step.id, step.details.landId, SELF_VENDOR_ID, 'Self', step.details.onFieldMode)}
+                                                  className={cn('rounded-full border border-dashed px-2.5 py-1 text-[11px] font-semibold transition-colors', step.details.vendorId === SELF_VENDOR_ID ? 'border-slate-700 bg-slate-700 text-white' : 'border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50')}
+                                                >
+                                                  Self
+                                                </button>
                                               </div>
+                                            )}
+                                            {!scopeLoadingByStep[step.id] && scopeVendorIds.length === 0 && (
+                                              <p className="text-[11px] text-slate-400 italic">No vendor scope for this land — assign one in Scope of Work, or select Self.</p>
                                             )}
                                             {selectedScope && selectedScope.activities?.length > 0 && step.details.onFieldMode === 'cultivation' && (
                                               <div className="flex flex-wrap gap-1">
@@ -1847,7 +1862,9 @@ const OnDemandTask = () => {
                                             {plotsLoadingByStep[step.id] ? (
                                               <p className="mt-1 text-[11px] text-slate-400 italic">Loading plots…</p>
                                             ) : plots.length === 0 ? (
-                                              <p className="mt-1 text-[11px] text-slate-400 italic">No plots found for this vendor's scope on this land.</p>
+                                              <p className="mt-1 text-[11px] text-slate-400 italic">
+                                                {step.details.vendorId === SELF_VENDOR_ID ? 'Plot-level scheduling isn\'t available for Self — set the date and quantity above.' : "No plots found for this vendor's scope on this land."}
+                                              </p>
                                             ) : activePlots.length === 0 ? (
                                               <p className="mt-1 text-[11px] text-slate-400 italic">All plots removed — add one back below.</p>
                                             ) : !step.details.onFieldStartDate || !step.details.onFieldWorkQuantity ? (
