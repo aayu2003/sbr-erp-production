@@ -14,6 +14,7 @@ import { type ComparativeModel } from '@/components/purchase/ComparativeStatemen
 import logoUrl from '@/Assets/3f-logo.png';
 import annexure2TermsRaw from '@/Assets/general-terms-annexure-2-wo.txt?raw';
 import getBaseUrl from '@/lib/config';
+import { fetchOrderCommunication } from '@/lib/orderCommunication';
 
 type Props = {
   open: boolean;
@@ -2764,6 +2765,8 @@ export function MakeWorkOrderPopup({
 
     setSavingPo(true);
     try {
+      await fetchOrderCommunication().catch(() => []);
+
       const finalVendorId = await onboardManualVendorIfNeeded(safe(resolvedVendorId));
       const annexurePayload = customAnnexures.reduce<Record<string, Page3State>>((result, annexure, index) => {
         const annexureNumber = index + 1;
