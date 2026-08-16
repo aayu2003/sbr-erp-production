@@ -20,7 +20,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
   Layers, Box, FileText, Map, AlertCircle, User,
   ClipboardCheck, Activity, FolderKanban, Landmark,
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
-  Car, Mail, Package, Scale, Truck, CheckSquare, PieChart, ShieldCheck,
+  Car, Mail, Package, Scale, Truck, CheckSquare, PieChart, ShieldCheck, Settings,
 };
 
 /* ---------------- NAV ITEM COMPONENT ---------------- */
@@ -269,7 +269,8 @@ const AppSidebar = () => {
                   (item.key === 'purchase-verifier' && ['admin-ops-indents', 'admin-wcc-approval', 'admin-grn-approval', 'admin-inspection-approval'].some(key => allowedModules.includes(key))) ||
                   (item.key === 'inspection-report' && allowedModules.includes('grn-module')) ||
                   (item.key === 'admin-inspection-approval' && (allowedModules.includes('admin-grn-approval') || allowedModules.includes('admin-ops-indents'))) ||
-                  (item.key === 'finance-inspection-approval' && allowedModules.includes('finance-admin-ops'))
+                  (item.key === 'finance-inspection-approval' && allowedModules.includes('finance-admin-ops')) ||
+                  (item.key.startsWith('finance-') && ['accounts-dashboard', 'accounts-ledger', 'accounts-payments', 'budget'].some(key => allowedModules.includes(key)))
                 )
               ),
             }))

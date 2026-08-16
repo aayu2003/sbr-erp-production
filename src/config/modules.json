@@ -274,6 +274,31 @@
           ]
         }
       ]
+    },
+    {
+      "key": "finance-accounts",
+      "label": "FINANCE & ACCOUNTS",
+      "description": "Focused accounting operations, controls, and reporting",
+      "icon": "Landmark",
+      "enabled": true,
+      "groups": [
+        {
+          "key": "finance-accounts-workspace",
+          "label": "Finance & Accounts",
+          "enabled": true,
+          "items": [
+            { "key": "finance-accounts-dashboard",          "label": "Dashboard",            "path": "/finance-accounts/dashboard",          "icon": "LayoutDashboard", "enabled": true },
+            { "key": "finance-bills-payables",              "label": "Bills & Payables",     "path": "/finance-accounts/bills-payables",     "icon": "Receipt",         "enabled": true },
+            { "key": "finance-payments-receipts",           "label": "Payments & Receipts", "path": "/finance-accounts/payments-receipts", "icon": "CreditCard",      "enabled": true },
+            { "key": "finance-vouchers",                    "label": "Vouchers",             "path": "/finance-accounts/vouchers",           "icon": "FileText",        "enabled": true },
+            { "key": "finance-banking",                     "label": "Banking",              "path": "/finance-accounts/banking",            "icon": "Landmark",        "enabled": true },
+            { "key": "finance-ledgers-reports",             "label": "Ledgers & Reports",    "path": "/finance-accounts/ledgers-reports",    "icon": "BookOpen",        "enabled": true },
+            { "key": "finance-budget-costing",              "label": "Budget & Costing",     "path": "/finance-accounts/budget-costing",     "icon": "PieChart",        "enabled": true },
+            { "key": "finance-masters-controls",            "label": "Masters & Controls",   "path": "/finance-accounts/masters-controls",   "icon": "Settings",        "enabled": true },
+            { "key": "finance-accounting-master",           "label": "Accounting Master",    "path": "/finance-accounts/accounting-master",  "icon": "Settings",        "enabled": true }
+          ]
+        }
+      ]
     }
   ]
 }
