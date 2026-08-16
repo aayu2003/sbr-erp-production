@@ -52,6 +52,8 @@ export default function WccCreateFlow({ farms, onClose }: Props) {
   const [scopeItems, setScopeItems] = useState<ScopeItem[]>([]);
   const [isLoadingScope, setIsLoadingScope] = useState(false);
   const [farmerNames, setFarmerNames] = useState<Record<string, string>>({});
+  const [operationalDateRange, setOperationalDateRange] = useState<{ start?: string; end?: string }>({});
+  const [isLoadingOperationalRange, setIsLoadingOperationalRange] = useState(false);
 
   // --- Fetch active vendors (live WO/PO) ---
   useEffect(() => {
@@ -135,6 +137,44 @@ export default function WccCreateFlow({ farms, onClose }: Props) {
     return () => { mounted = false; };
   }, [selectedVendorId]);
 
+  // --- Discover the selected vendor's actual operational (non-cultivation) task date span ---
+  // A pure operational vendor (e.g. a borewell driller with no land scope) has no scope
+  // start/end dates to seed WccModal's default range with, so it would otherwise fall back to
+  // "last 30 days" and silently hide real tasks dated outside that window. Query without a
+  // narrow date filter (a wide open window) so nothing gets excluded here, then use the
+  // resulting min/max as part of the default range instead.
+  useEffect(() => {
+    if (!selectedVendorId) {
+      setOperationalDateRange({});
+      return;
+    }
+    let mounted = true;
+    setIsLoadingOperationalRange(true);
+    (async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/admin_cultivation/get_operational_work_done_by_vendor`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vendor_id: selectedVendorId, start_date: '2000-01-01', end_date: '2100-12-31' }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!mounted) return;
+        const entries: Array<{ from_date?: string; to_date?: string }> = data?.success && Array.isArray(data.work_done) ? data.work_done : [];
+        const starts = entries.map((e) => e.from_date).filter((d): d is string => !!d);
+        const ends = entries.map((e) => e.to_date).filter((d): d is string => !!d);
+        setOperationalDateRange({
+          start: starts.length ? starts.reduce((a, b) => (a < b ? a : b)) : undefined,
+          end: ends.length ? ends.reduce((a, b) => (a > b ? a : b)) : undefined,
+        });
+      } catch {
+        if (mounted) setOperationalDateRange({});
+      } finally {
+        if (mounted) setIsLoadingOperationalRange(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [selectedVendorId]);
+
   // --- Fetch farmer names for whichever farms show up in the selected vendor's scope ---
   useEffect(() => {
     const ids = scopeItems.map((s) => s.land_id).filter((id) => id && !farmerNames[id]);
@@ -185,22 +225,33 @@ export default function WccCreateFlow({ farms, onClose }: Props) {
     return Array.from(set);
   }, [scopeItems]);
 
+  // Combines the vendor's cultivation scope dates with their actual operational-task date
+  // span, so the default range covers both regardless of which kind of work (or both) this
+  // vendor does — a pure operational vendor still gets a real range instead of "no scope dates".
   const vendorScopeDateRange = useMemo(() => {
-    const starts = scopeItems.map((i) => i.start_date).filter((d): d is string => !!d);
-    const ends = scopeItems.map((i) => i.end_date).filter((d): d is string => !!d);
+    const starts = [
+      ...scopeItems.map((i) => i.start_date),
+      operationalDateRange.start,
+    ].filter((d): d is string => !!d);
+    const ends = [
+      ...scopeItems.map((i) => i.end_date),
+      operationalDateRange.end,
+    ].filter((d): d is string => !!d);
     return {
       start: starts.length ? starts.reduce((a, b) => (a < b ? a : b)) : undefined,
       end: ends.length ? ends.reduce((a, b) => (a > b ? a : b)) : undefined,
     };
-  }, [scopeItems]);
+  }, [scopeItems, operationalDateRange]);
+
+  const isLoadingVendorDetail = isLoadingScope || isLoadingOperationalRange;
 
   // Once a vendor is picked, hand off straight to the existing task/date/generate modal —
-  // but only once its scope-of-work has actually finished loading. WccModal seeds its date
-  // range from defaultStartDate/defaultEndDate via a one-time useState initializer, so
-  // mounting it before scopeItems (and the date range derived from it) is ready would
-  // permanently lock it onto the fallback "last 30 days" window instead of the vendor's
-  // real scope dates — hiding genuine tasks outside that window.
-  if (selectedVendor && !isLoadingScope) {
+  // but only once both its scope-of-work AND operational-task date span have actually
+  // finished loading. WccModal seeds its date range from defaultStartDate/defaultEndDate via
+  // a one-time useState initializer, so mounting it before those are ready would permanently
+  // lock it onto the fallback "last 30 days" window instead of the vendor's real work dates —
+  // hiding genuine tasks outside that window (especially for vendors with no land scope at all).
+  if (selectedVendor && !isLoadingVendorDetail) {
     return (
       <WccModal
         vendorId={selectedVendor.vendor_id}
@@ -269,11 +320,11 @@ export default function WccCreateFlow({ farms, onClose }: Props) {
               <button
                 key={vendor.vendor_id}
                 type="button"
-                disabled={isLoadingScope && selectedVendorId === vendor.vendor_id}
+                disabled={isLoadingVendorDetail && selectedVendorId === vendor.vendor_id}
                 onClick={() => setSelectedVendorId(vendor.vendor_id)}
                 className={cn(
                   'w-full border-l-2 border-transparent px-4 py-3.5 text-left transition-all hover:bg-slate-50',
-                  isLoadingScope && selectedVendorId === vendor.vendor_id && 'opacity-60',
+                  isLoadingVendorDetail && selectedVendorId === vendor.vendor_id && 'opacity-60',
                 )}
               >
                 <span className="text-sm font-semibold text-slate-800">{vendor.vendor_name}</span>
@@ -285,8 +336,8 @@ export default function WccCreateFlow({ farms, onClose }: Props) {
                     <span className="flex items-center gap-1 font-medium"><Hash className="h-3 w-3 shrink-0" />{vendor.contact}</span>
                   )}
                 </div>
-                {isLoadingScope && selectedVendorId === vendor.vendor_id && (
-                  <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">Loading scope of work…</p>
+                {isLoadingVendorDetail && selectedVendorId === vendor.vendor_id && (
+                  <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">Loading vendor's work…</p>
                 )}
               </button>
             ))
