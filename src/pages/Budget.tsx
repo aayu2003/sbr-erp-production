@@ -694,7 +694,7 @@ function barTextColor(pct: number) { return pct >= 90 ? "text-red-600" : pct >= 
 function UtilizationBar({ pct }: { pct: number }) {
   const clamped = Math.min(pct, 100);
   return (
-    <div className="flex min-w-[140px] items-center gap-2">
+    <div className="flex w-full min-w-0 items-center gap-1.5">
       <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
         <div className={`h-full rounded-full transition-all ${barColor(pct)}`} style={{ width: `${clamped}%` }} />
       </div>
@@ -714,7 +714,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-const inputCls = "h-10 w-full rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20";
+const inputCls = "h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none transition focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10";
 
 // ── Add Line Item Modal ───────────────────────────────────────────────────────
 const MAPPING_LABELS: Record<MappingField, string> = {
@@ -992,7 +992,7 @@ function AddLineItemModal({
                   onClick={() => setMode("working")}
                   className={[
                     "h-7 rounded-md px-3 text-xs font-extrabold transition-all",
-                    mode === "working" ? "bg-[#173f70] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
+                    mode === "working" ? "bg-[#0d5c4d] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
                   ].join(" ")}
                 >
                   Working Sheet
@@ -1003,7 +1003,7 @@ function AddLineItemModal({
                 onClick={() => setMode("manual")}
                 className={[
                   "h-7 rounded-md px-3 text-xs font-extrabold transition-all",
-                  mode === "manual" ? "bg-[#173f70] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
+                  mode === "manual" ? "bg-[#0d5c4d] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
                 ].join(" ")}
               >
                 Manual
@@ -1013,7 +1013,7 @@ function AddLineItemModal({
                 onClick={() => setMode("bulk")}
                 className={[
                   "h-7 rounded-md px-3 text-xs font-extrabold transition-all",
-                  mode === "bulk" ? "bg-[#173f70] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
+                  mode === "bulk" ? "bg-[#0d5c4d] text-white shadow-sm" : "text-slate-500 hover:text-slate-700",
                 ].join(" ")}
               >
                 Bulk Upload
@@ -1087,7 +1087,7 @@ function AddLineItemModal({
               <div className="rounded-lg border border-slate-200 overflow-hidden">
                 <div className="bg-slate-50 px-3 py-2 flex items-center justify-between">
                   <p className="text-xs font-extrabold text-slate-600">{matchedFarms.length} farm(s) · "{cropType}"</p>
-                  <p className="text-xs font-extrabold text-[#173f70]">{fmtNum(totalAcres)} acres</p>
+                  <p className="text-xs font-extrabold text-[#0d5c4d]">{fmtNum(totalAcres)} acres</p>
                 </div>
                 <div className="max-h-24 overflow-y-auto divide-y divide-slate-100">
                   {matchedFarms.map((f) => (
@@ -1103,7 +1103,7 @@ function AddLineItemModal({
             {/* Acres */}
             <Field label="Acres *">
               <input type="number" min="0" value={acres} onChange={(e) => setAcres(e.target.value)} placeholder="0"
-                className={`${inputCls} ${cropType ? "bg-blue-50/40 font-extrabold text-[#173f70]" : ""}`} />
+                className={`${inputCls} ${cropType ? "bg-blue-50/40 font-extrabold text-[#0d5c4d]" : ""}`} />
             </Field>
 
             {/* Working sheet mode — mapped value tiles */}
@@ -1149,7 +1149,7 @@ function AddLineItemModal({
                   <div className="flex items-center gap-2">
                     {rangeStr
                       ? <>
-                          <code className="rounded bg-[#173f70]/10 px-2 py-0.5 text-[10px] font-extrabold text-[#173f70]">{rangeStr}</code>
+                          <code className="rounded bg-[#0d5c4d]/10 px-2 py-0.5 text-[10px] font-extrabold text-[#0d5c4d]">{rangeStr}</code>
                           <button type="button" onClick={() => setFinalRange(null)} className="text-slate-300 hover:text-red-400">
                             <X className="h-3 w-3" />
                           </button>
@@ -1200,7 +1200,7 @@ function AddLineItemModal({
                 />
               </Field>
               <label
-                className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 p-8 transition-all hover:border-[#173f70]/40 hover:bg-slate-100/60"
+                className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 p-8 transition-all hover:border-[#0d5c4d]/40 hover:bg-slate-100/60"
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleBulkFile(f); }}
               >
@@ -1230,7 +1230,7 @@ function AddLineItemModal({
                         <span className="ml-2 text-red-500">· {bulkRows.filter((r) => r.errors.length > 0).length} with errors</span>
                       )}
                     </p>
-                    <p className="text-xs font-extrabold text-[#173f70]">{bulkValidCount} ready to import</p>
+                    <p className="text-xs font-extrabold text-[#0d5c4d]">{bulkValidCount} ready to import</p>
                   </div>
                   <div className="max-h-[340px] overflow-auto rounded-lg border border-slate-200">
                     <table className="w-full border-collapse text-xs">
@@ -1308,7 +1308,7 @@ function AddLineItemModal({
                       className={[
                         "shrink-0 h-7 rounded-md px-3 text-xs font-extrabold transition-all",
                         selectedSheet === name
-                          ? "bg-[#173f70] text-white"
+                          ? "bg-[#0d5c4d] text-white"
                           : "text-slate-500 hover:text-slate-700",
                       ].join(" ")}
                     >
@@ -1329,7 +1329,7 @@ function AddLineItemModal({
                       onClick={() => setMappingField(isActive ? null : f)}
                       className={["h-8 rounded-lg border px-3 text-xs font-extrabold transition-all",
                         isActive
-                          ? "border-[#173f70] bg-[#173f70] text-white"
+                          ? "border-[#0d5c4d] bg-[#0d5c4d] text-white"
                           : mapped
                           ? `${colors.chip} border-transparent`
                           : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
@@ -1411,7 +1411,7 @@ function AddLineItemModal({
                               style={style}
                               className={[
                                 "border border-slate-200",
-                                isMaping && !mf ? "hover:bg-[#173f70]/10" : "",
+                                isMaping && !mf ? "hover:bg-[#0d5c4d]/10" : "",
                               ].join(" ")}
                               onMouseDown={(e) => handleCellMouseDown(ri, ci, cell.value, e)}
                               onMouseEnter={() => handleCellMouseEnter(ri, ci)}
@@ -1439,7 +1439,7 @@ function AddLineItemModal({
             <button
               type="button"
               onClick={handleBulkImport}
-              className="h-10 rounded-lg bg-[#173f70] px-5 text-sm font-semibold text-white hover:bg-[#12345e]"
+              className="h-10 rounded-lg bg-[#0d5c4d] px-5 text-sm font-semibold text-white hover:bg-[#0a4b3f]"
             >
               Import {bulkValidCount > 0 ? `${bulkValidCount} ` : ""}Item{bulkValidCount !== 1 ? "s" : ""}
             </button>
@@ -1448,7 +1448,7 @@ function AddLineItemModal({
               type="button"
               onClick={handleAdd}
               disabled={!lineItemId.trim() && (!category.trim() || !lineItem.trim() || !uom.trim() || !qtyPerAcre || !acres || !ratePerUnit)}
-              className="h-10 rounded-lg bg-[#173f70] px-5 text-sm font-semibold text-white hover:bg-[#12345e] disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-10 rounded-lg bg-[#0d5c4d] px-5 text-sm font-semibold text-white hover:bg-[#0a4b3f] disabled:cursor-not-allowed disabled:opacity-50"
             >
               Add Line Item
             </button>
@@ -1565,7 +1565,7 @@ function EditLineItemModal({
 
         <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4">
           <button onClick={onClose} className="h-10 rounded-lg border border-slate-200 px-5 text-sm font-semibold hover:bg-slate-50">Cancel</button>
-          <button type="button" onClick={handleSave} className="h-10 rounded-lg bg-[#173f70] px-5 text-sm font-semibold text-white hover:bg-[#12345e]">Save Changes</button>
+          <button type="button" onClick={handleSave} className="h-10 rounded-lg bg-[#0d5c4d] px-5 text-sm font-semibold text-white hover:bg-[#0a4b3f]">Save Changes</button>
         </div>
       </div>
     </div>
@@ -1669,7 +1669,7 @@ function XlsxDrawer({
               <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">
                 {selectedSheet}
                 {displayRange && (
-                  <> · <code className="rounded bg-[#173f70]/10 px-1.5 text-[#173f70]">{displayRange}</code></>
+                  <> · <code className="rounded bg-[#0d5c4d]/10 px-1.5 text-[#0d5c4d]">{displayRange}</code></>
                 )}
               </p>
             </div>
@@ -1692,7 +1692,7 @@ function XlsxDrawer({
                 className={[
                   "shrink-0 h-7 rounded-md px-3 text-xs font-extrabold transition-all",
                   selectedSheet === name
-                    ? "bg-[#173f70] text-white"
+                    ? "bg-[#0d5c4d] text-white"
                     : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
                 ].join(" ")}
               >
@@ -1787,7 +1787,7 @@ function XlsxDrawer({
                                   onChange={e => setEditValue(e.target.value)}
                                   onBlur={() => commitEdit(ri, ci)}
                                   onKeyDown={e => { if (e.key === "Enter") commitEdit(ri, ci); if (e.key === "Escape") setEditingCell(null); }}
-                                  className="h-full w-full border-0 bg-blue-50 px-0 text-xs outline-none ring-1 ring-[#173f70]"
+                                  className="h-full w-full border-0 bg-blue-50 px-0 text-xs outline-none ring-1 ring-[#0d5c4d]"
                                   style={{ fontFamily: "inherit" }}
                                 />
                               ) : (
@@ -1866,11 +1866,11 @@ export default function Budget() {
           line_item_name: row.lineItem,
         }),
       });
-      const json: any = await res.json().catch(() => null);
+      const json = await res.json().catch(() => null) as { success?: boolean; message?: string; data?: BudgetAllocationEntry[] } | null;
       if (!res.ok || !json?.success) throw new Error(json?.message || "Failed to load allocation breakdown");
       setAllocationBreakdowns((prev) => ({ ...prev, [row.id]: json.data || [] }));
-    } catch (err: any) {
-      setAllocationErrors((prev) => ({ ...prev, [row.id]: err?.message || "Failed to load allocation breakdown" }));
+    } catch (err: unknown) {
+      setAllocationErrors((prev) => ({ ...prev, [row.id]: err instanceof Error ? err.message : "Failed to load allocation breakdown" }));
     } finally {
       setLoadingAllocationId((prev) => (prev === row.id ? null : prev));
     }
@@ -2163,18 +2163,16 @@ export default function Budget() {
   };
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="min-h-full bg-[#f6f8fa] px-5 py-6 sm:px-8 lg:px-10 lg:py-8">
+      <div className="mx-auto max-w-[1800px] space-y-6">
       {/* Header */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-extrabold text-slate-900">Budget</h1>
-          <p className="mt-1 text-sm font-medium text-slate-500">Plan and track capital and operational expenditure across all farm acres</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+        <div className="flex items-start gap-4"><span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#0d473f] text-white shadow-[0_12px_30px_rgba(13,71,63,0.18)]"><FileSpreadsheet className="h-6 w-6" /></span><div><p className="text-[11px] font-extrabold uppercase tracking-[0.2em] text-[#18765f]">Accounts · Budget Workspace</p><h1 className="mt-1 text-3xl font-bold tracking-[-0.035em] text-slate-950">Budget</h1><p className="mt-1.5 text-sm font-medium text-slate-500">Plan and track capital and operational expenditure across all farm acres</p></div></div>
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => setShowPlayground(true)}
-            className="inline-flex h-10 items-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-4 text-sm font-semibold text-violet-700 transition-all hover:bg-violet-100"
+            className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#cfe3dd] bg-white px-4 text-sm font-bold text-[#0d5c4d] transition-all hover:bg-[#edf5f2]"
           >
             <Sparkles className="h-4 w-4" />
             Playground
@@ -2182,7 +2180,7 @@ export default function Budget() {
           <button
             type="button"
             onClick={() => setLocked((l) => !l)}
-            className={["inline-flex h-10 items-center gap-2 rounded-lg border px-4 text-sm font-semibold transition-all",
+            className={["inline-flex h-11 items-center gap-2 rounded-xl border px-4 text-sm font-bold transition-all",
               locked ? "border-red-200 bg-red-50 text-red-600 hover:bg-red-100" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"].join(" ")}
           >
             {locked ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
@@ -2192,7 +2190,7 @@ export default function Budget() {
             type="button"
             disabled={locked}
             onClick={() => setShowAdd(true)}
-            className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#cfe3dd] bg-white px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2] disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Plus className="h-4 w-4" />
             Add Budget Item
@@ -2202,9 +2200,9 @@ export default function Budget() {
             onClick={handleSave}
             disabled={isSaving || !hasUnsavedChanges}
             className={[
-              "relative inline-flex h-10 items-center gap-2 rounded-lg px-5 text-sm font-semibold text-white shadow-sm transition-all",
+              "relative inline-flex h-11 items-center gap-2 rounded-xl px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] transition-all",
               hasUnsavedChanges
-                ? "bg-emerald-600 hover:bg-emerald-700"
+                ? "bg-[#0d5c4d] hover:bg-[#0a4b3f]"
                 : "bg-slate-300 cursor-not-allowed",
               isSaving ? "opacity-70 cursor-not-allowed" : "",
             ].join(" ")}
@@ -2231,15 +2229,15 @@ export default function Budget() {
 
       {/* Summary cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Grand Total</p>
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#173f70]/10"><DollarSign className="h-4 w-4 text-[#173f70]" /></div>
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#0d5c4d]/10"><DollarSign className="h-4 w-4 text-[#0d5c4d]" /></div>
           </div>
           <p className="mt-2 text-2xl font-extrabold text-slate-900">{fmt(grandTotal)}</p>
           <p className="mt-1 text-xs font-semibold text-slate-400">Capex + Opex combined</p>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Total Capex</p>
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-50"><TrendingUp className="h-4 w-4 text-violet-600" /></div>
@@ -2247,7 +2245,7 @@ export default function Budget() {
           <p className="mt-2 text-2xl font-extrabold text-violet-700">{fmt(totalCapex)}</p>
           <p className="mt-1 text-xs font-semibold text-slate-400">{grandTotal > 0 ? ((totalCapex / grandTotal) * 100).toFixed(1) : "0.0"}% of total budget</p>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Total Opex</p>
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-50"><TrendingDown className="h-4 w-4 text-sky-600" /></div>
@@ -2255,7 +2253,7 @@ export default function Budget() {
           <p className="mt-2 text-2xl font-extrabold text-sky-700">{fmt(totalOpex)}</p>
           <p className="mt-1 text-xs font-semibold text-slate-400">{grandTotal > 0 ? ((totalOpex / grandTotal) * 100).toFixed(1) : "0.0"}% of total budget</p>
         </div>
-        <div className="rounded-xl border border-teal-200 bg-teal-50/40 p-5 shadow-sm">
+        <div className="rounded-2xl border border-[#b8d6ce] bg-[#edf7f4] p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <p className="text-xs font-extrabold uppercase tracking-wide text-teal-600">Total Savings</p>
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-100"><TrendingDown className="h-4 w-4 text-teal-600" /></div>
@@ -2266,12 +2264,12 @@ export default function Budget() {
       </div>
 
       {/* Filter tabs */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
         <Filter className="h-4 w-4 text-slate-400" />
         {(["All", "Capex", "Opex"] as const).map((t) => (
           <button key={t} type="button" onClick={() => setActiveType(t)}
             className={["h-8 rounded-lg px-4 text-xs font-extrabold transition-all",
-              activeType === t ? "bg-[#173f70] text-white shadow-sm" : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"].join(" ")}
+              activeType === t ? "bg-[#0d5c4d] text-white shadow-sm" : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"].join(" ")}
           >{t}</button>
         ))}
       </div>
@@ -2279,16 +2277,17 @@ export default function Budget() {
       {/* Full-area loader */}
       {loading && (
         <div className="flex flex-col items-center justify-center gap-4 py-24">
-          <div className="h-12 w-12 animate-spin rounded-full border-4 border-slate-200 border-t-[#173f70]" />
+          <div className="h-12 w-12 animate-spin rounded-full border-4 border-slate-200 border-t-[#0d5c4d]" />
           <p className="text-sm font-semibold text-slate-400">Loading budget…</p>
         </div>
       )}
 
       {/* Table */}
       {!loading && (
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[1400px] border-collapse text-left">
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="w-full overflow-hidden">
+          <table className="w-full table-fixed border-collapse text-left text-[10px] [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:whitespace-nowrap [&_th]:px-1.5 [&_th]:py-2 [&_td]:overflow-hidden [&_td]:text-ellipsis [&_td]:whitespace-nowrap [&_td]:px-1.5 [&_td]:py-2.5">
+            <colgroup><col style={{ width: "2%" }} /><col style={{ width: "4.5%" }} /><col style={{ width: "7.5%" }} /><col style={{ width: "12%" }} /><col style={{ width: "4.5%" }} /><col style={{ width: "5.5%" }} /><col style={{ width: "4.5%" }} /><col style={{ width: "5.5%" }} /><col style={{ width: "6.5%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "7%" }} /><col style={{ width: "10%" }} /><col style={{ width: "6%" }} /><col style={{ width: "4%" }} />{!locked && <col style={{ width: "5%" }} />}</colgroup>
             <thead>
               {/* Group header row */}
               <tr className="bg-slate-100 text-[10px] font-extrabold uppercase tracking-widest text-slate-400">
@@ -2344,7 +2343,7 @@ export default function Budget() {
                 const isAllocationExpanded = expandedAllocationId === row.id;
                 return (
                   <Fragment key={row.id}>
-                  <tr className="border-b border-slate-100 text-sm last:border-b-0 hover:bg-slate-50/60">
+                  <tr className="border-b border-slate-100 text-xs last:border-b-0 hover:bg-slate-50/60">
                     <td className="px-3 py-3.5 text-center text-xs font-semibold text-slate-400 select-none">{idx + 1}</td>
                     <td className="whitespace-nowrap px-4 py-3.5">
                       <span className={`rounded-full px-2.5 py-0.5 text-xs font-extrabold ${typeColors[row.type]}`}>{row.type}</span>
@@ -2418,7 +2417,7 @@ export default function Budget() {
                       ) : <span className="text-slate-300 font-semibold">—</span>}
                     </td>
                     {/* 4. Utilization — actual spend progress */}
-                    <td className="px-4 py-3.5 border-l-2 border-slate-200 min-w-[160px]">
+                    <td className="border-l-2 border-slate-200 px-2 py-3">
                       <div className="space-y-1">
                         <div className="flex items-center justify-between gap-2 mb-1">
                           <span className="text-[10px] font-bold text-slate-500 tabular-nums">{fmt(utilizedValue)}</span>
@@ -2565,6 +2564,7 @@ export default function Budget() {
       {disbursementItem && (
         <DisbursementSequence budgetId={budgetId} item={disbursementItem} onClose={() => setDisbursementItem(null)} />
       )}
+      </div>
     </div>
   );
 }

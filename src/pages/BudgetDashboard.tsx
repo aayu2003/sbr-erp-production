@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Plus, X, Upload, FileSpreadsheet, Calendar,
-  ChevronRight, Search, MapPin, Wheat, BarChart3, Lock, Unlock, Users, Loader2,
+  ChevronRight, Search, MapPin, Wheat, BarChart3, Lock, Unlock, Users, Loader2, Eye,
 } from "lucide-react";
 import getBaseUrl from "@/lib/config";
 
@@ -41,7 +41,7 @@ const CROP_LABELS: Record<CropKey, string> = { paddy: 'Paddy', rahar: 'Rahar', n
 const CROP_BTN: Record<CropKey, { on: string; off: string }> = {
   paddy:  { on: 'border-amber-400 bg-amber-100 text-amber-700',  off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
   rahar:  { on: 'border-[#800000] bg-[#800000]/10 text-[#800000]',  off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
-  napier: { on: 'border-[#173f70] bg-[#173f70] text-white',      off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
+  napier: { on: 'border-[#0d5c4d] bg-[#0d5c4d] text-white',      off: 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50' },
 };
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-const inputCls  = "h-10 w-full rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20";
+const inputCls  = "h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none transition focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10";
 const selectCls = `${inputCls} cursor-pointer`;
 
 // ── Create Budget Modal ───────────────────────────────────────────────────────
@@ -205,21 +205,22 @@ function CreateBudgetModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/45 p-4 py-10">
-      <div className="w-full max-w-xl rounded-xl bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/55 p-4 backdrop-blur-[2px]">
+      <div className="max-h-[94vh] w-full max-w-2xl overflow-y-auto rounded-3xl bg-[#f6f8fa] shadow-2xl">
 
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+        <div className="flex items-center justify-between bg-[#0d473f] px-6 py-5 text-white">
           <div>
-            <h2 className="text-xl font-extrabold text-slate-900">Create New Budget</h2>
-            <p className="mt-0.5 text-xs font-semibold text-slate-500">Set up a new budget plan for a crop cycle</p>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Accounts · Budget</p>
+            <h2 className="mt-1 text-xl font-bold">Create New Budget</h2>
+            <p className="mt-1 text-xs font-semibold text-white/60">Set up a new budget plan for a crop cycle</p>
           </div>
-          <button onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100">
+          <button onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-xl text-white/70 hover:bg-white/10 hover:text-white">
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="p-6 space-y-4">
+        <div className="m-5 space-y-4 rounded-2xl border border-slate-200 bg-white p-5">
           {error && (
             <p className="rounded-md bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{error}</p>
           )}
@@ -333,7 +334,7 @@ function CreateBudgetModal({
                     {matchedRows.length} land parcel{matchedRows.length !== 1 ? "s" : ""} · {selectedCropTypes.map((t) => CROP_LABELS[t]).join(", ")}
                   </p>
                 </div>
-                <p className="text-xs font-extrabold text-[#173f70]">Total: {fmtNum(totalAcres)} acres</p>
+                <p className="text-xs font-extrabold text-[#0d5c4d]">Total: {fmtNum(totalAcres)} acres</p>
               </div>
               {loadingData ? (
                 <div className="py-6 text-center text-xs font-semibold text-slate-400">Loading land data…</div>
@@ -372,7 +373,7 @@ function CreateBudgetModal({
                       <tr>
                         <td colSpan={2} className="py-1.5 pl-3 pr-2 font-extrabold text-slate-700">Total</td>
                         {selectedCropTypes.map((ct) => (
-                          <td key={ct} className="py-1.5 px-2 text-right font-extrabold text-[#173f70]">
+                          <td key={ct} className="py-1.5 px-2 text-right font-extrabold text-[#0d5c4d]">
                             {fmtNum(cropTotals[ct] ?? 0)}
                           </td>
                         ))}
@@ -401,7 +402,7 @@ function CreateBudgetModal({
             ) : (
               <div
                 onClick={() => fileRef.current?.click()}
-                className="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed border-slate-300 px-4 py-3 hover:border-[#173f70] hover:bg-blue-50/30 transition-all"
+                className="flex cursor-pointer items-center gap-3 rounded-xl border border-dashed border-[#b8d6ce] px-4 py-3 transition-all hover:border-[#0d5c4d] hover:bg-[#edf7f4]"
               >
                 <FileSpreadsheet className="h-5 w-5 text-slate-400 shrink-0" />
                 <div>
@@ -416,15 +417,15 @@ function CreateBudgetModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4">
-          <button onClick={onClose} className="h-10 rounded-lg border border-slate-200 px-5 text-sm font-semibold hover:bg-slate-50">
+        <div className="flex items-center justify-end gap-3 border-t border-slate-200 bg-white px-6 py-4">
+          <button onClick={onClose} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50">
             Cancel
           </button>
           <button
             type="button"
             onClick={handleCreate}
             disabled={loading}
-            className="h-10 rounded-lg bg-[#173f70] px-5 text-sm font-semibold text-white hover:bg-[#12345e] disabled:opacity-60 disabled:cursor-not-allowed"
+            className="h-11 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {loading ? "Creating…" : "Create Budget"}
           </button>
@@ -481,16 +482,16 @@ function BudgetCardItem({ budget, onClick }: { budget: BudgetCard; onClick: () =
     <div
       onClick={budget.locked ? undefined : onClick}
       className={[
-        "group relative flex flex-col gap-4 rounded-xl border p-5 shadow-sm transition-all",
+        "group relative flex flex-col gap-4 rounded-2xl border p-5 shadow-sm transition-all",
         budget.locked
           ? "cursor-not-allowed border-slate-200 bg-slate-50 opacity-70"
-          : "cursor-pointer border-slate-200 bg-white hover:border-[#173f70]/40 hover:shadow-md",
+          : "cursor-pointer border-slate-200 bg-white hover:border-[#8fc2b5] hover:shadow-[0_16px_40px_rgba(13,71,63,0.10)]",
       ].join(" ")}
     >
       {/* Top */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h3 className={`truncate text-base font-extrabold transition-colors ${budget.locked ? "text-slate-500" : "text-slate-900 group-hover:text-[#173f70]"}`}>
+          <h3 className={`truncate text-base font-extrabold transition-colors ${budget.locked ? "text-slate-500" : "text-slate-900 group-hover:text-[#0d5c4d]"}`}>
             {budget.budget_name}
           </h3>
           <p className="mt-0.5 text-xs font-semibold text-slate-400">FY {fy}</p>
@@ -534,7 +535,7 @@ function BudgetCardItem({ budget, onClick }: { budget: BudgetCard; onClick: () =
       </div>
 
       {/* Footer stats */}
-      <div className="mt-auto grid grid-cols-2 gap-3 rounded-lg bg-slate-50 px-3 py-2.5">
+      <div className="mt-auto grid grid-cols-2 gap-3 rounded-xl bg-[#f1f7f5] px-3 py-2.5">
         <div>
           <p className="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">Farms</p>
           <p className="mt-0.5 text-sm font-extrabold text-slate-700">{farmCount}</p>
@@ -552,7 +553,7 @@ function BudgetCardItem({ budget, onClick }: { budget: BudgetCard; onClick: () =
         type="button"
         disabled={budget.locked || uploadingHr}
         onClick={(e) => { e.stopPropagation(); hrFileRef.current?.click(); }}
-        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white py-2 text-xs font-semibold text-slate-600 transition-all hover:border-[#173f70]/40 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-[#cfe3dd] bg-white py-2 text-xs font-bold text-[#0d5c4d] transition-all hover:bg-[#edf5f2] disabled:cursor-not-allowed disabled:opacity-50"
       >
         {uploadingHr ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
         {uploadingHr ? "Uploading…" : "Add HR Budget"}
@@ -566,9 +567,18 @@ function BudgetCardItem({ budget, onClick }: { budget: BudgetCard; onClick: () =
         onChange={handleHrFile}
       />
 
+      <button
+        type="button"
+        onClick={(event) => { event.stopPropagation(); onClick(); }}
+        className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white transition hover:bg-[#0a4b3f]"
+      >
+        <Eye className="h-4 w-4" />
+        View Budget
+      </button>
+
       {/* Arrow hint on hover — only for unlocked */}
       {!budget.locked && (
-        <ChevronRight className="absolute bottom-4 right-4 h-4 w-4 text-[#173f70] opacity-0 transition-opacity group-hover:opacity-100" />
+        <ChevronRight className="absolute bottom-4 right-4 h-4 w-4 text-[#0d5c4d] opacity-0 transition-opacity group-hover:opacity-100" />
       )}
     </div>
   );
@@ -606,20 +616,16 @@ export default function BudgetDashboard() {
     : budgets;
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="min-h-full bg-[#f6f8fa] px-5 py-6 sm:px-8 lg:px-10 lg:py-8">
+      <div className="mx-auto max-w-[1600px] space-y-6">
 
       {/* Header */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-extrabold text-slate-900">Budgets</h1>
-          <p className="mt-1 text-sm font-medium text-slate-500">
-            {budgets.length} budget{budgets.length !== 1 ? "s" : ""}
-          </p>
-        </div>
+      <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+        <div className="flex items-start gap-4"><span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#0d473f] text-white shadow-[0_12px_30px_rgba(13,71,63,0.18)]"><BarChart3 className="h-6 w-6" /></span><div><p className="text-[11px] font-extrabold uppercase tracking-[0.2em] text-[#18765f]">Accounts · Budget Management</p><h1 className="mt-1 text-3xl font-bold tracking-[-0.035em] text-slate-950">Budgets</h1><p className="mt-1.5 text-sm font-medium text-slate-500">Plan, control and track capital and operational expenditure · {budgets.length} budget{budgets.length !== 1 ? "s" : ""}</p></div></div>
         <button
           type="button"
           onClick={() => setShowCreate(true)}
-          className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#173f70] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#12345e]"
+          className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"
         >
           <Plus className="h-4 w-4" />
           New Budget
@@ -627,25 +633,25 @@ export default function BudgetDashboard() {
       </div>
 
       {/* Search */}
-      <div className="relative max-w-sm">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="relative max-w-md">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search by name, crop, or year…"
-          className="h-10 w-full rounded-lg border border-slate-200 pl-9 pr-4 text-sm font-semibold text-slate-800 outline-none focus:border-[#173f70] focus:ring-1 focus:ring-[#173f70]/20"
+          className="h-11 w-full rounded-xl border border-slate-200 bg-[#fbfcfd] pl-10 pr-4 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10"
         />
-      </div>
+      </div></div>
 
       {/* Cards */}
       {loading ? (
         <div className="flex items-center justify-center gap-2 py-20 text-sm font-semibold text-slate-400">
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-[#173f70]" />
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-[#0d5c4d]" />
           Loading budgets…
         </div>
       ) : filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-slate-300 py-20">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-slate-100">
+        <div className="flex flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-[#b8d6ce] bg-white py-20 shadow-sm">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#eaf4f1]">
             <BarChart3 className="h-7 w-7 text-slate-400" />
           </div>
           <div className="text-center">
@@ -660,7 +666,7 @@ export default function BudgetDashboard() {
             <button
               type="button"
               onClick={() => setShowCreate(true)}
-              className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#173f70] px-4 text-xs font-semibold text-white hover:bg-[#12345e]"
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#0d5c4d] px-4 text-xs font-bold text-white hover:bg-[#0a4b3f]"
             >
               <Plus className="h-3.5 w-3.5" />
               Create Budget
@@ -685,6 +691,7 @@ export default function BudgetDashboard() {
           onCreated={() => setRefreshKey((k) => k + 1)}
         />
       )}
+      </div>
     </div>
   );
 }
