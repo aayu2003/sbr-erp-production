@@ -50,9 +50,12 @@ import VendorDirectory from "./pages/VendorDirectory";
 import QuotationComparative from "./pages/QuotationComparative";
 import SprQuotationComparative from "./pages/SprQuotationComparative";
 import HOInbox from "@/pages/HOInbox";
+import WorkOrderCommunication from "@/pages/WorkOrderCommunication";
 import HO from "@/pages/HO";
 import POCreation from "@/pages/POCreation";
+import WOCreation from "@/pages/WOCreation";
 import PurchaseFlow from "@/pages/PurchaseFlow";
+import WorkOrderFlow from "@/pages/WorkOrderFlow";
 import ProjectConfig from "@/pages/ProjectConfig";
 import DirectorCapex from "./pages/DirectorCapex";
 import DirectorOpex from "./pages/DirectorOpex";
@@ -153,10 +156,10 @@ const App = () => (
           {/* Management */}
           <Route path="/work-order" element={<AppLayout><WorkOrder /></AppLayout>} />
           <Route path="/work-requisition" element={<AppLayout><WorkOrder /></AppLayout>} />
-          <Route path="/wo-creation" element={<AppLayout><HOInbox orderTypeFilter="SPR" view="creation" title="WO Creation" /></AppLayout>} />
+          <Route path="/wo-creation" element={<AppLayout><WOCreation /></AppLayout>} />
           <Route path="/work-verifier" element={<AppLayout><WorkOrderVerifier /></AppLayout>} />
-          <Route path="/work-approver" element={<AppLayout><HOInbox orderTypeFilter="SPR" view="approval" title="WO - Order Approval Flow" /></AppLayout>} />
-          <Route path="/work-flow" element={<AppLayout><PurchaseFlow orderTypeFilter="SPR" title="Work Flow" /></AppLayout>} />
+          <Route path="/work-approver" element={<AppLayout><WorkOrderCommunication title="WO - Order Approval Flow" /></AppLayout>} />
+          <Route path="/work-flow" element={<AppLayout><WorkOrderFlow /></AppLayout>} />
           <Route path="/scope-of-work" element={<AppLayout><ScopeOfWork /></AppLayout>} />
           <Route path="/wcc-module" element={<AppLayout><WccModule /></AppLayout>} />
           <Route path="/inventory" element={<AppLayout><Inventory /></AppLayout>} />
@@ -261,7 +264,7 @@ const App = () => (
             path="/ho"
             element={
               <AppLayout>
-                <HOInbox orderTypeFilter="PR" />
+                <HOInbox />
               </AppLayout>
             }
           />
@@ -285,7 +288,7 @@ const App = () => (
             path="/purchase-flow"
             element={
               <AppLayout>
-                <PurchaseFlow orderTypeFilter="PR" />
+                <PurchaseFlow />
               </AppLayout>
             }
           />

@@ -14,6 +14,7 @@ import { type ComparativeModel } from '@/components/purchase/ComparativeStatemen
 import logoUrl from '@/Assets/3f-logo.png';
 import annexure2TermsRaw from '@/Assets/general-terms-annexure-2-wo.txt?raw';
 import getBaseUrl from '@/lib/config';
+import { fetchOrderCommunication } from '@/lib/orderCommunication';
 
 type Props = {
   open: boolean;
@@ -670,6 +671,10 @@ type Page1State = {
   approvedBy: string;
   requiredPurchaseDocuments: string[];
   customFields: CustomPoField[];
+  // Row numbers (from editCommercialClauseRows) the user removed from the standard
+  // Commercial Terms table for this order — every WO carries different terms, so any
+  // of the 15 default rows can be dropped, not just custom-added ones.
+  removedStandardTerms: number[];
 };
 
 const defaultPage1 = (isWorkOrder = false): Page1State => ({
@@ -724,6 +729,7 @@ const defaultPage1 = (isWorkOrder = false): Page1State => ({
   approvedBy: '',
   requiredPurchaseDocuments: [orderFlowDocumentOptions(isWorkOrder)[0].value],
   customFields: [],
+  removedStandardTerms: [],
 });
 
 type Page2State = {
@@ -1740,6 +1746,7 @@ export function MakeWorkOrderPopup({
               isWorkOrder,
             ),
             customFields: Array.isArray((pq as any)?.customFields) ? (pq as any).customFields : [],
+            removedStandardTerms: Array.isArray((pq as any)?.removedStandardTerms) ? (pq as any).removedStandardTerms : [],
           } as Page1State);
           setP2({ ...defaultPage2(isWorkOrder), ...(baseTerms as any) } as Page2State);
           const storedOrderLines = normalizeEditableOrderLines(
@@ -2167,6 +2174,8 @@ export function MakeWorkOrderPopup({
     return { perWeekPct, maxPct, perWeekAmt, maxAmt };
   }, [p2.ldPerWeekPercent, p2.ldMaxPercent, computedTotals?.base]);
 
+  const removedStandardTermNos = new Set(Array.isArray(p1.removedStandardTerms) ? p1.removedStandardTerms : []);
+
   const commercialDraftRows: CommercialDraftRow[] = [
     {
       no: 1,
@@ -2190,14 +2199,18 @@ export function MakeWorkOrderPopup({
     { no: 13, particular: 'Remarks', details: safe(p2.remarks) || '—' },
     { no: 14, particular: 'Site & Billing Address', details: safe(p2.siteBillingAddress) || '—' },
     { no: 15, particular: 'Documents Required', details: safe(p2.documentsRequired) || '—' },
-    ...(Array.isArray(p1.customFields) ? p1.customFields : [])
-      .filter((field) => safe(field.label) || safe(field.value))
-      .map((field, index) => ({
-        no: 16 + index,
-        particular: safe(field.label) || 'Additional Term',
-        details: safe(field.value) || '—',
-      })),
-  ];
+  ]
+    .filter((row) => !removedStandardTermNos.has(row.no))
+    .map((row, index) => ({ ...row, no: index + 1 }))
+    .concat(
+      (Array.isArray(p1.customFields) ? p1.customFields : [])
+        .filter((field) => safe(field.label) || safe(field.value))
+        .map((field, index) => ({
+          no: (15 - removedStandardTermNos.size) + index + 1,
+          particular: safe(field.label) || 'Additional Term',
+          details: safe(field.value) || '—',
+        })),
+    );
   const correspondenceReservedLines = Math.min(
     46,
     Math.max(
@@ -2764,6 +2777,8 @@ export function MakeWorkOrderPopup({
 
     setSavingPo(true);
     try {
+      await fetchOrderCommunication().catch(() => []);
+
       const finalVendorId = await onboardManualVendorIfNeeded(safe(resolvedVendorId));
       const annexurePayload = customAnnexures.reduce<Record<string, Page3State>>((result, annexure, index) => {
         const annexureNumber = index + 1;
@@ -2928,6 +2943,22 @@ export function MakeWorkOrderPopup({
     }));
   };
 
+  const removeStandardTerm = (no: number) => {
+    setP1((current) => ({
+      ...current,
+      removedStandardTerms: (Array.isArray(current.removedStandardTerms) ? current.removedStandardTerms : []).includes(no)
+        ? current.removedStandardTerms
+        : [...(Array.isArray(current.removedStandardTerms) ? current.removedStandardTerms : []), no],
+    }));
+  };
+
+  const restoreStandardTerm = (no: number) => {
+    setP1((current) => ({
+      ...current,
+      removedStandardTerms: (Array.isArray(current.removedStandardTerms) ? current.removedStandardTerms : []).filter((x) => x !== no),
+    }));
+  };
+
   const formInputClass = 'h-11 rounded-xl border-slate-200 bg-white text-sm text-slate-800 shadow-none focus-visible:ring-[#0D3A35]';
   const formLabelClass = 'mb-1.5 block text-[11px] font-bold uppercase tracking-[0.09em] text-slate-500';
   const formTextareaClass = 'min-h-[84px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#0D3A35] focus:ring-1 focus:ring-[#0D3A35]';
@@ -3023,6 +3054,9 @@ export function MakeWorkOrderPopup({
       ),
     },
   ];
+
+  const visibleCommercialClauseRows = editCommercialClauseRows.filter((row) => !removedStandardTermNos.has(row.no));
+  const removedCommercialClauseRows = editCommercialClauseRows.filter((row) => removedStandardTermNos.has(row.no));
 
   const detailsForm = (
     <div className="mx-auto flex max-w-6xl flex-col gap-5">
@@ -3356,16 +3390,28 @@ export function MakeWorkOrderPopup({
               </tr>
             </thead>
             <tbody>
-              {editCommercialClauseRows.map((row) => (
+              {visibleCommercialClauseRows.map((row, index) => (
                 <tr key={row.no} className="border-b border-slate-200 bg-white last:border-b-0">
-                  <td className="border-r border-slate-200 bg-slate-50 px-3 py-4 text-center align-middle font-bold text-slate-500">{row.no})</td>
-                  <td className="border-r border-slate-200 bg-slate-50 px-4 py-4 align-middle font-bold text-slate-700">{row.particular}</td>
+                  <td className="border-r border-slate-200 bg-slate-50 px-3 py-4 text-center align-middle font-bold text-slate-500">{index + 1})</td>
+                  <td className="border-r border-slate-200 bg-slate-50 px-4 py-4 align-middle font-bold text-slate-700">
+                    <div className="flex items-start justify-between gap-2">
+                      <span>{row.particular}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeStandardTerm(row.no)}
+                        title="Remove this term"
+                        className="shrink-0 rounded-md p-0.5 text-slate-300 hover:bg-red-50 hover:text-red-500"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </td>
                   <td className="px-4 py-4 align-top">{row.detail}</td>
                 </tr>
               ))}
               {(Array.isArray(p1.customFields) ? p1.customFields : []).map((field, index) => (
                 <tr key={field.id} className="border-b border-slate-200 bg-white last:border-b-0">
-                  <td className="border-r border-slate-200 bg-slate-50 px-3 py-3 text-center align-middle font-bold text-slate-500">{15 + index})</td>
+                  <td className="border-r border-slate-200 bg-slate-50 px-3 py-3 text-center align-middle font-bold text-slate-500">{visibleCommercialClauseRows.length + index + 1})</td>
                   <td className="border-r border-slate-200 bg-slate-50 px-3 py-3 align-middle">
                     <Input
                       value={field.label}
@@ -3396,6 +3442,22 @@ export function MakeWorkOrderPopup({
               ))}
             </tbody>
           </table>
+          {removedCommercialClauseRows.length > 0 && (
+            <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-slate-200 bg-slate-50 p-3">
+              <span className="text-xs font-semibold text-slate-500">Removed:</span>
+              {removedCommercialClauseRows.map((row) => (
+                <button
+                  key={row.no}
+                  type="button"
+                  onClick={() => restoreStandardTerm(row.no)}
+                  title="Add back"
+                  className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-500 hover:border-[#0D3A35] hover:text-[#0D3A35]"
+                >
+                  {row.particular} <Plus className="h-3 w-3" />
+                </button>
+              ))}
+            </div>
+          )}
           <div className="mt-4 flex justify-end">
             <Button
               type="button"

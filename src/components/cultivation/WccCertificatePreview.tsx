@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { X, Download, Printer, ArrowUpRight, Loader2, AlertCircle } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable, { type RowInput } from 'jspdf-autotable';
@@ -22,49 +22,32 @@ const formatDate = (d?: string) => {
   catch { return d; }
 };
 
-const titleCase = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
-const acres = (n: number) => `${n.toFixed(2)} Acres`;
 const formatInr = (n: number) => `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 // ─────────────────────────────────────────────────────────────
-// Pivot: crop → land → activity → completed acres (dedup'd by plot+activity so the same
-// plot doesn't get double-counted if it shows up across multiple work-done entries).
+// Annexure: one flat, numbered line per completed activity — cultivation lines are one row
+// per (land, activity, date) so a plot worked on twice gets two dated lines instead of a
+// single blended total; operational (non-cultivation) lines are one row per logged task.
+// Rate/Remarks are filled in by the preparer per line, not derived from source data.
 // ─────────────────────────────────────────────────────────────
-interface AnnexureRow {
-  landId: string;
-  farmerName: string;
-  area: number;
-  byActivity: Record<string, number>;
-  total: number;
-}
-
-interface CropGroup {
-  crop: string;
-  rows: AnnexureRow[];
-  subtotalByActivity: Record<string, number>;
-  subtotalTotal: number;
-}
-
-// Non-cultivation vendor work (e.g. rental vehicle log books, via the Operational Calendar) —
-// shown as its own section since it has no land/crop/acreage to fit into the pivot grid above.
-export interface AnnexureOperationalLine {
+export interface AnnexureLine {
+  id: string;
   activity: string;
-  from_date: string;
-  to_date: string;
+  place: string;
+  dateOfCompletion: string;
+  uom: string;
   quantity: number;
-  unit: string;
+  rate: number;
+  remarks: string;
+  landId?: string; // cultivation lines only — used to resolve the certificate's block label
 }
 
 export interface AnnexurePivot {
-  activities: string[];
-  crops: CropGroup[];
-  grandByActivity: Record<string, number>;
-  grandTotal: number;
-  operationalLines: AnnexureOperationalLine[];
+  lines: AnnexureLine[];
   enterprise?: WccEnterpriseDraft;
 }
 
-const EMPTY_PIVOT: AnnexurePivot = { activities: [], crops: [], grandByActivity: {}, grandTotal: 0, operationalLines: [] };
+const EMPTY_PIVOT: AnnexurePivot = { lines: [] };
 
 const buildAnnexurePivot = (
   workDone: ApiWorkDoneEntry[],
@@ -72,114 +55,62 @@ const buildAnnexurePivot = (
   scopeItems: WccScopeLand[],
   operationalWorkDone: ApiOperationalWorkDoneEntry[] = [],
 ): AnnexurePivot => {
-  const plotCropById = new Map<string, string>();
   const landById = new Map<string, WccScopeLand>();
-  for (const land of scopeItems) {
-    landById.set(land.land_id, land);
-    for (const plot of land.plots) {
-      plotCropById.set(plot.plot_id, plot.crop_type || 'Unknown');
-    }
-  }
+  for (const land of scopeItems) landById.set(land.land_id, land);
 
-  const activityOrder: string[] = [];
-  const cropOrder: string[] = [];
-  // crop -> land_id -> activity -> acres
-  const grid = new Map<string, Map<string, Map<string, number>>>();
-  const counted = new Set<string>(); // `${plot_id}__${activity}` — one credit per plot+activity
+  // land + activity + date -> line (dedup'd by plot+activity+date so the same plot can't be
+  // double-counted if it shows up across multiple work-done entries for that same date).
+  const grid = new Map<string, AnnexureLine>();
+  const counted = new Set<string>();
 
   for (const entry of workDone) {
     const details = taskDetailsById[entry.task_id];
     const activity = details?.assigned_acres?.find((a) => a.farm_id === entry.farm_id)?.activity || 'Unknown Activity';
-    if (!activityOrder.includes(activity)) activityOrder.push(activity);
 
     for (const plot of entry.plot) {
       if ((plot.status || '').trim().toLowerCase() !== 'completed') continue;
-      const dedupeKey = `${plot.plot_id}__${activity}`;
+      const dedupeKey = `${plot.plot_id}__${activity}__${entry.date}`;
       if (counted.has(dedupeKey)) continue;
       counted.add(dedupeKey);
 
-      const crop = plotCropById.get(plot.plot_id) || 'Unknown';
-      if (!cropOrder.includes(crop)) cropOrder.push(crop);
-
-      if (!grid.has(crop)) grid.set(crop, new Map());
-      const byLand = grid.get(crop)!;
-      if (!byLand.has(entry.farm_id)) byLand.set(entry.farm_id, new Map());
-      const byActivity = byLand.get(entry.farm_id)!;
-      byActivity.set(activity, (byActivity.get(activity) || 0) + (Number(plot.plot_area) || 0));
-    }
-  }
-
-  const crops: CropGroup[] = cropOrder.map((crop) => {
-    const byLand = grid.get(crop)!;
-    const rows: AnnexureRow[] = Array.from(byLand.entries())
-      .map(([landId, byActivity]) => {
-        const land = landById.get(landId);
-        const area = (land?.plots || [])
-          .filter((p) => (p.crop_type || 'Unknown') === crop)
-          .reduce((s, p) => s + (Number(p.plot_area) || 0), 0);
-        const byActivityObj: Record<string, number> = {};
-        let total = 0;
-        byActivity.forEach((val, act) => { byActivityObj[act] = val; total += val; });
-        return {
-          landId,
-          farmerName: land?.farmer_name || land?.farmer_id || landId,
-          area,
-          byActivity: byActivityObj,
-          total,
-        };
-      })
-      .sort((a, b) => a.farmerName.localeCompare(b.farmerName));
-
-    const subtotalByActivity: Record<string, number> = {};
-    let subtotalTotal = 0;
-    for (const row of rows) {
-      for (const act of activityOrder) {
-        subtotalByActivity[act] = (subtotalByActivity[act] || 0) + (row.byActivity[act] || 0);
+      const key = `${entry.farm_id}__${activity}__${entry.date}`;
+      const area = Number(plot.plot_area) || 0;
+      const existing = grid.get(key);
+      if (existing) {
+        existing.quantity += area;
+        continue;
       }
-      subtotalTotal += row.total;
+      const land = landById.get(entry.farm_id);
+      grid.set(key, {
+        id: key,
+        activity,
+        place: land?.farmer_name || land?.farmer_id || entry.farm_id,
+        dateOfCompletion: entry.date,
+        uom: 'Acre',
+        quantity: area,
+        rate: 0,
+        remarks: '',
+        landId: entry.farm_id,
+      });
     }
-
-    return { crop, rows, subtotalByActivity, subtotalTotal };
-  });
-
-  const grandByActivity: Record<string, number> = {};
-  let grandTotal = 0;
-  for (const group of crops) {
-    for (const act of activityOrder) {
-      grandByActivity[act] = (grandByActivity[act] || 0) + (group.subtotalByActivity[act] || 0);
-    }
-    grandTotal += group.subtotalTotal;
   }
 
-  const operationalLines: AnnexureOperationalLine[] = operationalWorkDone.map((entry) => ({
+  const operationalLines: AnnexureLine[] = operationalWorkDone.map((entry, idx) => ({
+    id: `op__${entry.task_id || idx}`,
     activity: entry.activity,
-    from_date: entry.from_date,
-    to_date: entry.to_date,
+    place: '—',
+    dateOfCompletion: entry.to_date || entry.from_date,
+    uom: entry.unit || '',
     quantity: Number(entry.quantity) || 0,
-    unit: entry.unit || '',
+    rate: 0,
+    remarks: '',
   }));
 
-  return { activities: activityOrder, crops, grandByActivity, grandTotal, operationalLines };
-};
+  const lines = [...grid.values(), ...operationalLines].sort((a, b) =>
+    a.dateOfCompletion.localeCompare(b.dateOfCompletion) || a.place.localeCompare(b.place) || a.activity.localeCompare(b.activity),
+  );
 
-// Flat, numbered certificate line items (crop-grouped, in pivot order) — shared by the
-// on-screen table and the PDF so the S.No sequence always matches between the two.
-interface CertificateLine {
-  crop: string;
-  activity: string;
-  qty: number;
-}
-
-const buildCertificateLines = (pivot: AnnexurePivot): CertificateLine[] => {
-  const lines: CertificateLine[] = [];
-  pivot.crops.forEach((group) => {
-    pivot.activities
-      .filter((a) => (group.subtotalByActivity[a] || 0) > 0)
-      .forEach((a) => {
-        lines.push({ crop: group.crop, activity: a, qty: group.subtotalByActivity[a] || 0 });
-      });
-  });
-  return lines;
+  return { lines };
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -251,14 +182,12 @@ interface CertificateMeta {
   certNo: string;
   certDate: string;
   woNumber: string;
-  ratePerAcre: string;
 }
 
 const EMPTY_META: CertificateMeta = {
   certNo: '',
   certDate: new Date().toISOString().slice(0, 10),
   woNumber: '',
-  ratePerAcre: '',
 };
 
 const inputCls = 'w-full bg-transparent outline-none border-b border-dashed border-gray-300 focus:border-[#0D3A35] px-0.5';
@@ -292,7 +221,6 @@ export interface PdfExportParams {
   certNo: string;
   certDate: string;
   woNumber: string;
-  rate: number;
   blockLabel: string;
   scopeOfWorkLabel: string;
   preparedBy: SignerDisplay;
@@ -303,12 +231,13 @@ export interface PdfExportParams {
 // Builds the certificate PDF document (Annexure + WCC pages) without saving/exporting it —
 // shared by the direct-download path and the "generate & attach to purchase flow" path.
 const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAutoTable> => {
-  const { pivot, vendorName, fromDate, toDate, certNo, certDate, woNumber, rate, blockLabel, scopeOfWorkLabel, preparedBy, verifiedBy, approvedBy } = p;
+  const { pivot, vendorName, fromDate, toDate, certNo, certDate, woNumber, blockLabel, scopeOfWorkLabel, preparedBy, verifiedBy, approvedBy } = p;
   const doc = new jsPDF() as JsPdfWithAutoTable;
   const enterprise = pivot.enterprise;
   const enterpriseTotals = enterprise ? calculateWccTotals(enterprise) : null;
   const enterpriseTemplate = enterprise ? WCC_WORK_TEMPLATES.find((item) => item.id === enterprise.header.workCategory) : undefined;
-  const cropLabel = pivot.crops.map((g) => titleCase(g.crop)).join(' + ') || 'No Crop';
+  const totalQuantity = pivot.lines.reduce((sum, line) => sum + line.quantity, 0);
+  const totalValue = pivot.lines.reduce((sum, line) => sum + line.quantity * line.rate, 0);
 
   // ── Page 1: Annexure ──
   doc.setFont('helvetica', 'bold');
@@ -319,51 +248,27 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   doc.text(vendorName, 105, 22, { align: 'center' });
   doc.text(`${formatDate(fromDate)} - ${formatDate(toDate)}`, 105, 27, { align: 'center' });
 
-  const annexureHead = [['S.No', 'Name', 'Area', ...pivot.activities, 'Total']];
-  const annexureBody: RowInput[] = [];
-  pivot.crops.forEach((group) => {
-    annexureBody.push([{
-      content: `${titleCase(group.crop)} Crop`,
-      colSpan: annexureHead[0].length,
-      styles: { fontStyle: 'bold', fillColor: [241, 245, 249] },
-    }]);
-    group.rows.forEach((row, i) => {
-      annexureBody.push([
-        i + 1,
-        row.farmerName,
-        acres(row.area),
-        ...pivot.activities.map((a) => (row.byActivity[a] ? acres(row.byActivity[a]) : '')),
-        { content: acres(row.total), styles: { fontStyle: 'bold' } },
-      ]);
-    });
-    annexureBody.push([
-      { content: `Total ${titleCase(group.crop)} Crop`, colSpan: 2, styles: { fontStyle: 'bold' } },
-      '',
-      ...pivot.activities.map((a) => ({ content: acres(group.subtotalByActivity[a] || 0), styles: { fontStyle: 'bold' as const } })),
-      { content: acres(group.subtotalTotal), styles: { fontStyle: 'bold' } },
-    ]);
-  });
+  const annexureHead = [['S.No', 'Activity', 'Place', 'Date of Completion', 'UOM', 'Quantity', 'Rate/Unit (₹)', 'Value (₹)', 'Remarks']];
+  const annexureBody: RowInput[] = pivot.lines.map((line, i) => [
+    i + 1,
+    line.activity,
+    line.place,
+    formatDate(line.dateOfCompletion),
+    line.uom,
+    line.quantity.toFixed(2),
+    line.rate ? line.rate.toFixed(2) : '—',
+    line.rate ? (line.quantity * line.rate).toFixed(2) : '—',
+    line.remarks || '—',
+  ]);
   annexureBody.push([
-    { content: `Total (${cropLabel} Crop)`, colSpan: 3, styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
-    ...pivot.activities.map((a) => ({ content: acres(pivot.grandByActivity[a] || 0), styles: { fontStyle: 'bold' as const, fillColor: [224, 231, 255] as [number, number, number] } })),
-    { content: acres(pivot.grandTotal), styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
+    { content: 'Total', colSpan: 5, styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
+    { content: totalQuantity.toFixed(2), styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
+    '',
+    { content: totalValue ? totalValue.toFixed(2) : '—', styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
+    '',
   ]);
 
   autoTable(doc, { startY: 32, head: annexureHead, body: annexureBody, styles: { fontSize: 7 }, headStyles: { fillColor: [30, 41, 59] } });
-
-  if (pivot.operationalLines.length > 0) {
-    const opStartY = (doc as JsPdfWithAutoTable).lastAutoTable.finalY + 6;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.text('Operational Work (Non-Cultivation)', 14, opStartY);
-    autoTable(doc, {
-      startY: opStartY + 2,
-      head: [['Activity', 'From', 'To', 'Quantity', 'Unit']],
-      body: pivot.operationalLines.map((l) => [l.activity, formatDate(l.from_date), formatDate(l.to_date), l.quantity, l.unit]),
-      styles: { fontSize: 7 },
-      headStyles: { fillColor: [30, 41, 59] },
-    });
-  }
 
   // ── Page 2: Work Completion Certificate ──
   doc.addPage();
@@ -414,43 +319,14 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     ],
   });
 
-  const lines = buildCertificateLines(pivot);
-  const activityHead = [['S.No', 'Activity', 'UoM', 'Work Done Quantity', 'Rate (₹)', 'Total (₹)']];
-  const activityBody: RowInput[] = [];
-  let lastCrop: string | null = null;
-  (enterprise ? enterprise.serviceLines.filter((line) => line.selected).map((line) => ({ crop: enterpriseTemplate?.label || 'Contracted Work', activity: line.description, qty: line.currentQty, unit: line.unit, rate: line.rate })) : lines.map((line) => ({ ...line, unit: 'Acre', rate }))).forEach((line, idx) => {
-    if (line.crop !== lastCrop) {
-      activityBody.push([{ content: `${titleCase(line.crop)} :-`, colSpan: 6, styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }]);
-      lastCrop = line.crop;
-    }
-    activityBody.push([
-      idx + 1,
-      `${titleCase(line.crop)} - ${line.activity}`,
-      line.unit,
-      line.qty.toFixed(2),
-      line.rate ? line.rate.toFixed(2) : '—',
-      line.rate ? (line.qty * line.rate).toFixed(2) : '—',
-    ]);
-  });
-  activityBody.push([
-    { content: 'Total Value', colSpan: 3, styles: { fontStyle: 'bold' } },
-    { content: pivot.grandTotal.toFixed(2), styles: { fontStyle: 'bold' } },
-    '',
-    { content: enterpriseTotals ? enterpriseTotals.gross.toFixed(2) : rate ? (pivot.grandTotal * rate).toFixed(2) : '—', styles: { fontStyle: 'bold' } },
-  ]);
-
-  autoTable(doc, {
-    startY: doc.lastAutoTable.finalY + 4,
-    head: activityHead,
-    body: activityBody,
-    styles: { fontSize: 8 },
-    headStyles: { fillColor: [30, 41, 59] },
-  });
-
-  let y = doc.lastAutoTable.finalY + 7;
+  let y = doc.lastAutoTable.finalY + 6;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.text('Activity-wise quantity, rate and value: refer attached Annexure.', 14, y);
+  y += 9;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
-  const certifiedValue = enterpriseTotals ? formatInr(enterpriseTotals.gross) : rate ? formatInr(pivot.grandTotal * rate) : '—';
+  const certifiedValue = enterpriseTotals ? formatInr(enterpriseTotals.gross) : totalValue ? formatInr(totalValue) : '—';
   doc.text(`Total Certified Value (₹): ${certifiedValue}`, 14, y);
   y += 5;
   doc.text(`Cumulative Certified Value: ${enterpriseTotals ? formatInr(enterpriseTotals.cumulative) : certifiedValue}`, 14, y);
@@ -569,7 +445,6 @@ export const wccParamsFromRecord = (record: WccCertificateRecord): PdfExportPara
   certNo: record.certificate_id,
   certDate: record.created_at,
   woNumber: record.order_number,
-  rate: record.rate_per_acre,
   blockLabel: record.block_name,
   scopeOfWorkLabel: record.scope_of_work,
   preparedBy: { name: record.prepared_by.name, designation: record.prepared_by.designation || '' },
@@ -679,9 +554,6 @@ const WccCertificatePreview = ({
   const enterprise = pivot.enterprise;
   const enterpriseTotals = enterprise ? calculateWccTotals(enterprise) : null;
   const enterpriseTemplate = enterprise ? WCC_WORK_TEMPLATES.find((item) => item.id === enterprise.header.workCategory) : undefined;
-  const certificateLines = useMemo(() => buildCertificateLines(pivot), [pivot]);
-  const cropLabel = pivot.crops.map((g) => titleCase(g.crop)).join(' + ') || 'No Crop';
-  const colCount = 3 + pivot.activities.length + 1;
 
   const vendorName = record?.vendor_name ?? vendorNameProp ?? '';
   const fromDate = record?.from_date ?? fromDateProp ?? '';
@@ -690,9 +562,47 @@ const WccCertificatePreview = ({
   const [meta, setMeta] = useState<CertificateMeta>(() => ({ ...EMPTY_META, woNumber: vendorWoNumber || '' }));
   const setField = (field: keyof CertificateMeta) => (v: string) => setMeta((prev) => ({ ...prev, [field]: v }));
 
-  // Revise mode only re-opens the rate for editing (per the "fix the rate, resubmit" flow) —
-  // the underlying completed-work snapshot and dates stay frozen from the original submission.
-  const [reviseRate, setReviseRate] = useState(() => String(existingRecord?.rate_per_acre ?? ''));
+  // Per-line Rate/Remarks the preparer fills in on the Annexure — keyed by AnnexureLine.id so
+  // edits survive re-renders as fresh work-done data streams in. Seeded from the frozen
+  // snapshot in revise mode, so the preparer starts from what was last submitted, not blank.
+  const [lineEdits, setLineEdits] = useState<Record<string, { rate: string; remarks: string }>>(() => {
+    if (!existingRecord) return {};
+    const seed: Record<string, { rate: string; remarks: string }> = {};
+    for (const line of existingRecord.annexure.lines) {
+      seed[line.id] = { rate: line.rate ? String(line.rate) : '', remarks: line.remarks || '' };
+    }
+    return seed;
+  });
+  const setLineEdit = (lineId: string, field: 'rate' | 'remarks') => (value: string) =>
+    setLineEdits((prev) => ({ ...prev, [lineId]: { rate: '', remarks: '', ...prev[lineId], [field]: value } }));
+
+  // The lines actually shown/priced/submitted — cultivation & operational lines merge their
+  // live rate/remarks edits; enterprise-drafted lines already carry a per-line rate set
+  // earlier in the WccWorkspace wizard, so they're mapped in read-only here.
+  const effectiveLines: AnnexureLine[] = useMemo(() => {
+    if (enterprise) {
+      return enterprise.serviceLines.filter((line) => line.selected).map((line) => ({
+        id: line.id,
+        activity: line.description,
+        place: line.locationReference || enterprise.header.projectSiteLabel || enterprise.header.site || '—',
+        dateOfCompletion: line.completionDate || enterprise.header.statementTo || '',
+        uom: line.unit,
+        quantity: line.currentQty,
+        rate: line.rate,
+        remarks: line.remarks,
+      }));
+    }
+    return pivot.lines.map((line) => {
+      const edit = lineEdits[line.id];
+      return edit ? { ...line, rate: Number(edit.rate) || 0, remarks: edit.remarks } : line;
+    });
+  }, [enterprise, pivot.lines, lineEdits]);
+
+  const totalQuantity = effectiveLines.reduce((sum, line) => sum + line.quantity, 0);
+  const totalValue = effectiveLines.reduce((sum, line) => sum + line.quantity * line.rate, 0);
+  // Enterprise-drafted lines already carry a fixed per-line rate from the WccWorkspace wizard —
+  // only cultivation/operational lines (create or revise, before submission) are editable here.
+  const linesEditable = !enterprise && ((isCreateMode && !locked) || (isReviseMode && !locked));
 
   // Auto-fetch the next certificate number for this order, once, on open (create mode only) —
   // still editable afterward in case it needs correcting.
@@ -737,8 +647,7 @@ const WccCertificatePreview = ({
       .finally(() => setOrderDocLoading(false));
   };
 
-  const rate = record ? (isReviseMode ? Number(reviseRate) || 0 : record.rate_per_acre) : (Number(meta.ratePerAcre) || 0);
-  const certifiedValue = rate ? formatInr(pivot.grandTotal * rate) : '—';
+  const certifiedValue = totalValue ? formatInr(totalValue) : '—';
 
   // Already known from the vendor's scope-of-work (get_scope_of_work_for_vendor) —
   // no need to type it in again.
@@ -765,7 +674,7 @@ const WccCertificatePreview = ({
   }, [isCreateMode]);
 
   const liveBlockLabels = useMemo(() => {
-    const landIdsInCertificate = new Set(pivot.crops.flatMap((g) => g.rows.map((r) => r.landId)));
+    const landIdsInCertificate = new Set(pivot.lines.map((l) => l.landId).filter((id): id is string => !!id));
     const names = new Set<string>();
     const ids = new Set<string>();
     for (const land of scopeItems) {
@@ -798,14 +707,13 @@ const WccCertificatePreview = ({
 
   const handleDownload = () => {
     downloadCertificateAsPdf({
-      pivot,
+      pivot: { ...pivot, lines: effectiveLines },
       vendorName,
       fromDate,
       toDate,
       certNo: certNoDisplay,
       certDate: certDateDisplay,
       woNumber: displayWoNumber,
-      rate,
       blockLabel,
       scopeOfWorkLabel,
       preparedBy: preparedByDisplay,
@@ -817,8 +725,12 @@ const WccCertificatePreview = ({
   const handleSubmitForVerification = async () => {
     if (!user?.id || !user?.name) { toast.error('You must be logged in to submit a certificate.'); return; }
     if (!vendorId) { toast.error('Missing vendor.'); return; }
-    if (!rate) { toast.error('Please enter a rate before submitting.'); return; }
+    if (effectiveLines.length === 0) { toast.error('No completed work to certify.'); return; }
+    if (effectiveLines.some((line) => !line.rate)) { toast.error('Please enter a rate for every activity line before submitting.'); return; }
     if (!displayWoNumber.trim()) { toast.error('Please enter an Order No. before submitting.'); return; }
+
+    const annexure = { ...pivot, lines: effectiveLines };
+    const avgRate = totalQuantity > 0 ? totalValue / totalQuantity : 0;
 
     setSubmitting(true);
     try {
@@ -834,10 +746,10 @@ const WccCertificatePreview = ({
           scope_of_work: scopeOfWorkLabel,
           from_date: fromDate,
           to_date: toDate,
-          annexure: pivot,
-          rate_per_acre: rate,
-          total_quantity: pivot.grandTotal,
-          total_certified_value: pivot.grandTotal * rate,
+          annexure,
+          rate_per_acre: avgRate,
+          total_quantity: totalQuantity,
+          total_certified_value: totalValue,
           prepared_by: { staff_id: user.id, name: user.name, designation: user.designation || '' },
         }),
       });
@@ -855,10 +767,10 @@ const WccCertificatePreview = ({
         scope_of_work: scopeOfWorkLabel,
         from_date: fromDate,
         to_date: toDate,
-        annexure: pivot,
-        rate_per_acre: rate,
-        total_quantity: pivot.grandTotal,
-        total_certified_value: pivot.grandTotal * rate,
+        annexure,
+        rate_per_acre: avgRate,
+        total_quantity: totalQuantity,
+        total_certified_value: totalValue,
         status: 'pending_verification',
         prepared_by: { staff_id: user.id, name: user.name, designation: user.designation || '', timestamp: now },
         verified_by: {},
@@ -879,8 +791,10 @@ const WccCertificatePreview = ({
   const handleResubmit = async () => {
     if (!existingRecord) return;
     if (!user?.id || !user?.name) { toast.error('You must be logged in to resubmit a certificate.'); return; }
-    const newRate = Number(reviseRate) || 0;
-    if (!newRate) { toast.error('Please enter a rate before resubmitting.'); return; }
+    if (effectiveLines.some((line) => !line.rate)) { toast.error('Please enter a rate for every activity line before resubmitting.'); return; }
+
+    const annexure = { ...existingRecord.annexure, lines: effectiveLines };
+    const avgRate = totalQuantity > 0 ? totalValue / totalQuantity : 0;
 
     setSubmitting(true);
     try {
@@ -891,10 +805,10 @@ const WccCertificatePreview = ({
           certificate_id: existingRecord.certificate_id,
           from_date: existingRecord.from_date,
           to_date: existingRecord.to_date,
-          annexure: existingRecord.annexure,
-          rate_per_acre: newRate,
-          total_quantity: existingRecord.annexure.grandTotal,
-          total_certified_value: existingRecord.annexure.grandTotal * newRate,
+          annexure,
+          rate_per_acre: avgRate,
+          total_quantity: totalQuantity,
+          total_certified_value: totalValue,
           prepared_by: { staff_id: user.id, name: user.name, designation: user.designation || '' },
         }),
       });
@@ -904,8 +818,10 @@ const WccCertificatePreview = ({
       const now = new Date().toISOString();
       setSubmittedRecord({
         ...existingRecord,
-        rate_per_acre: newRate,
-        total_certified_value: existingRecord.annexure.grandTotal * newRate,
+        annexure,
+        rate_per_acre: avgRate,
+        total_quantity: totalQuantity,
+        total_certified_value: totalValue,
         status: 'pending_verification',
         prepared_by: { staff_id: user.id, name: user.name, designation: user.designation || '', timestamp: now },
         verified_by: {},
@@ -1015,105 +931,80 @@ const WccCertificatePreview = ({
 
         {/* Printable content */}
         <div className="wcc-print-area flex-1 overflow-y-auto p-6 space-y-8 bg-slate-100">
-          {pivot.crops.length === 0 && pivot.operationalLines.length === 0 ? (
+          {effectiveLines.length === 0 ? (
             <div className="py-16 text-center text-sm text-slate-400">
               No completed work found for this vendor in the selected period.
             </div>
           ) : (
             <>
               {/* Annexure */}
-              {pivot.crops.length > 0 && (
-                <div className="bg-white rounded-lg border border-gray-200 p-4">
-                  <h2 className="text-center text-base font-bold text-slate-900 uppercase tracking-wide">Annexure</h2>
-                  <p className="text-center text-xs text-slate-500 mt-0.5">{vendorName} · {formatDate(fromDate)} – {formatDate(toDate)}</p>
-                  <div className="mt-4 overflow-x-auto rounded-lg border border-gray-200">
-                    <table className="w-full text-xs border-collapse">
-                      <thead>
-                        <tr className="bg-slate-800 text-white">
-                          <th className="px-2 py-2 text-left font-semibold">S.No</th>
-                          <th className="px-2 py-2 text-left font-semibold">Name</th>
-                          <th className="px-2 py-2 text-right font-semibold">Area</th>
-                          {pivot.activities.map((a) => (
-                            <th key={a} className="px-2 py-2 text-right font-semibold whitespace-nowrap">{a}</th>
-                          ))}
-                          <th className="px-2 py-2 text-right font-semibold">Total</th>
+              <div className="bg-white rounded-lg border border-gray-200 p-4">
+                <h2 className="text-center text-base font-bold text-slate-900 uppercase tracking-wide">Annexure</h2>
+                <p className="text-center text-xs text-slate-500 mt-0.5">{vendorName} · {formatDate(fromDate)} – {formatDate(toDate)}</p>
+                <div className="mt-4 overflow-x-auto rounded-lg border border-gray-200">
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-slate-800 text-white">
+                        <th className="px-2 py-2 text-left font-semibold">S.No</th>
+                        <th className="px-2 py-2 text-left font-semibold">Activity</th>
+                        <th className="px-2 py-2 text-left font-semibold">Place</th>
+                        <th className="px-2 py-2 text-left font-semibold whitespace-nowrap">Date of Completion</th>
+                        <th className="px-2 py-2 text-left font-semibold">UOM</th>
+                        <th className="px-2 py-2 text-right font-semibold">Quantity</th>
+                        <th className="px-2 py-2 text-right font-semibold whitespace-nowrap">Rate / Unit (₹)</th>
+                        <th className="px-2 py-2 text-right font-semibold">Value (₹)</th>
+                        <th className="px-2 py-2 text-left font-semibold">Remarks</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {effectiveLines.map((line, i) => (
+                        <tr key={line.id} className={cn('border-b border-gray-100', i % 2 === 1 && 'bg-slate-50/50')}>
+                          <td className="px-2 py-1.5">{i + 1}</td>
+                          <td className="px-2 py-1.5">{line.activity}</td>
+                          <td className="px-2 py-1.5">{line.place}</td>
+                          <td className="px-2 py-1.5 whitespace-nowrap">{formatDate(line.dateOfCompletion)}</td>
+                          <td className="px-2 py-1.5">{line.uom}</td>
+                          <td className="px-2 py-1.5 text-right whitespace-nowrap">{line.quantity.toFixed(2)}</td>
+                          <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                            {linesEditable ? (
+                              <input
+                                type="number"
+                                value={lineEdits[line.id]?.rate ?? ''}
+                                onChange={(e) => setLineEdit(line.id, 'rate')(e.target.value)}
+                                placeholder="0"
+                                className="w-20 border-b border-dashed border-gray-300 bg-transparent text-right outline-none focus:border-[#0D3A35]"
+                              />
+                            ) : (
+                              line.rate ? line.rate.toFixed(2) : '—'
+                            )}
+                          </td>
+                          <td className="px-2 py-1.5 text-right whitespace-nowrap font-semibold">{line.rate ? (line.quantity * line.rate).toFixed(2) : '—'}</td>
+                          <td className="px-2 py-1.5">
+                            {linesEditable ? (
+                              <input
+                                type="text"
+                                value={lineEdits[line.id]?.remarks ?? ''}
+                                onChange={(e) => setLineEdit(line.id, 'remarks')(e.target.value)}
+                                placeholder="—"
+                                className="w-28 border-b border-dashed border-gray-300 bg-transparent outline-none focus:border-[#0D3A35]"
+                              />
+                            ) : (
+                              line.remarks || '—'
+                            )}
+                          </td>
                         </tr>
-                      </thead>
-                      <tbody>
-                        {pivot.crops.map((group) => (
-                          <Fragment key={group.crop}>
-                            <tr className="bg-slate-100">
-                              <td colSpan={colCount} className="px-2 py-1.5 font-bold text-slate-700">
-                                {titleCase(group.crop)} Crop
-                              </td>
-                            </tr>
-                            {group.rows.map((row, i) => (
-                              <tr key={row.landId} className={cn('border-b border-gray-100', i % 2 === 1 && 'bg-slate-50/50')}>
-                                <td className="px-2 py-1.5">{i + 1}</td>
-                                <td className="px-2 py-1.5">{row.farmerName}</td>
-                                <td className="px-2 py-1.5 text-right whitespace-nowrap">{acres(row.area)}</td>
-                                {pivot.activities.map((a) => (
-                                  <td key={a} className="px-2 py-1.5 text-right whitespace-nowrap">
-                                    {row.byActivity[a] ? acres(row.byActivity[a]) : ''}
-                                  </td>
-                                ))}
-                                <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap">{acres(row.total)}</td>
-                              </tr>
-                            ))}
-                            <tr className="border-b-2 border-gray-200 font-bold bg-slate-50">
-                              <td className="px-2 py-1.5" colSpan={2}>Total {titleCase(group.crop)} Crop</td>
-                              <td className="px-2 py-1.5" />
-                              {pivot.activities.map((a) => (
-                                <td key={a} className="px-2 py-1.5 text-right whitespace-nowrap">{acres(group.subtotalByActivity[a] || 0)}</td>
-                              ))}
-                              <td className="px-2 py-1.5 text-right whitespace-nowrap">{acres(group.subtotalTotal)}</td>
-                            </tr>
-                          </Fragment>
-                        ))}
-                        <tr className="bg-emerald-50 font-bold">
-                          <td className="px-2 py-2" colSpan={3}>Total ({cropLabel} Crop)</td>
-                          {pivot.activities.map((a) => (
-                            <td key={a} className="px-2 py-2 text-right whitespace-nowrap">{acres(pivot.grandByActivity[a] || 0)}</td>
-                          ))}
-                          <td className="px-2 py-2 text-right whitespace-nowrap">{acres(pivot.grandTotal)}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
+                      ))}
+                      <tr className="bg-emerald-50 font-bold">
+                        <td className="px-2 py-2" colSpan={5}>Total</td>
+                        <td className="px-2 py-2 text-right whitespace-nowrap">{totalQuantity.toFixed(2)}</td>
+                        <td className="px-2 py-2" />
+                        <td className="px-2 py-2 text-right whitespace-nowrap">{totalValue ? totalValue.toFixed(2) : '—'}</td>
+                        <td className="px-2 py-2" />
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
-              )}
-
-              {/* Operational work (non-cultivation) — e.g. rental vehicle log books */}
-              {pivot.operationalLines.length > 0 && (
-                <div className="bg-white rounded-lg border border-gray-200 p-4">
-                  <h2 className="text-center text-base font-bold text-slate-900 uppercase tracking-wide">Operational Work</h2>
-                  <p className="text-center text-xs text-slate-500 mt-0.5">{vendorName} · {formatDate(fromDate)} – {formatDate(toDate)}</p>
-                  <div className="mt-4 overflow-x-auto rounded-lg border border-gray-200">
-                    <table className="w-full text-xs border-collapse">
-                      <thead>
-                        <tr className="bg-slate-800 text-white">
-                          <th className="px-2 py-2 text-left font-semibold">Activity</th>
-                          <th className="px-2 py-2 text-left font-semibold">From</th>
-                          <th className="px-2 py-2 text-left font-semibold">To</th>
-                          <th className="px-2 py-2 text-right font-semibold">Quantity</th>
-                          <th className="px-2 py-2 text-left font-semibold">Unit</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {pivot.operationalLines.map((line, i) => (
-                          <tr key={`${line.activity}-${i}`} className={cn('border-b border-gray-100', i % 2 === 1 && 'bg-slate-50/50')}>
-                            <td className="px-2 py-1.5">{line.activity}</td>
-                            <td className="px-2 py-1.5">{formatDate(line.from_date)}</td>
-                            <td className="px-2 py-1.5">{formatDate(line.to_date)}</td>
-                            <td className="px-2 py-1.5 text-right">{line.quantity}</td>
-                            <td className="px-2 py-1.5">{line.unit}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
+              </div>
 
               {/* Work Completion Certificate — replica of the real document */}
               <div className="bg-white rounded-lg border-2 border-gray-800 overflow-hidden">
@@ -1202,62 +1093,11 @@ const WccCertificatePreview = ({
                   </tbody>
                 </table>
 
-                {/* Activity table */}
-                <table className="w-full text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-slate-800 text-white">
-                      <th className="px-3 py-2 text-left font-semibold">S.No</th>
-                      <th className="px-3 py-2 text-left font-semibold">Activity</th>
-                      <th className="px-3 py-2 text-center font-semibold">UoM</th>
-                      <th className="px-3 py-2 text-right font-semibold">Work Done Quantity</th>
-                      <th className="px-3 py-2 text-right font-semibold">Rate (₹)</th>
-                      <th className="px-3 py-2 text-right font-semibold">Total (₹)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(enterprise ? enterprise.serviceLines.filter((line) => line.selected).map((line) => ({ crop: enterpriseTemplate?.label || 'Contracted Work', activity: line.description, qty: line.currentQty, unit: line.unit, lineRate: line.rate })) : certificateLines.map((line) => ({ ...line, unit: 'Acre', lineRate: rate }))).map((line, idx, displayLines) => {
-                      const showCropHeader = idx === 0 || displayLines[idx - 1].crop !== line.crop;
-                      return (
-                        <Fragment key={`${line.crop}-${line.activity}`}>
-                          {showCropHeader && (
-                            <tr className="bg-slate-100">
-                              <td colSpan={6} className="px-3 py-1.5 font-bold text-slate-700 border-b border-gray-200">{titleCase(line.crop)} :-</td>
-                            </tr>
-                          )}
-                          <tr className="border-b border-gray-100">
-                            <td className="px-3 py-1.5">{idx + 1}</td>
-                            <td className="px-3 py-1.5">{titleCase(line.crop)} - {line.activity}</td>
-                            <td className="px-3 py-1.5 text-center">{line.unit}</td>
-                            <td className="px-3 py-1.5 text-right">{line.qty.toFixed(2)}</td>
-                            <td className="px-3 py-1.5 text-right">{line.lineRate ? line.lineRate.toFixed(2) : '—'}</td>
-                            <td className="px-3 py-1.5 text-right">{line.lineRate ? (line.qty * line.lineRate).toFixed(2) : '—'}</td>
-                          </tr>
-                        </Fragment>
-                      );
-                    })}
-                    <tr className="font-bold border-t-2 border-gray-400">
-                      <td className="px-3 py-2" colSpan={3}>Total Value</td>
-                      <td className="px-3 py-2 text-right">{pivot.grandTotal.toFixed(2)}</td>
-                      <td className="px-3 py-2" />
-                      <td className="px-3 py-2 text-right">{enterpriseTotals ? enterpriseTotals.gross.toFixed(2) : rate ? (pivot.grandTotal * rate).toFixed(2) : '—'}</td>
-                    </tr>
-                  </tbody>
-                </table>
-
-                {/* Rate input — editable in create mode (unsubmitted) and revise mode */}
-                {(isReviseMode || (isCreateMode && !locked)) && (
-                  <div className="wcc-no-print px-3 py-2 border-t border-gray-300 flex items-center gap-2 text-xs bg-slate-50">
-                    <label className="font-semibold text-slate-600 shrink-0">Rate (₹ / Acre):</label>
-                    <input
-                      type="number"
-                      value={isReviseMode ? reviseRate : meta.ratePerAcre}
-                      onChange={(e) => (isReviseMode ? setReviseRate(e.target.value) : setField('ratePerAcre')(e.target.value))}
-                      placeholder="500"
-                      className="w-24 border border-gray-300 rounded px-2 py-1 text-right"
-                    />
-                    <span className="text-slate-400">applied uniformly to every activity line above</span>
-                  </div>
-                )}
+                {/* Activity-wise quantity, rate and value is on the attached Annexure — the
+                    per-line inputs there are what's editable in create/revise mode. */}
+                <div className="px-3 py-2 border-t border-gray-300 text-xs text-slate-500">
+                  Activity-wise quantity, rate and value: refer attached Annexure.
+                </div>
 
                 {/* Certified value */}
                 <div className="px-3 py-2 border-t border-gray-300 text-xs space-y-1">

@@ -27,6 +27,7 @@ import {
 } from '@/components/purchase/ComparativeStatementPreview';
 import { PRPreview, type PRPreviewIndent, type PRPreviewLineItem } from '@/components/purchase/PRPreview';
 import { getBaseUrl } from '@/lib/config';
+import { fetchOrderCommunication } from '@/lib/orderCommunication';
 import { MakePurchaseOrderPopup } from '@/components/ho-inbox/MakePurchaseOrderPopup';
 import { MakeWorkOrderPopup } from '@/components/ho-inbox/MakeWorkOrderPopup';
 
@@ -367,7 +368,6 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
   const nfaDone = nfaStatusLower === 'approved';
   const poDone = poStatus === 'created' || poStatus === 'forwarded' || poStatus === 'completed' || Boolean(poNo) || Boolean(poCreatedAt);
   const poForwarded = poStatus === 'forwarded';
-  const forwardedToOrderCreation = approvalFlowOnly && Boolean(String((item as any)?.hoForwardedAt ?? '').trim());
 
   useEffect(() => {
     // Best-effort: detect existing PO from backend so button states are correct on refresh.
@@ -594,6 +594,8 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
 
     setApproving(true);
     try {
+      await fetchOrderCommunication().catch(() => []);
+
       const url = `${baseUrl}/purchase_flow/approve_TC`;
       const res = await fetch(url, {
         method: 'POST',
@@ -644,6 +646,8 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
 
     setApprovingNfa(true);
     try {
+      await fetchOrderCommunication().catch(() => []);
+
       const response = await fetch(`${baseUrl}/purchase_flow/approve_NFA`, {
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -667,25 +671,11 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
     }
   };
 
-  const forwardToOrderCreation = () => {
-    if (!nfaDone) return toast.error('Approve NFA first');
-    if (forwardedToOrderCreation) return;
-    const forwardedAt = new Date().toISOString();
-    try {
-      const storageKey = 'farmconnect.orderCreationForwarded.v1';
-      const saved = JSON.parse(window.localStorage.getItem(storageKey) || '{}');
-      window.localStorage.setItem(storageKey, JSON.stringify({ ...saved, [item.indentId]: forwardedAt }));
-    } catch {
-      // The in-memory status still updates if browser storage is unavailable.
-    }
-    onUpdate(item.indentId, { hoForwardedAt: forwardedAt } as any);
-    toast.success(`Forwarded to ${lastStepLabel} Creation`);
-  };
-
-  const openMakePo = () => {
+  const openMakePo = async () => {
     const selectedVendorId = String(item?.hoSelectedVendorId ?? '').trim();
     if (!selectedVendorId) return toast.error('Select a vendor first');
     if (!tcDone) return toast.error('Approve TC first');
+    await fetchOrderCommunication().catch(() => []);
     setMakePoOpen(true);
   };
 
@@ -718,8 +708,8 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
     },
     {
       label: approvalFlowOnly ? `${lastStepLabel} Creation` : lastStepLabel,
-      done: approvalFlowOnly ? Boolean((item as any)?.hoForwardedAt) : poDone,
-      sub: approvalFlowOnly ? fmt(String((item as any)?.hoForwardedAt ?? '')) : (poCreatedAt ? fmt(poCreatedAt) : undefined),
+      done: approvalFlowOnly ? nfaDone : poDone,
+      sub: approvalFlowOnly ? undefined : (poCreatedAt ? fmt(poCreatedAt) : undefined),
     },
   ];
 
@@ -1017,6 +1007,8 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
 
                   setPoForwarding(true);
                   try {
+                    await fetchOrderCommunication().catch(() => []);
+
                     const res = await fetch(`${baseUrl}/purchase_flow/forward_purchase_order`, {
                       method: 'POST',
                       headers: {
@@ -1259,8 +1251,8 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                   <p className="mt-1 text-[10px] font-medium text-slate-400">Including GST & charges</p>
                 </div>
                 <div className="text-left lg:text-center">
-                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-slate-400 lg:hidden">Forwarded On</span>
-                  <p className="text-xs font-bold text-slate-700">{fmt(String((item as any)?.hoForwardedAt ?? '')) || 'Not recorded'}</p>
+                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-slate-400 lg:hidden">NFA Approved</span>
+                  <p className="text-xs font-bold text-slate-700">{(item.lastSavedAt && fmt(item.lastSavedAt)) || 'Not recorded'}</p>
                   <p className="mt-1 text-[10px] font-medium text-emerald-700">Ready for {lastStepLabel} creation</p>
                 </div>
               </>
@@ -1278,7 +1270,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
             <div className="flex justify-start lg:justify-center" onClick={(e) => e.stopPropagation()}>
               <Button
                 type="button"
-                disabled={approvingNfa || forwardedToOrderCreation}
+                disabled={approvingNfa || (approvalFlowOnly && nfaDone)}
                 onClick={() => {
                   if (creationFlow) {
                     if (poDone) openEditPo();
@@ -1289,11 +1281,8 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                     setTcApprovalOpen(true);
                     return;
                   }
-                  if (approvalFlowOnly && nfaDone) {
-                    forwardToOrderCreation();
-                    return;
-                  }
                   if (approvalFlowOnly) {
+                    if (nfaDone) return;
                     void approveNfaNow();
                     return;
                   }
@@ -1306,7 +1295,7 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                 }}
                 className="h-9 gap-2 bg-[#0D3A35] px-4 text-white hover:bg-[#092e2a] disabled:bg-emerald-700 disabled:text-white disabled:opacity-100"
               >
-                {forwardedToOrderCreation
+                {approvalFlowOnly && nfaDone
                   ? <Check className="h-4 w-4" />
                   : canApprove
                   ? <ClipboardList className="h-4 w-4" />
@@ -1317,13 +1306,11 @@ export function ComparativeQuotationApprovalRow({ item, onUpdate, defaultOpen, d
                   ? poDone
                     ? `View / Edit ${lastStepLabel}`
                     : `Create ${lastStepLabel}`
-                  : forwardedToOrderCreation
-                  ? `Forwarded to ${lastStepLabel} Creation`
                   : canApprove
                   ? 'TC Approval'
                   : approvalFlowOnly
                     ? nfaDone
-                      ? `Forward to ${lastStepLabel} Creation`
+                      ? 'NFA Approved'
                       : approvingNfa ? 'Approving NFA…' : 'Approve NFA'
                     : nfaDone ? 'Forward to WO/PO' : 'Forward to NFA'}
               </Button>

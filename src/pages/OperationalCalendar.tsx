@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, X, Wrench, User, MapPin } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Wrench, User, MapPin, Check } from 'lucide-react';
+import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 
@@ -175,6 +176,7 @@ const OperationalCalendar = () => {
 
   const [filterVendor, setFilterVendor] = useState('');
   const [filterActivity, setFilterActivity] = useState('');
+  const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
 
   const currentDateKey = dateKey(new Date());
 
@@ -204,6 +206,35 @@ const OperationalCalendar = () => {
   const getFarmLabel = (farmId: string) => {
     const f = farms.find((x: any) => String(x?.farm_id || '') === farmId);
     return f ? String((f as any)?.owner_name || farmId) : farmId;
+  };
+
+  const handleCompleteTask = async (row: OperationalTaskRow) => {
+    if (completingTaskId) return;
+    setCompletingTaskId(row.task_id);
+    try {
+      const res = await fetch(`${BASE_URL}/admin_cultivation/complete_operational_task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calander_id: row.calander_id, task_id: row.task_id }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) throw new Error(data?.detail || 'Failed to complete task');
+
+      setActivitiesData((prev) => {
+        const next = { ...prev };
+        for (const [dateStr, rows] of Object.entries(next)) {
+          next[dateStr] = rows.map((r) =>
+            r.calander_id === row.calander_id && r.task_id === row.task_id ? { ...r, status: 'completed' } : r,
+          );
+        }
+        return next;
+      });
+      toast.success('Task marked as completed');
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to complete task');
+    } finally {
+      setCompletingTaskId(null);
+    }
   };
 
   const monthsToDisplay = useMemo(
@@ -341,7 +372,19 @@ const OperationalCalendar = () => {
                   {row.from_date !== row.to_date && (
                     <div className="text-[10px] text-slate-400">Runs {formatDate(row.from_date)} → {formatDate(row.to_date)}</div>
                   )}
-                  <div className="text-[10px] text-slate-400 font-mono">{row.task_id}</div>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[10px] text-slate-400 font-mono">{row.task_id}</div>
+                    {normalizeStatus(row.status) !== 'completed' && (
+                      <button
+                        type="button"
+                        onClick={() => handleCompleteTask(row)}
+                        disabled={completingTaskId === row.task_id}
+                        className="inline-flex shrink-0 items-center gap-1 rounded-md border border-green-200 bg-green-50 px-2 py-1 text-[10px] font-semibold text-green-700 transition-colors hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <Check className="h-3 w-3" /> {completingTaskId === row.task_id ? 'Completing…' : 'Complete'}
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
