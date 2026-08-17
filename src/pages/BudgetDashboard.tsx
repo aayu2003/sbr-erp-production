@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import * as XLSX from "xlsx";
 import {
   Plus, X, Upload, FileSpreadsheet, Calendar,
-  ChevronRight, Search, MapPin, Wheat, BarChart3, Lock, Unlock, Users, Loader2, Eye,
+  ChevronRight, Search, MapPin, Wheat, BarChart3, Lock, Unlock, Users, Loader2, Eye, WalletCards,
 } from "lucide-react";
 import getBaseUrl from "@/lib/config";
 
@@ -23,6 +24,24 @@ type BudgetCard = {
   locked: boolean;
   created_at: string;
   update_logs: unknown[];
+};
+
+type AllocatedLine = {
+  id: string;
+  budgetId: string;
+  budgetName: string;
+  financialYear: string;
+  type: string;
+  category: string;
+  lineItem: string;
+  uom: string;
+  qtyPerAcre: number;
+  acres: number;
+  totalQty: number;
+  ratePerUnit: number;
+  budgetValue: number;
+  allocatedAmount: number;
+  remainingAmount: number;
 };
 
 type FarmRecord = {
@@ -46,6 +65,7 @@ const CROP_BTN: Record<CropKey, { on: string; off: string }> = {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const fmtNum = (n: number) => n % 1 === 0 ? n.toLocaleString("en-IN") : n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+const fmtCurrency = (n: number) => `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const SEASON_COLORS: Record<SeasonType, string> = {
   Rabi:   "bg-amber-100 text-amber-700 border-amber-200",
@@ -592,6 +612,10 @@ export default function BudgetDashboard() {
   const [showCreate, setShowCreate] = useState(false);
   const [search,     setSearch]     = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  const [activeTab, setActiveTab] = useState<"budget" | "allocated">("budget");
+  const [allocatedLines, setAllocatedLines] = useState<AllocatedLine[]>([]);
+  const [loadingAllocations, setLoadingAllocations] = useState(false);
+  const [selectedAllocatedBudgetId, setSelectedAllocatedBudgetId] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -601,6 +625,58 @@ export default function BudgetDashboard() {
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [refreshKey]);
+
+  useEffect(() => {
+    if (budgets.length === 0) {
+      setAllocatedLines([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingAllocations(true);
+    Promise.all(budgets.map(async (budget) => {
+      try {
+        const response = await fetch(`${getBaseUrl()}/admin_accounts/get_budget/${budget.budget_id}`);
+        if (!response.ok) return [] as AllocatedLine[];
+        const workbook = XLSX.read(await response.arrayBuffer(), { type: "array", cellFormula: true, cellText: false, cellNF: true });
+        const worksheet = workbook.Sheets.budget;
+        if (!worksheet) return [] as AllocatedLine[];
+        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet);
+        return rows.flatMap((row, index) => {
+          const allocatedAmount = Number(row.amount_in_pipeline) || 0;
+          if (allocatedAmount <= 0) return [];
+          const quantity = Number(row.quantity_per_acre) || 0;
+          const acres = Number(row.total_acres) || 0;
+          const rate = Number(row.rate_per_unit) || 0;
+          const budgetValue = quantity * acres * rate;
+          const savedRemaining = Number(row.remaining_amount);
+          return [{
+            id: `${budget.budget_id}-${String(row.line_item_id || index)}`,
+            budgetId: budget.budget_id,
+            budgetName: budget.budget_name,
+            financialYear: `${budget.financial_year_start}-${String(Number(budget.financial_year_end) % 100).padStart(2, "0")}`,
+            type: String(row.budget_type || "Opex"),
+            category: String(row.category || ""),
+            lineItem: String(row.line_item || ""),
+            uom: String(row.UoM || ""),
+            qtyPerAcre: quantity,
+            acres,
+            totalQty: quantity * acres,
+            ratePerUnit: rate,
+            budgetValue,
+            allocatedAmount,
+            remainingAmount: Number.isFinite(savedRemaining) && row.remaining_amount !== "" && row.remaining_amount != null
+              ? savedRemaining
+              : budgetValue - allocatedAmount,
+          }];
+        });
+      } catch {
+        return [] as AllocatedLine[];
+      }
+    }))
+      .then((groups) => { if (!cancelled) setAllocatedLines(groups.flat()); })
+      .finally(() => { if (!cancelled) setLoadingAllocations(false); });
+    return () => { cancelled = true; };
+  }, [budgets]);
 
   const filtered = search
     ? budgets.filter((b) => {
@@ -614,6 +690,27 @@ export default function BudgetDashboard() {
         );
       })
     : budgets;
+
+  const allocatedBudgetCards = budgets
+    .map((budget) => {
+      const lines = allocatedLines.filter((line) => line.budgetId === budget.budget_id);
+      return {
+        budget,
+        lines,
+        allocatedAmount: lines.reduce((sum, line) => sum + line.allocatedAmount, 0),
+        budgetValue: lines.reduce((sum, line) => sum + line.budgetValue, 0),
+        remainingAmount: lines.reduce((sum, line) => sum + line.remainingAmount, 0),
+      };
+    })
+    .filter((entry) => entry.lines.length > 0);
+  const filteredAllocatedBudgets = search
+    ? allocatedBudgetCards.filter(({ budget, lines }) => {
+        const query = search.toLowerCase();
+        return [budget.budget_name, budget.crop_season, budget.crop_type || "", budget.financial_year_start, budget.financial_year_end, ...lines.flatMap((line) => [line.category, line.lineItem])]
+          .some((value) => String(value).toLowerCase().includes(query));
+      })
+    : allocatedBudgetCards;
+  const selectedAllocatedBudget = allocatedBudgetCards.find(({ budget }) => budget.budget_id === selectedAllocatedBudgetId) ?? null;
 
   return (
     <div className="min-h-full bg-[#f6f8fa] px-5 py-6 sm:px-8 lg:px-10 lg:py-8">
@@ -632,19 +729,31 @@ export default function BudgetDashboard() {
         </button>
       </div>
 
+      {/* Workspace tabs */}
+      <div className="flex items-center gap-1 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm">
+        <button type="button" onClick={() => setActiveTab("budget")} className={`inline-flex h-11 items-center gap-2 rounded-xl px-5 text-sm font-bold transition ${activeTab === "budget" ? "bg-[#0d5c4d] text-white shadow-sm" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}>
+          <BarChart3 className="h-4 w-4" /> Budget
+          <span className={`rounded-full px-2 py-0.5 text-[10px] ${activeTab === "budget" ? "bg-white/15 text-white" : "bg-slate-100 text-slate-500"}`}>{budgets.length}</span>
+        </button>
+        <button type="button" onClick={() => setActiveTab("allocated")} className={`inline-flex h-11 items-center gap-2 rounded-xl px-5 text-sm font-bold transition ${activeTab === "allocated" ? "bg-[#0d5c4d] text-white shadow-sm" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}>
+          <WalletCards className="h-4 w-4" /> Allocated
+          <span className={`rounded-full px-2 py-0.5 text-[10px] ${activeTab === "allocated" ? "bg-white/15 text-white" : "bg-slate-100 text-slate-500"}`}>{allocatedBudgetCards.length}</span>
+        </button>
+      </div>
+
       {/* Search */}
       <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="relative max-w-md">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by name, crop, or year…"
+          placeholder={activeTab === "budget" ? "Search by name, crop, or year…" : "Search budget, category, or line item…"}
           className="h-11 w-full rounded-xl border border-slate-200 bg-[#fbfcfd] pl-10 pr-4 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10"
         />
       </div></div>
 
-      {/* Cards */}
-      {loading ? (
+      {/* Budget cards */}
+      {activeTab === "budget" && (loading ? (
         <div className="flex items-center justify-center gap-2 py-20 text-sm font-semibold text-slate-400">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-[#0d5c4d]" />
           Loading budgets…
@@ -682,6 +791,78 @@ export default function BudgetDashboard() {
               onClick={() => navigate(`/budget/${b.budget_id}`)}
             />
           ))}
+        </div>
+      ))}
+
+      {/* Allocated budgets */}
+      {activeTab === "allocated" && (
+        loadingAllocations ? (
+          <div className="flex items-center justify-center gap-2 py-20 text-sm font-semibold text-slate-400"><Loader2 className="h-4 w-4 animate-spin" /> Loading allocated budgets…</div>
+        ) : filteredAllocatedBudgets.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-[#b8d6ce] bg-white py-20 text-center shadow-sm"><WalletCards className="mx-auto h-10 w-10 text-slate-300" /><p className="mt-3 text-sm font-bold text-slate-700">{search ? "No allocated budgets match your search" : "No budget amounts allocated yet"}</p><p className="mt-1 text-xs font-semibold text-slate-400">Budgets with allocated line-item amounts will appear here.</p></div>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {filteredAllocatedBudgets.map(({ budget, lines, allocatedAmount, budgetValue, remainingAmount }) => (
+              <article key={budget.budget_id} onClick={() => setSelectedAllocatedBudgetId(budget.budget_id)} className="group cursor-pointer overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition-all hover:border-[#8fc2b5] hover:shadow-[0_16px_40px_rgba(13,71,63,0.10)]">
+                <div className="border-b border-slate-100 p-5">
+                  <div className="flex items-start justify-between gap-3"><div className="min-w-0"><h3 className="truncate text-base font-extrabold text-slate-900 group-hover:text-[#0d5c4d]">{budget.budget_name}</h3><p className="mt-1 text-xs font-semibold text-slate-400">FY {budget.financial_year_start}-{String(Number(budget.financial_year_end) % 100).padStart(2, "0")}</p></div><span className="shrink-0 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-extrabold text-violet-700">{lines.length} allocated line{lines.length !== 1 ? "s" : ""}</span></div>
+                  <div className="mt-4 flex items-center gap-2 text-xs text-slate-500"><Wheat className="h-3.5 w-3.5 text-amber-500" /><span className="font-semibold capitalize">{budget.crop_type || budget.crop_season || "Budget"}</span></div>
+                </div>
+                <div className="grid grid-cols-2 gap-px bg-slate-100">
+                  <div className="bg-violet-50/70 p-4"><p className="text-[10px] font-extrabold uppercase tracking-wide text-violet-400">Allocated</p><p className="mt-1 text-lg font-extrabold text-violet-700">{fmtCurrency(allocatedAmount)}</p></div>
+                  <div className="bg-sky-50/70 p-4"><p className="text-[10px] font-extrabold uppercase tracking-wide text-sky-400">Remaining</p><p className={`mt-1 text-lg font-extrabold ${remainingAmount < 0 ? "text-red-600" : "text-sky-700"}`}>{fmtCurrency(remainingAmount)}</p></div>
+                </div>
+                <div className="space-y-3 p-5">
+                  <div className="flex items-center justify-between text-xs"><span className="font-semibold text-slate-400">Budget value of allocated lines</span><span className="font-extrabold text-slate-700">{fmtCurrency(budgetValue)}</span></div>
+                  <button type="button" onClick={(event) => { event.stopPropagation(); setSelectedAllocatedBudgetId(budget.budget_id); }} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Eye className="h-4 w-4" /> View Allocated Details</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )
+      )}
+
+      {selectedAllocatedBudget && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-[2px]" onMouseDown={(event) => event.target === event.currentTarget && setSelectedAllocatedBudgetId(null)}>
+          <div className="flex max-h-[90vh] w-full max-w-[1500px] flex-col overflow-hidden rounded-3xl bg-[#f6f8fa] shadow-2xl">
+            <div className="flex shrink-0 items-start justify-between bg-[#0d473f] px-6 py-5 text-white">
+              <div><p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Allocated Budget Lines</p><h2 className="mt-1 text-xl font-bold">{selectedAllocatedBudget.budget.budget_name}</h2></div>
+              <button type="button" onClick={() => setSelectedAllocatedBudgetId(null)} className="inline-flex h-9 w-9 items-center justify-center rounded-xl text-white/70 hover:bg-white/10 hover:text-white" aria-label="Close allocated budget details"><X className="h-5 w-5" /></button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-5">
+              <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[1320px] text-left text-xs">
+                    <thead className="sticky top-0 z-10 bg-[#0d473f] text-[10px] uppercase tracking-[0.08em] text-white">
+                      <tr>
+                        <th className="whitespace-nowrap px-3 py-3">Type</th><th className="whitespace-nowrap px-3 py-3">Category</th><th className="whitespace-nowrap px-3 py-3">Line Item</th><th className="whitespace-nowrap px-3 py-3">UoM</th><th className="whitespace-nowrap px-3 py-3 text-right">Qty / Acre</th><th className="whitespace-nowrap px-3 py-3 text-right">Acres</th><th className="whitespace-nowrap px-3 py-3 text-right">Total Qty</th><th className="whitespace-nowrap px-3 py-3 text-right">Rate / Unit</th><th className="whitespace-nowrap px-3 py-3 text-right">Total Budget</th><th className="whitespace-nowrap px-3 py-3 text-right">Allocated</th><th className="whitespace-nowrap px-3 py-3 text-right">Variance</th><th className="whitespace-nowrap px-3 py-3">Bar</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {selectedAllocatedBudget.lines.map((line) => {
+                        const variance = line.budgetValue - line.allocatedAmount;
+                        const allocationPercent = line.budgetValue > 0 ? Math.min(100, Math.max(0, (line.allocatedAmount / line.budgetValue) * 100)) : 0;
+                        return <tr key={line.id} className="hover:bg-[#f6faf9]">
+                          <td className="px-3 py-3"><span className={`rounded-full px-2.5 py-1 font-bold ${line.type === "Capex" ? "bg-violet-50 text-violet-700" : "bg-emerald-50 text-emerald-700"}`}>{line.type}</span></td>
+                          <td className="max-w-[150px] truncate px-3 py-3 font-semibold text-slate-600" title={line.category}>{line.category || "—"}</td>
+                          <td className="max-w-[230px] truncate px-3 py-3 font-bold text-slate-800" title={line.lineItem}>{line.lineItem || "—"}</td>
+                          <td className="whitespace-nowrap px-3 py-3 text-slate-500">{line.uom || "—"}</td>
+                          <td className="whitespace-nowrap px-3 py-3 text-right font-semibold text-slate-700">{fmtNum(line.qtyPerAcre)}</td>
+                          <td className="whitespace-nowrap px-3 py-3 text-right font-semibold text-slate-700">{fmtNum(line.acres)}</td>
+                          <td className="whitespace-nowrap px-3 py-3 text-right font-bold text-slate-800">{fmtNum(line.totalQty)}</td>
+                          <td className="whitespace-nowrap px-3 py-3 text-right font-semibold text-slate-700">{fmtCurrency(line.ratePerUnit)}</td>
+                          <td className="whitespace-nowrap bg-emerald-50/50 px-3 py-3 text-right font-extrabold text-emerald-700">{fmtCurrency(line.budgetValue)}</td>
+                          <td className="whitespace-nowrap bg-violet-50/50 px-3 py-3 text-right font-extrabold text-violet-700">{fmtCurrency(line.allocatedAmount)}</td>
+                          <td className={`whitespace-nowrap px-3 py-3 text-right font-extrabold ${variance < 0 ? "text-red-600" : "text-sky-700"}`}>{fmtCurrency(variance)}</td>
+                          <td className="w-36 px-3 py-3"><div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${line.allocatedAmount > line.budgetValue ? "bg-red-500" : "bg-[#0d7a64]"}`} style={{ width: `${allocationPercent}%` }} /></div><p className="mt-1 text-right text-[9px] font-bold text-slate-400">{allocationPercent.toFixed(1)}%</p></td>
+                        </tr>;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

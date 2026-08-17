@@ -1,6 +1,23 @@
 {
   "supersets": [
     {
+      "key": "communication-section",
+      "label": "MAIL",
+      "description": "Internal messages and ERP-linked communication",
+      "icon": "Mail",
+      "enabled": true,
+      "groups": [
+        {
+          "key": "communication-general",
+          "label": "Mail",
+          "enabled": true,
+          "items": [
+            { "key": "communication", "label": "Mail", "path": "/communication", "icon": "Mail", "enabled": true }
+          ]
+        }
+      ]
+    },
+    {
       "key": "ceos-desk",
       "label": "CEO'S DESK",
       "description": "Executive overview and decision dashboard",

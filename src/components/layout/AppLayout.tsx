@@ -32,6 +32,7 @@ interface NavItemProps {
   notificationStatus?: "warning" | "success" | "none";
   isSidebarCollapsed: boolean;
   budgetCard?: boolean;
+  notificationCount?: number;
 }
 
 const NavItem = ({
@@ -41,6 +42,7 @@ const NavItem = ({
   notificationStatus = "none",
   isSidebarCollapsed,
   budgetCard = false,
+  notificationCount = 0,
 }: NavItemProps) => {
   return (
     <NavLink
@@ -76,7 +78,16 @@ const NavItem = ({
           {!isSidebarCollapsed && <span className="ml-auto" />}
 
           {/* Updated notification logic to render AlertCircle icon for warnings */}
-          {notificationStatus === "warning" ? (
+          {notificationCount > 0 ? (
+            <span
+              className={cn(
+                "flex min-w-5 items-center justify-center rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-extrabold leading-none text-slate-900",
+                isSidebarCollapsed && "absolute right-1 top-1 h-4 min-w-4 px-1"
+              )}
+            >
+              {notificationCount > 99 ? "99+" : notificationCount}
+            </span>
+          ) : notificationStatus === "warning" ? (
             <AlertCircle
               className={cn(
                 "text-orange-500 fill-orange-50 shrink-0",
@@ -172,11 +183,34 @@ const NavGroup = ({
 
 const AppSidebar = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [mailUnread, setMailUnread] = useState(0);
   const { user } = useAuth();
   const isSuperAdmin = user?.id === 'sbr-admin';
 
   useEffect(() => {
     document.title = "SBR | Farm-connect";
+  }, []);
+
+  useEffect(() => {
+    const updateMailUnread = () => {
+      try {
+        const raw = localStorage.getItem('erp_communication_messages_v1');
+        if (!raw) return setMailUnread(2);
+        const items: Array<{ direction?: string; read?: boolean; archived?: boolean; type?: string }> = JSON.parse(raw);
+        setMailUnread(items.filter(message =>
+          message.direction === 'received' && !message.read && !message.archived && message.type !== 'Announcement'
+        ).length);
+      } catch {
+        setMailUnread(0);
+      }
+    };
+    updateMailUnread();
+    window.addEventListener('storage', updateMailUnread);
+    window.addEventListener('erp-mail-updated', updateMailUnread);
+    return () => {
+      window.removeEventListener('storage', updateMailUnread);
+      window.removeEventListener('erp-mail-updated', updateMailUnread);
+    };
   }, []);
 
   return (
@@ -262,6 +296,7 @@ const AppSidebar = () => {
                 item.enabled && (
                   isSuperAdmin ||
                   allowedModules.includes(item.key) ||
+                  item.key === 'communication' ||
                   (item.key === 'purchase-comparative' && allowedModules.includes('purchase-req')) ||
                   (item.key === 'work-comparative' && (allowedModules.includes('work-order') || allowedModules.includes('purchase-req'))) ||
                   (item.key === 'work-requisition-approver' && (allowedModules.includes('work-order') || allowedModules.includes('finance-admin-ops'))) ||
@@ -295,6 +330,7 @@ const AppSidebar = () => {
                   label={item.label}
                   isSidebarCollapsed={isCollapsed}
                   notificationStatus={notif as 'warning' | 'success' | 'none'}
+                  notificationCount={item.key === 'communication' ? mailUnread : 0}
                 />
               );
             });

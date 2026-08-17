@@ -111,6 +111,7 @@ import {
   Vouchers,
 } from "./pages/FinanceAccounts";
 import AccountingMaster from "./pages/AccountingMaster";
+import Communication from "./pages/Communication";
 
 const queryClient = new QueryClient();
 
@@ -126,6 +127,7 @@ const App = () => (
           <Route path="/index" element={<Index />} />
 
           <Route path="/ceos-desk" element={<AppLayout><CeosDesk /></AppLayout>} />
+          <Route path="/communication" element={<AppLayout><Communication /></AppLayout>} />
 
           <Route path="/legal" element={<AppLayout><Legal /></AppLayout>} />
 
