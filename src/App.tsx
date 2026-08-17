@@ -111,6 +111,7 @@ import {
   Vouchers,
 } from "./pages/FinanceAccounts";
 import AccountingMaster from "./pages/AccountingMaster";
+import InvoiceDirectory from "./pages/InvoiceDirectory";
 
 const queryClient = new QueryClient();
 
@@ -344,6 +345,7 @@ const App = () => (
           <Route path="/finance-accounts" element={<Navigate to="/finance-accounts/dashboard" replace />} />
           <Route path="/finance-accounts/dashboard" element={<AppLayout><FinanceAccountsDashboard /></AppLayout>} />
           <Route path="/finance-accounts/bills-payables" element={<AppLayout><BillsPayables /></AppLayout>} />
+          <Route path="/finance-accounts/invoice-directory" element={<AppLayout><InvoiceDirectory /></AppLayout>} />
           <Route path="/finance-accounts/payments-receipts" element={<AppLayout><PaymentsReceipts /></AppLayout>} />
           <Route path="/finance-accounts/vouchers" element={<AppLayout><Vouchers /></AppLayout>} />
           <Route path="/finance-accounts/banking" element={<AppLayout><Banking /></AppLayout>} />
