@@ -28,7 +28,8 @@ const formatInr = (n: number) => `₹${n.toLocaleString('en-IN', { minimumFracti
 // Annexure: one flat, numbered line per completed activity — cultivation lines are one row
 // per (land, activity, date) so a plot worked on twice gets two dated lines instead of a
 // single blended total; operational (non-cultivation) lines are one row per logged task.
-// Rate/Remarks are filled in by the preparer per line, not derived from source data.
+// Place is always the land's owner name; Rate is filled in by the preparer per line, not
+// derived from source data.
 // ─────────────────────────────────────────────────────────────
 export interface AnnexureLine {
   id: string;
@@ -38,8 +39,7 @@ export interface AnnexureLine {
   uom: string;
   quantity: number;
   rate: number;
-  remarks: string;
-  landId?: string; // cultivation lines only — used to resolve the certificate's block label
+  landId?: string; // used to resolve the certificate's block label
 }
 
 export interface AnnexurePivot {
@@ -54,9 +54,15 @@ const buildAnnexurePivot = (
   taskDetailsById: Record<string, ApiTaskDetails>,
   scopeItems: WccScopeLand[],
   operationalWorkDone: ApiOperationalWorkDoneEntry[] = [],
+  farmerNames: Record<string, string> = {},
 ): AnnexurePivot => {
   const landById = new Map<string, WccScopeLand>();
   for (const land of scopeItems) landById.set(land.land_id, land);
+
+  // Owner name for a farm_id — prefers the vendor's own scope-of-work record (already carries
+  // farmer_name), then the farmer-details lookup, then falls back to the raw farm_id.
+  const ownerNameFor = (farmId: string) =>
+    landById.get(farmId)?.farmer_name || farmerNames[farmId] || landById.get(farmId)?.farmer_id || farmId;
 
   // land + activity + date -> line (dedup'd by plot+activity+date so the same plot can't be
   // double-counted if it shows up across multiple work-done entries for that same date).
@@ -80,16 +86,14 @@ const buildAnnexurePivot = (
         existing.quantity += area;
         continue;
       }
-      const land = landById.get(entry.farm_id);
       grid.set(key, {
         id: key,
         activity,
-        place: land?.farmer_name || land?.farmer_id || entry.farm_id,
+        place: ownerNameFor(entry.farm_id),
         dateOfCompletion: entry.date,
         uom: 'Acre',
         quantity: area,
         rate: 0,
-        remarks: '',
         landId: entry.farm_id,
       });
     }
@@ -98,12 +102,12 @@ const buildAnnexurePivot = (
   const operationalLines: AnnexureLine[] = operationalWorkDone.map((entry, idx) => ({
     id: `op__${entry.task_id || idx}`,
     activity: entry.activity,
-    place: '—',
+    place: entry.farm_id ? ownerNameFor(entry.farm_id) : '—',
     dateOfCompletion: entry.to_date || entry.from_date,
     uom: entry.unit || '',
     quantity: Number(entry.quantity) || 0,
     rate: 0,
-    remarks: '',
+    landId: entry.farm_id,
   }));
 
   const lines = [...grid.values(), ...operationalLines].sort((a, b) =>
@@ -238,6 +242,12 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   const enterpriseTemplate = enterprise ? WCC_WORK_TEMPLATES.find((item) => item.id === enterprise.header.workCategory) : undefined;
   const totalQuantity = pivot.lines.reduce((sum, line) => sum + line.quantity, 0);
   const totalValue = pivot.lines.reduce((sum, line) => sum + line.quantity * line.rate, 0);
+  const activityTotalsOrder: string[] = [];
+  const activityTotalsMap = new Map<string, number>();
+  for (const line of pivot.lines) {
+    if (!activityTotalsMap.has(line.activity)) { activityTotalsOrder.push(line.activity); activityTotalsMap.set(line.activity, 0); }
+    activityTotalsMap.set(line.activity, (activityTotalsMap.get(line.activity) || 0) + line.quantity * line.rate);
+  }
 
   // ── Page 1: Annexure ──
   doc.setFont('helvetica', 'bold');
@@ -248,7 +258,7 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   doc.text(vendorName, 105, 22, { align: 'center' });
   doc.text(`${formatDate(fromDate)} - ${formatDate(toDate)}`, 105, 27, { align: 'center' });
 
-  const annexureHead = [['S.No', 'Activity', 'Place', 'Date of Completion', 'UOM', 'Quantity', 'Rate/Unit (₹)', 'Value (₹)', 'Remarks']];
+  const annexureHead = [['S.No', 'Activity', 'Place', 'Date of Completion', 'UOM', 'Quantity', 'Rate/Unit (₹)', 'Value (₹)']];
   const annexureBody: RowInput[] = pivot.lines.map((line, i) => [
     i + 1,
     line.activity,
@@ -258,14 +268,12 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     line.quantity.toFixed(2),
     line.rate ? line.rate.toFixed(2) : '—',
     line.rate ? (line.quantity * line.rate).toFixed(2) : '—',
-    line.remarks || '—',
   ]);
   annexureBody.push([
     { content: 'Total', colSpan: 5, styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
     { content: totalQuantity.toFixed(2), styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
     '',
     { content: totalValue ? totalValue.toFixed(2) : '—', styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
-    '',
   ]);
 
   autoTable(doc, { startY: 32, head: annexureHead, body: annexureBody, styles: { fontSize: 7 }, headStyles: { fillColor: [30, 41, 59] } });
@@ -320,10 +328,25 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   });
 
   let y = doc.lastAutoTable.finalY + 6;
-  doc.setFont('helvetica', 'normal');
+  doc.setFont('helvetica', 'bold');
   doc.setFontSize(8);
-  doc.text('Activity-wise quantity, rate and value: refer attached Annexure.', 14, y);
-  y += 9;
+  doc.text('Activity-wise Certified Value', 14, y);
+  y += 2;
+  autoTable(doc, {
+    startY: y,
+    theme: 'plain',
+    styles: { fontSize: 8, cellPadding: 1 },
+    columnStyles: { 0: { cellWidth: 100 }, 1: { halign: 'right' } },
+    margin: { left: 14, right: 14 },
+    body: [
+      ...activityTotalsOrder.map((activity) => [activity, activityTotalsMap.get(activity) ? (activityTotalsMap.get(activity) as number).toFixed(2) : '—']),
+      [
+        { content: 'Total', styles: { fontStyle: 'bold' } },
+        { content: totalValue ? totalValue.toFixed(2) : '—', styles: { fontStyle: 'bold' } },
+      ],
+    ],
+  });
+  y = doc.lastAutoTable.finalY + 6;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
   const certifiedValue = enterpriseTotals ? formatInr(enterpriseTotals.gross) : totalValue ? formatInr(totalValue) : '—';
@@ -507,6 +530,7 @@ export interface WccCertificatePreviewProps {
   operationalWorkDone?: ApiOperationalWorkDoneEntry[];
   taskDetailsById?: Record<string, ApiTaskDetails>;
   scopeItems?: WccScopeLand[];
+  farmerNames?: Record<string, string>;
 
   // 'revise' | 'review' | 'view' modes — a previously persisted record
   existingRecord?: WccCertificateRecord;
@@ -529,6 +553,7 @@ const WccCertificatePreview = ({
   operationalWorkDone = [],
   taskDetailsById = {},
   scopeItems = [],
+  farmerNames = {},
   existingRecord,
   onChanged,
 }: WccCertificatePreviewProps) => {
@@ -547,8 +572,8 @@ const WccCertificatePreview = ({
   // Live pivot only matters pre-submission in create mode; every other mode (and a
   // create-mode certificate that's already been submitted) renders the frozen snapshot.
   const livePivot = useMemo(
-    () => (isCreateMode ? buildAnnexurePivot(workDone, taskDetailsById, scopeItems, operationalWorkDone) : EMPTY_PIVOT),
-    [isCreateMode, workDone, taskDetailsById, scopeItems, operationalWorkDone],
+    () => (isCreateMode ? buildAnnexurePivot(workDone, taskDetailsById, scopeItems, operationalWorkDone, farmerNames) : EMPTY_PIVOT),
+    [isCreateMode, workDone, taskDetailsById, scopeItems, operationalWorkDone, farmerNames],
   );
   const pivot = record ? record.annexure : livePivot;
   const enterprise = pivot.enterprise;
@@ -562,23 +587,23 @@ const WccCertificatePreview = ({
   const [meta, setMeta] = useState<CertificateMeta>(() => ({ ...EMPTY_META, woNumber: vendorWoNumber || '' }));
   const setField = (field: keyof CertificateMeta) => (v: string) => setMeta((prev) => ({ ...prev, [field]: v }));
 
-  // Per-line Rate/Remarks the preparer fills in on the Annexure — keyed by AnnexureLine.id so
-  // edits survive re-renders as fresh work-done data streams in. Seeded from the frozen
-  // snapshot in revise mode, so the preparer starts from what was last submitted, not blank.
-  const [lineEdits, setLineEdits] = useState<Record<string, { rate: string; remarks: string }>>(() => {
+  // Per-line Rate the preparer fills in on the Annexure — keyed by AnnexureLine.id so edits
+  // survive re-renders as fresh work-done data streams in. Seeded from the frozen snapshot in
+  // revise mode, so the preparer starts from what was last submitted, not blank.
+  const [lineEdits, setLineEdits] = useState<Record<string, string>>(() => {
     if (!existingRecord) return {};
-    const seed: Record<string, { rate: string; remarks: string }> = {};
+    const seed: Record<string, string> = {};
     for (const line of existingRecord.annexure.lines) {
-      seed[line.id] = { rate: line.rate ? String(line.rate) : '', remarks: line.remarks || '' };
+      seed[line.id] = line.rate ? String(line.rate) : '';
     }
     return seed;
   });
-  const setLineEdit = (lineId: string, field: 'rate' | 'remarks') => (value: string) =>
-    setLineEdits((prev) => ({ ...prev, [lineId]: { rate: '', remarks: '', ...prev[lineId], [field]: value } }));
+  const setLineRate = (lineId: string) => (value: string) =>
+    setLineEdits((prev) => ({ ...prev, [lineId]: value }));
 
   // The lines actually shown/priced/submitted — cultivation & operational lines merge their
-  // live rate/remarks edits; enterprise-drafted lines already carry a per-line rate set
-  // earlier in the WccWorkspace wizard, so they're mapped in read-only here.
+  // live rate edits; enterprise-drafted lines already carry a per-line rate set earlier in
+  // the WccWorkspace wizard, so they're mapped in read-only here.
   const effectiveLines: AnnexureLine[] = useMemo(() => {
     if (enterprise) {
       return enterprise.serviceLines.filter((line) => line.selected).map((line) => ({
@@ -589,17 +614,27 @@ const WccCertificatePreview = ({
         uom: line.unit,
         quantity: line.currentQty,
         rate: line.rate,
-        remarks: line.remarks,
       }));
     }
     return pivot.lines.map((line) => {
       const edit = lineEdits[line.id];
-      return edit ? { ...line, rate: Number(edit.rate) || 0, remarks: edit.remarks } : line;
+      return edit !== undefined ? { ...line, rate: Number(edit) || 0 } : line;
     });
   }, [enterprise, pivot.lines, lineEdits]);
 
   const totalQuantity = effectiveLines.reduce((sum, line) => sum + line.quantity, 0);
   const totalValue = effectiveLines.reduce((sum, line) => sum + line.quantity * line.rate, 0);
+  // Per-activity certified value shown on the certificate page in place of a flat
+  // "refer attached Annexure" note — one row per distinct activity, in first-seen order.
+  const activityTotals = useMemo(() => {
+    const order: string[] = [];
+    const totals = new Map<string, number>();
+    for (const line of effectiveLines) {
+      if (!totals.has(line.activity)) { order.push(line.activity); totals.set(line.activity, 0); }
+      totals.set(line.activity, (totals.get(line.activity) || 0) + line.quantity * line.rate);
+    }
+    return order.map((activity) => ({ activity, value: totals.get(activity) || 0 }));
+  }, [effectiveLines]);
   // Enterprise-drafted lines already carry a fixed per-line rate from the WccWorkspace wizard —
   // only cultivation/operational lines (create or revise, before submission) are editable here.
   const linesEditable = !enterprise && ((isCreateMode && !locked) || (isReviseMode && !locked));
@@ -953,7 +988,6 @@ const WccCertificatePreview = ({
                         <th className="px-2 py-2 text-right font-semibold">Quantity</th>
                         <th className="px-2 py-2 text-right font-semibold whitespace-nowrap">Rate / Unit (₹)</th>
                         <th className="px-2 py-2 text-right font-semibold">Value (₹)</th>
-                        <th className="px-2 py-2 text-left font-semibold">Remarks</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -969,8 +1003,8 @@ const WccCertificatePreview = ({
                             {linesEditable ? (
                               <input
                                 type="number"
-                                value={lineEdits[line.id]?.rate ?? ''}
-                                onChange={(e) => setLineEdit(line.id, 'rate')(e.target.value)}
+                                value={lineEdits[line.id] ?? ''}
+                                onChange={(e) => setLineRate(line.id)(e.target.value)}
                                 placeholder="0"
                                 className="w-20 border-b border-dashed border-gray-300 bg-transparent text-right outline-none focus:border-[#0D3A35]"
                               />
@@ -979,19 +1013,6 @@ const WccCertificatePreview = ({
                             )}
                           </td>
                           <td className="px-2 py-1.5 text-right whitespace-nowrap font-semibold">{line.rate ? (line.quantity * line.rate).toFixed(2) : '—'}</td>
-                          <td className="px-2 py-1.5">
-                            {linesEditable ? (
-                              <input
-                                type="text"
-                                value={lineEdits[line.id]?.remarks ?? ''}
-                                onChange={(e) => setLineEdit(line.id, 'remarks')(e.target.value)}
-                                placeholder="—"
-                                className="w-28 border-b border-dashed border-gray-300 bg-transparent outline-none focus:border-[#0D3A35]"
-                              />
-                            ) : (
-                              line.remarks || '—'
-                            )}
-                          </td>
                         </tr>
                       ))}
                       <tr className="bg-emerald-50 font-bold">
@@ -999,7 +1020,6 @@ const WccCertificatePreview = ({
                         <td className="px-2 py-2 text-right whitespace-nowrap">{totalQuantity.toFixed(2)}</td>
                         <td className="px-2 py-2" />
                         <td className="px-2 py-2 text-right whitespace-nowrap">{totalValue ? totalValue.toFixed(2) : '—'}</td>
-                        <td className="px-2 py-2" />
                       </tr>
                     </tbody>
                   </table>
@@ -1093,10 +1113,24 @@ const WccCertificatePreview = ({
                   </tbody>
                 </table>
 
-                {/* Activity-wise quantity, rate and value is on the attached Annexure — the
-                    per-line inputs there are what's editable in create/revise mode. */}
-                <div className="px-3 py-2 border-t border-gray-300 text-xs text-slate-500">
-                  Activity-wise quantity, rate and value: refer attached Annexure.
+                {/* Activity-wise certified value — per-line rate/qty edits live on the
+                    Annexure above; this rolls those lines up by activity. */}
+                <div className="px-3 py-2 border-t border-gray-300 text-xs">
+                  <div className="font-semibold text-slate-600 mb-1">Activity-wise Certified Value</div>
+                  <table className="w-full">
+                    <tbody>
+                      {activityTotals.map(({ activity, value }) => (
+                        <tr key={activity}>
+                          <td className="py-0.5 text-slate-700">{activity}</td>
+                          <td className="py-0.5 text-right font-medium whitespace-nowrap">{value ? formatInr(value) : '—'}</td>
+                        </tr>
+                      ))}
+                      <tr className="border-t border-gray-300 font-bold text-slate-800">
+                        <td className="py-1">Total</td>
+                        <td className="py-1 text-right whitespace-nowrap">{totalValue ? formatInr(totalValue) : '—'}</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
 
                 {/* Certified value */}

@@ -29,6 +29,7 @@ import {
   ZoomOut,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import getBaseUrl from "@/lib/config";
 import { getGrnById, type GRNRecord } from "@/lib/grnApi";
@@ -60,6 +61,9 @@ type FinanceRecord = {
   notes: string;
   attachmentName?: string;
   attachmentType?: string;
+  attachmentUrl?: string;
+  additionalDocumentUrls?: Record<string, string>;
+  ledgerEntryStatus?: string;
   invoiceDate?: string;
   dueDate?: string;
   poWoReference?: string;
@@ -151,13 +155,13 @@ type PRRDetails = {
   financeApproval: string;
 };
 
-type TabDefinition = {
+export type TabDefinition = {
   label: string;
   description: string;
   features: string[];
 };
 
-type ModuleDefinition = {
+export type ModuleDefinition = {
   key: FinanceModuleKey;
   title: string;
   shortTitle: string;
@@ -193,20 +197,6 @@ const openDocumentDatabase = () => new Promise<IDBDatabase>((resolve, reject) =>
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error);
 });
-
-const saveBillDocuments = async (recordId: string, billFile: File | null, supportingFiles: File[]) => {
-  if (!billFile && supportingFiles.length === 0) return;
-  const database = await openDocumentDatabase();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction(DOCUMENT_STORE_NAME, "readwrite");
-    const store = transaction.objectStore(DOCUMENT_STORE_NAME);
-    if (billFile) store.put({ key: `${recordId}:bill`, recordId, role: "bill", name: billFile.name, type: billFile.type, blob: billFile } satisfies StoredBillDocument);
-    supportingFiles.forEach((file) => store.put({ key: `${recordId}:supporting:${file.name}`, recordId, role: "supporting", name: file.name, type: file.type, blob: file } satisfies StoredBillDocument));
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-  });
-  database.close();
-};
 
 const loadBillDocuments = async (recordId: string) => {
   const database = await openDocumentDatabase();
@@ -336,7 +326,7 @@ const FINANCE_MODULES: ModuleDefinition[] = [
   },
 ];
 
-const moduleByKey = Object.fromEntries(FINANCE_MODULES.map((module) => [module.key, module])) as Record<FinanceModuleKey, ModuleDefinition>;
+export const moduleByKey = Object.fromEntries(FINANCE_MODULES.map((module) => [module.key, module])) as Record<FinanceModuleKey, ModuleDefinition>;
 
 const loadRecords = (): FinanceRecord[] => {
   try {
@@ -361,17 +351,6 @@ const financialYearShort = (date = new Date()) => {
   return `${String(startYear).slice(-2)}-${String(startYear + 1).slice(-2)}`;
 };
 
-const nextBillInwardNumber = () => {
-  const fy = financialYearShort();
-  const prefix = `BI/${fy}/`;
-  const numbers = loadRecords()
-    .map((record) => String(record.billInwardNo ?? ""))
-    .filter((number) => number.startsWith(prefix))
-    .map((number) => Number(number.slice(prefix.length)))
-    .filter(Number.isFinite);
-  return `${prefix}${String((numbers.length ? Math.max(...numbers) : 0) + 1).padStart(5, "0")}`;
-};
-
 const nextPaymentRequestNumber = (records: FinanceRecord[]) => {
   const fy = financialYearShort();
   const prefix = `PRR/${fy}/`;
@@ -382,6 +361,91 @@ const nextPaymentRequestNumber = (records: FinanceRecord[]) => {
     .map((number) => Number(number.slice(prefix.length)))
     .filter(Number.isFinite);
   return `${prefix}${String((numbers.length ? Math.max(...numbers) : 0) + 1).padStart(3, "0")}`;
+};
+
+// Only the director-level approval has a backend endpoint to drive it (update_invoice_approval_status)
+// so far — ledger posting and admin-ops approval aren't wired to any mutation yet, this only
+// reflects whatever the backend already recorded for them.
+const invoiceStatusLabel = (invoice: Record<string, unknown>): string => {
+  const ledger = String(invoice.ledger_entery_status ?? "").toLowerCase();
+  const director = String(invoice.director_approval_status ?? "").toLowerCase();
+  if (["posted", "paid"].includes(ledger)) return "Paid";
+  if (director === "approved") return "Verified";
+  return "Pending Approval";
+};
+
+// Maps a raw admin_accounts_invoice row (as returned by GET /admin_accounts/get_invoices)
+// into the FinanceRecord shape the register table/preview panels already render.
+const mapInvoiceToRecord = (invoice: Record<string, unknown>): FinanceRecord => {
+  const vendor = (invoice.vendor_details as Record<string, unknown>) ?? {};
+  const invoiceDetails = (invoice.invoice_details as Record<string, unknown>) ?? {};
+  const purchaseOrder = (invoice.purchase_order_details as Record<string, unknown>) ?? {};
+  const tax = (invoice.tax_details as Record<string, unknown>) ?? {};
+  const totalTax = Number(tax.total_tax_amount ?? 0);
+  const totalPayable = Number(invoice.total_amount_payable ?? 0);
+  const otherAdjustment = Number(tax.other_charges_or_adjustments ?? 0);
+  const invoiceAmount = Number((invoiceDetails.invoice_amount as number | undefined) ?? (totalPayable - otherAdjustment));
+  const orderNumber = String(purchaseOrder.order_number ?? "");
+  const supportingDocs: Array<Record<string, unknown>> = Array.isArray(purchaseOrder.cupporting_documents) ? purchaseOrder.cupporting_documents : [];
+  const linkedOrderDoc = supportingDocs.find((doc) => ["PO", "WO", "CONTRACT"].includes(String(doc.document_type ?? "").toUpperCase()));
+  const grnWccDoc = supportingDocs.find((doc) => ["GRN", "WCC"].includes(String(doc.document_type ?? "").toUpperCase()));
+  const additionalDocs: Array<Record<string, unknown>> = Array.isArray(invoice.additional_documents) ? invoice.additional_documents : [];
+  const invoiceId = String(invoice.invoice_id ?? "");
+
+  return {
+    id: invoiceId,
+    module: "bills-payables",
+    tab: "Inward",
+    entryType: "Bill Inward",
+    reference: String(invoiceDetails.invoice_number ?? ""),
+    party: String(vendor.vendor_name ?? ""),
+    vendorId: String(vendor.vendor_id ?? ""),
+    vendorGstin: String(vendor.gst_number ?? ""),
+    date: String(invoiceDetails.inward_date ?? ""),
+    invoiceDate: String(invoiceDetails.invoice_date ?? ""),
+    dueDate: String(tax.payment_due_date ?? ""),
+    amount: totalPayable,
+    baseAmount: invoiceAmount - totalTax,
+    taxAmount: totalTax,
+    cgstAmount: Number(tax.cgst_amount ?? 0),
+    sgstAmount: Number(tax.sgst_amount ?? 0),
+    igstAmount: Number(tax.igst_amount ?? 0),
+    otherAdjustment,
+    billInwardNo: invoiceId,
+    invoiceType: String(invoice.bill_type ?? ""),
+    billPriority: String(invoice.bill_priority ?? "Normal"),
+    referenceType: linkedOrderDoc ? String(linkedOrderDoc.document_type ?? "PO") : orderNumber ? "PO" : "Direct Bill",
+    poWoReference: orderNumber || "NA",
+    grnServiceReference: grnWccDoc ? String(grnWccDoc.document_number ?? "") : "",
+    department: String(purchaseOrder.department ?? ""),
+    tdsApplicable: tax.tds_applicable ? "Yes" : "No",
+    paymentTerms: String(tax.payment_terms ?? ""),
+    attachmentName: invoiceDetails.invoice_doc_url ? String(invoiceDetails.invoice_doc_url).split("/").pop() || "Invoice document" : "",
+    attachmentType: "application/pdf",
+    attachmentUrl: invoiceDetails.invoice_doc_url ? String(invoiceDetails.invoice_doc_url) : "",
+    supportingDocumentNames: additionalDocs.map((doc) => String(doc.name ?? doc.url ?? "")).filter(Boolean),
+    additionalDocumentUrls: Object.fromEntries(
+      additionalDocs.map((doc) => [String(doc.name ?? doc.url ?? ""), String(doc.url ?? "")]).filter(([name]) => name),
+    ),
+    status: invoiceStatusLabel(invoice),
+    ledgerEntryStatus: String(invoice.ledger_entery_status ?? ""),
+    notes: "",
+  };
+};
+
+// Backend invoices are the source of truth for the bill's own data, but this UI has no
+// verify/approve/pay endpoint yet — so a locally-set status (from the Verify / Mark Paid
+// buttons below) is preserved across refetches instead of being reset by the raw fetch.
+const mergeInvoiceRecords = (previous: FinanceRecord[], fetched: FinanceRecord[]): FinanceRecord[] => {
+  const previousById = new Map(previous.map((record) => [record.id, record]));
+  const merged = fetched.map((record) => {
+    const existing = previousById.get(record.id);
+    // ledgerEntryStatus has no backend update endpoint yet either — same reasoning as status.
+    return existing ? { ...record, status: existing.status, ledgerEntryStatus: existing.ledgerEntryStatus } : record;
+  });
+  const fetchedIds = new Set(fetched.map((record) => record.id));
+  const untouched = previous.filter((record) => !fetchedIds.has(record.id));
+  return [...merged, ...untouched];
 };
 
 function PageHeading({ icon: Icon, eyebrow, title, description, action }: { icon: ElementType; eyebrow: string; title: string; description: string; action?: React.ReactNode }) {
@@ -504,7 +568,7 @@ const initialForm = (module: ModuleDefinition, tab: TabDefinition): Omit<Finance
   cgstAmount: 0,
   sgstAmount: 0,
   igstAmount: 0,
-  billInwardNo: module.key === "bills-payables" && tab.label === "Inward" ? nextBillInwardNumber() : "",
+  billInwardNo: "",
   invoiceType: "Tax Invoice",
   vendorGstin: "",
   placeOfSupply: "",
@@ -522,7 +586,7 @@ const initialForm = (module: ModuleDefinition, tab: TabDefinition): Omit<Finance
   supportingDocumentNames: [],
 });
 
-type EntryModalProps = { module: ModuleDefinition; tab: TabDefinition; existing?: FinanceRecord | null; onClose: () => void; onSave: (record: FinanceRecord) => void };
+type EntryModalProps = { module: ModuleDefinition; tab: TabDefinition; existing?: FinanceRecord | null; onClose: () => void; onSave: (record: FinanceRecord) => void; onSaved?: () => void; initialFile?: File; initialInvoiceDocUrl?: string; initialFileName?: string; initialVendorId?: string; initialVendorName?: string; initialInvoiceDirectoryId?: string; initialSupportingFiles?: File[]; initialAdditionalDocuments?: Array<{ name: string; url: string }> };
 
 type DirectoryVendor = { id: string; name: string; phone?: string; address?: string };
 type VendorOrder = { flowId: string; orderNumber: string; orderType: string; status: string };
@@ -575,8 +639,12 @@ const vendorOrderLabel = (orderType: string) => {
   return "PO";
 };
 
-function BillInwardModal({ module, tab, existing, onClose, onSave }: EntryModalProps) {
-  const [form, setForm] = useState<Omit<FinanceRecord, "id">>(() => existing ? { ...initialForm(module, tab), ...existing } : initialForm(module, tab));
+export function BillInwardModal({ module, tab, existing, onClose, onSaved, initialFile, initialInvoiceDocUrl, initialFileName, initialVendorId, initialVendorName, initialInvoiceDirectoryId, initialSupportingFiles, initialAdditionalDocuments }: EntryModalProps) {
+  const [form, setForm] = useState<Omit<FinanceRecord, "id">>(() => {
+    const base = existing ? { ...initialForm(module, tab), ...existing } : initialForm(module, tab);
+    if (!existing && initialVendorId) return { ...base, vendorId: initialVendorId, party: initialVendorName || base.party };
+    return base;
+  });
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [fileError, setFileError] = useState("");
@@ -587,15 +655,43 @@ function BillInwardModal({ module, tab, existing, onClose, onSave }: EntryModalP
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState("");
   const [vendorDetailsLoading, setVendorDetailsLoading] = useState(false);
-  const [supportingFiles, setSupportingFiles] = useState<File[]>([]);
+  // Each supporting file keeps a stable preview URL alongside it (created once, revoked on
+  // removal/unmount) so the document tab strip below can preview it without recreating blob
+  // URLs on every render.
+  const [supportingFiles, setSupportingFiles] = useState<Array<{ file: File; url: string }>>(() => (((!existing && initialSupportingFiles) || []) as File[]).map((item) => ({ file: item, url: URL.createObjectURL(item) })));
+  // Additional documents that are already hosted (e.g. the rest of an Invoice Directory
+  // folder) — kept separate from supportingFiles so they aren't re-uploaded on submit.
+  const [remoteAdditionalDocuments, setRemoteAdditionalDocuments] = useState<Array<{ name: string; url: string }>>(() => (!existing && initialAdditionalDocuments) || []);
+  const [selectedPreviewKey, setSelectedPreviewKey] = useState("");
+  const supportingFilesRef = useRef(supportingFiles);
+  useEffect(() => { supportingFilesRef.current = supportingFiles; }, [supportingFiles]);
+  useEffect(() => () => { supportingFilesRef.current.forEach((item) => URL.revokeObjectURL(item.url)); }, []);
   const [completionReferences, setCompletionReferences] = useState<CompletionReference[]>([]);
   const [completionReferencesLoading, setCompletionReferencesLoading] = useState(false);
   const [completionReferencesError, setCompletionReferencesError] = useState("");
   const [accountingDimensions] = useState<AccountingDimensions>(loadAccountingDimensions);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
   }, [previewUrl]);
+
+  // Bill Inward No. is allocated by the backend sequence, not guessed from whatever the
+  // browser happens to have cached — only fetched for a brand-new entry.
+  useEffect(() => {
+    if (existing) return;
+    let cancelled = false;
+    fetch(`${String(getBaseUrl() ?? "").replace(/\/$/, "")}/admin_accounts/get_next_invoice_id`, { headers: { Accept: "application/json" } })
+      .then((res) => res.json())
+      .then((data: { success?: boolean; next_invoice_id?: string }) => {
+        if (!cancelled && data?.success && data.next_invoice_id) {
+          setForm((current) => ({ ...current, billInwardNo: data.next_invoice_id as string }));
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -778,6 +874,23 @@ function BillInwardModal({ module, tab, existing, onClose, onSave }: EntryModalP
     return () => { cancelled = true; };
   }, [form.vendorId]);
 
+  // Once a real PO/WO/Contract is linked, its own payment terms are more specific than the
+  // vendor-level default above and take priority over it.
+  useEffect(() => {
+    let cancelled = false;
+    const orderNumber = String(form.poWoReference ?? "").trim();
+    if (!orderNumber || orderNumber === "NA") return () => { cancelled = true; };
+    const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+    fetch(`${baseUrl}/admin_accounts/get_payment_terms/${encodeURIComponent(orderNumber)}`, { headers: { Accept: "application/json" } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { success?: boolean; "payment terms"?: string } | null) => {
+        const terms = data?.success ? data["payment terms"] : undefined;
+        if (!cancelled && terms) setForm((current) => ({ ...current, paymentTerms: terms }));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [form.poWoReference]);
+
   useEffect(() => {
     if (!form.invoiceDate) return;
     const invoiceDate = new Date(`${form.invoiceDate}T00:00:00`);
@@ -802,26 +915,132 @@ function BillInwardModal({ module, tab, existing, onClose, onSave }: EntryModalP
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setFile(selected);
     setPreviewUrl(URL.createObjectURL(selected));
+    setRemoteInvoiceDocUrl("");
     setFileError("");
     update("attachmentName", selected.name);
     update("attachmentType", selected.type);
   };
+
+  // Opened from the Invoice Directory's "Process Invoice" action — the folder's Invoice
+  // document is already known, so skip straight past the "upload bill document" gate.
+  useEffect(() => {
+    if (initialFile) chooseFile(initialFile);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Same "Process Invoice" case, but when the folder's document only has a remote URL (no
+  // local File could be resolved, e.g. cross-origin S3 fetch blocked by CORS) — use the
+  // already-hosted document directly instead of forcing a re-upload of the same file.
+  const [remoteInvoiceDocUrl, setRemoteInvoiceDocUrl] = useState(() => (!initialFile && initialInvoiceDocUrl) || "");
+  useEffect(() => {
+    if (!initialFile && initialInvoiceDocUrl) {
+      setPreviewUrl(initialInvoiceDocUrl);
+      update("attachmentName", initialFileName || initialInvoiceDocUrl.split("/").pop() || "Invoice document");
+      update("attachmentType", /\.pdf(\?|$)/i.test(initialInvoiceDocUrl) ? "application/pdf" : "image/jpeg");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Uploads a single file against the vendor's PO/WO document store — falls back to the
+  // Bill Inward number when this bill isn't linked to a real order, since the endpoint
+  // just uses order_number to namespace the S3 path, not to validate an actual order.
+  const uploadBillDocument = async (baseUrl: string, orderNumber: string, documentFile: File) => {
+    const body = new FormData();
+    body.append("document", documentFile);
+    const response = await fetch(`${baseUrl}/purchase_flow/upload_purchase_flow_document?order_number=${encodeURIComponent(orderNumber)}`, { method: "POST", body });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.success || !payload?.file_url) throw new Error(payload?.detail || `Failed to upload ${documentFile.name}`);
+    return String(payload.file_url);
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!file && !existing?.attachmentName) {
+    if (!file && !existing?.attachmentName && !remoteInvoiceDocUrl) {
       setFileError("Upload the bill document before entering its details.");
       return;
     }
-    const taxAmount = Number(form.cgstAmount || 0) + Number(form.sgstAmount || 0) + Number(form.igstAmount || 0);
-    const payable = Number(form.baseAmount || 0) + taxAmount + Number(form.otherAdjustment || 0);
-    const supportingDocumentNames = Array.from(new Set([...(form.supportingDocumentNames ?? []), ...supportingFiles.map((item) => item.name)]));
-    const recordId = existing?.id ?? `FA-${Date.now()}`;
-    try {
-      await saveBillDocuments(recordId, file, supportingFiles);
-    } catch {
-      // Metadata is still saved so older browsers can show the complete document list.
+    if (!form.vendorId) {
+      toast.error("Select a vendor before submitting.");
+      return;
     }
-    onSave({ ...form, amount: payable, taxAmount, supportingDocumentNames, entryType: "Bill Inward", status: existing ? form.status : "Pending Approval", id: recordId });
+
+    const totalGst = Number(form.cgstAmount || 0) + Number(form.sgstAmount || 0) + Number(form.igstAmount || 0);
+    const invoiceAmount = Number(form.baseAmount || 0) + totalGst;
+    const payable = invoiceAmount + Number(form.otherAdjustment || 0);
+    const hasOrderReference = Boolean(form.poWoReference) && form.poWoReference !== "NA";
+    const hasCompletionReference = Boolean(form.grnServiceReference) && form.grnServiceReference !== "NA";
+    const uploadOrderNumber = hasOrderReference ? (form.poWoReference as string) : (form.billInwardNo || `BI-${Date.now()}`);
+
+    setSubmitting(true);
+    try {
+      const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+
+      // Only the invoice document and ad-hoc extras (e-way bill, challan, etc.) get
+      // uploaded here — the linked PO/WO and its GRN/WCC are existing backend records,
+      // referenced by number below rather than re-uploaded. A folder processed from the
+      // Invoice Directory already has its document hosted (remoteInvoiceDocUrl) — reuse it
+      // instead of re-uploading the same file, unless it was replaced with a new one.
+      const invoiceDocUrl = file ? await uploadBillDocument(baseUrl, uploadOrderNumber, file) : remoteInvoiceDocUrl;
+      const additionalDocuments: Array<{ name: string; url: string }> = [...remoteAdditionalDocuments];
+      for (const { file: supportingFile } of supportingFiles) {
+        const url = await uploadBillDocument(baseUrl, uploadOrderNumber, supportingFile);
+        additionalDocuments.push({ name: supportingFile.name, url });
+      }
+
+      const base = Number(form.baseAmount || 0);
+      const cupportingDocuments = [
+        ...(hasOrderReference ? [{ document_type: form.referenceType, document_number: form.poWoReference }] : []),
+        ...(hasCompletionReference ? [{ document_type: form.referenceType === "WO" ? "WCC" : "GRN", document_number: form.grnServiceReference }] : []),
+      ];
+
+      const response = await fetch(`${baseUrl}/admin_accounts/invoice_inward`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          invoice_directory_id: initialInvoiceDirectoryId || "",
+          vendor: { vendor_id: form.vendorId, vendor_name: form.party, gst_number: form.vendorGstin || "" },
+          invoice: {
+            invoice_number: form.reference,
+            invoice_date: form.invoiceDate || "",
+            invoice_amount: invoiceAmount,
+            invoice_doc_url: invoiceDocUrl,
+            inward_date: form.date,
+          },
+          purchase_order: {
+            order_number: hasOrderReference ? form.poWoReference : "",
+            cupporting_documents: cupportingDocuments,
+            department: form.department || "",
+          },
+          tax_details: {
+            cgst_percentage: base > 0 ? (Number(form.cgstAmount || 0) / base) * 100 : 0,
+            cgst_amount: Number(form.cgstAmount || 0),
+            sgst_percentage: base > 0 ? (Number(form.sgstAmount || 0) / base) * 100 : 0,
+            sgst_amount: Number(form.sgstAmount || 0),
+            igst_percentage: base > 0 ? (Number(form.igstAmount || 0) / base) * 100 : 0,
+            igst_amount: Number(form.igstAmount || 0),
+            total_tax_amount: totalGst,
+            other_charges_or_adjustments: Number(form.otherAdjustment || 0),
+            tds_applicable: form.tdsApplicable === "Yes",
+            payment_terms: form.paymentTerms || "",
+            payment_due_date: form.dueDate || "",
+          },
+          total_amount_payable: payable,
+          bill_priority: form.billPriority || "Normal",
+          bill_type: form.invoiceType || "",
+          additional_documents: additionalDocuments,
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || data?.success === false) throw new Error(data?.detail || data?.message || "Failed to save invoice inward");
+
+      toast.success(`Invoice inward ${data?.data?.invoice_id ?? form.reference} recorded successfully`);
+      onSaved?.();
+      onClose();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to submit invoice inward");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const inputClass = "h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none transition placeholder:font-normal placeholder:text-slate-400 focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10";
@@ -830,10 +1049,20 @@ function BillInwardModal({ module, tab, existing, onClose, onSave }: EntryModalP
   const totalPayable = Number(form.baseAmount || 0) + totalGst + Number(form.otherAdjustment || 0);
   const selectedVendor = vendors.find((vendor) => vendor.id === form.vendorId);
   const filteredVendorOrders = vendorOrders.filter((order) => vendorOrderLabel(order.orderType) === form.referenceType);
-  const attachmentName = file?.name || existing?.attachmentName || "";
-  const attachmentType = file?.type || existing?.attachmentType || "";
+  const attachmentName = file?.name || existing?.attachmentName || form.attachmentName || "";
+  const attachmentType = file?.type || existing?.attachmentType || form.attachmentType || "";
 
-  if (!file && !existing?.attachmentName) {
+  // Every document available to preview — the bill attachment plus every additional
+  // document, whether already hosted (remoteAdditionalDocuments) or freshly picked
+  // (supportingFiles). Shown as a tab strip once there's more than one.
+  const previewDocuments = [
+    ...(file || remoteInvoiceDocUrl ? [{ key: "bill", name: attachmentName || "Bill attachment", role: "bill" as const, type: attachmentType, url: previewUrl }] : []),
+    ...remoteAdditionalDocuments.map((document) => ({ key: `remote-${document.url}`, name: document.name, role: "supporting" as const, type: /\.pdf(\?|$)/i.test(document.url) ? "application/pdf" : "image/jpeg", url: document.url })),
+    ...supportingFiles.map((item) => ({ key: `local-${item.url}`, name: item.file.name, role: "supporting" as const, type: item.file.type, url: item.url })),
+  ];
+  const selectedPreview = previewDocuments.find((document) => document.key === selectedPreviewKey) ?? previewDocuments[0];
+
+  if (!file && !existing?.attachmentName && !remoteInvoiceDocUrl) {
     return (
       <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-[2px]" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
         <div className="w-full max-w-2xl overflow-hidden rounded-3xl bg-white shadow-2xl">
@@ -877,29 +1106,51 @@ function BillInwardModal({ module, tab, existing, onClose, onSave }: EntryModalP
 
         <div className="grid min-h-0 flex-1 overflow-y-auto bg-[#eef3f6] lg:grid-cols-[minmax(0,1.05fr)_minmax(520px,0.95fr)] lg:overflow-hidden">
           <section className="flex min-h-[520px] flex-col border-b border-slate-200 p-4 lg:min-h-0 lg:border-b-0 lg:border-r lg:p-5">
-            <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-2xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/70">
-              <div className="flex min-w-0 items-center gap-3">
-                <span className="rounded-xl bg-[#eaf4f1] p-2 text-[#0d5c4d]"><FileImage className="h-5 w-5" /></span>
-                <div className="min-w-0"><p className="truncate text-sm font-bold text-slate-800">{attachmentName}</p><p className="text-xs font-medium text-slate-400">{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB · ` : "Saved attachment · "}{attachmentType === "application/pdf" ? "PDF document" : "Bill image"}</p></div>
+            {previewDocuments.length > 1 ? (
+              <div className="mb-3 flex shrink-0 gap-2 overflow-x-auto pb-1">
+                {previewDocuments.map((document) => (
+                  <button
+                    key={document.key}
+                    type="button"
+                    onClick={() => setSelectedPreviewKey(document.key)}
+                    className={cn(
+                      "flex min-w-[190px] items-center gap-2 rounded-xl border px-3 py-2 text-left",
+                      selectedPreview?.key === document.key ? "border-[#278b76] bg-[#e7f3ef] text-[#0d5c4d]" : "border-slate-200 bg-white text-slate-600 hover:border-[#b8d6ce]",
+                    )}
+                  >
+                    {document.type.startsWith("image/") ? <FileImage className="h-4 w-4 shrink-0" /> : <FileText className="h-4 w-4 shrink-0" />}
+                    <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{document.name}</span><span className="mt-0.5 block text-[10px] font-semibold uppercase opacity-60">{document.role === "bill" ? "Bill Attachment" : "Supporting"}</span></span>
+                  </button>
+                ))}
               </div>
-              <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-600 hover:bg-slate-50"><input type="file" className="sr-only" accept="application/pdf,image/jpeg,image/png,image/webp" onChange={(event) => chooseFile(event.target.files?.[0])} /><RefreshCw className="h-3.5 w-3.5" /> Replace</label>
-            </div>
+            ) : (
+              <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-2xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/70">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="rounded-xl bg-[#eaf4f1] p-2 text-[#0d5c4d]"><FileImage className="h-5 w-5" /></span>
+                  <div className="min-w-0"><p className="truncate text-sm font-bold text-slate-800">{attachmentName}</p><p className="text-xs font-medium text-slate-400">{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB · ` : "Saved attachment · "}{attachmentType === "application/pdf" ? "PDF document" : "Bill image"}</p></div>
+                </div>
+                <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-600 hover:bg-slate-50"><input type="file" className="sr-only" accept="application/pdf,image/jpeg,image/png,image/webp" onChange={(event) => chooseFile(event.target.files?.[0])} /><RefreshCw className="h-3.5 w-3.5" /> Replace</label>
+              </div>
+            )}
             <div className="flex min-h-[430px] flex-1 items-center justify-center overflow-hidden rounded-2xl bg-slate-200/70 p-3 ring-1 ring-slate-300/70">
-              {!file ? (
+              {!selectedPreview ? (
                 <div className="flex max-w-sm flex-col items-center px-6 text-center"><span className="rounded-2xl bg-white p-4 text-[#0d5c4d] shadow-sm"><FileImage className="h-8 w-8" /></span><p className="mt-4 text-sm font-bold text-slate-700">{attachmentName}</p><p className="mt-2 text-xs leading-5 text-slate-500">The saved invoice remains attached. Use Replace to load a new document preview while editing.</p></div>
-              ) : file.type === "application/pdf" ? (
-                <iframe title="Bill PDF preview" src={previewUrl} className="h-full min-h-[650px] w-full rounded-xl bg-white" />
+              ) : selectedPreview.type === "application/pdf" || selectedPreview.type.startsWith("image/") ? (
+                <MediaPreviewFrame name={selectedPreview.name} type={selectedPreview.type} url={selectedPreview.url} />
               ) : (
-                <img src={previewUrl} alt="Uploaded bill preview" className="max-h-full max-w-full rounded-xl object-contain shadow-lg" />
+                <div className="flex max-w-xs flex-col items-center text-center text-slate-400"><FileText className="h-10 w-10" /><p className="mt-3 break-all text-sm font-bold text-slate-700">{selectedPreview.name}</p><p className="mt-1 text-xs">Preview isn't available for this file type.</p></div>
               )}
             </div>
+            {previewDocuments.length > 1 && selectedPreview?.role === "bill" && (
+              <label className="mt-3 inline-flex h-9 w-fit cursor-pointer items-center gap-2 self-end rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 hover:bg-slate-50"><input type="file" className="sr-only" accept="application/pdf,image/jpeg,image/png,image/webp" onChange={(event) => chooseFile(event.target.files?.[0])} /><RefreshCw className="h-3.5 w-3.5" /> Replace Bill Attachment</label>
+            )}
           </section>
 
           <section className="overflow-y-auto bg-white p-5 sm:p-6">
             <div className="mb-5"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">Bill details</p><h3 className="mt-1 text-lg font-bold text-slate-900">Enter details from the uploaded bill</h3></div>
             <div className="grid gap-5 sm:grid-cols-2">
               <div className="sm:col-span-2"><p className="text-[11px] font-extrabold uppercase tracking-[0.13em] text-slate-400">Invoice identity</p></div>
-              <label className={fieldLabel}>Bill Inward No. *<input readOnly className={cn(inputClass, "bg-slate-50 text-[#0d5c4d]")} value={form.billInwardNo ?? ""} /></label>
+              <label className={fieldLabel}>Bill Inward No. *<input readOnly className={cn(inputClass, "bg-slate-50 text-[#0d5c4d]")} value={form.billInwardNo || (existing ? "" : "Allocating…")} /></label>
               <label className={fieldLabel}>Invoice Type *<select required className={inputClass} value={form.invoiceType ?? ""} onChange={(event) => update("invoiceType", event.target.value)}>{["Tax Invoice", "Service Invoice", "Proforma Invoice", "Debit Note", "Credit Note", "Expense Bill", "Contractor Bill", "Other"].map((item) => <option key={item}>{item}</option>)}</select></label>
               <label className={fieldLabel}>Vendor *
                 <select
@@ -983,9 +1234,9 @@ function BillInwardModal({ module, tab, existing, onClose, onSave }: EntryModalP
               <label className={fieldLabel}>Original Bill Received *<select required className={inputClass} value={form.originalBillReceived ?? "No"} onChange={(event) => update("originalBillReceived", event.target.value)}><option>No</option><option>Yes</option></select></label>
               <div className="rounded-2xl border border-[#cfe3dd] bg-[#f6faf9] p-4 sm:col-span-2"><div className="flex items-center justify-between gap-3"><div><p className="text-xs font-bold text-slate-700">Bill Attachment *</p><p className="mt-1 text-xs text-slate-400">{attachmentName} · mandatory invoice document</p></div><span className="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-extrabold uppercase text-emerald-700">Attached</span></div></div>
               <div className="sm:col-span-2">
-                <label className="flex cursor-pointer items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-sm font-bold text-[#0d5c4d] hover:border-[#8bbcaf] hover:bg-[#f0f8f5]"><input multiple type="file" className="sr-only" accept=".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.xls,.xlsx" onChange={(event) => { const added = Array.from(event.target.files ?? []); setSupportingFiles((current) => [...current, ...added]); event.target.value = ""; }} /><UploadCloud className="h-4 w-4" /> Add Supporting Documents</label>
-                <p className="mt-2 text-[11px] font-medium text-slate-400">PO, WO, GRN, WCC, measurement sheet, approval, quotation or challan.</p>
-                {(form.supportingDocumentNames?.length || supportingFiles.length > 0) && <div className="mt-3 space-y-2">{(form.supportingDocumentNames ?? []).map((name) => <div key={`saved-${name}`} className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2"><span className="min-w-0 truncate text-xs font-semibold text-slate-600">{name}</span><span className="text-[10px] font-bold uppercase text-emerald-600">Saved</span></div>)}{supportingFiles.map((document, index) => <div key={`${document.name}-${index}`} className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2"><span className="min-w-0 truncate text-xs font-semibold text-slate-600">{document.name}</span><button type="button" onClick={() => setSupportingFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="ml-3 rounded-md p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 className="h-3.5 w-3.5" /></button></div>)}</div>}
+                <label className="flex cursor-pointer items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-sm font-bold text-[#0d5c4d] hover:border-[#8bbcaf] hover:bg-[#f0f8f5]"><input multiple type="file" className="sr-only" accept=".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.xls,.xlsx" onChange={(event) => { const added = Array.from(event.target.files ?? []).map((item) => ({ file: item, url: URL.createObjectURL(item) })); setSupportingFiles((current) => [...current, ...added]); event.target.value = ""; }} /><UploadCloud className="h-4 w-4" /> Add Additional Documents</label>
+                <p className="mt-2 text-[11px] font-medium text-slate-400">E-way bill, challan or other ad-hoc documents. PO/WO and GRN/WCC are linked by reference above — no need to upload them again.</p>
+                {(form.supportingDocumentNames?.length || remoteAdditionalDocuments.length > 0 || supportingFiles.length > 0) && <div className="mt-3 space-y-2">{(form.supportingDocumentNames ?? []).map((name) => <div key={`saved-${name}`} className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2"><span className="min-w-0 truncate text-xs font-semibold text-slate-600">{name}</span><span className="text-[10px] font-bold uppercase text-emerald-600">Saved</span></div>)}{remoteAdditionalDocuments.map((document, index) => <div key={`remote-${document.url}`} className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2"><span className="min-w-0 truncate text-xs font-semibold text-slate-600">{document.name}</span><button type="button" onClick={() => setRemoteAdditionalDocuments((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="ml-3 rounded-md p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 className="h-3.5 w-3.5" /></button></div>)}{supportingFiles.map(({ file: supportingFile, url: supportingUrl }, index) => <div key={`${supportingFile.name}-${index}`} className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2"><span className="min-w-0 truncate text-xs font-semibold text-slate-600">{supportingFile.name}</span><button type="button" onClick={() => { URL.revokeObjectURL(supportingUrl); setSupportingFiles((current) => current.filter((_, itemIndex) => itemIndex !== index)); }} className="ml-3 rounded-md p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 className="h-3.5 w-3.5" /></button></div>)}</div>}
               </div>
               <label className={cn(fieldLabel, "sm:col-span-2")}>Narration / Notes<textarea rows={3} className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm font-medium text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10" value={form.notes} onChange={(event) => update("notes", event.target.value)} placeholder="Add bill purpose, remarks or control notes" /></label>
             </div>
@@ -994,7 +1245,7 @@ function BillInwardModal({ module, tab, existing, onClose, onSave }: EntryModalP
 
         <div className="flex shrink-0 flex-col gap-3 border-t border-slate-100 bg-white px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs font-medium text-slate-400">The uploaded document is required for Bill Inward.</p>
-          <div className="flex justify-end gap-3"><button type="button" onClick={onClose} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50">Cancel</button><button type="submit" className="h-11 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f]">{existing ? "Save Changes" : "Save Bill Inward"}</button></div>
+          <div className="flex justify-end gap-3"><button type="button" onClick={onClose} disabled={submitting} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cancel</button><button type="submit" disabled={submitting} className="h-11 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f] disabled:opacity-60">{submitting ? "Saving…" : existing ? "Save Changes" : "Save Bill Inward"}</button></div>
         </div>
       </form>
     </div>
@@ -1548,7 +1799,135 @@ function ExactPurchaseOrderPreview({ order }: { order: Record<string, unknown> }
   return <MakePurchaseOrderPopup open comparative={comparative} vendorId={vendorId} poNumber={poNumber} onClose={() => undefined} variant="inline" inlineSimulatePrint reviewOnly documentStatus="approved" />;
 }
 
-function BillVerificationPreview({ record, onClose, onVerify, onRequestPayment, paymentRequested = false, actionMode = "verify" }: { record: FinanceRecord; onClose: () => void; onVerify: () => void; onRequestPayment?: () => void; paymentRequested?: boolean; actionMode?: "verify" | "pay" }) {
+// Shown right after a bill is verified — books the liability against the vendor's accounts
+// ledger via the same add_accounts_ledger_entry endpoint AccountsPayments.tsx already uses
+// for its own "intake" step, so both flows post to the same place.
+function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord; onClose: () => void; onPosted: () => void }) {
+  const totalGst = Number(record.cgstAmount || 0) + Number(record.sgstAmount || 0) + Number(record.igstAmount || 0);
+  const totalPayable = Number(record.amount || 0) || (Number(record.baseAmount || 0) + totalGst + Number(record.otherAdjustment || 0));
+  const [liabilityAmount, setLiabilityAmount] = useState(String(totalPayable || ""));
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [submitting, setSubmitting] = useState(false);
+  const [selectedDocKey, setSelectedDocKey] = useState("");
+
+  const documents = [
+    ...(record.attachmentUrl ? [{ key: "bill", name: record.attachmentName || "Bill attachment", role: "bill" as const, type: record.attachmentType || (/\.pdf(\?|$)/i.test(record.attachmentUrl) ? "application/pdf" : "image/jpeg"), url: record.attachmentUrl }] : []),
+    ...Object.entries(record.additionalDocumentUrls ?? {}).map(([name, url]) => ({ key: `add-${url}`, name, role: "supporting" as const, type: /\.pdf(\?|$)/i.test(url) ? "application/pdf" : "image/jpeg", url })),
+  ];
+  const selectedDocument = documents.find((document) => document.key === selectedDocKey) ?? documents[0];
+
+  const handlePost = async () => {
+    const amount = Number(liabilityAmount);
+    if (!amount || amount <= 0) { toast.error("Enter the liability amount to book."); return; }
+    if (!record.vendorId) { toast.error("This bill has no vendor on record."); return; }
+    setSubmitting(true);
+    try {
+      const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+      const response = await fetch(`${baseUrl}/admin_accounts/add_accounts_ledger_entry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vendor_id: record.vendorId,
+          vendor_details: { vendor_name: record.party, gst_number: record.vendorGstin || "" },
+          invoice_no: record.billInwardNo || record.reference || "",
+          transfer_type: "debit",
+          base_amount: amount,
+          discount_percentage: 0,
+          GST_percentage: 0,
+          freight_charges: 0,
+          other_charges: 0,
+          tds_percentage: 0,
+          date,
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.success) throw new Error(data?.detail || data?.message || "Failed to post ledger entry");
+      toast.success(`Liability of ${formatCurrency(amount)} booked for ${record.billInwardNo || record.reference}`);
+      onPosted();
+      onClose();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to post ledger entry");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-[2px]">
+      <div className="flex max-h-[94vh] w-full max-w-[1300px] flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
+        <div className="flex shrink-0 items-start justify-between bg-[#0d473f] px-6 py-5 text-white">
+          <div>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Bills & Payables · Verification</p>
+            <h2 className="mt-1 text-xl font-bold">Ledger Entry</h2>
+            <p className="mt-1 text-xs font-medium text-white/60">{record.billInwardNo || record.reference} · {record.party} · verified, ready to book</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg p-2 text-white/70 hover:bg-white/10 hover:text-white"><X className="h-5 w-5" /></button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 overflow-y-auto bg-[#eef3f6] lg:grid-cols-[minmax(0,1fr)_minmax(400px,0.85fr)] lg:overflow-hidden">
+          <section className="flex min-h-[420px] flex-col border-b border-slate-200 p-4 lg:min-h-0 lg:border-b-0 lg:border-r lg:p-5">
+            <p className="mb-3 text-xs font-extrabold uppercase tracking-[0.13em] text-slate-400">Documents on file</p>
+            {documents.length > 1 && (
+              <div className="mb-3 flex shrink-0 gap-2 overflow-x-auto pb-1">
+                {documents.map((document) => (
+                  <button key={document.key} type="button" onClick={() => setSelectedDocKey(document.key)} className={cn("flex min-w-[190px] items-center gap-2 rounded-xl border px-3 py-2 text-left", selectedDocument?.key === document.key ? "border-[#278b76] bg-[#e7f3ef] text-[#0d5c4d]" : "border-slate-200 bg-white text-slate-600 hover:border-[#b8d6ce]")}>
+                    {document.type.startsWith("image/") ? <FileImage className="h-4 w-4 shrink-0" /> : <FileText className="h-4 w-4 shrink-0" />}
+                    <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{document.name}</span><span className="mt-0.5 block text-[10px] font-semibold uppercase opacity-60">{document.role === "bill" ? "Bill Attachment" : "Supporting"}</span></span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="flex min-h-[380px] flex-1 items-center justify-center overflow-hidden rounded-2xl bg-slate-200/70 p-3 ring-1 ring-slate-300/70">
+              {!selectedDocument ? (
+                <div className="flex max-w-sm flex-col items-center px-6 text-center text-slate-400"><FileText className="h-9 w-9" /><p className="mt-3 text-sm font-bold text-slate-600">No documents on file</p></div>
+              ) : selectedDocument.type === "application/pdf" || selectedDocument.type.startsWith("image/") ? (
+                <MediaPreviewFrame name={selectedDocument.name} type={selectedDocument.type} url={selectedDocument.url} />
+              ) : (
+                <div className="flex max-w-xs flex-col items-center text-center text-slate-400"><FileText className="h-10 w-10" /><p className="mt-3 break-all text-sm font-bold text-slate-700">{selectedDocument.name}</p></div>
+              )}
+            </div>
+          </section>
+
+          <section className="overflow-y-auto bg-white p-5 sm:p-6">
+            <div className="mb-4"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">Invoice summary</p><h3 className="mt-1 text-lg font-bold text-slate-900">Confirm the liability to book</h3></div>
+            <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
+              <div className="flex justify-between"><span className="text-slate-500">Taxable / Base Amount</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.baseAmount || 0))}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">CGST</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.cgstAmount || 0))}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">SGST</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.sgstAmount || 0))}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">IGST</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.igstAmount || 0))}</span></div>
+              <div className="flex justify-between border-t border-slate-200 pt-2"><span className="text-slate-500">Total GST</span><span className="font-semibold text-slate-800">{formatCurrency(totalGst)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Other Charges / Adjustment</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.otherAdjustment || 0))}</span></div>
+              <div className="flex justify-between border-t border-slate-200 pt-2 text-base"><span className="font-bold text-slate-700">Total Invoiced</span><span className="font-bold text-[#0d5c4d]">{formatCurrency(totalPayable)}</span></div>
+            </div>
+
+            <div className="mt-5 grid gap-4 sm:grid-cols-2">
+              <label className="space-y-2 text-xs font-bold text-slate-600">Liability Amount to Book *
+                <input required type="number" min="0" step="0.01" value={liabilityAmount} onChange={(event) => setLiabilityAmount(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10" />
+              </label>
+              <label className="space-y-2 text-xs font-bold text-slate-600">Entry Date *
+                <input required type="date" value={date} onChange={(event) => setDate(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10" />
+              </label>
+            </div>
+            {Number(liabilityAmount || 0) !== totalPayable && (
+              <p className="mt-2 text-[11px] font-semibold text-amber-700">This differs from the invoice's total ({formatCurrency(totalPayable)}) — booking a partial or adjusted liability.</p>
+            )}
+          </section>
+        </div>
+
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-100 bg-white px-6 py-4">
+          <p className="text-xs font-medium text-slate-400">Posts to the vendor's accounts ledger as a liability.</p>
+          <div className="flex gap-3">
+            <button type="button" onClick={onClose} disabled={submitting} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Skip for now</button>
+            <button type="button" onClick={handlePost} disabled={submitting} className="h-11 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f] disabled:opacity-60">{submitting ? "Posting…" : "Post Ledger Entry"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BillVerificationPreview({ record, onClose, onVerify, onRequestPayment, onPostLedgerEntry, paymentRequested = false, actionMode = "verify" }: { record: FinanceRecord; onClose: () => void; onVerify: () => void; onRequestPayment?: () => void; onPostLedgerEntry?: () => void; paymentRequested?: boolean; actionMode?: "verify" | "pay" }) {
+  const ledgerEntryPending = record.ledgerEntryStatus !== "completed";
   const [storedDocuments, setStoredDocuments] = useState<Array<StoredBillDocument & { url: string }>>([]);
   const [selectedDocumentKey, setSelectedDocumentKey] = useState("");
   const [documentsLoading, setDocumentsLoading] = useState(true);
@@ -1635,8 +2014,8 @@ function BillVerificationPreview({ record, onClose, onVerify, onRequestPayment, 
 
   const totalGst = Number(record.cgstAmount || 0) + Number(record.sgstAmount || 0) + Number(record.igstAmount || 0);
   const metadataDocuments = [
-    ...(record.attachmentName ? [{ key: `${record.id}:bill-metadata`, recordId: record.id, role: "bill" as const, name: record.attachmentName, type: record.attachmentType || "", url: "" }] : []),
-    ...(record.supportingDocumentNames ?? []).map((name) => ({ key: `${record.id}:supporting-metadata:${name}`, recordId: record.id, role: "supporting" as const, name, type: "", url: "" })),
+    ...(record.attachmentName ? [{ key: `${record.id}:bill-metadata`, recordId: record.id, role: "bill" as const, name: record.attachmentName, type: record.attachmentType || "", url: record.attachmentUrl || "" }] : []),
+    ...(record.supportingDocumentNames ?? []).map((name) => ({ key: `${record.id}:supporting-metadata:${name}`, recordId: record.id, role: "supporting" as const, name, type: record.additionalDocumentUrls?.[name] ? "application/pdf" : "", url: record.additionalDocumentUrls?.[name] || "" })),
   ];
   const linkedReferenceDocuments = [
     ...(record.poWoReference && record.poWoReference !== "NA" ? [{ key: `${record.id}:order-reference`, recordId: record.id, role: "reference" as const, name: `${record.referenceType || "Order"} · ${record.poWoReference}`, type: linkedDocumentPreviews.order?.type || "application/x-linked-reference", url: linkedDocumentPreviews.order?.url || "", referenceLabel: `${record.referenceType || "Order"} Reference` }] : []),
@@ -1724,8 +2103,8 @@ function BillVerificationPreview({ record, onClose, onVerify, onRequestPayment, 
           </div>
         </div>
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-100 bg-white px-6 py-4">
-          <p className="text-xs font-medium text-slate-400">{actionMode === "pay" ? record.status === "Pending Approval" || record.status === "Draft" ? "The bill must be verified before it can be marked as paid." : "Confirm payment only after the complete bill amount has been settled." : record.status === "Verified" ? paymentRequested ? "A payment request has been raised for this verified bill." : "The bill is verified and ready to be requested for payment." : "Verification confirms that the bill details and supporting references have been reviewed."}</p>
-          <div className="flex gap-3"><button onClick={onClose} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50">Close</button>{actionMode === "verify" ? record.status === "Verified" ? <button onClick={onRequestPayment} disabled={paymentRequested} className={cn("inline-flex h-11 items-center gap-2 rounded-xl px-5 text-sm font-bold", paymentRequested ? "cursor-not-allowed bg-emerald-50 text-emerald-700" : "bg-[#0d5c4d] text-white hover:bg-[#0a4b3f]")}><CreditCard className="h-4 w-4" />{paymentRequested ? "Payment Requested" : "Request Payment"}</button> : record.status !== "Paid" && <button onClick={onVerify} className="inline-flex h-11 items-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f]"><CheckCircle2 className="h-4 w-4" />Verify Bill</button> : record.status === "Verified" && <button onClick={onVerify} className="inline-flex h-11 items-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f]"><CheckCircle2 className="h-4 w-4" />Mark as Paid</button>}</div>
+          <p className="text-xs font-medium text-slate-400">{actionMode === "pay" ? record.status === "Pending Approval" || record.status === "Draft" ? "The bill must be verified before it can be marked as paid." : "Confirm payment only after the complete bill amount has been settled." : record.status === "Verified" ? ledgerEntryPending ? "The bill is verified — post a ledger entry to record the liability before requesting payment." : paymentRequested ? "A payment request has been raised for this verified bill." : "The bill is verified and ready to be requested for payment." : "Verification confirms that the bill details and supporting references have been reviewed."}</p>
+          <div className="flex gap-3"><button onClick={onClose} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50">Close</button>{actionMode === "verify" ? record.status === "Verified" ? ledgerEntryPending ? <button onClick={onPostLedgerEntry} className="inline-flex h-11 items-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f]"><IndianRupee className="h-4 w-4" />Ledger Entry</button> : <button onClick={onRequestPayment} disabled={paymentRequested} className={cn("inline-flex h-11 items-center gap-2 rounded-xl px-5 text-sm font-bold", paymentRequested ? "cursor-not-allowed bg-emerald-50 text-emerald-700" : "bg-[#0d5c4d] text-white hover:bg-[#0a4b3f]")}><CreditCard className="h-4 w-4" />{paymentRequested ? "Payment Requested" : "Request Payment"}</button> : record.status !== "Paid" && <button onClick={onVerify} className="inline-flex h-11 items-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f]"><CheckCircle2 className="h-4 w-4" />Verify Bill</button> : record.status === "Verified" && <button onClick={onVerify} className="inline-flex h-11 items-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f]"><CheckCircle2 className="h-4 w-4" />Mark as Paid</button>}</div>
         </div>
       </div>
     </div>
@@ -1745,8 +2124,35 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
   const [verificationPreview, setVerificationPreview] = useState<FinanceRecord | null>(null);
   const [billPreviewMode, setBillPreviewMode] = useState<"verify" | "pay">("verify");
   const [prrModalRecord, setPrrModalRecord] = useState<FinanceRecord | null>(null);
+  const [ledgerEntryRecord, setLedgerEntryRecord] = useState<FinanceRecord | null>(null);
+  const [invoicesLoading, setInvoicesLoading] = useState(false);
+  const [invoicesError, setInvoicesError] = useState("");
 
   useEffect(() => setRecords(loadRecords()), []);
+
+  const loadInvoices = () => {
+    setInvoicesLoading(true);
+    setInvoicesError("");
+    fetch(`${String(getBaseUrl() ?? "").replace(/\/$/, "")}/admin_accounts/get_invoices`, { headers: { Accept: "application/json" } })
+      .then(async (res) => {
+        const data = await res.json().catch(() => null) as { success?: boolean; data?: Array<Record<string, unknown>>; detail?: string } | null;
+        if (!res.ok || !data?.success || !Array.isArray(data.data)) {
+          throw new Error(!res.ok ? `Invoice API not reachable (${res.status}${data?.detail ? ` — ${data.detail}` : ""}). Rows shown below may be stale local data, not the database.` : "Invoice API returned an unexpected response.");
+        }
+        setRecords((current) => mergeInvoiceRecords(current, data.data.map(mapInvoiceToRecord)));
+      })
+      .catch((error) => setInvoicesError(error instanceof Error ? error.message : "Could not load invoices from the backend."))
+      .finally(() => setInvoicesLoading(false));
+  };
+
+  // Bills & Payables' Inward/Verification/Bills Paid tabs read real invoices from the
+  // backend now that Bill Inward is saved there directly (see BillInwardModal) instead of
+  // to localStorage — other modules are untouched and keep using only the local register.
+  useEffect(() => {
+    if (moduleKey !== "bills-payables") return;
+    loadInvoices();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moduleKey]);
 
   const moduleRecords = records.filter((record) => record.module === moduleKey);
   const isVerificationRegister = moduleKey === "bills-payables" && activeTab.label === "Verification";
@@ -1781,11 +2187,33 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
     setEditing(null);
   };
 
-  const verifyBill = (entry: FinanceRecord) => {
+  const verifyBill = async (entry: FinanceRecord) => {
     if (!window.confirm(`Verify ${entry.billInwardNo || entry.reference}?`)) return;
-    const verifiedEntry = { ...entry, status: "Verified" };
-    saveRecords(records.map((record) => record.id === entry.id ? verifiedEntry : record));
-    setVerificationPreview(verifiedEntry);
+    try {
+      const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+      const response = await fetch(`${baseUrl}/admin_accounts/update_invoice_approval_status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invoice_id: entry.id, approval_status: "approved" }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.success) throw new Error(data?.detail || data?.message || "Failed to verify bill");
+      const verifiedEntry = { ...entry, status: "Verified" };
+      saveRecords(records.map((record) => record.id === entry.id ? verifiedEntry : record));
+      toast.success(`${entry.billInwardNo || entry.reference} verified`);
+      setVerificationPreview(null);
+      setLedgerEntryRecord(verifiedEntry);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to verify bill");
+    }
+  };
+
+  // No backend endpoint updates the invoice's own ledger_entery_status yet, so this is
+  // recorded locally (preserved across get_invoices refetches by mergeInvoiceRecords) —
+  // the real ledger entry itself is already posted for real via add_accounts_ledger_entry.
+  const markLedgerEntryPosted = (entry: FinanceRecord) => {
+    saveRecords(records.map((record) => record.id === entry.id ? { ...record, ledgerEntryStatus: "completed" } : record));
+    setLedgerEntryRecord(null);
   };
 
   const requestPayment = (entry: FinanceRecord) => {
@@ -1872,6 +2300,10 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
           </div>
         </div>
 
+        {moduleKey === "bills-payables" && invoicesError && (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-sm font-semibold text-amber-800">{invoicesError}</div>
+        )}
+
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
             { label: `${activeTab.label} Entries`, value: tabRecords.length.toLocaleString("en-IN"), icon: ClipboardList },
@@ -1888,7 +2320,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
 
         <section className="overflow-hidden rounded-3xl border border-slate-200/80 bg-white shadow-[0_18px_45px_rgba(15,23,42,0.05)]">
           <div className="flex flex-col gap-4 border-b border-slate-100 p-5 lg:flex-row lg:items-center lg:justify-between">
-            <div><h2 className="text-lg font-bold text-slate-950">{activeTab.label} Register</h2><p className="mt-1 text-sm text-slate-500">Search, review and maintain entries for this workflow.</p></div>
+            <div><h2 className="text-lg font-bold text-slate-950">{activeTab.label} Register{invoicesLoading && <span className="ml-2 align-middle text-xs font-semibold text-slate-400">Refreshing…</span>}</h2><p className="mt-1 text-sm text-slate-500">Search, review and maintain entries for this workflow.</p></div>
             <div className="flex flex-col gap-2 sm:flex-row">
               <label className="relative block"><Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={search} onChange={(event) => setSearch(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 pl-10 pr-4 text-sm font-medium outline-none focus:border-[#278b76] sm:w-72" placeholder="Search reference, party or type" /></label>
               <label className="relative"><select value={status} onChange={(event) => setStatus(event.target.value)} className="h-11 appearance-none rounded-xl border border-slate-200 bg-white pl-4 pr-10 text-sm font-bold text-slate-600 outline-none focus:border-[#278b76]"><option>All statuses</option>{["Draft", "Pending Approval", "Verified", "Posted", "Paid", "Reconciled", "Closed"].map((item) => <option key={item}>{item}</option>)}</select><ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /></label>
@@ -1919,9 +2351,10 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
           )}
         </section>
       </div>
-      {modalOpen && <EntryModal module={module} tab={activeTab} existing={editing} onClose={() => { setModalOpen(false); setEditing(null); }} onSave={saveEntry} />}
+      {modalOpen && <EntryModal module={module} tab={activeTab} existing={editing} onClose={() => { setModalOpen(false); setEditing(null); }} onSave={saveEntry} onSaved={loadInvoices} />}
       {prrModalRecord && <PrrModal record={prrModalRecord} bills={records.filter((record) => record.module === "bills-payables" && record.tab === "Inward" && record.entryType === "Bill Inward" && ["Verified", "Paid"].includes(record.status))} onClose={() => setPrrModalRecord(null)} onSave={savePrr} />}
-      {verificationPreview && <BillVerificationPreview record={verificationPreview} actionMode={billPreviewMode} paymentRequested={records.some((record) => record.module === "payments-receipts" && record.tab === "Requests" && record.sourceBillId === verificationPreview.id)} onClose={() => setVerificationPreview(null)} onVerify={() => billPreviewMode === "pay" ? markBillPaid(verificationPreview) : verifyBill(verificationPreview)} onRequestPayment={() => requestPayment(verificationPreview)} />}
+      {verificationPreview && <BillVerificationPreview record={verificationPreview} actionMode={billPreviewMode} paymentRequested={records.some((record) => record.module === "payments-receipts" && record.tab === "Requests" && record.sourceBillId === verificationPreview.id)} onClose={() => setVerificationPreview(null)} onVerify={() => billPreviewMode === "pay" ? markBillPaid(verificationPreview) : verifyBill(verificationPreview)} onRequestPayment={() => requestPayment(verificationPreview)} onPostLedgerEntry={() => { setVerificationPreview(null); setLedgerEntryRecord(verificationPreview); }} />}
+      {ledgerEntryRecord && <LedgerEntryModal record={ledgerEntryRecord} onClose={() => setLedgerEntryRecord(null)} onPosted={() => markLedgerEntryPosted(ledgerEntryRecord)} />}
     </div>
   );
 }

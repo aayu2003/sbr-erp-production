@@ -48,6 +48,7 @@ export interface ApiOperationalWorkDoneEntry {
   spec_unit?: string;
   status?: string;
   task_id?: string;
+  farm_id?: string;
 }
 
 // Raw shape of a `Tasks` table item — only the fields this modal (and the certificate
@@ -173,6 +174,33 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
       .finally(() => { if (mounted) setLoadingOperational(false); });
     return () => { mounted = false; };
   }, [vendorId, fromDate, toDate]);
+
+  // Farmer names for farm_ids that show up in operational (non-cultivation) work but aren't
+  // already covered by the vendor's own land scope-of-work (e.g. a borewell driller with no
+  // cultivation scope at all) — the Annexure's "Place" column needs the owner's name either way.
+  const [operationalFarmerNames, setOperationalFarmerNames] = useState<Record<string, string>>({});
+  const fetchedOperationalFarmIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const farmIds = Array.from(new Set(
+      operationalWorkDone.map((w) => w.farm_id).filter((id): id is string => !!id && !farmerNames[id]),
+    ));
+    farmIds.forEach((farmId) => {
+      if (fetchedOperationalFarmIds.current.has(farmId)) return;
+      fetchedOperationalFarmIds.current.add(farmId);
+      fetch(`${BASE_URL}/farmer_managment/get_farmer_details_from_farm_id/${farmId}`)
+        .then((res) => res.json())
+        .then((data: { farmer?: { farmer_name?: string } }) => {
+          const name = data?.farmer?.farmer_name;
+          if (name) setOperationalFarmerNames((prev) => ({ ...prev, [farmId]: name }));
+        })
+        .catch(() => {});
+    });
+  }, [operationalWorkDone, farmerNames]);
+
+  const mergedFarmerNames = useMemo(
+    () => ({ ...operationalFarmerNames, ...farmerNames }),
+    [operationalFarmerNames, farmerNames],
+  );
 
   // Task details (activity name + progress photos) — fetched once per unique task_id.
   const [taskDetailsById, setTaskDetailsById] = useState<Record<string, ApiTaskDetails>>({});
@@ -395,6 +423,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
           operationalWorkDone={operationalWorkDone}
           taskDetailsById={taskDetailsById}
           scopeItems={scopeItems}
+          farmerNames={mergedFarmerNames}
           onClose={() => setShowCertificatePreview(false)}
         />
       )}

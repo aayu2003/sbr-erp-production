@@ -306,6 +306,7 @@
           "items": [
             { "key": "finance-accounts-dashboard",          "label": "Dashboard",            "path": "/finance-accounts/dashboard",          "icon": "LayoutDashboard", "enabled": true },
             { "key": "finance-bills-payables",              "label": "Bills & Payables",     "path": "/finance-accounts/bills-payables",     "icon": "Receipt",         "enabled": true },
+            { "key": "finance-invoice-directory",           "label": "Invoice Directory",    "path": "/finance-accounts/invoice-directory",  "icon": "FolderKanban",    "enabled": true },
             { "key": "finance-payments-receipts",           "label": "Payments & Receipts", "path": "/finance-accounts/payments-receipts", "icon": "CreditCard",      "enabled": true },
             { "key": "finance-vouchers",                    "label": "Vouchers",             "path": "/finance-accounts/vouchers",           "icon": "FileText",        "enabled": true },
             { "key": "finance-banking",                     "label": "Banking",              "path": "/finance-accounts/banking",            "icon": "Landmark",        "enabled": true },
