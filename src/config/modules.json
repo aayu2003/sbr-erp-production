@@ -313,7 +313,8 @@
             { "key": "finance-ledgers-reports",             "label": "Ledgers & Reports",    "path": "/finance-accounts/ledgers-reports",    "icon": "BookOpen",        "enabled": true },
             { "key": "finance-budget-costing",              "label": "Budget & Costing",     "path": "/finance-accounts/budget-costing",     "icon": "PieChart",        "enabled": true },
             { "key": "finance-masters-controls",            "label": "Masters & Controls",   "path": "/finance-accounts/masters-controls",   "icon": "Settings",        "enabled": true },
-            { "key": "finance-accounting-master",           "label": "Accounting Master",    "path": "/finance-accounts/accounting-master",  "icon": "Settings",        "enabled": true }
+            { "key": "finance-accounting-master",           "label": "Accounting Master",    "path": "/finance-accounts/accounting-master",  "icon": "Settings",        "enabled": true },
+            { "key": "finance-chart-of-accounts",           "label": "Chart of Accounts",    "path": "/finance-accounts/chart-of-accounts", "icon": "BookOpen",        "enabled": true }
           ]
         }
       ]

@@ -111,6 +111,7 @@ import {
   Vouchers,
 } from "./pages/FinanceAccounts";
 import AccountingMaster from "./pages/AccountingMaster";
+import ChartOfAccounts from "./pages/ChartOfAccounts";
 import Communication from "./pages/Communication";
 import InvoiceDirectory from "./pages/InvoiceDirectory";
 
@@ -355,6 +356,7 @@ const App = () => (
           <Route path="/finance-accounts/budget-costing" element={<AppLayout><BudgetCosting /></AppLayout>} />
           <Route path="/finance-accounts/masters-controls" element={<AppLayout><MastersControls /></AppLayout>} />
           <Route path="/finance-accounts/accounting-master" element={<AppLayout><AccountingMaster /></AppLayout>} />
+          <Route path="/finance-accounts/chart-of-accounts" element={<AppLayout><ChartOfAccounts /></AppLayout>} />
 
           {/* Standalone Webapp — no ERP sidebar */}
           <Route path="/approval/webapp/*" element={<WebApp />} />

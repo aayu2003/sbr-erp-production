@@ -1,379 +1,135 @@
-import { useMemo, useState, type ElementType } from "react";
+import { useMemo, useRef, useState, type ElementType } from "react";
 import {
-  BookOpen,
-  Building2,
-  CalendarDays,
-  Check,
-  CircleDollarSign,
-  Edit3,
-  FileKey,
-  FolderKanban,
-  Landmark,
-  LockKeyhole,
-  Plus,
-  Receipt,
-  RotateCcw,
-  Save,
-  Settings2,
-  ShieldCheck,
-  Target,
-  Trash2,
-  WalletCards,
-  X,
+  Banknote, BookOpen, Building2, CalendarDays, CheckCircle2, ChevronRight,
+  Download, Edit3, FileClock, FileKey, FileSpreadsheet, Filter, FolderTree,
+  History, Landmark, LayoutList, Link2, LockKeyhole, Network, Plus, Receipt,
+  Search, ShieldCheck, Target, Upload, Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CostAccountingSetup from "@/components/accounting/CostAccountingSetup";
 
-type MasterTab = "Organisation" | "Numbering" | "Tax & TDS" | "Payments & Banking" | "Cost Allocation" | "Cost Centre" | "Cost Attribution" | "Workflow & Controls";
+type Tab = "Chart of Accounts" | "Sub Ledgers" | "Cost Centre" | "Cost Attribution" | "Tax & Statutory" | "Banks & Cash" | "Voucher Setup" | "Financial Setup" | "Mapping & Controls";
+type Status = "Active" | "Inactive";
+type GL = { id:string; code:string; name:string; parent:string; category:string; type:string; normal:string; control:boolean; slType?:string; direct:boolean; balance:number; status:Status };
+type SL = { id:string; code:string; name:string; type:string; source:string; entity:string; control:string; terms:string; balance:number; drcr:"Dr"|"Cr"; status:Status };
+type Tax = { id:string; code:string; name:string; section:string; rate:number; nature:string; input:string; output:string; effective:string; status:Status };
+type Bank = { id:string; code:string; name:string; account:string; ifsc:string; branch:string; gl:string; balance:number; status:Status };
+type Cash = { id:string; code:string; location:string; custodian:string; centre:string; gl:string; limit:number; status:Status };
+type Voucher = { id:string; code:string; name:string; prefix:string; numbering:string; approval:boolean; posting:string; status:Status };
+type Term = { id:string; code:string; name:string; days:number; description:string; status:Status };
+type FY = { id:string; name:string; start:string; end:string; status:"Open"|"Soft Locked"|"Hard Locked"; current:boolean; lock:string };
+type Opening = { id:string; type:string; ledger:string; date:string; debit:number; credit:number; reference:string };
+type Mapping = { id:string; scope:string; source:string; target:string; gl:string; auto:boolean; status:Status };
+type Audit = { id:string; action:string; detail:string; at:string; user:string };
+type Data = { gl:GL[]; sl:SL[]; taxes:Tax[]; banks:Bank[]; cash:Cash[]; vouchers:Voucher[]; terms:Term[]; years:FY[]; openings:Opening[]; mappings:Mapping[]; audit:Audit[] };
+type Kind = "GL Account"|"Sub Ledger"|"Tax Master"|"Bank Account"|"Cash Master"|"Voucher Type"|"Payment Term"|"Financial Year"|"Opening Balance"|"Mapping Rule";
 
-type NumberingRule = {
-  id: string;
-  document: string;
-  prefix: string;
-  digits: number;
-  reset: "Financial Year" | "Calendar Year" | "Never";
-  nextNumber: number;
-};
+const KEY = "sbr-accounting-master-workspace-v2";
+const LEGACY = "sbr-accounting-master-v1";
+const money = (n:number) => new Intl.NumberFormat("en-IN",{style:"currency",currency:"INR",maximumFractionDigits:0}).format(n);
+const input = "h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-[#278b76] focus:ring-2 focus:ring-[#278b76]/10";
+const label = "space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500";
 
-type ApprovalRule = {
-  id: string;
-  transaction: string;
-  fromAmount: number;
-  toAmount: number;
-  levels: number;
-};
-
-type DimensionMaster = {
-  id: string;
-  code: string;
-  name: string;
-  shortName?: string;
-  description?: string;
-  projectHead?: string;
-  department?: string;
-  location?: string;
-  startDate?: string;
-  endDate?: string;
-  status?: "Active" | "Inactive" | "Completed" | "On Hold";
-};
-
-type AccountingMasterConfig = {
-  organisation: {
-    legalEntity: string;
-    baseCurrency: string;
-    activeFinancialYear: string;
-    financialYearStartMonth: string;
-    booksStartDate: string;
-    accountingMethod: string;
-    dateFormat: string;
-    timezone: string;
-  };
-  numbering: NumberingRule[];
-  tax: {
-    gstEnabled: boolean;
-    companyGstin: string;
-    registrationState: string;
-    defaultTaxTreatment: string;
-    tdsEnabled: boolean;
-    defaultTdsRate: number;
-    tdsRounding: string;
-    taxCalculationBasis: string;
-  };
-  payments: {
-    defaultCreditDays: number;
-    paymentApprovalRequired: boolean;
-    allowPartPayments: boolean;
-    requirePaymentAllocation: boolean;
-    bankReconciliationRequired: boolean;
-    defaultBankAccount: string;
-    paymentModes: string[];
-  };
-  costing: {
-    requireDepartment: boolean;
-    requireProject: boolean;
-    requireSiteLand: boolean;
-    requireBudgetHead: boolean;
-    requireCostCentre: boolean;
-    preventBudgetOverrun: boolean;
-    allocationBasis: string;
-    departments: DimensionMaster[];
-    costCentres: DimensionMaster[];
-    projects: DimensionMaster[];
-    sites: DimensionMaster[];
-  };
-  controls: {
-    makerChecker: boolean;
-    mandatoryBillAttachment: boolean;
-    mandatorySupportingDocuments: boolean;
-    allowBackdatedEntries: boolean;
-    autoPostApprovedVouchers: boolean;
-    periodLockDate: string;
-    auditLogRetentionYears: number;
-    approvalRules: ApprovalRule[];
-  };
-};
-
-const STORAGE_KEY = "sbr-accounting-master-v1";
-
-const DEFAULT_CONFIG: AccountingMasterConfig = {
-  organisation: {
-    legalEntity: "SAI BIORESOURCES PRIVATE LIMITED",
-    baseCurrency: "INR",
-    activeFinancialYear: "2026-27",
-    financialYearStartMonth: "April",
-    booksStartDate: "2026-04-01",
-    accountingMethod: "Accrual",
-    dateFormat: "DD/MM/YYYY",
-    timezone: "Asia/Kolkata",
-  },
-  numbering: [
-    { id: "bill-inward", document: "Bill Inward", prefix: "BI/{FY}/", digits: 5, reset: "Financial Year", nextNumber: 1 },
-    { id: "journal-voucher", document: "Journal Voucher", prefix: "JV/{FY}/", digits: 5, reset: "Financial Year", nextNumber: 1 },
-    { id: "bank-payment", document: "Bank Payment Voucher", prefix: "BPV/{FY}/", digits: 5, reset: "Financial Year", nextNumber: 1 },
-    { id: "bank-receipt", document: "Bank Receipt Voucher", prefix: "BRV/{FY}/", digits: 5, reset: "Financial Year", nextNumber: 1 },
-    { id: "cash-payment", document: "Cash Payment Voucher", prefix: "CPV/{FY}/", digits: 5, reset: "Financial Year", nextNumber: 1 },
-    { id: "cash-receipt", document: "Cash Receipt Voucher", prefix: "CRV/{FY}/", digits: 5, reset: "Financial Year", nextNumber: 1 },
-    { id: "payment-request", document: "Payment Request / PRR", prefix: "PRR/{FY}/", digits: 5, reset: "Financial Year", nextNumber: 1 },
-    { id: "debit-note", document: "Debit Note", prefix: "DN/{FY}/", digits: 5, reset: "Financial Year", nextNumber: 1 },
-    { id: "credit-note", document: "Credit Note", prefix: "CN/{FY}/", digits: 5, reset: "Financial Year", nextNumber: 1 },
+const defaults:Data = {
+  gl:[
+    {id:"100000",code:"100000",name:"Assets",parent:"—",category:"Asset",type:"Header",normal:"Debit",control:false,direct:false,balance:28450000,status:"Active"},
+    {id:"110000",code:"110000",name:"Current Assets",parent:"Assets",category:"Asset",type:"Header",normal:"Debit",control:false,direct:false,balance:12840000,status:"Active"},
+    {id:"111000",code:"111000",name:"Cash & Bank",parent:"Current Assets",category:"Asset",type:"Header",normal:"Debit",control:false,direct:false,balance:6240000,status:"Active"},
+    {id:"111001",code:"111001",name:"Cash in Hand",parent:"Cash & Bank",category:"Asset",type:"Cash",normal:"Debit",control:false,direct:true,balance:185000,status:"Active"},
+    {id:"200000",code:"200000",name:"Liabilities",parent:"—",category:"Liability",type:"Header",normal:"Credit",control:false,direct:false,balance:9630000,status:"Active"},
+    {id:"211000",code:"211000",name:"Trade Payables",parent:"Current Liabilities",category:"Liability",type:"Control Account",normal:"Credit",control:true,slType:"Vendor",direct:false,balance:4280000,status:"Active"},
+    {id:"212000",code:"212000",name:"Contractor Payables",parent:"Current Liabilities",category:"Liability",type:"Control Account",normal:"Credit",control:true,slType:"Contractor",direct:false,balance:1960000,status:"Active"},
+    {id:"500000",code:"500000",name:"Expenses",parent:"—",category:"Expense",type:"Header",normal:"Debit",control:false,direct:false,balance:18400000,status:"Active"},
+    {id:"511000",code:"511000",name:"Cultivation Expense",parent:"Expenses",category:"Expense",type:"Posting Account",normal:"Debit",control:false,direct:true,balance:7230000,status:"Active"},
   ],
-  tax: {
-    gstEnabled: true,
-    companyGstin: "",
-    registrationState: "Chhattisgarh",
-    defaultTaxTreatment: "Auto — based on Place of Supply",
-    tdsEnabled: true,
-    defaultTdsRate: 0,
-    tdsRounding: "Nearest Rupee",
-    taxCalculationBasis: "Line Item",
-  },
-  payments: {
-    defaultCreditDays: 30,
-    paymentApprovalRequired: true,
-    allowPartPayments: true,
-    requirePaymentAllocation: true,
-    bankReconciliationRequired: true,
-    defaultBankAccount: "",
-    paymentModes: ["NEFT", "RTGS", "IMPS", "Cheque", "UPI", "Cash"],
-  },
-  costing: {
-    requireDepartment: true,
-    requireProject: true,
-    requireSiteLand: false,
-    requireBudgetHead: true,
-    requireCostCentre: true,
-    preventBudgetOverrun: true,
-    allocationBasis: "Line Item",
-    departments: [],
-    costCentres: [],
-    projects: [],
-    sites: [],
-  },
-  controls: {
-    makerChecker: true,
-    mandatoryBillAttachment: true,
-    mandatorySupportingDocuments: false,
-    allowBackdatedEntries: false,
-    autoPostApprovedVouchers: false,
-    periodLockDate: "",
-    auditLogRetentionYears: 8,
-    approvalRules: [
-      { id: "rule-1", transaction: "Bill Passing", fromAmount: 0, toAmount: 100000, levels: 1 },
-      { id: "rule-2", transaction: "Bill Passing", fromAmount: 100001, toAmount: 1000000, levels: 2 },
-      { id: "rule-3", transaction: "Vendor Payment", fromAmount: 0, toAmount: 1000000, levels: 2 },
-    ],
-  },
+  sl:[
+    {id:"sl1",code:"VEN-00128-P",name:"Prem Industries - Payable",type:"Vendor",source:"Vendor Master",entity:"VEN-00128",control:"Trade Payables",terms:"30 Days",balance:275000,drcr:"Cr",status:"Active"},
+    {id:"sl2",code:"VEN-00128-A",name:"Prem Industries - Advance",type:"Vendor",source:"Vendor Master",entity:"VEN-00128",control:"Vendor Advances",terms:"Advance Payment",balance:85000,drcr:"Dr",status:"Active"},
+    {id:"sl3",code:"CON-00044",name:"Dinesh Kumar Nishad",type:"Contractor",source:"Contractor Master",entity:"CON-00044",control:"Contractor Payables",terms:"15 Days",balance:142000,drcr:"Cr",status:"Active"},
+    {id:"sl4",code:"EMP-00016",name:"Sukhdeep Singh",type:"Employee",source:"Employee Master",entity:"EMP-00016",control:"Employee Payables",terms:"Immediate",balance:18500,drcr:"Cr",status:"Active"},
+  ],
+  taxes:[
+    {id:"t1",code:"GST-18",name:"GST 18%",section:"GST",rate:18,nature:"CGST + SGST",input:"Input CGST / SGST",output:"Output CGST / SGST",effective:"2026-04-01",status:"Active"},
+    {id:"t2",code:"IGST-18",name:"IGST 18%",section:"GST",rate:18,nature:"IGST",input:"Input IGST",output:"Output IGST",effective:"2026-04-01",status:"Active"},
+    {id:"t3",code:"TDS-194C",name:"Contractor Payment",section:"TDS",rate:2,nature:"Section 194C",input:"Contractor Expense",output:"TDS Payable",effective:"2026-04-01",status:"Active"},
+  ],
+  banks:[{id:"b1",code:"BNK-001",name:"HDFC Bank",account:"•••• 4821",ifsc:"HDFC0001824",branch:"Raipur",gl:"HDFC Bank Current Account",balance:4820000,status:"Active"},{id:"b2",code:"BNK-002",name:"ICICI Bank",account:"•••• 7640",ifsc:"ICIC0001189",branch:"Raipur",gl:"ICICI Bank Current Account",balance:1260000,status:"Active"}],
+  cash:[{id:"c1",code:"CSH-HO",location:"Head Office Cash",custodian:"Accounts Manager",centre:"Corporate Office",gl:"Cash in Hand",limit:100000,status:"Active"},{id:"c2",code:"CSH-DUR",location:"Durg Site Cash",custodian:"Durg Field Manager",centre:"Durg Cluster",gl:"Durg Site Cash",limit:50000,status:"Active"}],
+  vouchers:[{id:"v1",code:"JV",name:"Journal Voucher",prefix:"JV/{FY}/",numbering:"Sequential",approval:true,posting:"Manual",status:"Active"},{id:"v2",code:"PV",name:"Payment Voucher",prefix:"PV/{FY}/",numbering:"Sequential",approval:true,posting:"Auto",status:"Active"},{id:"v3",code:"RV",name:"Receipt Voucher",prefix:"RV/{FY}/",numbering:"Sequential",approval:false,posting:"Auto",status:"Active"},{id:"v4",code:"CV",name:"Contra Voucher",prefix:"CV/{FY}/",numbering:"Sequential",approval:false,posting:"Auto",status:"Active"},{id:"v5",code:"DN",name:"Debit Note",prefix:"DN/{FY}/",numbering:"Sequential",approval:true,posting:"Manual",status:"Active"}],
+  terms:[{id:"p1",code:"IMM",name:"Immediate",days:0,description:"Due immediately",status:"Active"},{id:"p2",code:"NET15",name:"15 Days",days:15,description:"Due within 15 days",status:"Active"},{id:"p3",code:"NET30",name:"30 Days",days:30,description:"Standard vendor terms",status:"Active"},{id:"p4",code:"ADV",name:"Advance Payment",days:0,description:"Pay before supply",status:"Active"}],
+  years:[{id:"y1",name:"2026-27",start:"2026-04-01",end:"2027-03-31",status:"Open",current:true,lock:""},{id:"y2",name:"2025-26",start:"2025-04-01",end:"2026-03-31",status:"Hard Locked",current:false,lock:"2026-04-30"}],
+  openings:[{id:"o1",type:"GL Account",ledger:"Cash in Hand",date:"2026-04-01",debit:185000,credit:0,reference:"Migration OB"},{id:"o2",type:"Sub Ledger",ledger:"Prem Industries - Payable",date:"2026-04-01",debit:0,credit:275000,reference:"Invoice breakup imported"}],
+  mappings:[{id:"m1",scope:"Entity",source:"Material Supplier",target:"Vendor",gl:"Trade Payables",auto:true,status:"Active"},{id:"m2",scope:"Entity",source:"Contractor",target:"Contractor",gl:"Contractor Payables",auto:true,status:"Active"},{id:"m3",scope:"Transaction",source:"HDPE Pipes",target:"Inventory",gl:"Inventory - Pipes",auto:false,status:"Active"},{id:"m4",scope:"Transaction",source:"Land Preparation",target:"Service Category",gl:"Land Preparation Expense",auto:false,status:"Active"},{id:"m5",scope:"Tax",source:"GST-18",target:"Input Tax",gl:"Input CGST / SGST",auto:false,status:"Active"}],
+  audit:[{id:"a1",action:"Workspace initialized",detail:"Accounting master defaults loaded",at:"17 Aug 2026, 10:30 AM",user:"SBR Admin"}],
 };
 
-const loadConfig = (): AccountingMasterConfig => {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) return DEFAULT_CONFIG;
-    const parsed = JSON.parse(saved) as Partial<AccountingMasterConfig>;
-    return {
-      ...DEFAULT_CONFIG,
-      ...parsed,
-      organisation: { ...DEFAULT_CONFIG.organisation, ...(parsed.organisation ?? {}) },
-      tax: { ...DEFAULT_CONFIG.tax, ...(parsed.tax ?? {}) },
-      payments: { ...DEFAULT_CONFIG.payments, ...(parsed.payments ?? {}) },
-      costing: { ...DEFAULT_CONFIG.costing, ...(parsed.costing ?? {}) },
-      controls: { ...DEFAULT_CONFIG.controls, ...(parsed.controls ?? {}) },
-      numbering: Array.isArray(parsed.numbering) ? parsed.numbering : DEFAULT_CONFIG.numbering,
-    };
-  } catch {
-    return DEFAULT_CONFIG;
-  }
-};
+const load=():Data=>{try{return{...defaults,...JSON.parse(localStorage.getItem(KEY)||"{}")}}catch{return defaults}};
+const costContext=()=>{try{const v=JSON.parse(localStorage.getItem(LEGACY)||"{}");return{projects:v?.costing?.projects||[],departments:v?.costing?.departments||[],legalEntity:v?.organisation?.legalEntity||"SAI BIORESOURCES PRIVATE LIMITED"}}catch{return{projects:[],departments:[],legalEntity:"SAI BIORESOURCES PRIVATE LIMITED"}}};
+const tabs:Array<{label:Tab;icon:ElementType}>=[{label:"Chart of Accounts",icon:FolderTree},{label:"Sub Ledgers",icon:Users},{label:"Cost Centre",icon:Building2},{label:"Cost Attribution",icon:Target},{label:"Tax & Statutory",icon:Receipt},{label:"Banks & Cash",icon:Landmark},{label:"Voucher Setup",icon:FileKey},{label:"Financial Setup",icon:CalendarDays},{label:"Mapping & Controls",icon:Network}];
 
-const inputClass = "h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none transition placeholder:font-normal placeholder:text-slate-400 focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10";
-const labelClass = "space-y-2 text-xs font-bold text-slate-600";
+function Badge({value}:{value:string}){return <span className={cn("rounded-full px-2.5 py-1 text-[10px] font-bold",["Active","Open","Auto"].includes(value)?"bg-emerald-50 text-emerald-700":value.includes("Lock")||value==="Manual"?"bg-amber-50 text-amber-700":"bg-slate-100 text-slate-500")}>{value}</span>}
+function Stat({label,value,detail,icon:Icon}:{label:string;value:string|number;detail:string;icon:ElementType}){return <div className="rounded-xl border bg-white p-4"><div className="flex"><div><p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</p><p className="mt-2 text-xl font-bold">{value}</p><p className="mt-1 text-[11px] text-slate-500">{detail}</p></div><span className="ml-auto grid h-9 w-9 place-items-center rounded-lg bg-emerald-50 text-[#0d5c4d]"><Icon className="h-4 w-4"/></span></div></div>}
+function Shell({title,count,actions,children}:{title:string;count:number;actions?:React.ReactNode;children:React.ReactNode}){return <section className="overflow-hidden rounded-xl border bg-white shadow-sm"><div className="flex items-center border-b px-4 py-3"><div><h2 className="text-sm font-bold">{title}</h2><p className="text-[11px] text-slate-400">{count} configured records</p></div><div className="ml-auto flex gap-2">{actions}</div></div>{children}</section>}
+function Empty(){return <div className="py-14 text-center"><FileSpreadsheet className="mx-auto h-8 w-8 text-slate-300"/><p className="mt-3 text-sm font-bold">No matching records</p></div>}
 
-function Toggle({ checked, onChange, label, description }: { checked: boolean; onChange: (checked: boolean) => void; label: string; description: string }) {
-  return (
-    <button type="button" onClick={() => onChange(!checked)} className="flex w-full items-center justify-between gap-5 rounded-2xl border border-slate-200 bg-white p-4 text-left hover:border-[#b8d6ce]">
-      <div><p className="text-sm font-bold text-slate-800">{label}</p><p className="mt-1 text-xs leading-5 text-slate-400">{description}</p></div>
-      <span className={cn("relative h-6 w-11 shrink-0 rounded-full transition", checked ? "bg-[#0d5c4d]" : "bg-slate-200")}><span className={cn("absolute top-1 h-4 w-4 rounded-full bg-white shadow transition", checked ? "left-6" : "left-1")} /></span>
-    </button>
-  );
+function Creator({open,kind,data,onClose,onCreate}:{open:boolean;kind:Kind;data:Data;onClose:()=>void;onCreate:(v:Record<string,string|number|boolean>)=>void}){
+  const [v,setV]=useState<Record<string,string|number|boolean>>({status:"Active",category:"Asset",type:"Posting Account",normal:"Debit",section:"GST",posting:"Manual",scope:"Entity",drcr:"Dr"});
+  const set=(k:string,x:string|number|boolean)=>setV(c=>({...c,[k]:x}));
+  const field=(name:string,key:string,opts?:string[],type="text")=><label className={label}>{name}{opts?<select className={input} value={String(v[key]??opts[0])} onChange={e=>set(key,e.target.value)}>{opts.map(x=><option key={x}>{x}</option>)}</select>:<input className={input} type={type} value={String(v[key]??"")} onChange={e=>set(key,type==="number"?Number(e.target.value):e.target.value)}/>}</label>;
+  const save=()=>{if(!String(v.code||v.name||v.source||v.ledger||"").trim())return toast.error("Complete required fields");onCreate(v);setV({status:"Active",category:"Asset",type:"Posting Account",normal:"Debit",section:"GST",posting:"Manual",scope:"Entity",drcr:"Dr"});onClose()};
+  return <Dialog open={open} onOpenChange={x=>!x&&onClose()}><DialogContent className="max-h-[90vh] max-w-3xl gap-0 overflow-hidden p-0"><DialogHeader className="bg-[#0d473f] px-6 py-5 text-white"><DialogTitle>Create {kind}</DialogTitle></DialogHeader><div className="max-h-[70vh] overflow-y-auto p-6"><div className="grid gap-4 sm:grid-cols-2">
+    {kind==="GL Account"&&<>{field("GL Code *","code")}{field("GL Name *","name")}{field("Parent Group","parent",["Assets","Current Assets","Liabilities","Current Liabilities","Equity","Income","Expenses"])}{field("Category","category",["Asset","Liability","Equity","Income","Expense"])}{field("Account Type","type",["Posting Account","Control Account","Header","Bank","Cash","Tax","Inventory","Fixed Asset","Revenue","Expense"])}{field("Normal Balance","normal",["Debit","Credit"])}{field("Allowed SL Type","slType",["None","Vendor","Contractor","Customer","Employee","Landowner","Farmer"])}{field("Opening Balance","balance",undefined,"number")}</>}
+    {kind==="Sub Ledger"&&<>{field("SL Code *","code")}{field("SL Name *","name")}{field("SL Type","type",["Vendor","Contractor","Customer","Employee","Landowner","Farmer","Other Party"])}{field("Linked ERP Master","source",["Vendor Master","Contractor Master","Employee Master","Landowner Master","Customer Master"])}{field("Linked Entity","entity")}{field("Control GL","control",data.gl.filter(x=>x.control).map(x=>x.name))}{field("Opening Balance","balance",undefined,"number")}{field("Dr / Cr","drcr",["Dr","Cr"])}{field("Payment Terms","terms",data.terms.map(x=>x.name))}</>}
+    {kind==="Tax Master"&&<>{field("Tax Code *","code")}{field("Tax Name *","name")}{field("Section","section",["GST","TDS","RCM"])}{field("Type / Section","nature")}{field("Rate %","rate",undefined,"number")}{field("Input / Expense GL","input")}{field("Output / Payable GL","output")}{field("Effective From","effective",undefined,"date")}</>}
+    {kind==="Bank Account"&&<>{field("Bank Code *","code")}{field("Bank Name *","name")}{field("Account Number","account")}{field("IFSC","ifsc")}{field("Branch","branch")}{field("Linked GL","gl")}{field("Opening Balance","balance",undefined,"number")}</>}
+    {kind==="Cash Master"&&<>{field("Cash Code *","code")}{field("Cash Location *","location")}{field("Custodian","custodian")}{field("Cost Centre","centre")}{field("Linked GL","gl")}{field("Cash Limit","limit",undefined,"number")}</>}
+    {kind==="Voucher Type"&&<>{field("Voucher Code *","code")}{field("Voucher Name *","name")}{field("Prefix","prefix")}{field("Numbering","numbering",["Sequential","Manual","System Generated"])}{field("Posting","posting",["Auto","Manual"])}</>}
+    {kind==="Payment Term"&&<>{field("Code *","code")}{field("Name *","name")}{field("Days","days",undefined,"number")}{field("Description","description")}</>}
+    {kind==="Financial Year"&&<>{field("Financial Year *","name")}{field("Start Date","start",undefined,"date")}{field("End Date","end",undefined,"date")}{field("Books Status","fyStatus",["Open","Soft Locked","Hard Locked"])}{field("Lock Date","lock",undefined,"date")}</>}
+    {kind==="Opening Balance"&&<>{field("Ledger Type","ledgerType",["GL Account","Sub Ledger","Bank","Cash","Vendor Outstanding","Customer Outstanding"])}{field("Ledger *","ledger")}{field("Date","date",undefined,"date")}{field("Debit","debit",undefined,"number")}{field("Credit","credit",undefined,"number")}{field("Reference","reference")}</>}
+    {kind==="Mapping Rule"&&<>{field("Scope","scope",["Entity","Transaction","Tax"])}{field("Source Category *","source")}{field("Target Type","target")}{field("Control / Posting GL","gl")}</>}
+  </div></div><div className="flex justify-end gap-2 border-t bg-slate-50 p-4"><Button variant="outline" onClick={onClose}>Cancel</Button><Button onClick={save} className="bg-[#0d5c4d]">Create Master</Button></div></DialogContent></Dialog>
 }
 
-function Section({ icon: Icon, title, description, children }: { icon: ElementType; title: string; description: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-[0_14px_38px_rgba(15,23,42,0.045)] sm:p-6">
-      <div className="flex items-start gap-3 border-b border-slate-100 pb-5"><span className="rounded-xl bg-[#eaf4f1] p-2.5 text-[#0d5c4d]"><Icon className="h-5 w-5" /></span><div><h2 className="text-base font-bold text-slate-900">{title}</h2><p className="mt-1 text-xs leading-5 text-slate-400">{description}</p></div></div>
-      <div className="mt-5">{children}</div>
-    </section>
-  );
-}
+export default function AccountingMaster(){
+  const [tab,setTab]=useState<Tab>("Chart of Accounts"),[data,setData]=useState<Data>(load),[search,setSearch]=useState(""),[status,setStatus]=useState("All"),[group,setGroup]=useState("All"),[tree,setTree]=useState(false),[kind,setKind]=useState<Kind>("GL Account"),[create,setCreate]=useState(false),[audit,setAudit]=useState(false);
+  const importRef=useRef<HTMLInputElement>(null),cost=useMemo(costContext,[]),q=search.toLowerCase();
+  const save=(next:Data,action?:string,detail="")=>{const final=action?{...next,audit:[{id:`a${Date.now()}`,action,detail,at:new Date().toLocaleString("en-IN"),user:"SBR Admin"},...next.audit]}:next;setData(final);localStorage.setItem(KEY,JSON.stringify(final))};
+  const match=(...x:unknown[])=>!q||x.some(v=>String(v??"").toLowerCase().includes(q));
+  const open=(k?:Kind)=>{const map:Partial<Record<Tab,Kind>>={"Chart of Accounts":"GL Account","Sub Ledgers":"Sub Ledger","Tax & Statutory":"Tax Master","Banks & Cash":"Bank Account","Voucher Setup":"Voucher Type","Financial Setup":"Financial Year","Mapping & Controls":"Mapping Rule"};setKind(k||map[tab]||"GL Account");setCreate(true)};
+  const add=(v:Record<string,string|number|boolean>)=>{const id=`x${Date.now()}`;const n={...data};
+    if(kind==="GL Account")n.gl=[...data.gl,{id,code:String(v.code),name:String(v.name),parent:String(v.parent||"—"),category:String(v.category),type:String(v.type),normal:String(v.normal),control:v.type==="Control Account",slType:String(v.slType||""),direct:v.type!=="Header"&&v.type!=="Control Account",balance:Number(v.balance||0),status:"Active"}];
+    if(kind==="Sub Ledger")n.sl=[...data.sl,{id,code:String(v.code),name:String(v.name),type:String(v.type),source:String(v.source),entity:String(v.entity||""),control:String(v.control||""),terms:String(v.terms||"Immediate"),balance:Number(v.balance||0),drcr:v.drcr as "Dr"|"Cr",status:"Active"}];
+    if(kind==="Tax Master")n.taxes=[...data.taxes,{id,code:String(v.code),name:String(v.name),section:String(v.section),rate:Number(v.rate||0),nature:String(v.nature||""),input:String(v.input||""),output:String(v.output||""),effective:String(v.effective||""),status:"Active"}];
+    if(kind==="Bank Account")n.banks=[...data.banks,{id,code:String(v.code),name:String(v.name),account:`•••• ${String(v.account||"").slice(-4)}`,ifsc:String(v.ifsc||""),branch:String(v.branch||""),gl:String(v.gl||""),balance:Number(v.balance||0),status:"Active"}];
+    if(kind==="Cash Master")n.cash=[...data.cash,{id,code:String(v.code),location:String(v.location),custodian:String(v.custodian||""),centre:String(v.centre||""),gl:String(v.gl||""),limit:Number(v.limit||0),status:"Active"}];
+    if(kind==="Voucher Type")n.vouchers=[...data.vouchers,{id,code:String(v.code),name:String(v.name),prefix:String(v.prefix||""),numbering:String(v.numbering),approval:false,posting:String(v.posting),status:"Active"}];
+    if(kind==="Payment Term")n.terms=[...data.terms,{id,code:String(v.code),name:String(v.name),days:Number(v.days||0),description:String(v.description||""),status:"Active"}];
+    if(kind==="Financial Year")n.years=[...data.years,{id,name:String(v.name),start:String(v.start||""),end:String(v.end||""),status:(v.fyStatus||"Open") as FY["status"],current:false,lock:String(v.lock||"")}];
+    if(kind==="Opening Balance")n.openings=[...data.openings,{id,type:String(v.ledgerType),ledger:String(v.ledger),date:String(v.date||""),debit:Number(v.debit||0),credit:Number(v.credit||0),reference:String(v.reference||"")}];
+    if(kind==="Mapping Rule")n.mappings=[...data.mappings,{id,scope:String(v.scope),source:String(v.source),target:String(v.target||""),gl:String(v.gl||""),auto:false,status:"Active"}];
+    save(n,`${kind} created`,String(v.name||v.source||v.ledger||v.code));toast.success(`${kind} created`)};
+  const exp=()=>{const b=new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),u=URL.createObjectURL(b),a=document.createElement("a");a.href=u;a.download="accounting-masters.json";a.click();URL.revokeObjectURL(u)};
+  const imp=(f?:File)=>{if(!f)return;const r=new FileReader();r.onload=()=>{try{save({...defaults,...JSON.parse(String(r.result))},"Masters imported",f.name);toast.success("Masters imported")}catch{toast.error("Invalid file")}};r.readAsText(f)};
+  const readiness=[data.gl.some(x=>x.control),data.sl.length>0,data.taxes.length>0,data.banks.length>0,data.vouchers.length>0,data.mappings.length>0].filter(Boolean).length;
 
-function DimensionMasterCard({ title, singular, items, onAdd, onDelete }: { title: string; singular: string; items: DimensionMaster[]; onAdd: (code: string, name: string) => void; onDelete: (id: string) => void }) {
-  const [code, setCode] = useState("");
-  const [name, setName] = useState("");
-  const add = () => {
-    if (!code.trim() || !name.trim()) return toast.error(`${singular} code and name are required`);
-    onAdd(code.trim().toUpperCase(), name.trim());
-    setCode("");
-    setName("");
-  };
-  return (
-    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-      <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3"><p className="text-sm font-bold text-slate-800">{title}</p><p className="mt-0.5 text-[11px] text-slate-400">Create options used in finance entry dropdowns.</p></div>
-      <div className="grid gap-2 p-3 sm:grid-cols-[130px_minmax(0,1fr)_auto]"><input className={inputClass} value={code} onChange={(event) => setCode(event.target.value)} placeholder="Code" /><input className={inputClass} value={name} onChange={(event) => setName(event.target.value)} placeholder={`${singular} name`} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); add(); } }} /><button type="button" onClick={add} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" /> Add</button></div>
-      <div className="max-h-56 overflow-y-auto border-t border-slate-100">
-        {items.length === 0 ? <p className="px-4 py-6 text-center text-xs font-medium text-slate-400">No {title.toLowerCase()} configured.</p> : items.map((item) => <div key={item.id} className="flex items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-b-0"><span className="rounded-lg bg-[#edf5f2] px-2 py-1 font-mono text-[10px] font-bold text-[#0d5c4d]">{item.code}</span><span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700">{item.name}</span><button type="button" onClick={() => onDelete(item.id)} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600" title={`Delete ${item.name}`}><Trash2 className="h-4 w-4" /></button></div>)}
-      </div>
-    </div>
-  );
-}
+  return <div className="min-h-full bg-[#f6f8fa] p-5 lg:p-8"><div className="mx-auto max-w-[1700px] space-y-5">
+    <header className="flex flex-col gap-4 xl:flex-row xl:items-center"><div><p className="text-[10px] font-extrabold uppercase tracking-[.18em] text-[#18765f]">Accounts · Master Creations</p><h1 className="mt-1 text-2xl font-bold">Master Creations</h1><p className="mt-1 text-sm text-slate-500">Configure accounting structure, ledgers, taxes, banks and posting controls.</p></div><div className="ml-auto flex flex-wrap gap-2"><input ref={importRef} type="file" className="hidden" accept="application/json" onChange={e=>imp(e.target.files?.[0])}/><Button variant="outline" onClick={()=>importRef.current?.click()}><Upload className="mr-2 h-4 w-4"/>Import</Button><Button variant="outline" onClick={exp}><Download className="mr-2 h-4 w-4"/>Export</Button><Button variant="outline" onClick={()=>setAudit(true)}><History className="mr-2 h-4 w-4"/>Audit Log</Button><Button onClick={()=>open()} className="bg-[#0d5c4d]"><Plus className="mr-2 h-4 w-4"/>Create Master</Button></div></header>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Stat label="General Ledgers" value={data.gl.length} detail={`${data.gl.filter(x=>x.control).length} control accounts`} icon={BookOpen}/><Stat label="Sub Ledgers" value={data.sl.length} detail={`${new Set(data.sl.map(x=>x.entity)).size} linked ERP entities`} icon={Users}/><Stat label="Active Financial Year" value={data.years.find(x=>x.current)?.name||"—"} detail={data.years.find(x=>x.current)?.status||"Not configured"} icon={CalendarDays}/><Stat label="Posting Readiness" value={`${readiness} / 6`} detail={readiness===6?"Core setup complete":"Configuration required"} icon={CheckCircle2}/></div>
+    <nav className="overflow-x-auto rounded-xl border bg-white p-1"><div className="flex min-w-max gap-1">{tabs.map(({label,icon:Icon})=><button key={label} onClick={()=>{setTab(label);setSearch("");setStatus("All");setGroup("All")}} className={cn("inline-flex h-10 items-center gap-2 rounded-lg px-3 text-xs font-bold",tab===label?"bg-[#0d5c4d] text-white":"text-slate-500 hover:bg-slate-100")}><Icon className="h-3.5 w-3.5"/>{label}</button>)}</div></nav>
+    {!(["Cost Centre","Cost Attribution"] as Tab[]).includes(tab)&&<div className="flex flex-col gap-2 rounded-xl border bg-white p-3 sm:flex-row"><div className="relative flex-1"><Search className="absolute left-3 top-3 h-4 w-4 text-slate-400"/><input className="h-10 w-full rounded-lg border bg-slate-50 pl-9 text-sm outline-none" placeholder="Search ledger, code, entity, category..." value={search} onChange={e=>setSearch(e.target.value)}/></div><select className={cn(input,"sm:w-36")} value={status} onChange={e=>setStatus(e.target.value)}><option>All</option><option>Active</option><option>Inactive</option></select><select className={cn(input,"sm:w-44")} value={group} onChange={e=>setGroup(e.target.value)}><option>All</option>{tab==="Chart of Accounts"&&["Asset","Liability","Equity","Income","Expense"].map(x=><option key={x}>{x}</option>)}{tab==="Sub Ledgers"&&["Vendor","Contractor","Customer","Employee","Landowner"].map(x=><option key={x}>{x}</option>)}{tab==="Tax & Statutory"&&["GST","TDS","RCM"].map(x=><option key={x}>{x}</option>)}</select><Button variant="outline" onClick={()=>{setSearch("");setStatus("All");setGroup("All")}}><Filter className="mr-2 h-4 w-4"/>Clear</Button></div>}
 
-function ProjectMasterSetup({ projects, onChange }: { projects: DimensionMaster[]; onChange: (projects: DimensionMaster[]) => void }) {
-  const [search, setSearch] = useState("");
-  const [editing, setEditing] = useState<DimensionMaster | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const nextCode = () => {
-    const numbers = projects.map((project) => /^PRJ-(\d+)$/.exec(project.code)?.[1]).filter(Boolean).map(Number);
-    return `PRJ-${String((numbers.length ? Math.max(...numbers) : 0) + 1).padStart(3, "0")}`;
-  };
-  const blank = (): DimensionMaster => ({ id: `projects-${Date.now()}`, code: nextCode(), name: "", shortName: "", description: "", projectHead: "", department: "", location: "", startDate: "", endDate: "", status: "Active" });
-  const [form, setForm] = useState<DimensionMaster>(blank);
-  const openAdd = () => { setEditing(null); setForm(blank()); setErrors({}); setDrawerOpen(true); };
-  const openEdit = (project: DimensionMaster) => { setEditing(project); setForm({ ...blank(), ...project }); setErrors({}); setDrawerOpen(true); };
-  const update = <K extends keyof DimensionMaster>(key: K, value: DimensionMaster[K]) => setForm((current) => ({ ...current, [key]: value }));
-  const saveProject = () => {
-    const nextErrors: Record<string, string> = {};
-    if (!form.name.trim()) nextErrors.name = "Project Name is required";
-    if (!form.department?.trim()) nextErrors.department = "Department is required";
-    if (form.endDate && form.startDate && form.endDate < form.startDate) nextErrors.endDate = "End Date cannot be before Start Date";
-    setErrors(nextErrors);
-    if (Object.keys(nextErrors).length) return;
-    const next = editing ? projects.map((project) => project.id === editing.id ? form : project) : [form, ...projects];
-    onChange(next);
-    setDrawerOpen(false);
-    toast.success(editing ? "Project updated" : "Project created");
-  };
-  const filtered = projects.filter((project) => [project.code, project.name, project.department, project.location, project.projectHead].some((value) => String(value ?? "").toLowerCase().includes(search.toLowerCase())));
-  return <div className="space-y-5">
-    <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-base font-bold text-slate-900">Project Master</h2><p className="mt-1 text-xs text-slate-400">Create projects used for accounting attribution, costing and finance entries.</p></div><button type="button" onClick={openAdd} className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white"><Plus className="h-4 w-4" /> Create Project</button></div>
-    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="flex flex-col gap-3 border-b border-slate-100 p-4 sm:flex-row sm:items-center sm:justify-between"><div><h3 className="font-bold text-slate-900">Projects Register</h3><p className="mt-1 text-xs text-slate-400">{filtered.length} projects configured</p></div><input className={cn(inputClass, "sm:max-w-sm")} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search project, code, department or location" /></div>
-      {filtered.length ? <div className="overflow-x-auto"><table className="w-full min-w-[980px] text-left text-sm"><thead className="bg-[#0d473f] text-[10px] uppercase tracking-[0.1em] text-white"><tr><th className="px-4 py-3">Project Code</th><th className="px-4 py-3">Project Name</th><th className="px-4 py-3">Department</th><th className="px-4 py-3">Project Head</th><th className="px-4 py-3">Location / Cluster</th><th className="px-4 py-3">Period</th><th className="px-4 py-3">Status</th><th className="px-4 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{filtered.map((project) => <tr key={project.id} className={cn("hover:bg-[#f6faf9]", project.status === "Inactive" && "opacity-60")}><td className="px-4 py-3 font-mono text-xs font-bold text-[#0d5c4d]">{project.code}</td><td className="px-4 py-3 font-bold text-slate-800">{project.name}</td><td className="px-4 py-3 text-slate-500">{project.department || "—"}</td><td className="px-4 py-3 text-slate-500">{project.projectHead || "—"}</td><td className="px-4 py-3 text-slate-500">{project.location || "—"}</td><td className="px-4 py-3 text-xs text-slate-500">{project.startDate || "—"}{project.endDate ? ` → ${project.endDate}` : ""}</td><td className="px-4 py-3"><span className={cn("rounded-full px-2.5 py-1 text-xs font-bold", project.status === "Active" ? "bg-emerald-50 text-emerald-700" : project.status === "Completed" ? "bg-blue-50 text-blue-700" : project.status === "On Hold" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500")}>{project.status || "Active"}</span></td><td className="px-4 py-3"><div className="flex justify-end gap-2"><button type="button" onClick={() => openEdit(project)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-[#0d5c4d]" title="Edit project"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => onChange(projects.map((item) => item.id === project.id ? { ...item, status: item.status === "Inactive" ? "Active" : "Inactive" } : item))} className="rounded-lg px-2 py-1 text-xs font-bold text-slate-500 hover:bg-slate-100">{project.status === "Inactive" ? "Reactivate" : "Deactivate"}</button></div></td></tr>)}</tbody></table></div> : <div className="py-14 text-center"><FolderKanban className="mx-auto h-8 w-8 text-slate-300" /><h4 className="mt-4 font-bold text-slate-800">No projects configured</h4><p className="mt-2 text-sm text-slate-400">Create a project to use it in costing and cost attribution.</p><button type="button" onClick={openAdd} className="mt-4 inline-flex h-10 items-center gap-2 rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white"><Plus className="h-4 w-4" /> Create Project</button></div>}
-    </section>
-    {drawerOpen && <div className="fixed inset-0 z-[120] bg-slate-950/45" onMouseDown={(event) => event.target === event.currentTarget && setDrawerOpen(false)}><aside className="ml-auto flex h-full w-full max-w-[540px] flex-col bg-[#f7f9fa] shadow-2xl"><div className="flex items-start justify-between bg-[#0d473f] px-6 py-5 text-white"><div><p className="text-[10px] font-extrabold uppercase tracking-[0.16em] text-white/60">Accounting Master · Projects</p><h2 className="mt-1 text-xl font-bold">{editing ? "Edit Project" : "Create Project"}</h2></div><button type="button" onClick={() => setDrawerOpen(false)} className="rounded-lg p-2 text-white/70 hover:bg-white/10"><X className="h-5 w-5" /></button></div><div className="min-h-0 flex-1 overflow-y-auto p-5"><section className="rounded-2xl border border-slate-200 bg-white p-5"><div className="grid gap-4 sm:grid-cols-2"><label className={labelClass}>Project Code<input readOnly className={cn(inputClass, "bg-slate-50 font-mono text-[#0d5c4d]")} value={form.code} /><span className="text-[10px] font-medium text-slate-400">Auto-generated</span></label><label className={labelClass}>Project Name<input className={inputClass} value={form.name} onChange={(event) => update("name", event.target.value)} />{errors.name && <span className="text-[11px] text-red-600">{errors.name}</span>}</label><label className={labelClass}>Short Name<input className={inputClass} value={form.shortName || ""} onChange={(event) => update("shortName", event.target.value)} /></label><label className={labelClass}>Department<input className={inputClass} value={form.department || ""} onChange={(event) => update("department", event.target.value)} />{errors.department && <span className="text-[11px] text-red-600">{errors.department}</span>}</label><label className={labelClass}>Project Head<input className={inputClass} value={form.projectHead || ""} onChange={(event) => update("projectHead", event.target.value)} /></label><label className={labelClass}>Location / Cluster<input className={inputClass} value={form.location || ""} onChange={(event) => update("location", event.target.value)} /></label><label className={labelClass}>Start Date<input type="date" className={inputClass} value={form.startDate || ""} onChange={(event) => update("startDate", event.target.value)} /></label><label className={labelClass}>End Date<input type="date" className={inputClass} value={form.endDate || ""} onChange={(event) => update("endDate", event.target.value)} />{errors.endDate && <span className="text-[11px] text-red-600">{errors.endDate}</span>}</label><label className={labelClass}>Status<select className={inputClass} value={form.status || "Active"} onChange={(event) => update("status", event.target.value as DimensionMaster["status"])}><option>Active</option><option>Inactive</option><option>Completed</option><option>On Hold</option></select></label><label className={cn(labelClass, "sm:col-span-2")}>Description<textarea rows={4} className="w-full rounded-xl border border-slate-200 p-3 text-sm font-medium outline-none focus:border-[#278b76]" value={form.description || ""} onChange={(event) => update("description", event.target.value)} /></label></div></section></div><div className="flex shrink-0 justify-end gap-3 border-t border-slate-200 bg-white p-4"><button type="button" onClick={() => setDrawerOpen(false)} className="h-10 rounded-xl border border-slate-200 px-4 text-sm font-bold text-slate-600">Cancel</button><button type="button" onClick={saveProject} className="h-10 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white">Save Project</button></div></aside></div>}
-  </div>;
-}
-
-export default function AccountingMaster() {
-  const [activeTab, setActiveTab] = useState<MasterTab>("Organisation");
-  const [config, setConfig] = useState<AccountingMasterConfig>(loadConfig);
-  const [savedAt, setSavedAt] = useState(() => localStorage.getItem(`${STORAGE_KEY}:saved-at`) ?? "");
-
-  const tabs: Array<{ label: MasterTab; icon: ElementType }> = [
-    { label: "Organisation", icon: Building2 },
-    { label: "Numbering", icon: FileKey },
-    { label: "Cost Centre", icon: Building2 },
-    { label: "Cost Attribution", icon: Target },
-  ];
-
-  const configuredControls = useMemo(() => {
-    const values = [config.tax.gstEnabled, config.tax.tdsEnabled, config.payments.paymentApprovalRequired, config.payments.bankReconciliationRequired, config.costing.requireBudgetHead, config.controls.makerChecker, config.controls.mandatoryBillAttachment];
-    return values.filter(Boolean).length;
-  }, [config]);
-
-  const save = () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-    const timestamp = new Date().toLocaleString("en-IN");
-    localStorage.setItem(`${STORAGE_KEY}:saved-at`, timestamp);
-    setSavedAt(timestamp);
-    toast.success("Accounting Master configuration saved");
-  };
-
-  const reset = () => {
-    if (!window.confirm("Reset Accounting Master to the default configuration?")) return;
-    setConfig(DEFAULT_CONFIG);
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(`${STORAGE_KEY}:saved-at`);
-    setSavedAt("");
-    toast.success("Accounting Master reset to defaults");
-  };
-
-  const updateNumbering = (id: string, patch: Partial<NumberingRule>) => setConfig((current) => ({ ...current, numbering: current.numbering.map((rule) => rule.id === id ? { ...rule, ...patch } : rule) }));
-  const updateApprovalRule = (id: string, patch: Partial<ApprovalRule>) => setConfig((current) => ({ ...current, controls: { ...current.controls, approvalRules: current.controls.approvalRules.map((rule) => rule.id === id ? { ...rule, ...patch } : rule) } }));
-  const addDimension = (key: "departments" | "costCentres" | "projects" | "sites", code: string, name: string) => {
-    const exists = config.costing[key].some((item) => item.code.toLowerCase() === code.toLowerCase() || item.name.toLowerCase() === name.toLowerCase());
-    if (exists) return toast.error(`${name} is already configured`);
-    setConfig((current) => ({ ...current, costing: { ...current.costing, [key]: [...current.costing[key], { id: `${key}-${Date.now()}`, code, name }] } }));
-  };
-  const deleteDimension = (key: "departments" | "costCentres" | "projects" | "sites", id: string) => setConfig((current) => ({ ...current, costing: { ...current.costing, [key]: current.costing[key].filter((item) => item.id !== id) } }));
-
-  return (
-    <div className="min-h-full bg-[#f6f8fa] px-5 py-6 sm:px-8 lg:px-10 lg:py-8">
-      <div className="mx-auto max-w-[1600px] space-y-6">
-        <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
-          <div className="flex items-start gap-4"><span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#0d473f] text-white shadow-[0_12px_30px_rgba(13,71,63,0.18)]"><Settings2 className="h-6 w-6" /></span><div><p className="text-[11px] font-extrabold uppercase tracking-[0.2em] text-[#18765f]">Finance & Accounts</p><h1 className="mt-1 text-3xl font-bold tracking-[-0.035em] text-slate-950">Accounting Master</h1><p className="mt-1.5 max-w-3xl text-sm font-medium leading-6 text-slate-500">Configure common accounting rules and defaults used across every Finance & Accounts page.</p></div></div>
-          <div className="flex flex-wrap gap-3"><button type="button" onClick={reset} className="inline-flex h-11 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-bold text-slate-600 hover:bg-slate-50"><RotateCcw className="h-4 w-4" /> Reset Defaults</button><button type="button" onClick={save} className="inline-flex h-11 items-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"><Save className="h-4 w-4" /> Save Configuration</button></div>
-        </div>
-
-        <div className="grid gap-4 sm:grid-cols-3">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-xs font-bold text-slate-400">Active Financial Year</p><p className="mt-2 text-xl font-bold text-slate-900">{config.organisation.activeFinancialYear}</p></div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-xs font-bold text-slate-400">Configured Number Series</p><p className="mt-2 text-xl font-bold text-slate-900">{config.numbering.length}</p></div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-xs font-bold text-slate-400">Core Controls Enabled</p><div className="mt-2 flex items-center gap-2"><p className="text-xl font-bold text-slate-900">{configuredControls} / 7</p>{savedAt && <span className="ml-auto text-[10px] font-semibold text-slate-400">Saved {savedAt}</span>}</div></div>
-        </div>
-
-        <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm"><div className="flex min-w-max gap-1">{tabs.map(({ label, icon: Icon }) => <button key={label} type="button" onClick={() => setActiveTab(label)} className={cn("inline-flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition", activeTab === label ? "bg-[#0d5c4d] text-white shadow-sm" : "text-slate-500 hover:bg-slate-100 hover:text-slate-800")}><Icon className="h-4 w-4" /> {label}</button>)}</div></div>
-
-        {activeTab === "Organisation" && <div className="grid gap-5 xl:grid-cols-2"><Section icon={Building2} title="Organisation & Books" description="Base settings inherited by vouchers, bills, payments and reports."><div className="grid gap-5 sm:grid-cols-2"><label className={cn(labelClass, "sm:col-span-2")}>Legal Entity<input className={inputClass} value={config.organisation.legalEntity} onChange={(event) => setConfig({ ...config, organisation: { ...config.organisation, legalEntity: event.target.value } })} /></label><label className={labelClass}>Base Currency<select className={inputClass} value={config.organisation.baseCurrency} onChange={(event) => setConfig({ ...config, organisation: { ...config.organisation, baseCurrency: event.target.value } })}>{["INR", "USD", "EUR", "GBP"].map((item) => <option key={item}>{item}</option>)}</select></label><label className={labelClass}>Accounting Method<select className={inputClass} value={config.organisation.accountingMethod} onChange={(event) => setConfig({ ...config, organisation: { ...config.organisation, accountingMethod: event.target.value } })}><option>Accrual</option><option>Cash</option></select></label><label className={labelClass}>Date Format<select className={inputClass} value={config.organisation.dateFormat} onChange={(event) => setConfig({ ...config, organisation: { ...config.organisation, dateFormat: event.target.value } })}><option>DD/MM/YYYY</option><option>DD-MM-YYYY</option><option>YYYY-MM-DD</option></select></label><label className={labelClass}>Timezone<input readOnly className={cn(inputClass, "bg-slate-50")} value={config.organisation.timezone} /></label></div></Section><Section icon={CalendarDays} title="Financial Year" description="Controls the active accounting period and year-based numbering."><div className="grid gap-5 sm:grid-cols-2"><label className={labelClass}>Active Financial Year<input className={inputClass} value={config.organisation.activeFinancialYear} onChange={(event) => setConfig({ ...config, organisation: { ...config.organisation, activeFinancialYear: event.target.value } })} placeholder="2026-27" /></label><label className={labelClass}>Start Month<select className={inputClass} value={config.organisation.financialYearStartMonth} onChange={(event) => setConfig({ ...config, organisation: { ...config.organisation, financialYearStartMonth: event.target.value } })}>{["January", "April", "July", "October"].map((item) => <option key={item}>{item}</option>)}</select></label><label className={cn(labelClass, "sm:col-span-2")}>Books Start Date<input type="date" className={inputClass} value={config.organisation.booksStartDate} onChange={(event) => setConfig({ ...config, organisation: { ...config.organisation, booksStartDate: event.target.value } })} /></label></div></Section></div>}
-
-        {activeTab === "Numbering" && <Section icon={FileKey} title="Document Numbering" description="Set prefixes, sequence length and reset rules for every accounting document."><div className="overflow-x-auto"><table className="w-full min-w-[980px] text-left"><thead className="bg-[#0d473f] text-[11px] uppercase tracking-[0.1em] text-white"><tr><th className="px-4 py-3">Document</th><th className="px-4 py-3">Prefix</th><th className="px-4 py-3">Digits</th><th className="px-4 py-3">Reset Cycle</th><th className="px-4 py-3">Next Number</th><th className="px-4 py-3">Preview</th></tr></thead><tbody className="divide-y divide-slate-100">{config.numbering.map((rule) => <tr key={rule.id}><td className="px-4 py-3 text-sm font-bold text-slate-800">{rule.document}</td><td className="p-2"><input className={inputClass} value={rule.prefix} onChange={(event) => updateNumbering(rule.id, { prefix: event.target.value })} /></td><td className="p-2"><input type="number" min="3" max="10" className={inputClass} value={rule.digits} onChange={(event) => updateNumbering(rule.id, { digits: Number(event.target.value) })} /></td><td className="p-2"><select className={inputClass} value={rule.reset} onChange={(event) => updateNumbering(rule.id, { reset: event.target.value as NumberingRule["reset"] })}>{["Financial Year", "Calendar Year", "Never"].map((item) => <option key={item}>{item}</option>)}</select></td><td className="p-2"><input type="number" min="1" className={inputClass} value={rule.nextNumber} onChange={(event) => updateNumbering(rule.id, { nextNumber: Number(event.target.value) })} /></td><td className="px-4 py-3 font-mono text-xs font-bold text-[#0d5c4d]">{rule.prefix.replace("{FY}", config.organisation.activeFinancialYear)}{String(rule.nextNumber).padStart(rule.digits, "0")}</td></tr>)}</tbody></table></div></Section>}
-
-        {activeTab === "Tax & TDS" && <div className="grid gap-5 xl:grid-cols-2"><Section icon={Receipt} title="GST Configuration" description="Controls GST registration and invoice tax treatment."><div className="space-y-4"><Toggle checked={config.tax.gstEnabled} onChange={(value) => setConfig({ ...config, tax: { ...config.tax, gstEnabled: value } })} label="Enable GST" description="Apply GST controls to bills, vouchers and reports." /><div className="grid gap-5 sm:grid-cols-2"><label className={labelClass}>Company GSTIN<input className={inputClass} value={config.tax.companyGstin} onChange={(event) => setConfig({ ...config, tax: { ...config.tax, companyGstin: event.target.value.toUpperCase() } })} /></label><label className={labelClass}>Registration State<input className={inputClass} value={config.tax.registrationState} onChange={(event) => setConfig({ ...config, tax: { ...config.tax, registrationState: event.target.value } })} /></label><label className={cn(labelClass, "sm:col-span-2")}>Default Tax Treatment<select className={inputClass} value={config.tax.defaultTaxTreatment} onChange={(event) => setConfig({ ...config, tax: { ...config.tax, defaultTaxTreatment: event.target.value } })}><option>Auto — based on Place of Supply</option><option>CGST + SGST</option><option>IGST</option><option>Exempt / Nil Rated</option></select></label></div></div></Section><Section icon={CircleDollarSign} title="TDS Controls" description="Default withholding controls used during bill passing and payment."><div className="space-y-4"><Toggle checked={config.tax.tdsEnabled} onChange={(value) => setConfig({ ...config, tax: { ...config.tax, tdsEnabled: value } })} label="Enable TDS" description="Allow TDS applicability and deduction during bill passing." /><div className="grid gap-5 sm:grid-cols-2"><label className={labelClass}>Default TDS Rate (%)<input type="number" min="0" step="0.01" className={inputClass} value={config.tax.defaultTdsRate} onChange={(event) => setConfig({ ...config, tax: { ...config.tax, defaultTdsRate: Number(event.target.value) } })} /></label><label className={labelClass}>Rounding<select className={inputClass} value={config.tax.tdsRounding} onChange={(event) => setConfig({ ...config, tax: { ...config.tax, tdsRounding: event.target.value } })}><option>Nearest Rupee</option><option>Two Decimals</option><option>Round Down</option></select></label><label className={cn(labelClass, "sm:col-span-2")}>Tax Calculation Basis<select className={inputClass} value={config.tax.taxCalculationBasis} onChange={(event) => setConfig({ ...config, tax: { ...config.tax, taxCalculationBasis: event.target.value } })}><option>Line Item</option><option>Invoice Total</option></select></label></div></div></Section></div>}
-
-        {activeTab === "Payments & Banking" && <div className="grid gap-5 xl:grid-cols-2"><Section icon={WalletCards} title="Payment Defaults" description="Defaults used by requests, advances, payments and receipts."><div className="space-y-4"><label className={labelClass}>Default Credit Days<input type="number" min="0" className={inputClass} value={config.payments.defaultCreditDays} onChange={(event) => setConfig({ ...config, payments: { ...config.payments, defaultCreditDays: Number(event.target.value) } })} /></label><Toggle checked={config.payments.paymentApprovalRequired} onChange={(value) => setConfig({ ...config, payments: { ...config.payments, paymentApprovalRequired: value } })} label="Payment Approval Required" description="Route every payment through the approval matrix." /><Toggle checked={config.payments.allowPartPayments} onChange={(value) => setConfig({ ...config, payments: { ...config.payments, allowPartPayments: value } })} label="Allow Part Payments" description="Permit partial settlement of passed bills." /><Toggle checked={config.payments.requirePaymentAllocation} onChange={(value) => setConfig({ ...config, payments: { ...config.payments, requirePaymentAllocation: value } })} label="Require Payment Allocation" description="Payments must be allocated against bills or advances." /></div></Section><Section icon={Landmark} title="Banking Defaults" description="Common bank and reconciliation controls."><div className="space-y-4"><label className={labelClass}>Default Bank Account<input className={inputClass} value={config.payments.defaultBankAccount} onChange={(event) => setConfig({ ...config, payments: { ...config.payments, defaultBankAccount: event.target.value } })} placeholder="Select after Bank Master setup" /></label><Toggle checked={config.payments.bankReconciliationRequired} onChange={(value) => setConfig({ ...config, payments: { ...config.payments, bankReconciliationRequired: value } })} label="Bank Reconciliation Required" description="Keep imported and book transactions unreconciled until matched." /><div><p className="mb-2 text-xs font-bold text-slate-600">Allowed Payment Modes</p><div className="flex flex-wrap gap-2">{config.payments.paymentModes.map((mode) => <span key={mode} className="rounded-full border border-[#cfe3dd] bg-[#f0f8f5] px-3 py-1.5 text-xs font-bold text-[#0d5c4d]">{mode}</span>)}</div></div></div></Section></div>}
-
-        {activeTab === "Cost Allocation" && <div className="space-y-5">
-          <div className="grid gap-5 xl:grid-cols-2">
-            <Section icon={CircleDollarSign} title="Mandatory Dimensions" description="Choose which costing dimensions must be captured on finance entries."><div className="space-y-3"><Toggle checked={config.costing.requireDepartment} onChange={(value) => setConfig({ ...config, costing: { ...config.costing, requireDepartment: value } })} label="Department" description="Require a department on accounting entries." /><Toggle checked={config.costing.requireCostCentre} onChange={(value) => setConfig({ ...config, costing: { ...config.costing, requireCostCentre: value } })} label="Cost Centre" description="Require a financial cost centre." /><Toggle checked={config.costing.requireProject} onChange={(value) => setConfig({ ...config, costing: { ...config.costing, requireProject: value } })} label="Project" description="Require a project for project-wise reporting." /><Toggle checked={config.costing.requireSiteLand} onChange={(value) => setConfig({ ...config, costing: { ...config.costing, requireSiteLand: value } })} label="Site / Land Parcel" description="Require a site, farm or land parcel allocation." /><Toggle checked={config.costing.requireBudgetHead} onChange={(value) => setConfig({ ...config, costing: { ...config.costing, requireBudgetHead: value } })} label="Budget Head" description="Require an approved budget or cost head." /></div></Section>
-            <Section icon={BookOpen} title="Budget Controls" description="Set how commitments and actuals affect available budgets."><div className="space-y-4"><label className={labelClass}>Allocation Basis<select className={inputClass} value={config.costing.allocationBasis} onChange={(event) => setConfig({ ...config, costing: { ...config.costing, allocationBasis: event.target.value } })}><option>Line Item</option><option>Document Total</option><option>Percentage Split</option></select></label><Toggle checked={config.costing.preventBudgetOverrun} onChange={(value) => setConfig({ ...config, costing: { ...config.costing, preventBudgetOverrun: value } })} label="Prevent Budget Overrun" description="Block entries that exceed the available budget balance." /><div className="rounded-2xl border border-[#cfe3dd] bg-[#f0f8f5] p-4 text-xs leading-5 text-slate-600">These rules apply to Bills & Payables, Payments & Receipts, Vouchers, and Budget & Costing.</div></div></Section>
-          </div>
-          <Section icon={Building2} title="Accounting Dimensions" description="Create the Department, Cost Centre, Project and Site options used throughout Finance & Accounts.">
-            <div className="grid gap-4 xl:grid-cols-2">
-              <DimensionMasterCard title="Departments" singular="Department" items={config.costing.departments} onAdd={(code, name) => addDimension("departments", code, name)} onDelete={(id) => deleteDimension("departments", id)} />
-              <DimensionMasterCard title="Cost Centres" singular="Cost Centre" items={config.costing.costCentres} onAdd={(code, name) => addDimension("costCentres", code, name)} onDelete={(id) => deleteDimension("costCentres", id)} />
-              <DimensionMasterCard title="Projects" singular="Project" items={config.costing.projects} onAdd={(code, name) => addDimension("projects", code, name)} onDelete={(id) => deleteDimension("projects", id)} />
-              <DimensionMasterCard title="Sites / Land Parcels" singular="Site" items={config.costing.sites} onAdd={(code, name) => addDimension("sites", code, name)} onDelete={(id) => deleteDimension("sites", id)} />
-            </div>
-          </Section>
-        </div>}
-
-        {activeTab === "Cost Centre" && <CostAccountingSetup mode="Cost Centre" projects={config.costing.projects} departments={config.costing.departments} legalEntity={config.organisation.legalEntity} />}
-
-        {activeTab === "Cost Attribution" && <CostAccountingSetup mode="Cost Attribution" projects={config.costing.projects} legalEntity={config.organisation.legalEntity} />}
-
-        {activeTab === "Organisation" && <ProjectMasterSetup projects={config.costing.projects} onChange={(projects) => setConfig((current) => ({ ...current, costing: { ...current.costing, projects } }))} />}
-
-        {activeTab === "Workflow & Controls" && <div className="space-y-5"><div className="grid gap-5 xl:grid-cols-2"><Section icon={ShieldCheck} title="Approval & Posting Controls" description="Global safeguards across finance transactions."><div className="space-y-3"><Toggle checked={config.controls.makerChecker} onChange={(value) => setConfig({ ...config, controls: { ...config.controls, makerChecker: value } })} label="Maker–Checker" description="The creator cannot approve the same accounting entry." /><Toggle checked={config.controls.mandatoryBillAttachment} onChange={(value) => setConfig({ ...config, controls: { ...config.controls, mandatoryBillAttachment: value } })} label="Mandatory Bill Attachment" description="Bill Inward cannot be saved without an invoice PDF or image." /><Toggle checked={config.controls.mandatorySupportingDocuments} onChange={(value) => setConfig({ ...config, controls: { ...config.controls, mandatorySupportingDocuments: value } })} label="Mandatory Supporting Documents" description="Require GRN, WCC or other supporting evidence where applicable." /><Toggle checked={config.controls.autoPostApprovedVouchers} onChange={(value) => setConfig({ ...config, controls: { ...config.controls, autoPostApprovedVouchers: value } })} label="Auto-post Approved Vouchers" description="Post vouchers automatically after final approval." /></div></Section><Section icon={LockKeyhole} title="Period & Audit Controls" description="Restrict dates and retain a complete finance audit trail."><div className="space-y-4"><Toggle checked={config.controls.allowBackdatedEntries} onChange={(value) => setConfig({ ...config, controls: { ...config.controls, allowBackdatedEntries: value } })} label="Allow Backdated Entries" description="Allow authorised users to enter prior-period documents." /><label className={labelClass}>Period Lock Date<input type="date" className={inputClass} value={config.controls.periodLockDate} onChange={(event) => setConfig({ ...config, controls: { ...config.controls, periodLockDate: event.target.value } })} /></label><label className={labelClass}>Audit Log Retention (Years)<input type="number" min="1" className={inputClass} value={config.controls.auditLogRetentionYears} onChange={(event) => setConfig({ ...config, controls: { ...config.controls, auditLogRetentionYears: Number(event.target.value) } })} /></label></div></Section></div><Section icon={Check} title="Approval Matrix" description="Define approval depth by transaction type and value range."><div className="overflow-x-auto"><table className="w-full min-w-[850px]"><thead className="bg-[#0d473f] text-left text-[11px] uppercase tracking-[0.1em] text-white"><tr><th className="px-4 py-3">Transaction</th><th className="px-4 py-3">From Amount</th><th className="px-4 py-3">To Amount</th><th className="px-4 py-3">Approval Levels</th><th className="w-14" /></tr></thead><tbody className="divide-y divide-slate-100">{config.controls.approvalRules.map((rule) => <tr key={rule.id}><td className="p-2"><select className={inputClass} value={rule.transaction} onChange={(event) => updateApprovalRule(rule.id, { transaction: event.target.value })}>{["Bill Verification", "Bill Passing", "Payment Request", "Vendor Payment", "Journal Voucher", "Bank Voucher"].map((item) => <option key={item}>{item}</option>)}</select></td><td className="p-2"><input type="number" min="0" className={inputClass} value={rule.fromAmount} onChange={(event) => updateApprovalRule(rule.id, { fromAmount: Number(event.target.value) })} /></td><td className="p-2"><input type="number" min="0" className={inputClass} value={rule.toAmount} onChange={(event) => updateApprovalRule(rule.id, { toAmount: Number(event.target.value) })} /></td><td className="p-2"><input type="number" min="1" max="10" className={inputClass} value={rule.levels} onChange={(event) => updateApprovalRule(rule.id, { levels: Number(event.target.value) })} /></td><td className="p-2"><button type="button" onClick={() => setConfig((current) => ({ ...current, controls: { ...current.controls, approvalRules: current.controls.approvalRules.filter((item) => item.id !== rule.id) } }))} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 className="h-4 w-4" /></button></td></tr>)}</tbody></table></div><button type="button" onClick={() => setConfig((current) => ({ ...current, controls: { ...current.controls, approvalRules: [...current.controls.approvalRules, { id: `rule-${Date.now()}`, transaction: "Bill Passing", fromAmount: 0, toAmount: 0, levels: 1 }] } }))} className="mt-4 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" /> Add Approval Rule</button></Section></div>}
-
-      </div>
-    </div>
-  );
+    {tab==="Chart of Accounts"&&(()=>{const rows=data.gl.filter(x=>match(x.code,x.name,x.parent,x.category,x.type)&&(status==="All"||x.status===status)&&(group==="All"||x.category===group));return <Shell title="Chart of Accounts" count={rows.length} actions={<><div className="flex rounded-lg border p-0.5"><button onClick={()=>setTree(true)} className={cn("p-1.5",tree&&"bg-slate-100")}><FolderTree className="h-4 w-4"/></button><button onClick={()=>setTree(false)} className={cn("p-1.5",!tree&&"bg-slate-100")}><LayoutList className="h-4 w-4"/></button></div><Button size="sm" onClick={()=>open("GL Account")} className="bg-[#0d5c4d]"><Plus className="mr-1 h-4 w-4"/>Create GL</Button></>}>{rows.length?<div className="overflow-x-auto"><table className="w-full min-w-[1050px] text-left text-xs"><thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["GL Code","Account Name","Parent Group","Category","Account Type","Normal Balance","Balance","Status",""] .map(x=><th key={x} className="px-4 py-3">{x}</th>)}</tr></thead><tbody className="divide-y">{rows.map(x=><tr key={x.id} className="hover:bg-emerald-50/20"><td className="px-4 py-3 font-mono font-bold text-[#0d5c4d]">{x.code}</td><td className="px-4 py-3"><div className="flex" style={{paddingLeft:tree&&x.parent!=="—"?20:0}}>{tree&&x.parent!=="—"&&<ChevronRight className="mr-1 h-3 w-3"/>}<b>{x.name}</b>{x.control&&<span className="ml-2 rounded bg-violet-50 px-1.5 text-[9px] font-bold text-violet-700">CONTROL</span>}</div></td><td className="px-4 py-3 text-slate-500">{x.parent}</td><td className="px-4 py-3">{x.category}</td><td className="px-4 py-3">{x.type}</td><td className="px-4 py-3">{x.normal}</td><td className="px-4 py-3 font-semibold">{money(x.balance)}</td><td className="px-4 py-3"><Badge value={x.status}/></td><td><Edit3 className="h-4 w-4 text-slate-400"/></td></tr>)}</tbody></table></div>:<Empty/>}</Shell>})()}
+    {tab==="Sub Ledgers"&&(()=>{const rows=data.sl.filter(x=>match(x.code,x.name,x.entity,x.control)&&(status==="All"||x.status===status)&&(group==="All"||x.type===group));return <Shell title="Sub Ledger Register" count={rows.length} actions={<Button size="sm" onClick={()=>open("Sub Ledger")} className="bg-[#0d5c4d]"><Plus className="mr-1 h-4 w-4"/>Create Sub Ledger</Button>}>{rows.length?<div className="overflow-x-auto"><table className="w-full min-w-[1050px] text-left text-xs"><thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["SL Code","Sub Ledger","Type","Linked ERP Master","Control GL","Payment Terms","Outstanding","Status"].map(x=><th key={x} className="px-4 py-3">{x}</th>)}</tr></thead><tbody className="divide-y">{rows.map(x=><tr key={x.id}><td className="px-4 py-3 font-mono font-bold text-[#0d5c4d]">{x.code}</td><td className="px-4 py-3"><b>{x.name}</b><p className="text-[10px] text-slate-400">{x.entity}</p></td><td className="px-4 py-3">{x.type}</td><td className="px-4 py-3"><span className="flex gap-1"><Link2 className="h-3 w-3"/>{x.source}</span></td><td className="px-4 py-3 font-semibold">{x.control}</td><td className="px-4 py-3">{x.terms}</td><td className="px-4 py-3 font-bold">{money(x.balance)} {x.drcr}</td><td className="px-4 py-3"><Badge value={x.status}/></td></tr>)}</tbody></table></div>:<Empty/>}</Shell>})()}
+    {tab==="Cost Centre"&&<CostAccountingSetup mode="Cost Centre" projects={cost.projects} departments={cost.departments} legalEntity={cost.legalEntity}/>}
+    {tab==="Cost Attribution"&&<CostAccountingSetup mode="Cost Attribution" projects={cost.projects} legalEntity={cost.legalEntity}/>}
+    {tab==="Tax & Statutory"&&<Shell title="GST, TDS & RCM Masters" count={data.taxes.length} actions={<Button size="sm" onClick={()=>open("Tax Master")} className="bg-[#0d5c4d]"><Plus className="mr-1 h-4 w-4"/>Create Tax Master</Button>}><div className="overflow-x-auto"><table className="w-full min-w-[950px] text-left text-xs"><thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["Code","Tax / Nature","Section","Rate","Input / Expense GL","Output / Payable GL","Effective","Status"].map(x=><th key={x} className="px-4 py-3">{x}</th>)}</tr></thead><tbody className="divide-y">{data.taxes.filter(x=>match(x.code,x.name,x.section)&&(status==="All"||x.status===status)&&(group==="All"||x.section===group)).map(x=><tr key={x.id}><td className="px-4 py-3 font-mono font-bold text-[#0d5c4d]">{x.code}</td><td className="px-4 py-3"><b>{x.name}</b><p className="text-[10px] text-slate-400">{x.nature}</p></td><td className="px-4 py-3">{x.section}</td><td className="px-4 py-3 font-bold">{x.rate}%</td><td className="px-4 py-3">{x.input}</td><td className="px-4 py-3">{x.output}</td><td className="px-4 py-3">{x.effective}</td><td className="px-4 py-3"><Badge value={x.status}/></td></tr>)}</tbody></table></div></Shell>}
+    {tab==="Banks & Cash"&&<div className="space-y-4"><Shell title="Bank Master" count={data.banks.length} actions={<Button size="sm" onClick={()=>open("Bank Account")} className="bg-[#0d5c4d]"><Plus className="mr-1 h-4 w-4"/>Add Bank</Button>}><div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-xs"><thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["Code","Bank","Account","IFSC / Branch","Linked GL","Opening Balance","Status"].map(x=><th key={x} className="px-4 py-3">{x}</th>)}</tr></thead><tbody className="divide-y">{data.banks.map(x=><tr key={x.id}><td className="px-4 py-3 font-mono font-bold text-[#0d5c4d]">{x.code}</td><td className="px-4 py-3 font-bold">{x.name}</td><td className="px-4 py-3">{x.account}</td><td className="px-4 py-3">{x.ifsc} · {x.branch}</td><td className="px-4 py-3">{x.gl}</td><td className="px-4 py-3 font-bold">{money(x.balance)}</td><td className="px-4 py-3"><Badge value={x.status}/></td></tr>)}</tbody></table></div></Shell><Shell title="Cash Locations" count={data.cash.length} actions={<Button variant="outline" size="sm" onClick={()=>open("Cash Master")}><Plus className="mr-1 h-4 w-4"/>Add Cash Location</Button>}><div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">{data.cash.map(x=><div key={x.id} className="rounded-xl border p-4"><Banknote className="h-5 w-5 text-emerald-700"/><p className="mt-3 font-bold">{x.location}</p><p className="font-mono text-[10px] text-[#0d5c4d]">{x.code}</p><p className="mt-3 text-[11px] text-slate-500">Custodian: {x.custodian}<br/>Cost Centre: {x.centre}<br/>Limit: {money(x.limit)}</p></div>)}</div></Shell></div>}
+    {tab==="Voucher Setup"&&<div className="space-y-4"><Shell title="Voucher Types" count={data.vouchers.length} actions={<Button size="sm" onClick={()=>open("Voucher Type")} className="bg-[#0d5c4d]"><Plus className="mr-1 h-4 w-4"/>Create Voucher Type</Button>}><div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-xs"><thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["Code","Voucher Type","Prefix","Numbering","Approval","Posting","Status"].map(x=><th key={x} className="px-4 py-3">{x}</th>)}</tr></thead><tbody className="divide-y">{data.vouchers.map(x=><tr key={x.id}><td className="px-4 py-3 font-mono font-bold text-[#0d5c4d]">{x.code}</td><td className="px-4 py-3 font-bold">{x.name}</td><td className="px-4 py-3 font-mono">{x.prefix}000001</td><td className="px-4 py-3">{x.numbering}</td><td className="px-4 py-3">{x.approval?"Required":"Not required"}</td><td className="px-4 py-3"><Badge value={x.posting}/></td><td className="px-4 py-3"><Badge value={x.status}/></td></tr>)}</tbody></table></div></Shell><Shell title="Payment Terms" count={data.terms.length} actions={<Button variant="outline" size="sm" onClick={()=>open("Payment Term")}><Plus className="mr-1 h-4 w-4"/>Add Payment Term</Button>}><div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">{data.terms.map(x=><div key={x.id} className="rounded-xl border p-4"><span className="font-mono text-xs font-bold text-[#0d5c4d]">{x.code}</span><p className="mt-3 font-bold">{x.name}</p><p className="mt-1 text-xs text-slate-500">{x.days} days · {x.description}</p></div>)}</div></Shell></div>}
+    {tab==="Financial Setup"&&<div className="space-y-4"><Shell title="Financial Years & Period Locks" count={data.years.length} actions={<Button size="sm" onClick={()=>open("Financial Year")} className="bg-[#0d5c4d]"><Plus className="mr-1 h-4 w-4"/>Add Financial Year</Button>}><div className="grid gap-3 p-4 md:grid-cols-2">{data.years.map(x=><div key={x.id} className={cn("rounded-xl border p-4",x.current&&"border-emerald-200 bg-emerald-50/30")}><div className="flex"><div><p className="text-lg font-bold">{x.name}</p><p className="text-xs text-slate-500">{x.start} → {x.end}</p></div><div className="ml-auto"><Badge value={x.status}/></div></div><p className="mt-4 flex gap-2 text-[11px] text-slate-500"><LockKeyhole className="h-3.5 w-3.5"/>Lock date: {x.lock||"Not locked"}</p></div>)}</div></Shell><Shell title="Opening Balances" count={data.openings.length} actions={<Button variant="outline" size="sm" onClick={()=>open("Opening Balance")}><Plus className="mr-1 h-4 w-4"/>Add Opening Balance</Button>}><div className="overflow-x-auto"><table className="w-full min-w-[750px] text-left text-xs"><thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["Ledger Type","Ledger","Date","Debit","Credit","Reference"].map(x=><th key={x} className="px-4 py-3">{x}</th>)}</tr></thead><tbody className="divide-y">{data.openings.map(x=><tr key={x.id}><td className="px-4 py-3">{x.type}</td><td className="px-4 py-3 font-bold">{x.ledger}</td><td className="px-4 py-3">{x.date}</td><td className="px-4 py-3">{x.debit?money(x.debit):"—"}</td><td className="px-4 py-3">{x.credit?money(x.credit):"—"}</td><td className="px-4 py-3">{x.reference}</td></tr>)}</tbody></table></div></Shell></div>}
+    {tab==="Mapping & Controls"&&<div className="space-y-4"><div className="grid gap-3 md:grid-cols-3"><Stat label="Entity Mappings" value={data.mappings.filter(x=>x.scope==="Entity").length} detail="ERP master to control GL" icon={Users}/><Stat label="Transaction Mappings" value={data.mappings.filter(x=>x.scope==="Transaction").length} detail="Category to posting GL" icon={Network}/><Stat label="Tax Mappings" value={data.mappings.filter(x=>x.scope==="Tax").length} detail="Tax code to statutory GL" icon={Receipt}/></div><Shell title="Entity, Transaction & Tax Mappings" count={data.mappings.length} actions={<Button size="sm" onClick={()=>open("Mapping Rule")} className="bg-[#0d5c4d]"><Plus className="mr-1 h-4 w-4"/>Create Mapping</Button>}><div className="overflow-x-auto"><table className="w-full min-w-[800px] text-left text-xs"><thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["Scope","Source","Target","Control / Posting GL","Auto-create SL","Status"].map(x=><th key={x} className="px-4 py-3">{x}</th>)}</tr></thead><tbody className="divide-y">{data.mappings.map(x=><tr key={x.id}><td className="px-4 py-3">{x.scope}</td><td className="px-4 py-3 font-bold">{x.source}</td><td className="px-4 py-3">{x.target}</td><td className="px-4 py-3 font-semibold text-[#0d5c4d]">{x.gl}</td><td className="px-4 py-3">{x.auto?"Yes":"No"}</td><td className="px-4 py-3"><Badge value={x.status}/></td></tr>)}</tbody></table></div></Shell><div className="grid gap-4 xl:grid-cols-2"><Shell title="Posting Controls" count={4}><div className="divide-y">{[["Maker–Checker","Creator cannot approve the same entry"],["Prevent direct posting to control GL","Posting must identify a sub ledger"],["Hard-lock closed periods","Normal users cannot backdate"],["Require balanced journal","Debits must equal credits"]].map(([a,b])=><div key={a} className="flex items-center gap-3 p-4"><CheckCircle2 className="h-5 w-5 text-emerald-600"/><div><p className="text-xs font-bold">{a}</p><p className="text-[11px] text-slate-400">{b}</p></div><span className="ml-auto h-5 w-9 rounded-full bg-[#0d5c4d] p-0.5"><span className="ml-auto block h-4 w-4 rounded-full bg-white"/></span></div>)}</div></Shell><Shell title="Posting Readiness" count={readiness}><div className="p-5"><div className="h-2 rounded bg-slate-100"><div className="h-full rounded bg-[#0d5c4d]" style={{width:`${readiness/6*100}%`}}/></div><p className="mt-4 font-bold">{readiness===6?"Ready for transaction posting":`${6-readiness} areas remaining`}</p><div className="mt-4 grid grid-cols-2 gap-2">{["Control GLs","Sub Ledgers","GST / TDS","Banks","Voucher Types","Mappings"].map((x,i)=><p key={x} className="flex gap-2 text-xs text-slate-600">{i<readiness?<CheckCircle2 className="h-4 w-4 text-emerald-600"/>:<FileClock className="h-4 w-4 text-amber-500"/>}{x}</p>)}</div></div></Shell></div></div>}
+  </div><Creator open={create} kind={kind} data={data} onClose={()=>setCreate(false)} onCreate={add}/><Dialog open={audit} onOpenChange={setAudit}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Accounting Master Audit Log</DialogTitle></DialogHeader><div className="max-h-[60vh] divide-y overflow-auto">{data.audit.map(x=><div key={x.id} className="py-3"><div className="flex"><b>{x.action}</b><time className="ml-auto text-[10px] text-slate-400">{x.at}</time></div><p className="text-xs text-slate-500">{x.detail}</p><p className="text-[10px] font-bold text-[#0d5c4d]">{x.user}</p></div>)}</div></DialogContent></Dialog></div>
 }
