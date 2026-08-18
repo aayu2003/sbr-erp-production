@@ -716,7 +716,7 @@ const BudgetHeadPickerModal = ({
                           <td className="min-w-[185px] px-3 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                             {isChecked ? (
                               <div className="space-y-1.5">
-                                <input type="number" min={0} max={currentBalance} step="0.01"
+                                <input type="number" onWheel={(e) => e.currentTarget.blur()} min={0} max={currentBalance} step="0.01"
                                   value={sel!.amount === 0 ? '' : sel!.amount}
                                   placeholder="Enter amount"
                                   onChange={(e) => updateAmount(li.line_item_id, Math.max(0, Number(e.target.value)))}
@@ -1665,8 +1665,8 @@ const WorkOrderModal = ({
                         </select>
                       )}
                     </div>
-                    <div><label className={labelClass}>Quantity *</label><input type="number" min="0" step="any" value={row.quantity} onChange={(event) => updateRowQuantityOrRate(row.id, 'quantity', event.target.value)} className={fieldClass} placeholder="0" /></div>
-                    <div><label className={labelClass}>Rate / Unit</label><input type="number" min="0" step="any" value={row.ratePerUnit} onChange={(event) => updateRowQuantityOrRate(row.id, 'ratePerUnit', event.target.value)} className={fieldClass} placeholder="0.00" /></div>
+                    <div><label className={labelClass}>Quantity *</label><input type="number" onWheel={(e) => e.currentTarget.blur()} min="0" step="any" value={row.quantity} onChange={(event) => updateRowQuantityOrRate(row.id, 'quantity', event.target.value)} className={fieldClass} placeholder="0" /></div>
+                    <div><label className={labelClass}>Rate / Unit</label><input type="number" onWheel={(e) => e.currentTarget.blur()} min="0" step="any" value={row.ratePerUnit} onChange={(event) => updateRowQuantityOrRate(row.id, 'ratePerUnit', event.target.value)} className={fieldClass} placeholder="0.00" /></div>
                   </div>
 
                   <div>
@@ -1695,8 +1695,8 @@ const WorkOrderModal = ({
                   <div>
                     <p className="mb-3 text-[11px] font-black uppercase tracking-[0.1em] text-slate-400">Commercial &amp; Reference Details</p>
                     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                      <div><label className={labelClass}>Approx. Service Value *</label><input type="number" min="0" step="0.01" value={row.approxValue} onChange={(event) => setRow(row.id, 'approxValue', event.target.value)} className={fieldClass} placeholder="0.00" /></div>
-                      <div><label className={labelClass}>GST % *</label><input type="number" min="0" step="0.01" value={row.gstPercent} onChange={(event) => setRow(row.id, 'gstPercent', event.target.value)} className={fieldClass} /></div>
+                      <div><label className={labelClass}>Approx. Service Value *</label><input type="number" onWheel={(e) => e.currentTarget.blur()} min="0" step="0.01" value={row.approxValue} onChange={(event) => setRow(row.id, 'approxValue', event.target.value)} className={fieldClass} placeholder="0.00" /></div>
+                      <div><label className={labelClass}>GST % *</label><input type="number" onWheel={(e) => e.currentTarget.blur()} min="0" step="0.01" value={row.gstPercent} onChange={(event) => setRow(row.id, 'gstPercent', event.target.value)} className={fieldClass} /></div>
                       <div><label className={labelClass}>GST Amount</label><div className="mt-1.5 flex h-11 items-center rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-600">{INR(calcRowGst(row))}</div></div>
                       <div><label className={labelClass}>Line Total</label><div className="mt-1.5 flex h-11 items-center rounded-xl bg-[#E9F3F0] px-3 text-sm font-black text-[#0D3A35]">{INR((Number(row.approxValue) || 0) + calcRowGst(row))}</div></div>
                       <div className="sm:col-span-2"><label className={labelClass}>Proposed Vendors / Contractor</label><input value={row.proposedVendors} onChange={(event) => setRow(row.id, 'proposedVendors', event.target.value)} className={fieldClass} placeholder="Enter preferred or proposed vendors" /></div>
