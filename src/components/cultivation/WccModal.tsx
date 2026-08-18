@@ -41,14 +41,29 @@ export interface ApiWorkDoneEntry {
 export interface ApiOperationalWorkDoneEntry {
   activity: string;
   from_date: string;
+  // The row's real completion date when it has one (to_date already carries this same value
+  // as a fallback-safe default) — from_date/to_date otherwise describe the whole task's
+  // planned window, not the day this specific line item was actually finished.
   to_date: string;
+  completion_date?: string;
+  // Actually-completed quantity (what a WCC certifies) — the backend only ever returns
+  // completed line items here, falling back to the originally assigned amount only for
+  // rows completed before completed_quantity existed.
   quantity?: number;
+  // The originally assigned quantity, kept alongside `quantity` for reference/audit —
+  // may differ from it when only part of the line item was actually completed.
+  assigned_quantity?: number;
   unit?: string;
   spec_value?: number;
   spec_unit?: string;
   status?: string;
   task_id?: string;
+  // Unique per line item — several line items from one on-field task now share the same
+  // task_id, so this (not task_id) is what's unique enough for React keys / annexure line ids.
+  line_item_id?: string;
   farm_id?: string;
+  // The WO this line item was drawn from, if the task was created against one.
+  order_number?: string;
 }
 
 // Raw shape of a `Tasks` table item — only the fields this modal (and the certificate
@@ -365,10 +380,13 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
               ) : (
                 <div className="space-y-1.5">
                   {operationalWorkDone.map((entry, idx) => (
-                    <div key={`${entry.task_id || idx}-${entry.from_date}`} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
+                    <div key={entry.line_item_id || `${entry.task_id || 'entry'}-${idx}`} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-slate-800 truncate">{entry.activity}</p>
-                        <p className="text-[11px] text-slate-400">{formatDate(entry.from_date)} – {formatDate(entry.to_date)}</p>
+                        <p className="text-[11px] text-slate-400">
+                          {formatDate(entry.from_date)} – {formatDate(entry.to_date)}
+                          {entry.order_number ? ` · ${entry.order_number}` : ''}
+                        </p>
                       </div>
                       <div className="shrink-0 text-right">
                         <p className="text-sm font-bold text-slate-700">{entry.quantity ?? '-'} {entry.unit || ''}</p>

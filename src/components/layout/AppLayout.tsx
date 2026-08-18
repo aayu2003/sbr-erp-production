@@ -227,7 +227,7 @@ const AppSidebar = () => {
           isCollapsed ? "flex items-center justify-center" : "flex items-center justify-between gap-2"
         )}
       >
-        <div className={cn("flex gap-3", isCollapsed ? "items-center" : "min-w-0 flex-1 items-start")}>
+        <div className={cn("flex gap-3 items-center", isCollapsed ? "" : "min-w-0 flex-1")}>
           {/* Logo Container */}
           <div className="h-11 w-11 rounded-2xl bg-white/95 flex items-center justify-center shadow-[0_8px_24px_rgba(15,23,42,0.09)] border border-white/10 overflow-hidden relative ring-1 ring-white/20">
             <img
@@ -248,8 +248,8 @@ const AppSidebar = () => {
 
           {!isCollapsed && (
             <div className="min-w-0 flex-1">
-              <h1 className="truncate font-semibold text-[20px] tracking-[-0.01em] text-white leading-none">
-                SaiBioresources
+              <h1 className="truncate font-semibold text-[16px] tracking-[-0.01em] text-white leading-none">
+                SAI BIORESOURCES
               </h1>
               <p className="mt-0.5 truncate text-[12px] text-white/60 font-medium leading-tight">
                 Private Limited
