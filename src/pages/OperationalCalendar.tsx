@@ -8,37 +8,58 @@ const BASE_URL = getBaseUrl().replace(/\/$/, '');
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface OperationalTaskRow {
+// One WO line item within a task — a single vendor task can carry several of these (e.g.
+// Borewell + Casing Pipe Fitting + Shaft Joining), each completed with its own quantity.
+interface OperationalLineItem {
+  lineItemId: string;
   activity: string;
-  calander_id: string;
-  farm_id: string;
-  vendor_id: string;
-  vendor_name: string;
   quantity: number;
   unit: string;
-  spec_value?: number;
-  spec_unit?: string;
+  specValue?: number;
+  specUnit?: string;
   status: string;
-  task_id: string;
-  from_date: string;
-  to_date: string;
+  completedQuantity?: number;
+  completionDate?: string;
 }
 
-type OperationalCalendarData = Record<string, OperationalTaskRow[]>;
+// One (calander_id, date) group — "one task" as far as the UI/user is concerned. A calander_id
+// alone isn't unique enough anymore: completing a line item for less than its assigned quantity
+// rolls the shortfall onto a *new* row dated the next day, so the same calander_id can now span
+// more than one calendar day — each day gets its own task card.
+interface OperationalTask {
+  calanderId: string;
+  dateKey: string;
+  taskId: string;
+  farmId: string;
+  vendorId: string;
+  vendorName: string;
+  fromDate: string;
+  toDate: string;
+  lineItems: OperationalLineItem[];
+}
+
+type OperationalCalendarData = Record<string, OperationalTask[]>;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const normalizeStatus = (status?: string) => {
   const s = String(status || '').trim().toLowerCase();
   if (s === 'completed' || s === 'done') return 'completed';
-  if (s === 'overdue') return 'overdue';
+  return 'pending';
+};
+
+// A task's overall status is "completed" once every line item is; otherwise it's "overdue"
+// the moment its own date has passed without being finished — not a status stored anywhere,
+// derived fresh against today so it never goes stale.
+const taskStatus = (task: OperationalTask, currentDateKey: string) => {
+  if (task.lineItems.length > 0 && task.lineItems.every(li => normalizeStatus(li.status) === 'completed')) return 'completed';
+  if (task.dateKey < currentDateKey) return 'overdue';
   return 'pending';
 };
 
 const statusBadgeClasses = (status: string) => {
-  const n = normalizeStatus(status);
-  if (n === 'completed') return 'bg-green-100 text-green-700 border-green-200';
-  if (n === 'overdue') return 'bg-red-100 text-red-700 border-red-200';
+  if (status === 'completed') return 'bg-green-100 text-green-700 border-green-200';
+  if (status === 'overdue') return 'bg-red-100 text-red-700 border-red-200';
   return 'bg-orange-100 text-orange-800 border-orange-200';
 };
 
@@ -51,37 +72,59 @@ const formatDate = (d?: string) => {
   return date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 };
 
+// Groups operational_calander.json by (calander_id, date) — every date_mapping block under one
+// calander_id shares farm/vendor, but its field_assignment rows can now be spread across
+// several actual dates (a rollover shortfall lands on the day after it was logged), so each
+// date gets its own task card instead of collapsing the whole calander_id onto one day.
 const fetchOperationalCalendarData = async (): Promise<OperationalCalendarData> => {
   const res = await fetch(`${BASE_URL}/admin_cultivation/fetch_operational_calander`);
   const data = await res.json().catch(() => null);
-  const calendar: OperationalCalendarData = {};
+  const groups = new Map<string, OperationalTask>();
+
   for (const calId in (data?.plan || {})) {
     const plan = data.plan[calId];
-    (plan?.date_mapping || []).forEach((dm: any) => {
-      const [fromDate, toDate] = Array.isArray(dm?.date) ? dm.date : [];
-      const fieldAssignment = dm?.field_assignment || {};
+    const dateMapping = Array.isArray(plan?.date_mapping) ? plan.date_mapping : [];
+
+    dateMapping.forEach((dm: Record<string, unknown>, dmIndex: number) => {
+      const [blockFrom, blockTo] = Array.isArray(dm?.date) ? dm.date as [string, string] : [];
+      const fieldAssignment = (dm?.field_assignment || {}) as Record<string, unknown>;
       Object.entries(fieldAssignment).forEach(([dateStr, rows]) => {
         if (!Array.isArray(rows)) return;
-        if (!calendar[dateStr]) calendar[dateStr] = [];
-        rows.forEach((row: any) => {
-          calendar[dateStr].push({
+        rows.forEach((row: Record<string, unknown>, rowIndex: number) => {
+          const groupKey = `${calId}::${dateStr}`;
+          let group = groups.get(groupKey);
+          if (!group) {
+            group = {
+              calanderId: calId, dateKey: dateStr, taskId: '', farmId: '', vendorId: '', vendorName: '',
+              fromDate: String(blockFrom || dateStr), toDate: String(blockTo || dateStr), lineItems: [],
+            };
+            groups.set(groupKey, group);
+          }
+          group.farmId = String(row?.farm_id || group.farmId);
+          group.vendorId = String(row?.vendor_id || group.vendorId);
+          group.vendorName = String(row?.vendor_name || group.vendorName);
+          group.taskId = String(row?.task_id || group.taskId);
+          group.lineItems.push({
+            lineItemId: String(row?.line_item_id || `${calId}-${dmIndex}-${rowIndex}`),
             activity: String(dm?.activity || ''),
-            calander_id: calId,
-            farm_id: String(row?.farm_id || ''),
-            vendor_id: String(row?.vendor_id || ''),
-            vendor_name: String(row?.vendor_name || ''),
             quantity: Number(row?.quantity) || 0,
             unit: String(row?.unit || ''),
-            spec_value: row?.spec_value != null ? Number(row.spec_value) : undefined,
-            spec_unit: row?.spec_unit || undefined,
+            specValue: row?.spec_value != null ? Number(row.spec_value) : undefined,
+            specUnit: row?.spec_unit || undefined,
             status: String(row?.status || 'pending'),
-            task_id: String(row?.task_id || ''),
-            from_date: String(fromDate || dateStr),
-            to_date: String(toDate || dateStr),
+            completedQuantity: row?.completed_quantity != null ? Number(row.completed_quantity) : undefined,
+            completionDate: (row?.completion_date as string | undefined) || undefined,
           });
         });
       });
     });
+  }
+
+  const calendar: OperationalCalendarData = {};
+  for (const group of groups.values()) {
+    if (group.lineItems.length === 0) continue;
+    if (!calendar[group.dateKey]) calendar[group.dateKey] = [];
+    calendar[group.dateKey].push(group);
   }
   return calendar;
 };
@@ -122,9 +165,9 @@ const MonthCard = ({
           const hasTask = rows.length > 0;
           const isToday = dStr === currentDateKey;
 
-          const hasOverdue = rows.some(r => normalizeStatus(r.status) === 'overdue');
-          const hasPending = rows.some(r => normalizeStatus(r.status) === 'pending');
-          const allCompleted = hasTask && rows.every(r => normalizeStatus(r.status) === 'completed');
+          const hasOverdue = rows.some(r => taskStatus(r, currentDateKey) === 'overdue');
+          const hasPending = rows.some(r => taskStatus(r, currentDateKey) === 'pending');
+          const allCompleted = hasTask && rows.every(r => taskStatus(r, currentDateKey) === 'completed');
 
           let bgClass = 'hover:bg-secondary';
           let textClass = 'text-muted-foreground/60';
@@ -161,6 +204,118 @@ const MonthCard = ({
   );
 };
 
+// ─── Completion modal ─────────────────────────────────────────────────────────
+// Replaces a single "mark completed" click — every not-yet-completed line item in the task
+// needs its own completed quantity, and the whole task shares one completion date (defaulted
+// to the task's own date, not today's real date — completions are usually logged after the
+// fact). Any line item completed for less than its assigned quantity has the shortfall rolled
+// onto a new pending row the day after completion_date, handled entirely server-side.
+
+const CompleteTaskModal = ({
+  task,
+  onClose,
+  onCompleted,
+}: {
+  task: OperationalTask;
+  onClose: () => void;
+  onCompleted: () => void;
+}) => {
+  const pendingLineItems = task.lineItems.filter(li => normalizeStatus(li.status) !== 'completed');
+  const [completionDate, setCompletionDate] = useState(task.dateKey);
+  const [quantities, setQuantities] = useState<Record<string, string>>(() =>
+    Object.fromEntries(pendingLineItems.map(li => [li.lineItemId, String(li.quantity)])),
+  );
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!completionDate) { toast.error('Enter the date of completion.'); return; }
+    const completions = pendingLineItems.map(li => ({ lineItemId: li.lineItemId, completedQuantity: Number(quantities[li.lineItemId]) || 0 }));
+    if (completions.some(c => c.completedQuantity <= 0)) {
+      toast.error('Enter a completed quantity for every line item.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await fetch(`${BASE_URL}/admin_cultivation/complete_operational_task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          calander_id: task.calanderId,
+          completions: completions.map(c => ({ line_item_id: c.lineItemId, completed_quantity: c.completedQuantity, completion_date: completionDate })),
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) throw new Error(data?.detail || 'Failed to complete task');
+      toast.success(data?.rollovers_created ? `Completed — ${data.rollovers_created} line item${data.rollovers_created !== 1 ? 's' : ''} rolled over to the next day` : 'Task marked as completed');
+      onCompleted();
+      onClose();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to complete task');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 backdrop-blur-[2px] p-4">
+      <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-[0_24px_64px_rgba(15,23,42,0.18)] flex flex-col max-h-[85vh]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 shrink-0">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">Complete task</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">{task.vendorName || 'Vendor'} · provide the quantity actually completed for each line item</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-md hover:bg-gray-100"><X className="w-4 h-4 text-gray-500" /></button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+          <div>
+            <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Date of completion</label>
+            <input
+              type="date"
+              value={completionDate}
+              onChange={e => setCompletionDate(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none"
+            />
+            <p className="mt-1 text-[10px] text-slate-400">Defaults to the task's own date — change it if the work was actually done on a different day.</p>
+          </div>
+          {pendingLineItems.map(li => (
+            <div key={li.lineItemId} className="rounded-lg border border-slate-200 p-3 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold text-slate-900">{li.activity || 'Activity'}</span>
+                <span className="text-[10px] text-slate-400">Assigned: {li.quantity} {li.unit}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={quantities[li.lineItemId] ?? ''}
+                  onChange={e => setQuantities(prev => ({ ...prev, [li.lineItemId]: e.target.value }))}
+                  className="w-28 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-right focus:border-slate-900 focus:outline-none"
+                />
+                <span className="text-xs text-slate-500">{li.unit} completed</span>
+              </div>
+              {Number(quantities[li.lineItemId] || 0) > 0 && Number(quantities[li.lineItemId]) < li.quantity && (
+                <p className="text-[10px] text-amber-600">Remaining {(li.quantity - Number(quantities[li.lineItemId])).toFixed(2)} {li.unit} will roll over to the next day as a new pending task.</p>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-200 shrink-0">
+          <button type="button" onClick={onClose} disabled={submitting} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button>
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={submitting}
+            className="inline-flex items-center gap-1 rounded-md border border-green-200 bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Check className="h-3 w-3" /> {submitting ? 'Completing…' : 'Submit completion'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 const OperationalCalendar = () => {
@@ -172,24 +327,24 @@ const OperationalCalendar = () => {
     return new Date(now.getFullYear(), now.getMonth(), 1);
   });
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [farms, setFarms] = useState<any[]>([]);
+  const [farms, setFarms] = useState<Array<Record<string, unknown>>>([]);
 
   const [filterVendor, setFilterVendor] = useState('');
   const [filterActivity, setFilterActivity] = useState('');
-  const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
+  const [completingTask, setCompletingTask] = useState<OperationalTask | null>(null);
 
   const currentDateKey = dateKey(new Date());
 
-  useEffect(() => {
-    let mounted = true;
+  const loadCalendar = () => {
     setLoading(true);
     setError(null);
     fetchOperationalCalendarData()
-      .then(data => { if (mounted) setActivitiesData(data); })
-      .catch(() => { if (mounted) setError('Unable to load operational calendar.'); })
-      .finally(() => { if (mounted) setLoading(false); });
-    return () => { mounted = false; };
-  }, []);
+      .then(data => setActivitiesData(data))
+      .catch(() => setError('Unable to load operational calendar.'))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { loadCalendar(); }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -204,37 +359,16 @@ const OperationalCalendar = () => {
   }, []);
 
   const getFarmLabel = (farmId: string) => {
-    const f = farms.find((x: any) => String(x?.farm_id || '') === farmId);
-    return f ? String((f as any)?.owner_name || farmId) : farmId;
+    const f = farms.find((x) => String(x?.farm_id || '') === farmId);
+    return f ? String(f?.owner_name || farmId) : farmId;
   };
 
-  const handleCompleteTask = async (row: OperationalTaskRow) => {
-    if (completingTaskId) return;
-    setCompletingTaskId(row.task_id);
-    try {
-      const res = await fetch(`${BASE_URL}/admin_cultivation/complete_operational_task`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ calander_id: row.calander_id, task_id: row.task_id }),
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.success) throw new Error(data?.detail || 'Failed to complete task');
-
-      setActivitiesData((prev) => {
-        const next = { ...prev };
-        for (const [dateStr, rows] of Object.entries(next)) {
-          next[dateStr] = rows.map((r) =>
-            r.calander_id === row.calander_id && r.task_id === row.task_id ? { ...r, status: 'completed' } : r,
-          );
-        }
-        return next;
-      });
-      toast.success('Task marked as completed');
-    } catch (e: any) {
-      toast.error(e?.message || 'Failed to complete task');
-    } finally {
-      setCompletingTaskId(null);
-    }
+  // A completion can roll leftover quantity onto a brand-new row on a different day (which
+  // this page hasn't fetched before), so a fresh full reload is simpler and safer than trying
+  // to hand-patch local state for that. The day popup stays open — it re-renders reactively
+  // once the reload lands, since it's already reading straight from activitiesData.
+  const handleTaskCompleted = () => {
+    loadCalendar();
   };
 
   const monthsToDisplay = useMemo(
@@ -244,30 +378,30 @@ const OperationalCalendar = () => {
 
   const vendorOptions = useMemo(() => {
     const names = new Set<string>();
-    Object.values(activitiesData).forEach(rows => rows.forEach(r => { if (r.vendor_name) names.add(r.vendor_name); }));
+    Object.values(activitiesData).forEach(tasks => tasks.forEach(t => { if (t.vendorName) names.add(t.vendorName); }));
     return Array.from(names).sort();
   }, [activitiesData]);
 
   const activityOptions = useMemo(() => {
     const names = new Set<string>();
-    Object.values(activitiesData).forEach(rows => rows.forEach(r => { if (r.activity) names.add(r.activity); }));
+    Object.values(activitiesData).forEach(tasks => tasks.forEach(t => t.lineItems.forEach(li => { if (li.activity) names.add(li.activity); })));
     return Array.from(names).sort();
   }, [activitiesData]);
 
   const filteredActivitiesData = useMemo(() => {
     if (!filterVendor && !filterActivity) return activitiesData;
     const filtered: OperationalCalendarData = {};
-    for (const [d, rows] of Object.entries(activitiesData)) {
-      const matched = rows.filter(r =>
-        (!filterVendor || r.vendor_name === filterVendor) &&
-        (!filterActivity || r.activity === filterActivity)
+    for (const [d, tasks] of Object.entries(activitiesData)) {
+      const matched = tasks.filter(t =>
+        (!filterVendor || t.vendorName === filterVendor) &&
+        (!filterActivity || t.lineItems.some(li => li.activity === filterActivity))
       );
       if (matched.length > 0) filtered[d] = matched;
     }
     return filtered;
   }, [activitiesData, filterVendor, filterActivity]);
 
-  const selectedRows = selectedDate ? (filteredActivitiesData[selectedDate] || []) : [];
+  const selectedTasks = selectedDate ? (filteredActivitiesData[selectedDate] || []) : [];
 
   return (
     <div className="p-8 space-y-8 animate-in fade-in duration-300 min-h-screen bg-gray-50/50 font-sans">
@@ -347,49 +481,78 @@ const OperationalCalendar = () => {
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 shrink-0">
               <div>
                 <h2 className="text-base font-semibold text-slate-900">{formatDate(selectedDate)}</h2>
-                <p className="text-xs text-muted-foreground mt-0.5">{selectedRows.length} operational task{selectedRows.length !== 1 ? 's' : ''}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{selectedTasks.length} operational task{selectedTasks.length !== 1 ? 's' : ''}</p>
               </div>
               <button onClick={() => setSelectedDate(null)} className="p-1.5 rounded-md hover:bg-gray-100"><X className="w-4 h-4 text-gray-500" /></button>
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
-              {selectedRows.length === 0 ? (
+              {selectedTasks.length === 0 ? (
                 <p className="text-sm text-slate-400 italic text-center py-6">No operational tasks on this date.</p>
-              ) : selectedRows.map((row, i) => (
-                <div key={`${row.task_id}-${i}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-1.5 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-slate-900">{row.activity || 'Task'}</span>
-                    <span className={cn('inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border capitalize', statusBadgeClasses(row.status))}>
-                      {normalizeStatus(row.status)}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-slate-600"><MapPin className="w-3.5 h-3.5 text-slate-400" /> {getFarmLabel(row.farm_id)}</div>
-                  <div className="flex items-center gap-1.5 text-slate-600"><User className="w-3.5 h-3.5 text-slate-400" /> {row.vendor_name || '—'}</div>
-                  <div className="flex items-center gap-1.5 text-slate-600">
-                    <Wrench className="w-3.5 h-3.5 text-slate-400" />
-                    {row.quantity} {row.unit}
-                    {row.spec_value != null && row.spec_unit ? `, up to ${row.spec_value} ${row.spec_unit}` : ''}
-                  </div>
-                  {row.from_date !== row.to_date && (
-                    <div className="text-[10px] text-slate-400">Runs {formatDate(row.from_date)} → {formatDate(row.to_date)}</div>
-                  )}
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-[10px] text-slate-400 font-mono">{row.task_id}</div>
-                    {normalizeStatus(row.status) !== 'completed' && (
-                      <button
-                        type="button"
-                        onClick={() => handleCompleteTask(row)}
-                        disabled={completingTaskId === row.task_id}
-                        className="inline-flex shrink-0 items-center gap-1 rounded-md border border-green-200 bg-green-50 px-2 py-1 text-[10px] font-semibold text-green-700 transition-colors hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        <Check className="h-3 w-3" /> {completingTaskId === row.task_id ? 'Completing…' : 'Complete'}
-                      </button>
+              ) : selectedTasks.map((task) => {
+                const status = taskStatus(task, currentDateKey);
+                const isMultiLineItem = task.lineItems.length > 1;
+                return (
+                  <div key={`${task.calanderId}-${task.dateKey}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-semibold text-slate-900">
+                        {isMultiLineItem ? `${task.lineItems.length} activities` : (task.lineItems[0]?.activity || 'Task')}
+                      </span>
+                      <span className={cn('inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border capitalize', statusBadgeClasses(status))}>
+                        {status}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-slate-600"><MapPin className="w-3.5 h-3.5 text-slate-400" /> {getFarmLabel(task.farmId)}</div>
+                    <div className="flex items-center gap-1.5 text-slate-600"><User className="w-3.5 h-3.5 text-slate-400" /> {task.vendorName || '—'}</div>
+
+                    <div className="space-y-1 rounded-md border border-slate-200 bg-white p-2">
+                      {task.lineItems.map(li => (
+                        <div key={li.lineItemId} className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5 text-slate-600 min-w-0">
+                            <Wrench className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span className="truncate">{li.activity || 'Activity'}</span>
+                          </div>
+                          <span className="shrink-0 text-slate-700">
+                            {normalizeStatus(li.status) === 'completed' && li.completedQuantity != null
+                              ? `${li.completedQuantity} / ${li.quantity} ${li.unit}`
+                              : `${li.quantity} ${li.unit}`}
+                            {li.specValue != null && li.specUnit ? `, up to ${li.specValue} ${li.specUnit}` : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {task.lineItems.some(li => li.completionDate) && (
+                      <div className="text-[10px] text-slate-400">Completed on {formatDate(task.lineItems.find(li => li.completionDate)?.completionDate)}</div>
                     )}
+
+                    {task.fromDate !== task.toDate && (
+                      <div className="text-[10px] text-slate-400">Runs {formatDate(task.fromDate)} → {formatDate(task.toDate)}</div>
+                    )}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] text-slate-400 font-mono">{task.taskId}</div>
+                      {status !== 'completed' && (
+                        <button
+                          type="button"
+                          onClick={() => setCompletingTask(task)}
+                          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-green-200 bg-green-50 px-2 py-1 text-[10px] font-semibold text-green-700 transition-colors hover:bg-green-100"
+                        >
+                          <Check className="h-3 w-3" /> Complete
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
+      )}
+
+      {completingTask && (
+        <CompleteTaskModal
+          task={completingTask}
+          onClose={() => setCompletingTask(null)}
+          onCompleted={handleTaskCompleted}
+        />
       )}
     </div>
   );

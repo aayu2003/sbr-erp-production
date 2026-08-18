@@ -20,7 +20,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
   Layers, Box, FileText, Map, AlertCircle, User,
   ClipboardCheck, Activity, FolderKanban, Landmark,
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
-  Car, Mail, Package, Scale, Truck, CheckSquare, PieChart, ShieldCheck,
+  Car, Mail, Package, Scale, Truck, CheckSquare, PieChart, ShieldCheck, Settings,
 };
 
 /* ---------------- NAV ITEM COMPONENT ---------------- */
@@ -32,6 +32,7 @@ interface NavItemProps {
   notificationStatus?: "warning" | "success" | "none";
   isSidebarCollapsed: boolean;
   budgetCard?: boolean;
+  notificationCount?: number;
 }
 
 const NavItem = ({
@@ -41,6 +42,7 @@ const NavItem = ({
   notificationStatus = "none",
   isSidebarCollapsed,
   budgetCard = false,
+  notificationCount = 0,
 }: NavItemProps) => {
   return (
     <NavLink
@@ -76,7 +78,16 @@ const NavItem = ({
           {!isSidebarCollapsed && <span className="ml-auto" />}
 
           {/* Updated notification logic to render AlertCircle icon for warnings */}
-          {notificationStatus === "warning" ? (
+          {notificationCount > 0 ? (
+            <span
+              className={cn(
+                "flex min-w-5 items-center justify-center rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-extrabold leading-none text-slate-900",
+                isSidebarCollapsed && "absolute right-1 top-1 h-4 min-w-4 px-1"
+              )}
+            >
+              {notificationCount > 99 ? "99+" : notificationCount}
+            </span>
+          ) : notificationStatus === "warning" ? (
             <AlertCircle
               className={cn(
                 "text-orange-500 fill-orange-50 shrink-0",
@@ -172,11 +183,34 @@ const NavGroup = ({
 
 const AppSidebar = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [mailUnread, setMailUnread] = useState(0);
   const { user } = useAuth();
   const isSuperAdmin = user?.id === 'sbr-admin';
 
   useEffect(() => {
     document.title = "SBR | Farm-connect";
+  }, []);
+
+  useEffect(() => {
+    const updateMailUnread = () => {
+      try {
+        const raw = localStorage.getItem('erp_communication_messages_v1');
+        if (!raw) return setMailUnread(2);
+        const items: Array<{ direction?: string; read?: boolean; archived?: boolean; type?: string }> = JSON.parse(raw);
+        setMailUnread(items.filter(message =>
+          message.direction === 'received' && !message.read && !message.archived && message.type !== 'Announcement'
+        ).length);
+      } catch {
+        setMailUnread(0);
+      }
+    };
+    updateMailUnread();
+    window.addEventListener('storage', updateMailUnread);
+    window.addEventListener('erp-mail-updated', updateMailUnread);
+    return () => {
+      window.removeEventListener('storage', updateMailUnread);
+      window.removeEventListener('erp-mail-updated', updateMailUnread);
+    };
   }, []);
 
   return (
@@ -193,7 +227,7 @@ const AppSidebar = () => {
           isCollapsed ? "flex items-center justify-center" : "flex items-center justify-between gap-2"
         )}
       >
-        <div className={cn("flex gap-3", isCollapsed ? "items-center" : "min-w-0 flex-1 items-start")}>
+        <div className={cn("flex gap-3 items-center", isCollapsed ? "" : "min-w-0 flex-1")}>
           {/* Logo Container */}
           <div className="h-11 w-11 rounded-2xl bg-white/95 flex items-center justify-center shadow-[0_8px_24px_rgba(15,23,42,0.09)] border border-white/10 overflow-hidden relative ring-1 ring-white/20">
             <img
@@ -214,8 +248,8 @@ const AppSidebar = () => {
 
           {!isCollapsed && (
             <div className="min-w-0 flex-1">
-              <h1 className="truncate font-semibold text-[20px] tracking-[-0.01em] text-white leading-none">
-                SaiBioresources
+              <h1 className="truncate font-semibold text-[16px] tracking-[-0.01em] text-white leading-none">
+                SAI BIORESOURCES
               </h1>
               <p className="mt-0.5 truncate text-[12px] text-white/60 font-medium leading-tight">
                 Private Limited
@@ -262,6 +296,7 @@ const AppSidebar = () => {
                 item.enabled && (
                   isSuperAdmin ||
                   allowedModules.includes(item.key) ||
+                  item.key === 'communication' ||
                   (item.key === 'purchase-comparative' && allowedModules.includes('purchase-req')) ||
                   (item.key === 'work-comparative' && (allowedModules.includes('work-order') || allowedModules.includes('purchase-req'))) ||
                   (item.key === 'work-requisition-approver' && (allowedModules.includes('work-order') || allowedModules.includes('finance-admin-ops'))) ||
@@ -269,7 +304,8 @@ const AppSidebar = () => {
                   (item.key === 'purchase-verifier' && ['admin-ops-indents', 'admin-wcc-approval', 'admin-grn-approval', 'admin-inspection-approval'].some(key => allowedModules.includes(key))) ||
                   (item.key === 'inspection-report' && allowedModules.includes('grn-module')) ||
                   (item.key === 'admin-inspection-approval' && (allowedModules.includes('admin-grn-approval') || allowedModules.includes('admin-ops-indents'))) ||
-                  (item.key === 'finance-inspection-approval' && allowedModules.includes('finance-admin-ops'))
+                  (item.key === 'finance-inspection-approval' && allowedModules.includes('finance-admin-ops')) ||
+                  (item.key.startsWith('finance-') && ['accounts-dashboard', 'accounts-ledger', 'accounts-payments', 'budget'].some(key => allowedModules.includes(key)))
                 )
               ),
             }))
@@ -294,6 +330,7 @@ const AppSidebar = () => {
                   label={item.label}
                   isSidebarCollapsed={isCollapsed}
                   notificationStatus={notif as 'warning' | 'success' | 'none'}
+                  notificationCount={item.key === 'communication' ? mailUnread : 0}
                 />
               );
             });

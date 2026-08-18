@@ -1855,7 +1855,7 @@ const PurchaseRequisition = ({ indentTypeFilter = 'PR' }: { indentTypeFilter?: '
                               <div key={li.id} className="flex items-center gap-2">
                                 <div className="min-w-0 text-xs truncate">{li.partName}</div>
                                 <div className="w-32">
-                                  <input type="number" value={addQuoteForms[it.id]?.prices[li.id] ?? String(li.ratePerItem || 0)} onChange={(e) => handlePriceChange(it.id, li.id, e.target.value)} className="w-full border rounded px-2 py-1 text-sm" />
+                                  <input type="number" onWheel={(e) => e.currentTarget.blur()} value={addQuoteForms[it.id]?.prices[li.id] ?? String(li.ratePerItem || 0)} onChange={(e) => handlePriceChange(it.id, li.id, e.target.value)} className="w-full border rounded px-2 py-1 text-sm" />
                                 </div>
                               </div>
                             ))}
@@ -1984,7 +1984,7 @@ const PurchaseRequisition = ({ indentTypeFilter = 'PR' }: { indentTypeFilter?: '
                               <div key={li.id} className="flex items-center gap-2">
                                 <div className="min-w-0 text-xs truncate">{li.partName}</div>
                                 <div className="w-32">
-                                  <input type="number" value={addQuoteForms[it.id]?.prices[li.id] ?? String(li.ratePerItem || 0)} onChange={(e) => handlePriceChange(it.id, li.id, e.target.value)} className="w-full border rounded px-2 py-1 text-sm" />
+                                  <input type="number" onWheel={(e) => e.currentTarget.blur()} value={addQuoteForms[it.id]?.prices[li.id] ?? String(li.ratePerItem || 0)} onChange={(e) => handlePriceChange(it.id, li.id, e.target.value)} className="w-full border rounded px-2 py-1 text-sm" />
                                 </div>
                               </div>
                             ))}
@@ -2119,7 +2119,7 @@ const PurchaseRequisition = ({ indentTypeFilter = 'PR' }: { indentTypeFilter?: '
               <h3 className="mb-4 text-sm font-black uppercase tracking-wider text-[#0D3A35]">Initial Item</h3>
               <div className="grid gap-4 md:grid-cols-[minmax(0,2fr)_1fr_1fr]">
                 <div><label className="text-xs font-bold text-slate-500">Item Name *</label><Input value={newItemName} onChange={(e) => setNewItemName(e.target.value)} className="mt-1.5 h-11 rounded-xl border-slate-200" placeholder="Item description" /></div>
-                <div><label className="text-xs font-bold text-slate-500">Quantity *</label><Input type="number" min="0" value={String(newItemQty)} onChange={(e) => setNewItemQty(Number(e.target.value))} className="mt-1.5 h-11 rounded-xl border-slate-200" /></div>
+                <div><label className="text-xs font-bold text-slate-500">Quantity *</label><Input type="number" onWheel={(e) => e.currentTarget.blur()} min="0" value={String(newItemQty)} onChange={(e) => setNewItemQty(Number(e.target.value))} className="mt-1.5 h-11 rounded-xl border-slate-200" /></div>
                 <div><label className="text-xs font-bold text-slate-500">UoM</label><Input value="Nos" readOnly className="mt-1.5 h-11 rounded-xl border-slate-200 bg-slate-50 font-bold text-slate-500" /></div>
               </div>
             </section>

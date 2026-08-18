@@ -28,7 +28,8 @@ const formatInr = (n: number) => `₹${n.toLocaleString('en-IN', { minimumFracti
 // Annexure: one flat, numbered line per completed activity — cultivation lines are one row
 // per (land, activity, date) so a plot worked on twice gets two dated lines instead of a
 // single blended total; operational (non-cultivation) lines are one row per logged task.
-// Rate/Remarks are filled in by the preparer per line, not derived from source data.
+// Place is always the land's owner name; Rate is filled in by the preparer per line, not
+// derived from source data.
 // ─────────────────────────────────────────────────────────────
 export interface AnnexureLine {
   id: string;
@@ -38,13 +39,29 @@ export interface AnnexureLine {
   uom: string;
   quantity: number;
   rate: number;
-  remarks: string;
-  landId?: string; // cultivation lines only — used to resolve the certificate's block label
+  landId?: string; // used to resolve the certificate's block label
 }
 
 export interface AnnexurePivot {
   lines: AnnexureLine[];
   enterprise?: WccEnterpriseDraft;
+}
+
+// One row of the certificate's "Activity-wise Certified Value" running-account table —
+// actualQuantity/ratePerUnit come from the linked WO's line item when one matches by
+// activity name; quantityPrevious/totalAmountPrevious have no backend source yet (always 0
+// for now) — everything else derives from the certificate's own effectiveLines.
+export interface ActivityProgressRow {
+  activity: string;
+  uom: string;
+  ratePerUnit: number;
+  actualQuantity: number;
+  quantityPrevious: number;
+  quantityCurrent: number;
+  quantityBalance: number;
+  totalAmount: number;
+  totalAmountPrevious: number;
+  totalAmountCurrent: number;
 }
 
 const EMPTY_PIVOT: AnnexurePivot = { lines: [] };
@@ -54,9 +71,15 @@ const buildAnnexurePivot = (
   taskDetailsById: Record<string, ApiTaskDetails>,
   scopeItems: WccScopeLand[],
   operationalWorkDone: ApiOperationalWorkDoneEntry[] = [],
+  farmerNames: Record<string, string> = {},
 ): AnnexurePivot => {
   const landById = new Map<string, WccScopeLand>();
   for (const land of scopeItems) landById.set(land.land_id, land);
+
+  // Owner name for a farm_id — prefers the vendor's own scope-of-work record (already carries
+  // farmer_name), then the farmer-details lookup, then falls back to the raw farm_id.
+  const ownerNameFor = (farmId: string) =>
+    landById.get(farmId)?.farmer_name || farmerNames[farmId] || landById.get(farmId)?.farmer_id || farmId;
 
   // land + activity + date -> line (dedup'd by plot+activity+date so the same plot can't be
   // double-counted if it shows up across multiple work-done entries for that same date).
@@ -80,30 +103,30 @@ const buildAnnexurePivot = (
         existing.quantity += area;
         continue;
       }
-      const land = landById.get(entry.farm_id);
       grid.set(key, {
         id: key,
         activity,
-        place: land?.farmer_name || land?.farmer_id || entry.farm_id,
+        place: ownerNameFor(entry.farm_id),
         dateOfCompletion: entry.date,
         uom: 'Acre',
         quantity: area,
         rate: 0,
-        remarks: '',
         landId: entry.farm_id,
       });
     }
   }
 
   const operationalLines: AnnexureLine[] = operationalWorkDone.map((entry, idx) => ({
-    id: `op__${entry.task_id || idx}`,
+    // Several line items from one on-field task now share a task_id — line_item_id is what's
+    // actually unique, and matters here since it keys per-line rate edits (lineEdits).
+    id: `op__${entry.line_item_id || `${entry.task_id || 'entry'}__${idx}`}`,
     activity: entry.activity,
-    place: '—',
+    place: entry.farm_id ? ownerNameFor(entry.farm_id) : '—',
     dateOfCompletion: entry.to_date || entry.from_date,
     uom: entry.unit || '',
     quantity: Number(entry.quantity) || 0,
     rate: 0,
-    remarks: '',
+    landId: entry.farm_id,
   }));
 
   const lines = [...grid.values(), ...operationalLines].sort((a, b) =>
@@ -226,18 +249,28 @@ export interface PdfExportParams {
   preparedBy: SignerDisplay;
   verifiedBy: SignerDisplay | null;
   approvedBy: SignerDisplay | null;
+  // Running-account progress table shown on-screen — optional since a persisted record
+  // (wccParamsFromRecord) has no live WO lookup to build it from; the PDF falls back to a
+  // plain activity/value rollup from pivot.lines when this isn't supplied.
+  activityProgress?: ActivityProgressRow[];
 }
 
 // Builds the certificate PDF document (Annexure + WCC pages) without saving/exporting it —
 // shared by the direct-download path and the "generate & attach to purchase flow" path.
 const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAutoTable> => {
-  const { pivot, vendorName, fromDate, toDate, certNo, certDate, woNumber, blockLabel, scopeOfWorkLabel, preparedBy, verifiedBy, approvedBy } = p;
+  const { pivot, vendorName, fromDate, toDate, certNo, certDate, woNumber, blockLabel, scopeOfWorkLabel, preparedBy, verifiedBy, approvedBy, activityProgress } = p;
   const doc = new jsPDF() as JsPdfWithAutoTable;
   const enterprise = pivot.enterprise;
   const enterpriseTotals = enterprise ? calculateWccTotals(enterprise) : null;
   const enterpriseTemplate = enterprise ? WCC_WORK_TEMPLATES.find((item) => item.id === enterprise.header.workCategory) : undefined;
   const totalQuantity = pivot.lines.reduce((sum, line) => sum + line.quantity, 0);
   const totalValue = pivot.lines.reduce((sum, line) => sum + line.quantity * line.rate, 0);
+  const activityTotalsOrder: string[] = [];
+  const activityTotalsMap = new Map<string, number>();
+  for (const line of pivot.lines) {
+    if (!activityTotalsMap.has(line.activity)) { activityTotalsOrder.push(line.activity); activityTotalsMap.set(line.activity, 0); }
+    activityTotalsMap.set(line.activity, (activityTotalsMap.get(line.activity) || 0) + line.quantity * line.rate);
+  }
 
   // ── Page 1: Annexure ──
   doc.setFont('helvetica', 'bold');
@@ -248,7 +281,7 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   doc.text(vendorName, 105, 22, { align: 'center' });
   doc.text(`${formatDate(fromDate)} - ${formatDate(toDate)}`, 105, 27, { align: 'center' });
 
-  const annexureHead = [['S.No', 'Activity', 'Place', 'Date of Completion', 'UOM', 'Quantity', 'Rate/Unit (₹)', 'Value (₹)', 'Remarks']];
+  const annexureHead = [['S.No', 'Activity', 'Place', 'Date of Completion', 'UOM', 'Quantity', 'Rate/Unit (₹)', 'Value (₹)']];
   const annexureBody: RowInput[] = pivot.lines.map((line, i) => [
     i + 1,
     line.activity,
@@ -258,14 +291,12 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     line.quantity.toFixed(2),
     line.rate ? line.rate.toFixed(2) : '—',
     line.rate ? (line.quantity * line.rate).toFixed(2) : '—',
-    line.remarks || '—',
   ]);
   annexureBody.push([
     { content: 'Total', colSpan: 5, styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
     { content: totalQuantity.toFixed(2), styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
     '',
     { content: totalValue ? totalValue.toFixed(2) : '—', styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
-    '',
   ]);
 
   autoTable(doc, { startY: 32, head: annexureHead, body: annexureBody, styles: { fontSize: 7 }, headStyles: { fillColor: [30, 41, 59] } });
@@ -320,10 +351,64 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   });
 
   let y = doc.lastAutoTable.finalY + 6;
-  doc.setFont('helvetica', 'normal');
+  doc.setFont('helvetica', 'bold');
   doc.setFontSize(8);
-  doc.text('Activity-wise quantity, rate and value: refer attached Annexure.', 14, y);
-  y += 9;
+  doc.text('Activity-wise Certified Value', 14, y);
+  y += 2;
+  if (activityProgress && activityProgress.length > 0) {
+    autoTable(doc, {
+      startY: y,
+      styles: { fontSize: 6, cellPadding: 1 },
+      headStyles: { fillColor: [30, 41, 59] },
+      columnStyles: {
+        0: { cellWidth: 8 }, 3: { halign: 'right' }, 4: { halign: 'right' }, 5: { halign: 'right' },
+        6: { halign: 'right' }, 7: { halign: 'right' }, 8: { halign: 'right' }, 9: { halign: 'right' }, 10: { halign: 'right' },
+      },
+      margin: { left: 14, right: 14 },
+      head: [['S.No', 'Activity', 'UOM', 'Rate/Unit', 'Actual Qty', 'Qty (Prev.)', 'Qty (Curr.)', 'Qty (Bal.)', 'Total Amt', 'Amt (Prev.)', 'Amt (Curr.)']],
+      body: [
+        ...activityProgress.map((row, i) => [
+          i + 1,
+          row.activity,
+          row.uom || '—',
+          row.ratePerUnit ? row.ratePerUnit.toFixed(2) : '—',
+          row.actualQuantity.toFixed(2),
+          row.quantityPrevious.toFixed(2),
+          row.quantityCurrent.toFixed(2),
+          row.quantityBalance.toFixed(2),
+          row.totalAmount ? row.totalAmount.toFixed(2) : '—',
+          row.totalAmountPrevious.toFixed(2),
+          row.totalAmountCurrent ? row.totalAmountCurrent.toFixed(2) : '—',
+        ]),
+        [
+          { content: 'Total', colSpan: 4, styles: { fontStyle: 'bold' } },
+          { content: activityProgress.reduce((sum, row) => sum + row.actualQuantity, 0).toFixed(2), styles: { fontStyle: 'bold' } },
+          { content: activityProgress.reduce((sum, row) => sum + row.quantityPrevious, 0).toFixed(2), styles: { fontStyle: 'bold' } },
+          { content: activityProgress.reduce((sum, row) => sum + row.quantityCurrent, 0).toFixed(2), styles: { fontStyle: 'bold' } },
+          { content: activityProgress.reduce((sum, row) => sum + row.quantityBalance, 0).toFixed(2), styles: { fontStyle: 'bold' } },
+          { content: activityProgress.reduce((sum, row) => sum + row.totalAmount, 0).toFixed(2), styles: { fontStyle: 'bold' } },
+          { content: activityProgress.reduce((sum, row) => sum + row.totalAmountPrevious, 0).toFixed(2), styles: { fontStyle: 'bold' } },
+          { content: totalValue ? totalValue.toFixed(2) : '—', styles: { fontStyle: 'bold' } },
+        ],
+      ],
+    });
+  } else {
+    autoTable(doc, {
+      startY: y,
+      theme: 'plain',
+      styles: { fontSize: 8, cellPadding: 1 },
+      columnStyles: { 0: { cellWidth: 100 }, 1: { halign: 'right' } },
+      margin: { left: 14, right: 14 },
+      body: [
+        ...activityTotalsOrder.map((activity) => [activity, activityTotalsMap.get(activity) ? (activityTotalsMap.get(activity) as number).toFixed(2) : '—']),
+        [
+          { content: 'Total', styles: { fontStyle: 'bold' } },
+          { content: totalValue ? totalValue.toFixed(2) : '—', styles: { fontStyle: 'bold' } },
+        ],
+      ],
+    });
+  }
+  y = doc.lastAutoTable.finalY + 6;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
   const certifiedValue = enterpriseTotals ? formatInr(enterpriseTotals.gross) : totalValue ? formatInr(totalValue) : '—';
@@ -507,6 +592,7 @@ export interface WccCertificatePreviewProps {
   operationalWorkDone?: ApiOperationalWorkDoneEntry[];
   taskDetailsById?: Record<string, ApiTaskDetails>;
   scopeItems?: WccScopeLand[];
+  farmerNames?: Record<string, string>;
 
   // 'revise' | 'review' | 'view' modes — a previously persisted record
   existingRecord?: WccCertificateRecord;
@@ -529,6 +615,7 @@ const WccCertificatePreview = ({
   operationalWorkDone = [],
   taskDetailsById = {},
   scopeItems = [],
+  farmerNames = {},
   existingRecord,
   onChanged,
 }: WccCertificatePreviewProps) => {
@@ -544,12 +631,58 @@ const WccCertificatePreview = ({
   const record = existingRecord ?? submittedRecord;
   const locked = isReadOnly || submittedRecord !== null;
 
+  const [meta, setMeta] = useState<CertificateMeta>(() => ({ ...EMPTY_META, woNumber: vendorWoNumber || '' }));
+  const displayWoNumber = record?.order_number ?? meta.woNumber;
+
+  // Previously-certified data for this WO — activity_summary gives the running totals used
+  // for the Qty/Amt (Previous) columns, and the annexure lines across every prior certificate
+  // give the latest date each activity was already certified through. A brand-new certificate
+  // must not re-certify work already covered by an earlier one (e.g. WCC1/2/3 certified "1st
+  // Ploughing" through 10 Aug — anything on or before that date is excluded from a new pivot,
+  // only work after 10 Aug is eligible).
+  const [previousByActivity, setPreviousByActivity] = useState<Record<string, { totalQuantity: number; totalAmount: number }>>({});
+  const [maxCertifiedDateByActivity, setMaxCertifiedDateByActivity] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!displayWoNumber) { setPreviousByActivity({}); setMaxCertifiedDateByActivity({}); return; }
+    let cancelled = false;
+    fetch(`${BASE_URL}/admin_wcc_certificate/get_previous_data/${displayWoNumber}`)
+      .then((res) => res.json())
+      .then((data: {
+        success?: boolean;
+        activity_summary?: Array<{ activity: string; uom?: string; total_quantity: number; total_amount: number }>;
+        certificates?: Array<{ annexure?: { lines?: Array<{ activity: string; dateOfCompletion: string }> } }>;
+      }) => {
+        if (cancelled || !data?.success) return;
+        const totals: Record<string, { totalQuantity: number; totalAmount: number }> = {};
+        (data.activity_summary ?? []).forEach((item) => { totals[item.activity] = { totalQuantity: Number(item.total_quantity) || 0, totalAmount: Number(item.total_amount) || 0 }; });
+        setPreviousByActivity(totals);
+
+        const maxDates: Record<string, string> = {};
+        (data.certificates ?? []).forEach((certificate) => {
+          (certificate.annexure?.lines ?? []).forEach((line) => {
+            if (!line?.activity || !line?.dateOfCompletion) return;
+            if (!maxDates[line.activity] || line.dateOfCompletion > maxDates[line.activity]) maxDates[line.activity] = line.dateOfCompletion;
+          });
+        });
+        setMaxCertifiedDateByActivity(maxDates);
+      })
+      .catch(() => { if (!cancelled) { setPreviousByActivity({}); setMaxCertifiedDateByActivity({}); } });
+    return () => { cancelled = true; };
+  }, [displayWoNumber]);
+
   // Live pivot only matters pre-submission in create mode; every other mode (and a
   // create-mode certificate that's already been submitted) renders the frozen snapshot.
-  const livePivot = useMemo(
-    () => (isCreateMode ? buildAnnexurePivot(workDone, taskDetailsById, scopeItems, operationalWorkDone) : EMPTY_PIVOT),
-    [isCreateMode, workDone, taskDetailsById, scopeItems, operationalWorkDone],
-  );
+  // Lines already covered by an earlier certificate for the same activity are excluded here
+  // so they can't be double-certified.
+  const livePivot = useMemo(() => {
+    if (!isCreateMode) return EMPTY_PIVOT;
+    const raw = buildAnnexurePivot(workDone, taskDetailsById, scopeItems, operationalWorkDone, farmerNames);
+    const lines = raw.lines.filter((line) => {
+      const maxDate = maxCertifiedDateByActivity[line.activity];
+      return !maxDate || line.dateOfCompletion > maxDate;
+    });
+    return { ...raw, lines };
+  }, [isCreateMode, workDone, taskDetailsById, scopeItems, operationalWorkDone, farmerNames, maxCertifiedDateByActivity]);
   const pivot = record ? record.annexure : livePivot;
   const enterprise = pivot.enterprise;
   const enterpriseTotals = enterprise ? calculateWccTotals(enterprise) : null;
@@ -559,26 +692,25 @@ const WccCertificatePreview = ({
   const fromDate = record?.from_date ?? fromDateProp ?? '';
   const toDate = record?.to_date ?? toDateProp ?? '';
 
-  const [meta, setMeta] = useState<CertificateMeta>(() => ({ ...EMPTY_META, woNumber: vendorWoNumber || '' }));
   const setField = (field: keyof CertificateMeta) => (v: string) => setMeta((prev) => ({ ...prev, [field]: v }));
 
-  // Per-line Rate/Remarks the preparer fills in on the Annexure — keyed by AnnexureLine.id so
-  // edits survive re-renders as fresh work-done data streams in. Seeded from the frozen
-  // snapshot in revise mode, so the preparer starts from what was last submitted, not blank.
-  const [lineEdits, setLineEdits] = useState<Record<string, { rate: string; remarks: string }>>(() => {
+  // Per-line Rate the preparer fills in on the Annexure — keyed by AnnexureLine.id so edits
+  // survive re-renders as fresh work-done data streams in. Seeded from the frozen snapshot in
+  // revise mode, so the preparer starts from what was last submitted, not blank.
+  const [lineEdits, setLineEdits] = useState<Record<string, string>>(() => {
     if (!existingRecord) return {};
-    const seed: Record<string, { rate: string; remarks: string }> = {};
+    const seed: Record<string, string> = {};
     for (const line of existingRecord.annexure.lines) {
-      seed[line.id] = { rate: line.rate ? String(line.rate) : '', remarks: line.remarks || '' };
+      seed[line.id] = line.rate ? String(line.rate) : '';
     }
     return seed;
   });
-  const setLineEdit = (lineId: string, field: 'rate' | 'remarks') => (value: string) =>
-    setLineEdits((prev) => ({ ...prev, [lineId]: { rate: '', remarks: '', ...prev[lineId], [field]: value } }));
+  const setLineRate = (lineId: string) => (value: string) =>
+    setLineEdits((prev) => ({ ...prev, [lineId]: value }));
 
   // The lines actually shown/priced/submitted — cultivation & operational lines merge their
-  // live rate/remarks edits; enterprise-drafted lines already carry a per-line rate set
-  // earlier in the WccWorkspace wizard, so they're mapped in read-only here.
+  // live rate edits; enterprise-drafted lines already carry a per-line rate set earlier in
+  // the WccWorkspace wizard, so they're mapped in read-only here.
   const effectiveLines: AnnexureLine[] = useMemo(() => {
     if (enterprise) {
       return enterprise.serviceLines.filter((line) => line.selected).map((line) => ({
@@ -589,17 +721,75 @@ const WccCertificatePreview = ({
         uom: line.unit,
         quantity: line.currentQty,
         rate: line.rate,
-        remarks: line.remarks,
       }));
     }
     return pivot.lines.map((line) => {
       const edit = lineEdits[line.id];
-      return edit ? { ...line, rate: Number(edit.rate) || 0, remarks: edit.remarks } : line;
+      return edit !== undefined ? { ...line, rate: Number(edit) || 0 } : line;
     });
   }, [enterprise, pivot.lines, lineEdits]);
 
   const totalQuantity = effectiveLines.reduce((sum, line) => sum + line.quantity, 0);
   const totalValue = effectiveLines.reduce((sum, line) => sum + line.quantity * line.rate, 0);
+
+  // Per-activity WO line item lookup (uom / rate / assigned quantity) — same
+  // get_active_vendor_orders endpoint the on-field task flow uses, matched by activity name
+  // against the linked order's line items.
+  const effectiveVendorId = vendorId || record?.vendor_id || '';
+  const [woLineItemsByActivity, setWoLineItemsByActivity] = useState<Record<string, { uom: string; unitRate: number; quantity: number }>>({});
+  useEffect(() => {
+    if (!effectiveVendorId || !displayWoNumber) { setWoLineItemsByActivity({}); return; }
+    let cancelled = false;
+    fetch(`${BASE_URL}/admin_wcc_certificate/get_active_vendor_orders/${effectiveVendorId}`)
+      .then((res) => res.json())
+      .then((data: { success?: boolean; items_details?: Record<string, Array<{ name: string; uom: string; unit_rate: number; quantity: number }>> }) => {
+        if (cancelled || !data?.success) return;
+        const items = data.items_details?.[displayWoNumber] ?? [];
+        const map: Record<string, { uom: string; unitRate: number; quantity: number }> = {};
+        items.forEach((item) => { map[item.name] = { uom: item.uom, unitRate: Number(item.unit_rate) || 0, quantity: Number(item.quantity) || 0 }; });
+        if (!cancelled) setWoLineItemsByActivity(map);
+      })
+      .catch(() => { if (!cancelled) setWoLineItemsByActivity({}); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveVendorId, displayWoNumber]);
+
+  // Per-activity progress against the WO — actualQuantity/ratePerUnit come from the WO line
+  // item when one matches, quantityCurrent/totalAmountCurrent are this certificate's own
+  // figures, quantityPrevious/totalAmountPrevious come from get_previous_data.
+  const activityProgress = useMemo<ActivityProgressRow[]>(() => {
+    const order: string[] = [];
+    const currentQtyByActivity = new Map<string, number>();
+    const currentValueByActivity = new Map<string, number>();
+    for (const line of effectiveLines) {
+      if (!currentQtyByActivity.has(line.activity)) { order.push(line.activity); currentQtyByActivity.set(line.activity, 0); currentValueByActivity.set(line.activity, 0); }
+      currentQtyByActivity.set(line.activity, (currentQtyByActivity.get(line.activity) || 0) + line.quantity);
+      currentValueByActivity.set(line.activity, (currentValueByActivity.get(line.activity) || 0) + line.quantity * line.rate);
+    }
+    return order.map((activity) => {
+      const quantityCurrent = currentQtyByActivity.get(activity) || 0;
+      const totalAmountCurrent = currentValueByActivity.get(activity) || 0;
+      const woItem = woLineItemsByActivity[activity];
+      const ratePerUnit = woItem ? woItem.unitRate : (quantityCurrent > 0 ? totalAmountCurrent / quantityCurrent : 0);
+      const actualQuantity = woItem ? woItem.quantity : quantityCurrent;
+      const uom = woItem?.uom || effectiveLines.find((line) => line.activity === activity)?.uom || '';
+      const previous = previousByActivity[activity];
+      const quantityPrevious = previous?.totalQuantity ?? 0;
+      const totalAmountPrevious = previous?.totalAmount ?? 0;
+      return {
+        activity,
+        uom,
+        ratePerUnit,
+        actualQuantity,
+        quantityPrevious,
+        quantityCurrent,
+        quantityBalance: actualQuantity - quantityPrevious - quantityCurrent,
+        totalAmount: ratePerUnit * actualQuantity,
+        totalAmountPrevious,
+        totalAmountCurrent,
+      };
+    });
+  }, [effectiveLines, woLineItemsByActivity, previousByActivity]);
   // Enterprise-drafted lines already carry a fixed per-line rate from the WccWorkspace wizard —
   // only cultivation/operational lines (create or revise, before submission) are editable here.
   const linesEditable = !enterprise && ((isCreateMode && !locked) || (isReviseMode && !locked));
@@ -625,8 +815,6 @@ const WccCertificatePreview = ({
   const [orderDocUrl, setOrderDocUrl] = useState<string | null>(null);
   const [orderDocLoading, setOrderDocLoading] = useState(false);
   const [orderDocError, setOrderDocError] = useState<string | null>(null);
-
-  const displayWoNumber = record?.order_number ?? meta.woNumber;
 
   const handleOpenOrderPreview = () => {
     const orderNumber = displayWoNumber.trim();
@@ -719,6 +907,7 @@ const WccCertificatePreview = ({
       preparedBy: preparedByDisplay,
       verifiedBy: verifiedByDisplay,
       approvedBy: approvedByDisplay,
+      activityProgress,
     }).catch((err) => console.error('Failed to generate WCC PDF:', err));
   };
 
@@ -953,7 +1142,6 @@ const WccCertificatePreview = ({
                         <th className="px-2 py-2 text-right font-semibold">Quantity</th>
                         <th className="px-2 py-2 text-right font-semibold whitespace-nowrap">Rate / Unit (₹)</th>
                         <th className="px-2 py-2 text-right font-semibold">Value (₹)</th>
-                        <th className="px-2 py-2 text-left font-semibold">Remarks</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -969,8 +1157,8 @@ const WccCertificatePreview = ({
                             {linesEditable ? (
                               <input
                                 type="number"
-                                value={lineEdits[line.id]?.rate ?? ''}
-                                onChange={(e) => setLineEdit(line.id, 'rate')(e.target.value)}
+                                value={lineEdits[line.id] ?? ''}
+                                onChange={(e) => setLineRate(line.id)(e.target.value)}
                                 placeholder="0"
                                 className="w-20 border-b border-dashed border-gray-300 bg-transparent text-right outline-none focus:border-[#0D3A35]"
                               />
@@ -979,19 +1167,6 @@ const WccCertificatePreview = ({
                             )}
                           </td>
                           <td className="px-2 py-1.5 text-right whitespace-nowrap font-semibold">{line.rate ? (line.quantity * line.rate).toFixed(2) : '—'}</td>
-                          <td className="px-2 py-1.5">
-                            {linesEditable ? (
-                              <input
-                                type="text"
-                                value={lineEdits[line.id]?.remarks ?? ''}
-                                onChange={(e) => setLineEdit(line.id, 'remarks')(e.target.value)}
-                                placeholder="—"
-                                className="w-28 border-b border-dashed border-gray-300 bg-transparent outline-none focus:border-[#0D3A35]"
-                              />
-                            ) : (
-                              line.remarks || '—'
-                            )}
-                          </td>
                         </tr>
                       ))}
                       <tr className="bg-emerald-50 font-bold">
@@ -999,7 +1174,6 @@ const WccCertificatePreview = ({
                         <td className="px-2 py-2 text-right whitespace-nowrap">{totalQuantity.toFixed(2)}</td>
                         <td className="px-2 py-2" />
                         <td className="px-2 py-2 text-right whitespace-nowrap">{totalValue ? totalValue.toFixed(2) : '—'}</td>
-                        <td className="px-2 py-2" />
                       </tr>
                     </tbody>
                   </table>
@@ -1093,10 +1267,58 @@ const WccCertificatePreview = ({
                   </tbody>
                 </table>
 
-                {/* Activity-wise quantity, rate and value is on the attached Annexure — the
-                    per-line inputs there are what's editable in create/revise mode. */}
-                <div className="px-3 py-2 border-t border-gray-300 text-xs text-slate-500">
-                  Activity-wise quantity, rate and value: refer attached Annexure.
+                {/* Activity-wise certified value — per-line rate/qty edits live on the
+                    Annexure above; this rolls those lines up by activity as a running-account
+                    progress table. "Previous" columns are placeholders (always 0) until the
+                    backend can report quantity already certified in earlier WCCs. */}
+                <div className="px-3 py-2 border-t border-gray-300 text-xs">
+                  <div className="font-semibold text-slate-600 mb-1">Activity-wise Certified Value</div>
+                  <div className="overflow-x-auto rounded border border-gray-200">
+                    <table className="w-full min-w-[860px] border-collapse text-[11px]">
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-600">
+                          <th className="px-1.5 py-1 text-left font-semibold">S.No</th>
+                          <th className="px-1.5 py-1 text-left font-semibold">Activity</th>
+                          <th className="px-1.5 py-1 text-left font-semibold">UOM</th>
+                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Rate/Unit (₹)</th>
+                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Actual Qty</th>
+                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Qty (Prev.)</th>
+                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Qty (Curr.)</th>
+                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Qty (Bal.)</th>
+                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Total Amt (₹)</th>
+                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Amt (Prev.) (₹)</th>
+                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Amt (Curr.) (₹)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {activityProgress.map((row, i) => (
+                          <tr key={row.activity} className="border-t border-gray-100">
+                            <td className="px-1.5 py-1">{i + 1}</td>
+                            <td className="px-1.5 py-1 text-slate-700">{row.activity}</td>
+                            <td className="px-1.5 py-1 text-slate-500">{row.uom || '—'}</td>
+                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.ratePerUnit ? formatInr(row.ratePerUnit) : '—'}</td>
+                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.actualQuantity.toFixed(2)}</td>
+                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.quantityPrevious.toFixed(2)}</td>
+                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.quantityCurrent.toFixed(2)}</td>
+                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.quantityBalance.toFixed(2)}</td>
+                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.totalAmount ? formatInr(row.totalAmount) : '—'}</td>
+                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{formatInr(row.totalAmountPrevious)}</td>
+                            <td className="px-1.5 py-1 text-right whitespace-nowrap font-medium">{row.totalAmountCurrent ? formatInr(row.totalAmountCurrent) : '—'}</td>
+                          </tr>
+                        ))}
+                        <tr className="border-t border-gray-300 bg-slate-50 font-bold text-slate-800">
+                          <td className="px-1.5 py-1" colSpan={4}>Total</td>
+                          <td className="px-1.5 py-1 text-right whitespace-nowrap">{activityProgress.reduce((sum, row) => sum + row.actualQuantity, 0).toFixed(2)}</td>
+                          <td className="px-1.5 py-1 text-right whitespace-nowrap">{activityProgress.reduce((sum, row) => sum + row.quantityPrevious, 0).toFixed(2)}</td>
+                          <td className="px-1.5 py-1 text-right whitespace-nowrap">{activityProgress.reduce((sum, row) => sum + row.quantityCurrent, 0).toFixed(2)}</td>
+                          <td className="px-1.5 py-1 text-right whitespace-nowrap">{activityProgress.reduce((sum, row) => sum + row.quantityBalance, 0).toFixed(2)}</td>
+                          <td className="px-1.5 py-1 text-right whitespace-nowrap">{formatInr(activityProgress.reduce((sum, row) => sum + row.totalAmount, 0))}</td>
+                          <td className="px-1.5 py-1 text-right whitespace-nowrap">{formatInr(activityProgress.reduce((sum, row) => sum + row.totalAmountPrevious, 0))}</td>
+                          <td className="px-1.5 py-1 text-right whitespace-nowrap">{totalValue ? formatInr(totalValue) : '—'}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
 
                 {/* Certified value */}

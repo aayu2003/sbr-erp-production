@@ -626,7 +626,7 @@ export default function SprQuotationComparative() {
                     return (
                       <td key={`${it.id}-${v.id}`} className="border border-border px-3 py-2 align-middle">
                         <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">Unit Rate</div>
-                        <Input type="number" min="0" step="0.01" className="h-9 text-center" value={String(unit || '')} onChange={(e) => setVendorRate(v.id, it.id, e.target.value)} placeholder="0" disabled={locked} />
+                        <Input type="number" onWheel={(e) => e.currentTarget.blur()} min="0" step="0.01" className="h-9 text-center" value={String(unit || '')} onChange={(e) => setVendorRate(v.id, it.id, e.target.value)} placeholder="0" disabled={locked} />
                         <div className="mt-1 text-[10px] text-slate-500">Amount: <span className="font-semibold text-[#20352f]">{amt ? inr(amt) : inr(0)}</span></div>
                       </td>
                     );
@@ -680,7 +680,7 @@ export default function SprQuotationComparative() {
                     {vendorOrder.map((vendor) => (
                       <td key={`${row.id}-${vendor.id}`} className="border border-border p-1">
                         <Input
-                          type="number"
+                          type="number" onWheel={(e) => e.currentTarget.blur()}
                           value={String(Number(row.values?.[vendor.id] || 0) || '')}
                           onChange={(event) => setModel({ ...model, customChargeRows: (model.customChargeRows || []).map((entry) => entry.id === row.id ? { ...entry, values: { ...entry.values, [vendor.id]: Number(event.target.value) || 0 } } : entry) })}
                           placeholder="0"

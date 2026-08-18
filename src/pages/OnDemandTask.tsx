@@ -38,7 +38,11 @@ interface TaskFlowStep {
     onFieldCalendarId: string;
     vendorId: string;
     vendorName: string;
+    onFieldOrderNumber: string;
     onFieldActivity: string;
+    // Non-cultivation, real-vendor case: quantity entered per WO line item name, keyed by
+    // item.name — a task can now cover several line items from the same WO in one step.
+    onFieldLineItemQuantities: Record<string, string>;
     onFieldStartDate: string;
     onFieldWorkQuantity: string;
     onFieldFromDate: string;
@@ -74,6 +78,18 @@ interface OnFieldCalendarOption {
   farm_id: string[];
   start_date: string;
   end_date: string;
+}
+
+// A Work Order line item, as returned by /admin_wcc_certificate/get_active_vendor_orders/{vendor_id} —
+// a WCC is always raised against a WO's line items, so on-field tasks pick their activity from
+// here instead of a generic activity list, keeping the two in sync.
+interface WoLineItem {
+  name: string;
+  description: string;
+  quantity: number;
+  unit_rate: number;
+  uom: string;
+  gst_percent: number;
 }
 
 // Shape returned by /admin_cultivation/get_cultivation_activities
@@ -574,6 +590,12 @@ const OnDemandTask = () => {
   const [excludedPlotsByStep, setExcludedPlotsByStep] = useState<Record<string, string[]>>({});
   const [calendarsByStep, setCalendarsByStep] = useState<Record<string, OnFieldCalendarOption[]>>({});
   const [calendarsLoadingByStep, setCalendarsLoadingByStep] = useState<Record<string, boolean>>({});
+  // The vendor's active Work Orders + their line items — activities are picked from here
+  // (rather than the generic cultivation activity list) so tasks line up with what a WCC
+  // will later be raised against. Self has no WO, so this stays empty for it.
+  const [activeOrdersByStep, setActiveOrdersByStep] = useState<Record<string, string[]>>({});
+  const [orderItemsByStep, setOrderItemsByStep] = useState<Record<string, Record<string, WoLineItem[]>>>({});
+  const [activeOrdersLoadingByStep, setActiveOrdersLoadingByStep] = useState<Record<string, boolean>>({});
 
 
   // Allocation modal state
@@ -689,7 +711,7 @@ const OnDemandTask = () => {
     expanded: true,
     details: {
       assignee: '', assigneeDesignation: '', title: `Step ${stepNumber}`, notes: '', inventoryItems: {}, allocationNeeded: false, includeLogistics: false, includeOnField: false, vehicleIds: [], inspectionInputType: 'text', inspectionFields: [], landId: '', otherDescription: '',
-      onFieldMode: 'cultivation', onFieldCalendarId: '', vendorId: '', vendorName: '', onFieldActivity: '', onFieldStartDate: '', onFieldWorkQuantity: '', onFieldFromDate: '', onFieldToDate: '', onFieldQty: '', onFieldUnit: '', onFieldSpecValue: '', onFieldSpecUnit: '',
+      onFieldMode: 'cultivation', onFieldCalendarId: '', vendorId: '', vendorName: '', onFieldOrderNumber: '', onFieldActivity: '', onFieldLineItemQuantities: {}, onFieldStartDate: '', onFieldWorkQuantity: '', onFieldFromDate: '', onFieldToDate: '', onFieldQty: '', onFieldUnit: '', onFieldSpecValue: '', onFieldSpecUnit: '',
     },
   });
 
@@ -739,10 +761,11 @@ const OnDemandTask = () => {
   const buildOnFieldEntry = (step: TaskFlowStep) => {
     const d = step.details;
     const land = farms.find(f => String(f?.farm_id || f?.id || '') === d.landId);
-    const base = { farm_id: String(land?.farm_id || ''), vendor_id: d.vendorId, vendor_name: d.vendorName, activity: d.onFieldActivity };
+    const base = { farm_id: String(land?.farm_id || ''), vendor_id: d.vendorId, vendor_name: d.vendorName };
     const data = d.onFieldMode === 'cultivation'
       ? [{
           ...base,
+          activity: d.onFieldActivity,
           calander_id: d.onFieldCalendarId,
           start_date: d.onFieldStartDate,
           work_quantity_per_day: Number(d.onFieldWorkQuantity) || 0,
@@ -751,14 +774,29 @@ const OnDemandTask = () => {
             d.onFieldStartDate, Number(d.onFieldWorkQuantity) || 0
           ).map(({ plot, assignedDate }) => ({ plot_id: plot.plot_id, plot_name: plot.plot_name, crop_type: plot.crop_type, quantity: Number(plot.plot_area) || 0, assigned_date: assignedDate })),
         }]
-      : [{
-          ...base,
-          from_date: d.onFieldFromDate,
-          to_date: d.onFieldToDate,
-          quantity: Number(d.onFieldQty) || 0,
-          unit: d.onFieldUnit,
-          ...(d.onFieldSpecValue && d.onFieldSpecUnit ? { spec_value: Number(d.onFieldSpecValue) || 0, spec_unit: d.onFieldSpecUnit } : {}),
-        }];
+      : d.vendorId !== SELF_VENDOR_ID
+        // Real vendor — one entry per WO line item the user put a quantity against.
+        ? (orderItemsByStep[step.id]?.[d.onFieldOrderNumber] || [])
+            .filter(item => Number(d.onFieldLineItemQuantities[item.name] || 0) > 0)
+            .map(item => ({
+              ...base,
+              activity: item.name,
+              from_date: d.onFieldFromDate,
+              to_date: d.onFieldToDate,
+              quantity: Number(d.onFieldLineItemQuantities[item.name]) || 0,
+              unit: item.uom,
+              order_number: d.onFieldOrderNumber,
+            }))
+        // Self — no Work Order to draw line items from, so this stays free-form.
+        : [{
+            ...base,
+            activity: d.onFieldActivity,
+            from_date: d.onFieldFromDate,
+            to_date: d.onFieldToDate,
+            quantity: Number(d.onFieldQty) || 0,
+            unit: d.onFieldUnit,
+            ...(d.onFieldSpecValue && d.onFieldSpecUnit ? { spec_value: Number(d.onFieldSpecValue) || 0, spec_unit: d.onFieldSpecUnit } : {}),
+          }];
     return { type: 'on_field', status: 'pending', task_mode: d.onFieldMode, data };
   };
 
@@ -843,17 +881,39 @@ const OnDemandTask = () => {
     }
   };
 
+  const fetchActiveOrdersForStep = async (stepId: string, vendorId: string) => {
+    setActiveOrdersLoadingByStep(prev => ({ ...prev, [stepId]: true }));
+    setActiveOrdersByStep(prev => ({ ...prev, [stepId]: [] }));
+    setOrderItemsByStep(prev => ({ ...prev, [stepId]: {} }));
+    try {
+      const res = await fetch(`${BASE_URL}/admin_wcc_certificate/get_active_vendor_orders/${vendorId}`);
+      const data = await res.json().catch(() => null);
+      if (data?.success && Array.isArray(data.active_orders)) {
+        const orders = data.active_orders as string[];
+        const items = data.items_details && typeof data.items_details === 'object' ? data.items_details as Record<string, WoLineItem[]> : {};
+        setActiveOrdersByStep(prev => ({ ...prev, [stepId]: orders }));
+        setOrderItemsByStep(prev => ({ ...prev, [stepId]: items }));
+        // Only one active order — pick it automatically instead of making the user do it.
+        if (orders.length === 1) updateStepDetails(stepId, { onFieldOrderNumber: orders[0] });
+      }
+    } catch { /* leave empty */ } finally {
+      setActiveOrdersLoadingByStep(prev => ({ ...prev, [stepId]: false }));
+    }
+  };
+
   const handleOnFieldModeChange = (stepId: string, mode: OnFieldTaskMode) =>
     updateStepDetails(stepId, {
-      onFieldMode: mode, vendorId: '', vendorName: '', onFieldActivity: '', onFieldWorkQuantity: '',
+      onFieldMode: mode, vendorId: '', vendorName: '', onFieldOrderNumber: '', onFieldActivity: '', onFieldLineItemQuantities: {}, onFieldWorkQuantity: '',
       onFieldQty: '', onFieldUnit: '', onFieldSpecValue: '', onFieldSpecUnit: '',
     });
 
   const handleOnFieldFarmChange = (stepId: string, farmId: string) => {
-    updateStepDetails(stepId, { landId: farmId, vendorId: '', vendorName: '', onFieldActivity: '', onFieldCalendarId: '' });
+    updateStepDetails(stepId, { landId: farmId, vendorId: '', vendorName: '', onFieldOrderNumber: '', onFieldActivity: '', onFieldLineItemQuantities: {}, onFieldCalendarId: '' });
     setPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
     setExcludedPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
     setCalendarsByStep(prev => ({ ...prev, [stepId]: [] }));
+    setActiveOrdersByStep(prev => ({ ...prev, [stepId]: [] }));
+    setOrderItemsByStep(prev => ({ ...prev, [stepId]: {} }));
     if (farmId) {
       fetchScopeForStep(stepId, farmId);
       fetchCalendarsForStep(stepId, farmId);
@@ -861,12 +921,19 @@ const OnDemandTask = () => {
   };
 
   const handleOnFieldVendorChange = (stepId: string, farmId: string, vendorId: string, vendorName: string, mode: OnFieldTaskMode) => {
-    updateStepDetails(stepId, { vendorId, vendorName, onFieldActivity: '' });
+    updateStepDetails(stepId, { vendorId, vendorName, onFieldOrderNumber: '', onFieldActivity: '', onFieldLineItemQuantities: {}, onFieldUnit: '' });
     setExcludedPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
     if (vendorId && vendorId !== SELF_VENDOR_ID && mode === 'cultivation') {
       fetchPlotsForStep(stepId, farmId, vendorId);
     } else {
       setPlotsByStep(prev => ({ ...prev, [stepId]: [] }));
+    }
+    // Self has no Work Order to draw activities from — the generic activity list is its fallback.
+    if (vendorId && vendorId !== SELF_VENDOR_ID) {
+      fetchActiveOrdersForStep(stepId, vendorId);
+    } else {
+      setActiveOrdersByStep(prev => ({ ...prev, [stepId]: [] }));
+      setOrderItemsByStep(prev => ({ ...prev, [stepId]: {} }));
     }
   };
 
@@ -1502,7 +1569,13 @@ const OnDemandTask = () => {
                                     ? `${step.details.inspectionFields.length} field${step.details.inspectionFields.length !== 1 ? 's' : ''} defined`
                                     : 'No fields yet — click to configure')}
                                   {step.type === 'on_field' && (step.details.vendorId
-                                    ? `${selectedLand?.land_data?.village || 'Farm'} · ${step.details.vendorName || 'Vendor'}${step.details.onFieldActivity ? ` · ${step.details.onFieldActivity}` : ''}`
+                                    ? (() => {
+                                        const selectedLineItemCount = Object.values(step.details.onFieldLineItemQuantities).filter(qty => Number(qty || 0) > 0).length;
+                                        const activitySummary = step.details.onFieldActivity
+                                          ? step.details.onFieldActivity
+                                          : selectedLineItemCount > 0 ? `${selectedLineItemCount} line item${selectedLineItemCount !== 1 ? 's' : ''}` : '';
+                                        return `${selectedLand?.land_data?.village || 'Farm'} · ${step.details.vendorName || 'Vendor'}${activitySummary ? ` · ${activitySummary}` : ''}`;
+                                      })()
                                     : step.details.landId ? 'Choose a vendor — click to configure' : 'Not configured yet — click to configure')}
                                   {step.type === 'other' && (step.details.otherDescription ? step.details.otherDescription : 'No description yet — click to configure')}
                                 </button>
@@ -1752,6 +1825,15 @@ const OnDemandTask = () => {
                                     const activePlots = plots.filter(p => !excludedPlotIds.includes(p.plot_id));
                                     const excludedPlots = plots.filter(p => excludedPlotIds.includes(p.plot_id));
                                     const calendars = calendarsByStep[step.id] || [];
+                                    const activeVendorOrders = activeOrdersByStep[step.id] || [];
+                                    const orderItems = orderItemsByStep[step.id] || {};
+                                    const selectedOrderItems = step.details.onFieldOrderNumber ? (orderItems[step.details.onFieldOrderNumber] || []) : [];
+                                    // Self has no Work Order — falls back to the generic activity list. A real vendor's
+                                    // activities always come from its selected WO's line items, so a task can only be
+                                    // matched to a WCC line item it actually corresponds to.
+                                    const activityOptions = step.details.vendorId && step.details.vendorId !== SELF_VENDOR_ID
+                                      ? selectedOrderItems.map(item => item.name).filter(Boolean)
+                                      : cultivationActivityOptions;
                                     const schedule = computePlotSchedule(activePlots, step.details.onFieldStartDate, Number(step.details.onFieldWorkQuantity) || 0);
                                     const scheduleRows = schedule.reduce<Array<{ kind: 'plot'; plot: OnFieldPlot; assignedDate: string } | { kind: 'subtotal'; date: string; total: number; count: number }>>((rows, { plot, assignedDate }, i) => {
                                       rows.push({ kind: 'plot', plot, assignedDate });
@@ -1845,11 +1927,30 @@ const OnDemandTask = () => {
                                           </div>
                                         )}
 
+                                        {step.details.vendorId && step.details.vendorId !== SELF_VENDOR_ID && (
+                                          <div>
+                                            {activeOrdersLoadingByStep[step.id] ? (
+                                              <p className="text-[11px] text-slate-400 italic">Loading work orders…</p>
+                                            ) : activeVendorOrders.length === 0 ? (
+                                              <p className="text-[11px] text-amber-600 italic">No active Work Order found for this vendor — activities can't be selected until one exists.</p>
+                                            ) : (
+                                              <select
+                                                value={step.details.onFieldOrderNumber}
+                                                onChange={e => updateStepDetails(step.id, { onFieldOrderNumber: e.target.value, onFieldActivity: '', onFieldLineItemQuantities: {}, onFieldUnit: '' })}
+                                                className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none"
+                                              >
+                                                <option value="">Select Work Order</option>
+                                                {activeVendorOrders.map(orderNumber => <option key={orderNumber} value={orderNumber}>{orderNumber}</option>)}
+                                              </select>
+                                            )}
+                                          </div>
+                                        )}
+
                                         {step.details.vendorId && step.details.onFieldMode === 'cultivation' && (
                                           <div className="grid grid-cols-3 gap-1.5">
-                                            <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
+                                            <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} disabled={activityOptions.length === 0} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100">
                                               <option value="">Activity</option>
-                                              {cultivationActivityOptions.map(a => <option key={a} value={a}>{a}</option>)}
+                                              {activityOptions.map(a => <option key={a} value={a}>{a}</option>)}
                                             </select>
                                             <input type="date" value={step.details.onFieldStartDate} onChange={e => updateStepDetails(step.id, { onFieldStartDate: e.target.value })} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
                                             <input type="number" min="0" value={step.details.onFieldWorkQuantity} onChange={e => updateStepDetails(step.id, { onFieldWorkQuantity: e.target.value })} placeholder="Qty/day (acres)" className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
@@ -1909,14 +2010,6 @@ const OnDemandTask = () => {
 
                                         {step.details.vendorId && step.details.onFieldMode === 'non_cultivation' && (
                                           <div className="space-y-2">
-                                            <div>
-                                              <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Task / activity</label>
-                                              <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
-                                                <option value="">Choose task</option>
-                                                {cultivationActivityOptions.map(a => <option key={a} value={a}>{a}</option>)}
-                                              </select>
-                                            </div>
-
                                             <div className="grid grid-cols-2 gap-1.5">
                                               <div>
                                                 <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">From date</label>
@@ -1928,20 +2021,64 @@ const OnDemandTask = () => {
                                               </div>
                                             </div>
 
-                                            <div className="rounded-md border border-slate-200 bg-slate-50 p-2 space-y-1.5">
-                                              <div className="flex items-center gap-1.5 text-xs text-slate-700">
-                                                <span className="shrink-0 font-medium">Do</span>
-                                                <input type="number" min="0" value={step.details.onFieldQty} onChange={e => updateStepDetails(step.id, { onFieldQty: e.target.value })} placeholder="2" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
-                                                <input value={step.details.onFieldUnit} onChange={e => updateStepDetails(step.id, { onFieldUnit: e.target.value })} placeholder="Borewells" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                            {step.details.vendorId !== SELF_VENDOR_ID ? (
+                                              <div>
+                                                <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Line items — set the quantity done for each</label>
+                                                {activeOrdersLoadingByStep[step.id] ? (
+                                                  <p className="mt-1 text-[11px] text-slate-400 italic">Loading work order…</p>
+                                                ) : !step.details.onFieldOrderNumber ? (
+                                                  <p className="mt-1 text-[11px] text-slate-400 italic">Select a Work Order above to see its line items.</p>
+                                                ) : selectedOrderItems.length === 0 ? (
+                                                  <p className="mt-1 text-[11px] text-slate-400 italic">This Work Order has no line items.</p>
+                                                ) : (
+                                                  <div className="mt-1 overflow-hidden rounded-md border border-slate-200 bg-white">
+                                                    <div className="grid grid-cols-[2fr_1fr_1fr_1fr] gap-2 border-b border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                                      <div>Activity</div><div className="text-right">UOM</div><div className="text-right">Rate</div><div className="text-right">Quantity</div>
+                                                    </div>
+                                                    <div className="divide-y divide-slate-100">
+                                                      {selectedOrderItems.map(item => (
+                                                        <div key={item.name} className="grid grid-cols-[2fr_1fr_1fr_1fr] items-center gap-2 px-2 py-1 text-[11px]">
+                                                          <span className="truncate font-medium text-slate-900" title={item.name}>{item.name}</span>
+                                                          <span className="text-right text-slate-600">{item.uom}</span>
+                                                          <span className="text-right text-slate-600">{item.unit_rate}</span>
+                                                          <input
+                                                            type="number"
+                                                            min="0"
+                                                            step="0.01"
+                                                            value={step.details.onFieldLineItemQuantities[item.name] || ''}
+                                                            onChange={e => updateStepDetails(step.id, { onFieldLineItemQuantities: { ...step.details.onFieldLineItemQuantities, [item.name]: e.target.value } })}
+                                                            placeholder="0"
+                                                            className="w-full rounded border border-slate-200 bg-white px-1.5 py-1 text-right text-xs focus:border-slate-900 focus:outline-none"
+                                                          />
+                                                        </div>
+                                                      ))}
+                                                    </div>
+                                                  </div>
+                                                )}
                                               </div>
-                                              <div className="flex items-center gap-1.5 text-xs text-slate-700">
-                                                <span className="shrink-0 font-medium">Up to</span>
-                                                <input type="number" min="0" value={step.details.onFieldSpecValue} onChange={e => updateStepDetails(step.id, { onFieldSpecValue: e.target.value })} placeholder="250" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
-                                                <input value={step.details.onFieldSpecUnit} onChange={e => updateStepDetails(step.id, { onFieldSpecUnit: e.target.value })} placeholder="feet deep" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
-                                                <span className="shrink-0 text-[10px] text-slate-400">(optional)</span>
+                                            ) : (
+                                              <div>
+                                                <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Task / activity</label>
+                                                <select value={step.details.onFieldActivity} onChange={e => updateStepDetails(step.id, { onFieldActivity: e.target.value })} className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none">
+                                                  <option value="">Choose task</option>
+                                                  {cultivationActivityOptions.map(a => <option key={a} value={a}>{a}</option>)}
+                                                </select>
+                                                <div className="mt-1.5 rounded-md border border-slate-200 bg-slate-50 p-2 space-y-1.5">
+                                                  <div className="flex items-center gap-1.5 text-xs text-slate-700">
+                                                    <span className="shrink-0 font-medium">Do</span>
+                                                    <input type="number" min="0" value={step.details.onFieldQty} onChange={e => updateStepDetails(step.id, { onFieldQty: e.target.value })} placeholder="2" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
+                                                    <input value={step.details.onFieldUnit} onChange={e => updateStepDetails(step.id, { onFieldUnit: e.target.value })} placeholder="Borewells" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                                  </div>
+                                                  <div className="flex items-center gap-1.5 text-xs text-slate-700">
+                                                    <span className="shrink-0 font-medium">Up to</span>
+                                                    <input type="number" min="0" value={step.details.onFieldSpecValue} onChange={e => updateStepDetails(step.id, { onFieldSpecValue: e.target.value })} placeholder="250" className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-center focus:border-slate-900 focus:outline-none" />
+                                                    <input value={step.details.onFieldSpecUnit} onChange={e => updateStepDetails(step.id, { onFieldSpecUnit: e.target.value })} placeholder="feet deep" className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs focus:border-slate-900 focus:outline-none" />
+                                                    <span className="shrink-0 text-[10px] text-slate-400">(optional)</span>
+                                                  </div>
+                                                  <p className="text-[10px] text-slate-400">Reads as: "Do {step.details.onFieldQty || '2'} {step.details.onFieldUnit || 'Borewells'}{step.details.onFieldSpecValue && step.details.onFieldSpecUnit ? `, up to ${step.details.onFieldSpecValue} ${step.details.onFieldSpecUnit}` : ''}".</p>
+                                                </div>
                                               </div>
-                                              <p className="text-[10px] text-slate-400">Reads as: "Do {step.details.onFieldQty || '2'} {step.details.onFieldUnit || 'Borewells'}{step.details.onFieldSpecValue && step.details.onFieldSpecUnit ? `, up to ${step.details.onFieldSpecValue} ${step.details.onFieldSpecUnit}` : ''}".</p>
-                                            </div>
+                                            )}
                                           </div>
                                         )}
                                       </div>
