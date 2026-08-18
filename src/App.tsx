@@ -100,6 +100,20 @@ import PRRApprovalInbox from "./pages/PRRApprovalInbox";
 import AccountsPurchaseFlow from "./pages/AccountsPurchaseFlow";
 import Budget from "./pages/Budget";
 import BudgetDashboard from "./pages/BudgetDashboard";
+import {
+  Banking,
+  BillsPayables,
+  BudgetCosting,
+  FinanceAccountsDashboard,
+  LedgersReports,
+  MastersControls,
+  PaymentsReceipts,
+  Vouchers,
+} from "./pages/FinanceAccounts";
+import AccountingMaster from "./pages/AccountingMaster";
+import ChartOfAccounts from "./pages/ChartOfAccounts";
+import Communication from "./pages/Communication";
+import InvoiceDirectory from "./pages/InvoiceDirectory";
 
 const queryClient = new QueryClient();
 
@@ -115,6 +129,7 @@ const App = () => (
           <Route path="/index" element={<Index />} />
 
           <Route path="/ceos-desk" element={<AppLayout><CeosDesk /></AppLayout>} />
+          <Route path="/communication" element={<AppLayout><Communication /></AppLayout>} />
 
           <Route path="/legal" element={<AppLayout><Legal /></AppLayout>} />
 
@@ -328,6 +343,20 @@ const App = () => (
           <Route path="/accounts/purchase-flow" element={<AppLayout><AccountsPurchaseFlow /></AppLayout>} />
           <Route path="/budget"                element={<AppLayout><BudgetDashboard /></AppLayout>} />
           <Route path="/budget/:budgetId"      element={<AppLayout><Budget /></AppLayout>} />
+
+          {/* Finance & Accounts — new workspace; legacy Accounts routes remain intact */}
+          <Route path="/finance-accounts" element={<Navigate to="/finance-accounts/dashboard" replace />} />
+          <Route path="/finance-accounts/dashboard" element={<AppLayout><FinanceAccountsDashboard /></AppLayout>} />
+          <Route path="/finance-accounts/bills-payables" element={<AppLayout><BillsPayables /></AppLayout>} />
+          <Route path="/finance-accounts/invoice-directory" element={<AppLayout><InvoiceDirectory /></AppLayout>} />
+          <Route path="/finance-accounts/payments-receipts" element={<AppLayout><PaymentsReceipts /></AppLayout>} />
+          <Route path="/finance-accounts/vouchers" element={<AppLayout><Vouchers /></AppLayout>} />
+          <Route path="/finance-accounts/banking" element={<AppLayout><Banking /></AppLayout>} />
+          <Route path="/finance-accounts/ledgers-reports" element={<AppLayout><LedgersReports /></AppLayout>} />
+          <Route path="/finance-accounts/budget-costing" element={<AppLayout><BudgetCosting /></AppLayout>} />
+          <Route path="/finance-accounts/masters-controls" element={<AppLayout><MastersControls /></AppLayout>} />
+          <Route path="/finance-accounts/accounting-master" element={<AppLayout><AccountingMaster /></AppLayout>} />
+          <Route path="/finance-accounts/chart-of-accounts" element={<AppLayout><ChartOfAccounts /></AppLayout>} />
 
           {/* Standalone Webapp — no ERP sidebar */}
           <Route path="/approval/webapp/*" element={<WebApp />} />
