@@ -4,6 +4,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Keep WCC invoice-status pills intact inside the register's fixed-width columns. */
+.wcc-register-page > section > .overflow-x-auto > table tbody td:nth-child(10) > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  line-height: 1rem;
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+}
+
 @layer base {
   :root {
     --brand-primary: #0D3A35;

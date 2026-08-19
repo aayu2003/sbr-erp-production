@@ -3,7 +3,7 @@ import {
   X,
   CalendarRange,
   FileCheck,
-  ChevronRight,
+  ArrowLeft,
   Shovel,
   Tractor,
   Droplets,
@@ -33,6 +33,7 @@ export interface ApiWorkDoneEntry {
   date: string;
   plot: ApiWorkDonePlot[];
   task_id: string;
+  order_number?: string;
 }
 
 // Non-cultivation vendor work (e.g. rental vehicle log books), from
@@ -131,10 +132,11 @@ export interface WccModalProps {
   scopeItems: WccScopeLand[];
   defaultStartDate?: string;
   defaultEndDate?: string;
+  onBack?: () => void;
   onClose: () => void;
 }
 
-const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, farmsById, farmerNames, scopeItems, defaultStartDate, defaultEndDate, onClose }: WccModalProps) => {
+const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, farmsById, farmerNames, scopeItems, defaultStartDate, defaultEndDate, onBack, onClose }: WccModalProps) => {
   const [fromDate, setFromDate] = useState(defaultStartDate || daysAgoKey(30));
   const [toDate, setToDate] = useState(defaultEndDate || todayKey());
   const [workDone, setWorkDone] = useState<ApiWorkDoneEntry[]>([]);
@@ -157,18 +159,19 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
     fetch(`${BASE_URL}/admin_cultivation/get_work_done_by_vendor_so_far`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vendor_id: vendorId, start_date: fromDate, end_date: toDate, farm_id: landIds, activities }),
+      body: JSON.stringify({ vendor_id: vendorId, order_number: vendorWoNumber, start_date: fromDate, end_date: toDate, farm_id: landIds, activities }),
     })
       .then((res) => res.json())
       .then((data: { success?: boolean; work_done?: ApiWorkDoneEntry[] }) => {
         if (!mounted) return;
-        setWorkDone(data?.success && Array.isArray(data.work_done) ? data.work_done : []);
+        const entries = data?.success && Array.isArray(data.work_done) ? data.work_done : [];
+        setWorkDone(entries.filter((entry) => !vendorWoNumber || !entry.order_number || entry.order_number === vendorWoNumber));
       })
       .catch(() => { if (mounted) setWorkDone([]); })
       .finally(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vendorId, fromDate, toDate, landIds.join(','), activities.join(',')]);
+  }, [vendorId, vendorWoNumber, fromDate, toDate, landIds.join(','), activities.join(',')]);
 
   // Fetch the vendor's non-cultivation (operational calendar) work for the same period —
   // independent of `activities`, so vendors with no land scope-of-work still get evidence.
@@ -178,17 +181,18 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
     fetch(`${BASE_URL}/admin_cultivation/get_operational_work_done_by_vendor`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vendor_id: vendorId, start_date: fromDate, end_date: toDate }),
+      body: JSON.stringify({ vendor_id: vendorId, order_number: vendorWoNumber, start_date: fromDate, end_date: toDate }),
     })
       .then((res) => res.json())
       .then((data: { success?: boolean; work_done?: ApiOperationalWorkDoneEntry[] }) => {
         if (!mounted) return;
-        setOperationalWorkDone(data?.success && Array.isArray(data.work_done) ? data.work_done : []);
+        const entries = data?.success && Array.isArray(data.work_done) ? data.work_done : [];
+        setOperationalWorkDone(entries.filter((entry) => !vendorWoNumber || !entry.order_number || entry.order_number === vendorWoNumber));
       })
       .catch(() => { if (mounted) setOperationalWorkDone([]); })
       .finally(() => { if (mounted) setLoadingOperational(false); });
     return () => { mounted = false; };
-  }, [vendorId, fromDate, toDate]);
+  }, [vendorId, vendorWoNumber, fromDate, toDate]);
 
   // Farmer names for farm_ids that show up in operational (non-cultivation) work but aren't
   // already covered by the vendor's own land scope-of-work (e.g. a borewell driller with no
@@ -221,7 +225,10 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
   const [taskDetailsById, setTaskDetailsById] = useState<Record<string, ApiTaskDetails>>({});
   const fetchedTaskIds = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const taskIds = Array.from(new Set(workDone.map((w) => w.task_id).filter(Boolean)));
+    const taskIds = Array.from(new Set([
+      ...workDone.map((w) => w.task_id),
+      ...operationalWorkDone.map((w) => w.task_id),
+    ].filter((taskId): taskId is string => Boolean(taskId))));
     taskIds.forEach((taskId) => {
       if (fetchedTaskIds.current.has(taskId)) return;
       fetchedTaskIds.current.add(taskId);
@@ -233,7 +240,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
         })
         .catch(() => setTaskDetailsById((prev) => ({ ...prev, [taskId]: {} })));
     });
-  }, [workDone]);
+  }, [workDone, operationalWorkDone]);
 
   const timelineTasks = useMemo<TimelineTask[]>(() => {
     return workDone.map((entry, index) => {
@@ -292,14 +299,22 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
 
   return (
     <>
-      <div className="fixed inset-0 z-[90] bg-black/40 backdrop-blur-sm animate-in fade-in duration-200" />
-      <div className="fixed inset-y-0 right-0 z-[91] flex w-full max-w-4xl flex-col bg-white shadow-2xl animate-in slide-in-from-right duration-300">
+      <div className="fixed inset-0 z-[120] bg-slate-950/55 backdrop-blur-sm animate-in fade-in duration-200" />
+      <div className="fixed inset-0 z-[121] flex items-center justify-center p-4 sm:p-6">
+      <div className="flex max-h-[94vh] w-full max-w-[1600px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl animate-in zoom-in-95 duration-200">
         {/* Header */}
         <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#0D3A35] bg-[#0D3A35] px-6 py-4 text-white">
-          <div className="min-w-0">
-            <p className="mb-0.5 text-[11px] font-semibold uppercase tracking-widest text-emerald-200">Work Completion Certificate</p>
-            <h2 className="truncate text-lg font-bold text-white">{vendorName}</h2>
-            <p className="mt-0.5 text-xs text-emerald-100">{landIds.length} land{landIds.length !== 1 ? 's' : ''} in scope</p>
+          <div className="flex min-w-0 items-start gap-3">
+            {onBack && (
+              <button type="button" onClick={onBack} className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-white/15 text-white/80 transition-colors hover:bg-white/10 hover:text-white" title="Back to vendor selection">
+                <ArrowLeft className="h-4 w-4" />
+              </button>
+            )}
+            <div className="min-w-0">
+              <p className="mb-0.5 text-[11px] font-semibold uppercase tracking-widest text-emerald-200">Create WCC · Step 3 of 3</p>
+              <h2 className="truncate text-lg font-bold text-white">{vendorName}</h2>
+              <p className="mt-0.5 text-xs text-emerald-100">{vendorWoNumber || 'Work order not recorded'} · {landIds.length} land{landIds.length !== 1 ? 's' : ''} in scope</p>
+            </div>
           </div>
           <button
             type="button"
@@ -311,37 +326,34 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
         </div>
 
         {/* Date range */}
-        <div className="px-6 py-4 border-b border-gray-100 bg-white shrink-0">
-          <div className="flex items-center gap-2 mb-2">
+        <div className="shrink-0 border-b border-gray-100 bg-white px-6 py-4">
+          <div className="mb-3 flex items-center gap-2">
             <CalendarRange className="h-3.5 w-3.5 text-emerald-700" />
             <span className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">Certificate Period</span>
           </div>
-          <div className="flex items-end gap-3">
-            <div className="flex-1">
-              <label className="text-[10px] font-semibold text-slate-400 block mb-1">From</label>
-              <input
-                type="date"
-                value={fromDate}
-                max={toDate}
-                onChange={(e) => setFromDate(e.target.value)}
-                className="h-9 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 focus:border-[#0D3A35] focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/10"
-              />
-            </div>
-            <ChevronRight className="w-4 h-4 text-gray-300 mb-2.5 shrink-0" />
-            <div className="flex-1">
-              <label className="text-[10px] font-semibold text-slate-400 block mb-1">To</label>
-              <input
-                type="date"
-                value={toDate}
-                min={fromDate}
-                onChange={(e) => setToDate(e.target.value)}
-                className="h-9 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 focus:border-[#0D3A35] focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/10"
-              />
-            </div>
-            <div className="text-right shrink-0 pl-2">
-              <div className="text-lg font-bold text-slate-800 leading-none">{timelineTasks.length}</div>
-              <div className="text-[10px] text-slate-400 mt-0.5">tasks · {totalAcres.toFixed(1)} ac</div>
-            </div>
+          <div className="overflow-hidden rounded-xl border border-slate-200">
+            <table className="w-full table-fixed border-collapse">
+              <thead className="bg-[#eef5f3] text-[#0D3A35]">
+                <tr>
+                  <th className="w-1/4 border-r border-slate-200 px-4 py-2 text-left text-[10px] font-extrabold uppercase tracking-[0.1em]">From Date</th>
+                  <th className="w-1/4 border-r border-slate-200 px-4 py-2 text-left text-[10px] font-extrabold uppercase tracking-[0.1em]">To Date</th>
+                  <th className="w-1/4 border-r border-slate-200 px-3 py-2 text-center text-[10px] font-extrabold uppercase tracking-[0.1em]">Tasks</th>
+                  <th className="w-1/4 px-3 py-2 text-center text-[10px] font-extrabold uppercase tracking-[0.1em]">Total Area</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="bg-white">
+                  <td className="border-r border-t border-slate-200 p-2.5">
+                    <input type="date" value={fromDate} max={toDate} onChange={(e) => setFromDate(e.target.value)} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 focus:border-[#0D3A35] focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/10" />
+                  </td>
+                  <td className="border-r border-t border-slate-200 p-2.5">
+                    <input type="date" value={toDate} min={fromDate} onChange={(e) => setToDate(e.target.value)} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 focus:border-[#0D3A35] focus:outline-none focus:ring-2 focus:ring-[#0D3A35]/10" />
+                  </td>
+                  <td className="border-r border-t border-slate-200 px-3 py-2.5 text-center"><p className="text-lg font-black tabular-nums text-slate-900">{timelineTasks.length}</p><p className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Tasks</p></td>
+                  <td className="border-t border-slate-200 px-3 py-2.5 text-center"><p className="text-lg font-black tabular-nums text-slate-900">{totalAcres.toFixed(1)}</p><p className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Acres</p></td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
@@ -361,6 +373,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
               plots: task.plots,
             })}
             progressImagesByTaskId={progressImagesByTaskId}
+            columns={3}
           />
 
           {/* Operational (non-cultivation) work — e.g. rental vehicle log books */}
@@ -378,22 +391,32 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
                   Loading…
                 </div>
               ) : (
-                <div className="space-y-1.5">
-                  {operationalWorkDone.map((entry, idx) => (
-                    <div key={entry.line_item_id || `${entry.task_id || 'entry'}-${idx}`} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold text-slate-800 truncate">{entry.activity}</p>
-                        <p className="text-[11px] text-slate-400">
-                          {formatDate(entry.from_date)} – {formatDate(entry.to_date)}
-                          {entry.order_number ? ` · ${entry.order_number}` : ''}
-                        </p>
-                      </div>
-                      <div className="shrink-0 text-right">
-                        <p className="text-sm font-bold text-slate-700">{entry.quantity ?? '-'} {entry.unit || ''}</p>
-                        {entry.status && <p className="text-[10px] text-slate-400 capitalize">{entry.status}</p>}
-                      </div>
-                    </div>
-                  ))}
+                <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[900px] table-fixed border-collapse text-xs">
+                      <thead className="bg-[#0D3A35] text-white">
+                        <tr>
+                          {[['S. No.', 'w-[7%]'], ['Activity', 'w-[20%]'], ['Place', 'w-[14%]'], ['Date of Completion', 'w-[14%]'], ['Work Order No.', 'w-[18%]'], ['UOM', 'w-[7%]'], ['Quantity', 'w-[8%]'], ['Status', 'w-[12%]']].map(([label, width]) => (
+                            <th key={label} className={`${width} px-3 py-3 text-center text-[10px] font-bold uppercase tracking-[0.06em] text-white/90`}>{label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {operationalWorkDone.map((entry, idx) => (
+                          <tr key={entry.line_item_id || `${entry.task_id || 'entry'}-${idx}`} className="transition-colors hover:bg-[#0D3A35]/[0.025]">
+                            <td className="px-3 py-3 text-center font-medium text-slate-500">{idx + 1}</td>
+                            <td className="px-3 py-3 font-semibold text-slate-800">{entry.activity}</td>
+                            <td className="px-3 py-3 text-slate-600">{entry.farm_id ? mergedFarmerNames[entry.farm_id] || entry.farm_id : '—'}</td>
+                            <td className="px-3 py-3 text-center font-medium text-slate-600">{formatDate(entry.completion_date || entry.to_date)}</td>
+                            <td className="px-3 py-3 text-center font-mono text-[11px] text-[#0D3A35]">{entry.order_number || vendorWoNumber || '—'}</td>
+                            <td className="px-3 py-3 text-center font-medium text-slate-600">{entry.unit || '—'}</td>
+                            <td className="px-3 py-3 text-right font-bold tabular-nums text-slate-800">{entry.quantity ?? '—'}</td>
+                            <td className="px-3 py-3 text-center"><span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-bold capitalize text-emerald-700">{entry.status || 'Completed'}</span></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>
@@ -408,6 +431,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
             {' '}· {formatDate(fromDate)} – {formatDate(toDate)}
           </p>
           <div className="flex items-center gap-2 shrink-0">
+            {onBack && <button type="button" onClick={onBack} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Change Work Order</button>}
             <button
               type="button"
               onClick={onClose}
@@ -424,6 +448,7 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
             </button>
           </div>
         </div>
+      </div>
       </div>
 
       {mapViewTask && <PlotMapViewModal task={mapViewTask} onClose={() => setMapViewTask(null)} />}
