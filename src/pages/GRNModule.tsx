@@ -37,6 +37,23 @@ const displayDate = (value?: string) => {
   return match ? `${match[3]}-${match[2]}-${match[1]}` : value || '—';
 };
 
+// Newest GRN first — e.g. GRN/26-27/023, .../022, .../021. Compares the fiscal-year segment
+// first (so a newer year always sorts above an older one) then the running number
+// numerically (so .../099 sorts above .../009, not below it as a plain string compare would
+// once the count passes 3 digits). Falls back to a plain string compare for any manually
+// entered GRN number that doesn't follow the GRN/{year}/{number} pattern.
+const compareGrnNoDesc = (a: string, b: string) => {
+  const partsA = a.split('/');
+  const partsB = b.split('/');
+  const runningA = Number(partsA[partsA.length - 1]);
+  const runningB = Number(partsB[partsB.length - 1]);
+  const prefixA = partsA.slice(0, -1).join('/');
+  const prefixB = partsB.slice(0, -1).join('/');
+  if (prefixA !== prefixB) return prefixB.localeCompare(prefixA);
+  if (Number.isFinite(runningA) && Number.isFinite(runningB)) return runningB - runningA;
+  return b.localeCompare(a);
+};
+
 // Shape returned by /purchase_flow/get_purchase_flows — only the fields GRN needs.
 type ApiPurchaseFlow = {
   comparison_id?: unknown;
@@ -235,14 +252,14 @@ export function GRNModule() {
 
   const filteredGrns = useMemo(() => {
     const query = q.trim().toLowerCase();
-    if (!query) return allGrns;
-    return allGrns.filter((grn) => (
+    const base = !query ? allGrns : allGrns.filter((grn) => (
       grn.grnNo.toLowerCase().includes(query) ||
       grn.poNo.toLowerCase().includes(query) ||
       grn.vendorName.toLowerCase().includes(query) ||
       grn.gateEntryIds.some((entryId) => entryId.toLowerCase().includes(query)) ||
       grn.items.some((item) => item.description.toLowerCase().includes(query))
     ));
+    return [...base].sort((a, b) => compareGrnNoDesc(a.grnNo, b.grnNo));
   }, [allGrns, q]);
 
   const refresh = () => setRefreshTick((x) => x + 1);

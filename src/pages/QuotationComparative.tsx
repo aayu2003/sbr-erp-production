@@ -1763,7 +1763,7 @@ export default function QuotationComparative() {
                         {['GST', 'IGST', 'CGST + SGST', 'Exempt', 'RCM', 'Nil Rated', 'Inclusive of Tax'].map((option) => <option key={option} value={option}>{option}</option>)}
                       </select>
                         <Input
-                          type="number"
+                          type="number" onWheel={(e) => e.currentTarget.blur()}
                           min="0"
                           className="h-8 rounded-md bg-background px-2 text-center text-[11px]"
                           value={String(Number.isFinite(it.gstPercent as any) ? it.gstPercent : '')}
@@ -1787,7 +1787,7 @@ export default function QuotationComparative() {
                         />
                     </div>
                   </td>
-                  <td className="border border-border px-2 py-1 text-center"><Input type="number" min="0" value={it.qty || ''} onChange={(e) => updateItemField(it.id, 'qty', Number(e.target.value) || 0)} className="h-8 text-center" /></td>
+                  <td className="border border-border px-2 py-1 text-center"><Input type="number" onWheel={(e) => e.currentTarget.blur()} min="0" value={it.qty || ''} onChange={(e) => updateItemField(it.id, 'qty', Number(e.target.value) || 0)} className="h-8 text-center" /></td>
                   <td className="border border-border px-2 py-1 text-center"><Input value={it.uom} onChange={(e) => updateItemField(it.id, 'uom', e.target.value)} className="h-8 text-center" placeholder="UOM" /></td>
                   {vendorOrder.map((v) => {
                     const q = model.quotes.find((x) => x.vendorId === v.id);
@@ -1798,7 +1798,7 @@ export default function QuotationComparative() {
                         <td className="border border-border px-3 py-2 text-center align-middle">
                           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">Unit Rate</div>
                           <Input
-                            type="number"
+                            type="number" onWheel={(e) => e.currentTarget.blur()}
                             min="0"
                             step="0.01"
                             className="h-9 text-center"
@@ -1829,7 +1829,7 @@ export default function QuotationComparative() {
                   { label: 'Additional Charges', type: 'Charge', basis: 'Fixed / % / Per Unit', value: (id: string) => Number(model.additionalChargesAmount?.[id] || 0), tax: () => '—', amount: (id: string) => Number(model.additionalChargesAmount?.[id] || 0) },
                   { label: 'Commercial Discount', type: 'Discount', basis: '% of (Net Basic + Charges)', value: (id: string) => Number(model.commercialDiscountAmount?.[id] || 0), tax: () => '—', amount: (id: string) => Number(model.commercialDiscountAmount?.[id] || 0) },
                   { label: 'Round Off', type: 'Round Off', basis: '—', value: (id: string) => Number(model.roundOffAmount?.[id] || 0), tax: () => '—', amount: (id: string) => Number(model.roundOffAmount?.[id] || 0) },
-                ].map((row) => <tr key={row.label} className="bg-white"><td className="border border-border px-3 py-1 font-semibold" colSpan={4}>{row.label}</td>{vendorOrder.map((vendor) => { const editableKey = row.label === 'Item Discount' ? 'itemDiscountAmount' : row.label === 'Additional Charges' ? 'additionalChargesAmount' : row.label === 'Commercial Discount' ? 'commercialDiscountAmount' : row.label === 'Round Off' ? 'roundOffAmount' : null; return <td key={`${row.label}-${vendor.id}`} className="border border-border p-1 text-center align-middle text-[12px] font-normal tabular-nums">{editableKey ? <Input type="number" value={String(Number(model[editableKey]?.[vendor.id] || 0) || '')} onChange={(event) => setModel({ ...model, [editableKey]: { ...(model[editableKey] || {}), [vendor.id]: Number(event.target.value) || 0 } })} placeholder="0" className="h-7 appearance-none border-[#d5e1dd] bg-[#fbfdfc] px-2 text-center text-[12px] font-normal tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" /> : <span className="inline-flex h-7 items-center justify-center text-[12px] font-normal tabular-nums">{inr(Number(row.amount(vendor.id)))}</span>}</td>; })}</tr>)}
+                ].map((row) => <tr key={row.label} className="bg-white"><td className="border border-border px-3 py-1 font-semibold" colSpan={4}>{row.label}</td>{vendorOrder.map((vendor) => { const editableKey = row.label === 'Item Discount' ? 'itemDiscountAmount' : row.label === 'Additional Charges' ? 'additionalChargesAmount' : row.label === 'Commercial Discount' ? 'commercialDiscountAmount' : row.label === 'Round Off' ? 'roundOffAmount' : null; return <td key={`${row.label}-${vendor.id}`} className="border border-border p-1 text-center align-middle text-[12px] font-normal tabular-nums">{editableKey ? <Input type="number" onWheel={(e) => e.currentTarget.blur()} value={String(Number(model[editableKey]?.[vendor.id] || 0) || '')} onChange={(event) => setModel({ ...model, [editableKey]: { ...(model[editableKey] || {}), [vendor.id]: Number(event.target.value) || 0 } })} placeholder="0" className="h-7 appearance-none border-[#d5e1dd] bg-[#fbfdfc] px-2 text-center text-[12px] font-normal tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" /> : <span className="inline-flex h-7 items-center justify-center text-[12px] font-normal tabular-nums">{inr(Number(row.amount(vendor.id)))}</span>}</td>; })}</tr>)}
                 {(model.charges || []).map((charge) => (
                   <tr key={charge.id} className="bg-white">
                     <td className="border border-border p-1" colSpan={4}>
@@ -1848,7 +1848,7 @@ export default function QuotationComparative() {
                     {vendorOrder.map((vendor) => (
                       <td key={`${charge.id}-${vendor.id}`} className="border border-border p-1 text-center align-middle">
                         <Input
-                          type="number"
+                          type="number" onWheel={(e) => e.currentTarget.blur()}
                           value={String(Number(charge.values?.[vendor.id] || 0) || '')}
                           onChange={(event) => updateChargeAdjustment(charge.id, { values: { ...charge.values, [vendor.id]: Number(event.target.value) || 0 } })}
                           placeholder="0"
@@ -1941,7 +1941,7 @@ export default function QuotationComparative() {
           <div className="flex gap-2"><Input value={newChargeLabel} onChange={(e) => setNewChargeLabel(e.target.value)} placeholder="Charge / adjustment name" className="w-64" /><Button type="button" onClick={addChargeAdjustment} className="bg-[#0b463f]"><Plus className="mr-1 h-4 w-4" /> Add</Button></div>
         </div>
         {(model.charges || []).length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 py-8 text-center text-sm text-slate-500">No additional charges or discounts added.</div> : (
-          <div className="overflow-x-auto"><table className="w-full min-w-[900px] border-collapse text-sm"><thead><tr className="bg-[#0b463f] text-white"><th className="p-3 text-left">Description</th><th className="p-3">Nature</th><th className="p-3">Calculation</th><th className="p-3">Tax %</th>{vendorOrder.map((v) => <th key={v.id} className="p-3">{v.name}</th>)}<th className="w-12" /></tr></thead><tbody>{(model.charges || []).map((charge) => <tr key={charge.id} className="border-b border-slate-200"><td className="p-2"><Input value={charge.label} onChange={(e) => updateChargeAdjustment(charge.id, { label: e.target.value })} /></td><td className="p-2"><SelectBox value={charge.nature} onChange={(value) => updateChargeAdjustment(charge.id, { nature: value as ChargeAdjustment['nature'] })} options={['Charge', 'Discount']} /></td><td className="p-2"><SelectBox value={charge.calculation} onChange={(value) => updateChargeAdjustment(charge.id, { calculation: value as ChargeAdjustment['calculation'] })} options={['Fixed', '% of Basic']} /></td><td className="p-2"><Input type="number" value={charge.taxPercent} onChange={(e) => updateChargeAdjustment(charge.id, { taxPercent: Number(e.target.value) || 0 })} /></td>{vendorOrder.map((v) => <td key={v.id} className="p-2"><Input type="number" value={charge.values[v.id] || ''} onChange={(e) => updateChargeAdjustment(charge.id, { values: { ...charge.values, [v.id]: Number(e.target.value) || 0 } })} /></td>)}<td className="p-2"><button type="button" onClick={() => removeChargeAdjustment(charge.id)} className="text-red-500"><Trash2 className="h-4 w-4" /></button></td></tr>)}</tbody></table></div>
+          <div className="overflow-x-auto"><table className="w-full min-w-[900px] border-collapse text-sm"><thead><tr className="bg-[#0b463f] text-white"><th className="p-3 text-left">Description</th><th className="p-3">Nature</th><th className="p-3">Calculation</th><th className="p-3">Tax %</th>{vendorOrder.map((v) => <th key={v.id} className="p-3">{v.name}</th>)}<th className="w-12" /></tr></thead><tbody>{(model.charges || []).map((charge) => <tr key={charge.id} className="border-b border-slate-200"><td className="p-2"><Input value={charge.label} onChange={(e) => updateChargeAdjustment(charge.id, { label: e.target.value })} /></td><td className="p-2"><SelectBox value={charge.nature} onChange={(value) => updateChargeAdjustment(charge.id, { nature: value as ChargeAdjustment['nature'] })} options={['Charge', 'Discount']} /></td><td className="p-2"><SelectBox value={charge.calculation} onChange={(value) => updateChargeAdjustment(charge.id, { calculation: value as ChargeAdjustment['calculation'] })} options={['Fixed', '% of Basic']} /></td><td className="p-2"><Input type="number" onWheel={(e) => e.currentTarget.blur()} value={charge.taxPercent} onChange={(e) => updateChargeAdjustment(charge.id, { taxPercent: Number(e.target.value) || 0 })} /></td>{vendorOrder.map((v) => <td key={v.id} className="p-2"><Input type="number" onWheel={(e) => e.currentTarget.blur()} value={charge.values[v.id] || ''} onChange={(e) => updateChargeAdjustment(charge.id, { values: { ...charge.values, [v.id]: Number(e.target.value) || 0 } })} /></td>)}<td className="p-2"><button type="button" onClick={() => removeChargeAdjustment(charge.id)} className="text-red-500"><Trash2 className="h-4 w-4" /></button></td></tr>)}</tbody></table></div>
         )}
       </section>
         </>
