@@ -222,6 +222,7 @@ const FINANCE_MODULES: ModuleDefinition[] = [
     tabs: [
       { label: "Inward", description: "Receive, catalogue and attach incoming bills.", features: ["Bill Inward", "Vendor Bills", "Bill Attachments"] },
       { label: "Verification", description: "Validate supporting documents, taxes and approvals.", features: ["Bill Verification", "Bill Attachments"] },
+      { label: "Ledger Posting", description: "Book ledger liability entries for bills awaiting posting.", features: ["Ledger Entry", "Bill Attachments"] },
       { label: "Bills Paid", description: "Track every Bill Inward entry through final payment.", features: ["Bills Paid", "Payment Status", "Debit/Credit Notes"] },
       { label: "Outstanding", description: "Track unpaid and partially settled liabilities.", features: ["Outstanding Payables", "Bill Attachments"] },
     ],
@@ -1802,13 +1803,54 @@ function ExactPurchaseOrderPreview({ order }: { order: Record<string, unknown> }
 // Shown right after a bill is verified — books the liability against the vendor's accounts
 // ledger via the same add_accounts_ledger_entry endpoint AccountsPayments.tsx already uses
 // for its own "intake" step, so both flows post to the same place.
+type JournalLine = { id: string; glAccount: string; subLedger: string; costCentre: string; costAttribution: string; debit: string; credit: string };
+type MasterItem = Record<string, unknown>;
+
+const masterOptionLabel = (item: MasterItem): string => {
+  const code = String(item.code ?? "").trim();
+  const name = String(item.name ?? item.label ?? "").trim();
+  if (code && name) return `${code} - ${name}`;
+  return name || code || String(item.item_id ?? "");
+};
+
 function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord; onClose: () => void; onPosted: () => void }) {
   const totalGst = Number(record.cgstAmount || 0) + Number(record.sgstAmount || 0) + Number(record.igstAmount || 0);
   const totalPayable = Number(record.amount || 0) || (Number(record.baseAmount || 0) + totalGst + Number(record.otherAdjustment || 0));
-  const [liabilityAmount, setLiabilityAmount] = useState(String(totalPayable || ""));
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const sourceReference = record.billInwardNo || record.reference || "";
+  const [postingDate, setPostingDate] = useState(new Date().toISOString().slice(0, 10));
+  const [voucherType, setVoucherType] = useState("Purchase");
+  const [narration, setNarration] = useState(`${record.entryType || "Bill Inward"} ${sourceReference} - ${record.party || ""}`.trim());
+  const [voucherNo, setVoucherNo] = useState("Generating…");
+  const [lines, setLines] = useState<JournalLine[]>(() => [
+    { id: "l1", glAccount: "", subLedger: "", costCentre: "", costAttribution: "", debit: totalPayable ? String(totalPayable) : "", credit: "" },
+    { id: "l2", glAccount: "", subLedger: record.party || "", costCentre: "", costAttribution: "", debit: "", credit: totalPayable ? String(totalPayable) : "" },
+  ]);
   const [submitting, setSubmitting] = useState(false);
   const [selectedDocKey, setSelectedDocKey] = useState("");
+  const [masters, setMasters] = useState<{ glAccounts: MasterItem[]; subLedgers: MasterItem[]; costCentres: MasterItem[]; costAttributions: MasterItem[]; voucherTypes: MasterItem[] }>({ glAccounts: [], subLedgers: [], costCentres: [], costAttributions: [], voucherTypes: [] });
+
+  useEffect(() => {
+    const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+    let cancelled = false;
+    fetch(`${baseUrl}/admin_accounts/get_next_voucher_number`)
+      .then((res) => res.json())
+      .then((data) => { if (!cancelled && data?.success) setVoucherNo(data.next_voucher_number); })
+      .catch(() => { if (!cancelled) setVoucherNo("—"); });
+    fetch(`${baseUrl}/admin_accounting_masters/list_all`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled || !data?.success) return;
+        setMasters({
+          glAccounts: data.data?.GL_ACCOUNT ?? [],
+          subLedgers: data.data?.SUB_LEDGER ?? [],
+          costCentres: data.data?.COST_CENTRE ?? [],
+          costAttributions: data.data?.COST_ATTRIBUTION ?? [],
+          voucherTypes: data.data?.VOUCHER_TYPE ?? [],
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   const documents = [
     ...(record.attachmentUrl ? [{ key: "bill", name: record.attachmentName || "Bill attachment", role: "bill" as const, type: record.attachmentType || (/\.pdf(\?|$)/i.test(record.attachmentUrl) ? "application/pdf" : "image/jpeg"), url: record.attachmentUrl }] : []),
@@ -1816,56 +1858,71 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
   ];
   const selectedDocument = documents.find((document) => document.key === selectedDocKey) ?? documents[0];
 
+  const updateLine = (id: string, patch: Partial<JournalLine>) => setLines((prev) => prev.map((line) => (line.id === id ? { ...line, ...patch } : line)));
+  const addLine = () => setLines((prev) => [...prev, { id: `l${Date.now()}`, glAccount: "", subLedger: "", costCentre: "", costAttribution: "", debit: "", credit: "" }]);
+  const removeLine = (id: string) => setLines((prev) => (prev.length > 2 ? prev.filter((line) => line.id !== id) : prev));
+
+  const totalDebit = lines.reduce((sum, line) => sum + (Number(line.debit) || 0), 0);
+  const totalCredit = lines.reduce((sum, line) => sum + (Number(line.credit) || 0), 0);
+  const difference = Math.round((totalDebit - totalCredit) * 100) / 100;
+  const isBalanced = difference === 0 && totalDebit > 0;
+
   const handlePost = async () => {
-    const amount = Number(liabilityAmount);
-    if (!amount || amount <= 0) { toast.error("Enter the liability amount to book."); return; }
-    if (!record.vendorId) { toast.error("This bill has no vendor on record."); return; }
+    const completedLines = lines.filter((line) => line.glAccount.trim() && ((Number(line.debit) || 0) > 0 || (Number(line.credit) || 0) > 0));
+    if (completedLines.length < 2) { toast.error("Add at least two ledger lines with a GL Account and an amount."); return; }
+    if (!isBalanced) { toast.error("Debit and Credit totals must match before posting."); return; }
     setSubmitting(true);
     try {
       const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
-      const response = await fetch(`${baseUrl}/admin_accounts/add_accounts_ledger_entry`, {
+      const response = await fetch(`${baseUrl}/admin_accounts/post_journal_voucher`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          vendor_id: record.vendorId,
-          vendor_details: { vendor_name: record.party, gst_number: record.vendorGstin || "" },
-          invoice_no: record.billInwardNo || record.reference || "",
-          transfer_type: "debit",
-          base_amount: amount,
-          discount_percentage: 0,
-          GST_percentage: 0,
-          freight_charges: 0,
-          other_charges: 0,
-          tds_percentage: 0,
-          date,
+          posting_date: postingDate,
+          voucher_type: voucherType,
+          source_module: "Purchase",
+          source_reference: sourceReference,
+          invoice_no: record.reference || "",
+          invoice_id: record.id,
+          party: record.party || "",
+          vendor_id: record.vendorId || "",
+          narration,
+          lines: completedLines.map((line) => ({ gl_account: line.glAccount, sub_ledger: line.subLedger, cost_centre: line.costCentre, cost_attribution: line.costAttribution, debit: Number(line.debit) || 0, credit: Number(line.credit) || 0 })),
         }),
       });
       const data = await response.json().catch(() => null);
-      if (!response.ok || !data?.success) throw new Error(data?.detail || data?.message || "Failed to post ledger entry");
-      toast.success(`Liability of ${formatCurrency(amount)} booked for ${record.billInwardNo || record.reference}`);
+      if (!response.ok || !data?.success) throw new Error(data?.detail || data?.message || "Failed to post journal voucher");
+      toast.success(`${data.data?.voucher_no || voucherNo} posted for ${sourceReference}`);
       onPosted();
       onClose();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to post ledger entry");
+      toast.error(error instanceof Error ? error.message : "Failed to post journal voucher");
     } finally {
       setSubmitting(false);
     }
   };
 
+  const smallInput = "h-9 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-800 outline-none focus:border-[#278b76] focus:ring-2 focus:ring-[#278b76]/10";
+
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-[2px]">
-      <div className="flex max-h-[94vh] w-full max-w-[1300px] flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
+      <div className="flex max-h-[94vh] w-full max-w-[1600px] flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
         <div className="flex shrink-0 items-start justify-between bg-[#0d473f] px-6 py-5 text-white">
           <div>
-            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Bills & Payables · Verification</p>
-            <h2 className="mt-1 text-xl font-bold">Ledger Entry</h2>
-            <p className="mt-1 text-xs font-medium text-white/60">{record.billInwardNo || record.reference} · {record.party} · verified, ready to book</p>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Bills & Payables · Ledger Posting</p>
+            <h2 className="mt-1 text-xl font-bold">Post Accounting Entry</h2>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg p-2 text-white/70 hover:bg-white/10 hover:text-white"><X className="h-5 w-5" /></button>
         </div>
 
-        <div className="grid min-h-0 flex-1 overflow-y-auto bg-[#eef3f6] lg:grid-cols-[minmax(0,1fr)_minmax(400px,0.85fr)] lg:overflow-hidden">
-          <section className="flex min-h-[420px] flex-col border-b border-slate-200 p-4 lg:min-h-0 lg:border-b-0 lg:border-r lg:p-5">
+        <div className="grid shrink-0 grid-cols-2 gap-3 border-b border-slate-100 bg-white px-6 py-3 text-xs sm:grid-cols-4 lg:grid-cols-7">
+          {[["Voucher No.", voucherNo], ["Date", formatRegisterDate(postingDate)], ["Source", record.entryType || "Bill Inward"], ["Reference No.", sourceReference || "—"], ["Party", record.party || "—"], ["Amount", formatCurrency(totalPayable)], ["Status", "Draft"]].map(([label, value]) => (
+            <div key={label}><p className="font-bold uppercase tracking-[0.08em] text-slate-400">{label}</p><p className="mt-1 truncate font-bold text-slate-800">{value}</p></div>
+          ))}
+        </div>
+
+        <div className="grid min-h-0 flex-1 overflow-y-auto bg-[#eef3f6] lg:grid-cols-[340px_minmax(0,1fr)] lg:overflow-hidden">
+          <section className="flex min-h-[360px] flex-col border-b border-slate-200 p-4 lg:min-h-0 lg:border-b-0 lg:border-r lg:p-5">
             <p className="mb-3 text-xs font-extrabold uppercase tracking-[0.13em] text-slate-400">Documents on file</p>
             {documents.length > 1 && (
               <div className="mb-3 flex shrink-0 gap-2 overflow-x-auto pb-1">
@@ -1877,7 +1934,7 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
                 ))}
               </div>
             )}
-            <div className="flex min-h-[380px] flex-1 items-center justify-center overflow-hidden rounded-2xl bg-slate-200/70 p-3 ring-1 ring-slate-300/70">
+            <div className="flex min-h-[320px] flex-1 items-center justify-center overflow-hidden rounded-2xl bg-slate-200/70 p-3 ring-1 ring-slate-300/70">
               {!selectedDocument ? (
                 <div className="flex max-w-sm flex-col items-center px-6 text-center text-slate-400"><FileText className="h-9 w-9" /><p className="mt-3 text-sm font-bold text-slate-600">No documents on file</p></div>
               ) : selectedDocument.type === "application/pdf" || selectedDocument.type.startsWith("image/") ? (
@@ -1889,36 +1946,73 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
           </section>
 
           <section className="overflow-y-auto bg-white p-5 sm:p-6">
-            <div className="mb-4"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">Invoice summary</p><h3 className="mt-1 text-lg font-bold text-slate-900">Confirm the liability to book</h3></div>
-            <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
-              <div className="flex justify-between"><span className="text-slate-500">Taxable / Base Amount</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.baseAmount || 0))}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">CGST</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.cgstAmount || 0))}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">SGST</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.sgstAmount || 0))}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">IGST</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.igstAmount || 0))}</span></div>
-              <div className="flex justify-between border-t border-slate-200 pt-2"><span className="text-slate-500">Total GST</span><span className="font-semibold text-slate-800">{formatCurrency(totalGst)}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">Other Charges / Adjustment</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.otherAdjustment || 0))}</span></div>
-              <div className="flex justify-between border-t border-slate-200 pt-2 text-base"><span className="font-bold text-slate-700">Total Invoiced</span><span className="font-bold text-[#0d5c4d]">{formatCurrency(totalPayable)}</span></div>
+            <p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">A. Source Details</p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Posting Date *
+                <input required type="date" value={postingDate} onChange={(event) => setPostingDate(event.target.value)} className={smallInput} />
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Voucher Type *
+                <input required list="ledger-voucher-types" value={voucherType} onChange={(event) => setVoucherType(event.target.value)} className={smallInput} placeholder="Purchase" />
+                <datalist id="ledger-voucher-types">{(masters.voucherTypes.length ? masters.voucherTypes.map((item) => masterOptionLabel(item)) : ["Purchase", "Journal", "Payment"]).map((label) => <option key={label} value={label} />)}</datalist>
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Source Module
+                <input disabled value="Bill Inward" className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Source Reference
+                <input disabled value={sourceReference || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Invoice / Document No.
+                <input disabled value={record.reference || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Party *
+                <input disabled value={record.party || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+              </label>
+            </div>
+            <label className="mt-3 block space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Narration
+              <textarea rows={2} value={narration} onChange={(event) => setNarration(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 outline-none focus:border-[#278b76] focus:ring-2 focus:ring-[#278b76]/10" />
+            </label>
+
+            <div className="mt-5 flex items-center justify-between">
+              <p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">B. Accounting Entry</p>
+              <button type="button" onClick={addLine} className="inline-flex items-center gap-1.5 text-xs font-bold text-[#0d5c4d] hover:underline"><Plus className="h-3.5 w-3.5" />Add Ledger Line</button>
+            </div>
+            <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200">
+              <table className="w-full min-w-[900px] text-left text-xs">
+                <thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["#", "GL Account *", "Sub Ledger", "Cost Centre", "Cost Attribution", "Debit (₹)", "Credit (₹)", ""].map((label) => <th key={label} className="px-2.5 py-2 font-bold">{label}</th>)}</tr></thead>
+                <tbody className="divide-y divide-slate-100">
+                  {lines.map((line, index) => (
+                    <tr key={line.id}>
+                      <td className="px-2.5 py-2 font-semibold text-slate-500">{index + 1}</td>
+                      <td className="px-2.5 py-2"><input list="ledger-gl-accounts" value={line.glAccount} onChange={(event) => updateLine(line.id, { glAccount: event.target.value })} className={smallInput} placeholder="Select GL account" /></td>
+                      <td className="px-2.5 py-2"><input list="ledger-sub-ledgers" value={line.subLedger} onChange={(event) => updateLine(line.id, { subLedger: event.target.value })} className={smallInput} placeholder="—" /></td>
+                      <td className="px-2.5 py-2"><input list="ledger-cost-centres" value={line.costCentre} onChange={(event) => updateLine(line.id, { costCentre: event.target.value })} className={smallInput} placeholder="—" /></td>
+                      <td className="px-2.5 py-2"><input list="ledger-cost-attributions" value={line.costAttribution} onChange={(event) => updateLine(line.id, { costAttribution: event.target.value })} className={smallInput} placeholder="—" /></td>
+                      <td className="px-2.5 py-2"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.debit} onChange={(event) => updateLine(line.id, { debit: event.target.value, credit: event.target.value ? "" : line.credit })} className={smallInput} /></td>
+                      <td className="px-2.5 py-2"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.credit} onChange={(event) => updateLine(line.id, { credit: event.target.value, debit: event.target.value ? "" : line.debit })} className={smallInput} /></td>
+                      <td className="px-2.5 py-2 text-center"><button type="button" onClick={() => removeLine(line.id)} disabled={lines.length <= 2} className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="h-3.5 w-3.5" /></button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <datalist id="ledger-gl-accounts">{masters.glAccounts.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+              <datalist id="ledger-sub-ledgers">{masters.subLedgers.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+              <datalist id="ledger-cost-centres">{masters.costCentres.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+              <datalist id="ledger-cost-attributions">{masters.costAttributions.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
             </div>
 
-            <div className="mt-5 grid gap-4 sm:grid-cols-2">
-              <label className="space-y-2 text-xs font-bold text-slate-600">Liability Amount to Book *
-                <input required type="number" min="0" step="0.01" value={liabilityAmount} onChange={(event) => setLiabilityAmount(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10" />
-              </label>
-              <label className="space-y-2 text-xs font-bold text-slate-600">Entry Date *
-                <input required type="date" value={date} onChange={(event) => setDate(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10" />
-              </label>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
+              <span><span className="text-slate-500">Total Debit (₹) </span><span className="font-bold text-slate-800">{formatCurrency(totalDebit)}</span></span>
+              <span><span className="text-slate-500">Total Credit (₹) </span><span className="font-bold text-slate-800">{formatCurrency(totalCredit)}</span></span>
+              <span className={cn("inline-flex items-center gap-1.5 font-bold", isBalanced ? "text-emerald-700" : "text-amber-700")}>Difference (₹) {formatCurrency(Math.abs(difference))} {isBalanced ? <CheckCircle2 className="h-3.5 w-3.5" /> : null}</span>
             </div>
-            {Number(liabilityAmount || 0) !== totalPayable && (
-              <p className="mt-2 text-[11px] font-semibold text-amber-700">This differs from the invoice's total ({formatCurrency(totalPayable)}) — booking a partial or adjusted liability.</p>
-            )}
           </section>
         </div>
 
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-100 bg-white px-6 py-4">
-          <p className="text-xs font-medium text-slate-400">Posts to the vendor's accounts ledger as a liability.</p>
+          <p className="text-xs font-medium text-slate-400">{isBalanced ? "Ready to post — debit and credit are balanced." : "Debit and credit must be equal before this can be posted."}</p>
           <div className="flex gap-3">
             <button type="button" onClick={onClose} disabled={submitting} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Skip for now</button>
-            <button type="button" onClick={handlePost} disabled={submitting} className="h-11 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f] disabled:opacity-60">{submitting ? "Posting…" : "Post Ledger Entry"}</button>
+            <button type="button" onClick={handlePost} disabled={submitting || !isBalanced} className="h-11 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f] disabled:opacity-60">{submitting ? "Posting…" : "Post Ledger Entry"}</button>
           </div>
         </div>
       </div>
@@ -2157,12 +2251,13 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
   const moduleRecords = records.filter((record) => record.module === moduleKey);
   const isVerificationRegister = moduleKey === "bills-payables" && activeTab.label === "Verification";
   const isBillsPaidRegister = moduleKey === "bills-payables" && activeTab.label === "Bills Paid";
+  const isLedgerPostingRegister = moduleKey === "bills-payables" && activeTab.label === "Ledger Posting";
   const isRequestRegister = moduleKey === "payments-receipts" && activeTab.label === "Requests";
-  const tabRecords = isVerificationRegister || isBillsPaidRegister
-    ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward")
+  const tabRecords = isVerificationRegister || isBillsPaidRegister || isLedgerPostingRegister
+    ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward" && (!isLedgerPostingRegister || (record.status === "Verified" && record.ledgerEntryStatus !== "completed")))
     : moduleRecords.filter((record) => record.tab === activeTab.label);
   const isInwardRegister = moduleKey === "bills-payables" && activeTab.label === "Inward";
-  const showsBillInwardRecords = isInwardRegister || isVerificationRegister || isBillsPaidRegister;
+  const showsBillInwardRecords = isInwardRegister || isVerificationRegister || isBillsPaidRegister || isLedgerPostingRegister;
   const visibleRecords = tabRecords.filter((record) => {
     const query = search.toLowerCase().trim();
     const matchesSearch = !query || [record.billInwardNo, record.reference, record.entryType, record.party, record.notes].some((value) => String(value ?? "").toLowerCase().includes(query));
@@ -2289,7 +2384,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
           eyebrow="Finance & Accounts"
           title={module.title}
           description={module.description}
-          action={!isVerificationRegister && !isBillsPaidRegister ? <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : "New Entry"}</button> : undefined}
+          action={!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister ? <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : "New Entry"}</button> : undefined}
         />
 
         <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm">
@@ -2335,7 +2430,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
                   {visibleRecords.map((record) => (
                     <tr key={record.id} className="leading-5 hover:bg-slate-50/80">
                       <td className="whitespace-nowrap px-5 py-4 font-semibold text-[#0d5c4d]">{showsBillInwardRecords ? record.billInwardNo || record.reference : record.reference}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.date)}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.dueDate)}</td><td className="px-5 py-4 font-semibold text-slate-800">{record.entryType}</td><td className="px-5 py-4 font-medium text-slate-500">{record.party || "—"}</td><td className="whitespace-nowrap px-5 py-4 text-right font-semibold text-slate-900">{formatCurrency(record.amount)}</td><td className="px-5 py-4 text-center"><span className={cn("inline-flex whitespace-nowrap rounded-full px-3 py-1 text-sm font-semibold", record.status === "Pending Approval" ? "bg-amber-50 text-amber-700" : record.status === "Verified" || ["Posted", "Paid", "Reconciled", "Closed"].includes(record.status) ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600")}>{record.status || "Draft"}</span></td>
-                      <td className="px-5 py-4"><div className="flex justify-end gap-1">{isVerificationRegister || isBillsPaidRegister ? <button onClick={() => { setBillPreviewMode(isBillsPaidRegister ? "pay" : "verify"); setVerificationPreview(record); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="Preview bill"><Eye className="h-4 w-4" />Preview</button> : isRequestRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />Create PRR</button> : <><button onClick={() => { setEditing(record); setModalOpen(true); }} className={cn("inline-flex items-center gap-1.5 rounded-lg text-slate-500 hover:bg-[#eaf4f1] hover:text-[#0d5c4d]", record.entryType === "Bill Inward" ? "px-3 py-2 text-sm font-semibold" : "p-2")} title="Edit"><Pencil className="h-4 w-4" />{record.entryType === "Bill Inward" && "Edit"}</button><button onClick={() => window.confirm(`Delete ${record.reference}?`) && saveRecords(records.filter((item) => item.id !== record.id))} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Delete"><Trash2 className="h-4 w-4" /></button></>}</div></td>
+                      <td className="px-5 py-4"><div className="flex justify-end gap-1">{isVerificationRegister || isBillsPaidRegister ? <button onClick={() => { setBillPreviewMode(isBillsPaidRegister ? "pay" : "verify"); setVerificationPreview(record); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="Preview bill"><Eye className="h-4 w-4" />Preview</button> : isLedgerPostingRegister ? <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Post ledger entry"><IndianRupee className="h-4 w-4" />Post Ledger Entry</button> : isRequestRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />Create PRR</button> : <><button onClick={() => { setEditing(record); setModalOpen(true); }} className={cn("inline-flex items-center gap-1.5 rounded-lg text-slate-500 hover:bg-[#eaf4f1] hover:text-[#0d5c4d]", record.entryType === "Bill Inward" ? "px-3 py-2 text-sm font-semibold" : "p-2")} title="Edit"><Pencil className="h-4 w-4" />{record.entryType === "Bill Inward" && "Edit"}</button><button onClick={() => window.confirm(`Delete ${record.reference}?`) && saveRecords(records.filter((item) => item.id !== record.id))} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Delete"><Trash2 className="h-4 w-4" /></button></>}</div></td>
                     </tr>
                   ))}
                 </tbody>
@@ -2345,8 +2440,8 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
             <div className="flex min-h-[300px] flex-col items-center justify-center px-6 py-12 text-center">
               <span className="rounded-2xl bg-[#edf5f2] p-4 text-[#6c9b90]"><FileBarChart className="h-8 w-8" /></span>
               <h3 className="mt-4 text-lg font-bold text-slate-800">No {activeTab.label.toLowerCase()} entries found</h3>
-              <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">{isVerificationRegister ? "Saved Bill Inward entries will appear here automatically for review and verification." : isBillsPaidRegister ? "Every Bill Inward entry will appear here. Verified bills can be marked as paid from their preview." : "Create the first entry for this workflow, or change the search and status filters."}</p>
-              {!isVerificationRegister && !isBillsPaidRegister && <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : `Create ${activeTab.features[0] ?? "Entry"}`}</button>}
+              <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">{isVerificationRegister ? "Saved Bill Inward entries will appear here automatically for review and verification." : isLedgerPostingRegister ? "Director-approved (Verified) bills with a pending ledger entry will appear here for posting." : isBillsPaidRegister ? "Every Bill Inward entry will appear here. Verified bills can be marked as paid from their preview." : "Create the first entry for this workflow, or change the search and status filters."}</p>
+              {!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister && <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : `Create ${activeTab.features[0] ?? "Entry"}`}</button>}
             </div>
           )}
         </section>

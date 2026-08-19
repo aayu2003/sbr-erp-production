@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ElementType } from "react";
+import { useEffect, useMemo, useRef, useState, type ElementType } from "react";
 import {
   Banknote, BookOpen, Building2, CalendarDays, CheckCircle2, ChevronRight,
   Download, Edit3, FileClock, FileKey, FileSpreadsheet, Filter, FolderTree,
@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CostAccountingSetup from "@/components/accounting/CostAccountingSetup";
+import getBaseUrl from "@/lib/config";
 
 type Tab = "Chart of Accounts" | "Sub Ledgers" | "Cost Centre" | "Cost Attribution" | "Tax & Statutory" | "Banks & Cash" | "Voucher Setup" | "Financial Setup" | "Mapping & Controls";
 type Status = "Active" | "Inactive";
@@ -27,46 +28,44 @@ type Audit = { id:string; action:string; detail:string; at:string; user:string }
 type Data = { gl:GL[]; sl:SL[]; taxes:Tax[]; banks:Bank[]; cash:Cash[]; vouchers:Voucher[]; terms:Term[]; years:FY[]; openings:Opening[]; mappings:Mapping[]; audit:Audit[] };
 type Kind = "GL Account"|"Sub Ledger"|"Tax Master"|"Bank Account"|"Cash Master"|"Voucher Type"|"Payment Term"|"Financial Year"|"Opening Balance"|"Mapping Rule";
 
-const KEY = "sbr-accounting-master-workspace-v2";
 const LEGACY = "sbr-accounting-master-v1";
 const money = (n:number) => new Intl.NumberFormat("en-IN",{style:"currency",currency:"INR",maximumFractionDigits:0}).format(n);
 const input = "h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-[#278b76] focus:ring-2 focus:ring-[#278b76]/10";
 const label = "space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500";
 
-const defaults:Data = {
-  gl:[
-    {id:"100000",code:"100000",name:"Assets",parent:"—",category:"Asset",type:"Header",normal:"Debit",control:false,direct:false,balance:28450000,status:"Active"},
-    {id:"110000",code:"110000",name:"Current Assets",parent:"Assets",category:"Asset",type:"Header",normal:"Debit",control:false,direct:false,balance:12840000,status:"Active"},
-    {id:"111000",code:"111000",name:"Cash & Bank",parent:"Current Assets",category:"Asset",type:"Header",normal:"Debit",control:false,direct:false,balance:6240000,status:"Active"},
-    {id:"111001",code:"111001",name:"Cash in Hand",parent:"Cash & Bank",category:"Asset",type:"Cash",normal:"Debit",control:false,direct:true,balance:185000,status:"Active"},
-    {id:"200000",code:"200000",name:"Liabilities",parent:"—",category:"Liability",type:"Header",normal:"Credit",control:false,direct:false,balance:9630000,status:"Active"},
-    {id:"211000",code:"211000",name:"Trade Payables",parent:"Current Liabilities",category:"Liability",type:"Control Account",normal:"Credit",control:true,slType:"Vendor",direct:false,balance:4280000,status:"Active"},
-    {id:"212000",code:"212000",name:"Contractor Payables",parent:"Current Liabilities",category:"Liability",type:"Control Account",normal:"Credit",control:true,slType:"Contractor",direct:false,balance:1960000,status:"Active"},
-    {id:"500000",code:"500000",name:"Expenses",parent:"—",category:"Expense",type:"Header",normal:"Debit",control:false,direct:false,balance:18400000,status:"Active"},
-    {id:"511000",code:"511000",name:"Cultivation Expense",parent:"Expenses",category:"Expense",type:"Posting Account",normal:"Debit",control:false,direct:true,balance:7230000,status:"Active"},
-  ],
-  sl:[
-    {id:"sl1",code:"VEN-00128-P",name:"Prem Industries - Payable",type:"Vendor",source:"Vendor Master",entity:"VEN-00128",control:"Trade Payables",terms:"30 Days",balance:275000,drcr:"Cr",status:"Active"},
-    {id:"sl2",code:"VEN-00128-A",name:"Prem Industries - Advance",type:"Vendor",source:"Vendor Master",entity:"VEN-00128",control:"Vendor Advances",terms:"Advance Payment",balance:85000,drcr:"Dr",status:"Active"},
-    {id:"sl3",code:"CON-00044",name:"Dinesh Kumar Nishad",type:"Contractor",source:"Contractor Master",entity:"CON-00044",control:"Contractor Payables",terms:"15 Days",balance:142000,drcr:"Cr",status:"Active"},
-    {id:"sl4",code:"EMP-00016",name:"Sukhdeep Singh",type:"Employee",source:"Employee Master",entity:"EMP-00016",control:"Employee Payables",terms:"Immediate",balance:18500,drcr:"Cr",status:"Active"},
-  ],
-  taxes:[
-    {id:"t1",code:"GST-18",name:"GST 18%",section:"GST",rate:18,nature:"CGST + SGST",input:"Input CGST / SGST",output:"Output CGST / SGST",effective:"2026-04-01",status:"Active"},
-    {id:"t2",code:"IGST-18",name:"IGST 18%",section:"GST",rate:18,nature:"IGST",input:"Input IGST",output:"Output IGST",effective:"2026-04-01",status:"Active"},
-    {id:"t3",code:"TDS-194C",name:"Contractor Payment",section:"TDS",rate:2,nature:"Section 194C",input:"Contractor Expense",output:"TDS Payable",effective:"2026-04-01",status:"Active"},
-  ],
-  banks:[{id:"b1",code:"BNK-001",name:"HDFC Bank",account:"•••• 4821",ifsc:"HDFC0001824",branch:"Raipur",gl:"HDFC Bank Current Account",balance:4820000,status:"Active"},{id:"b2",code:"BNK-002",name:"ICICI Bank",account:"•••• 7640",ifsc:"ICIC0001189",branch:"Raipur",gl:"ICICI Bank Current Account",balance:1260000,status:"Active"}],
-  cash:[{id:"c1",code:"CSH-HO",location:"Head Office Cash",custodian:"Accounts Manager",centre:"Corporate Office",gl:"Cash in Hand",limit:100000,status:"Active"},{id:"c2",code:"CSH-DUR",location:"Durg Site Cash",custodian:"Durg Field Manager",centre:"Durg Cluster",gl:"Durg Site Cash",limit:50000,status:"Active"}],
-  vouchers:[{id:"v1",code:"JV",name:"Journal Voucher",prefix:"JV/{FY}/",numbering:"Sequential",approval:true,posting:"Manual",status:"Active"},{id:"v2",code:"PV",name:"Payment Voucher",prefix:"PV/{FY}/",numbering:"Sequential",approval:true,posting:"Auto",status:"Active"},{id:"v3",code:"RV",name:"Receipt Voucher",prefix:"RV/{FY}/",numbering:"Sequential",approval:false,posting:"Auto",status:"Active"},{id:"v4",code:"CV",name:"Contra Voucher",prefix:"CV/{FY}/",numbering:"Sequential",approval:false,posting:"Auto",status:"Active"},{id:"v5",code:"DN",name:"Debit Note",prefix:"DN/{FY}/",numbering:"Sequential",approval:true,posting:"Manual",status:"Active"}],
-  terms:[{id:"p1",code:"IMM",name:"Immediate",days:0,description:"Due immediately",status:"Active"},{id:"p2",code:"NET15",name:"15 Days",days:15,description:"Due within 15 days",status:"Active"},{id:"p3",code:"NET30",name:"30 Days",days:30,description:"Standard vendor terms",status:"Active"},{id:"p4",code:"ADV",name:"Advance Payment",days:0,description:"Pay before supply",status:"Active"}],
-  years:[{id:"y1",name:"2026-27",start:"2026-04-01",end:"2027-03-31",status:"Open",current:true,lock:""},{id:"y2",name:"2025-26",start:"2025-04-01",end:"2026-03-31",status:"Hard Locked",current:false,lock:"2026-04-30"}],
-  openings:[{id:"o1",type:"GL Account",ledger:"Cash in Hand",date:"2026-04-01",debit:185000,credit:0,reference:"Migration OB"},{id:"o2",type:"Sub Ledger",ledger:"Prem Industries - Payable",date:"2026-04-01",debit:0,credit:275000,reference:"Invoice breakup imported"}],
-  mappings:[{id:"m1",scope:"Entity",source:"Material Supplier",target:"Vendor",gl:"Trade Payables",auto:true,status:"Active"},{id:"m2",scope:"Entity",source:"Contractor",target:"Contractor",gl:"Contractor Payables",auto:true,status:"Active"},{id:"m3",scope:"Transaction",source:"HDPE Pipes",target:"Inventory",gl:"Inventory - Pipes",auto:false,status:"Active"},{id:"m4",scope:"Transaction",source:"Land Preparation",target:"Service Category",gl:"Land Preparation Expense",auto:false,status:"Active"},{id:"m5",scope:"Tax",source:"GST-18",target:"Input Tax",gl:"Input CGST / SGST",auto:false,status:"Active"}],
-  audit:[{id:"a1",action:"Workspace initialized",detail:"Accounting master defaults loaded",at:"17 Aug 2026, 10:30 AM",user:"SBR Admin"}],
+const EMPTY_DATA:Data = { gl:[], sl:[], taxes:[], banks:[], cash:[], vouchers:[], terms:[], years:[], openings:[], mappings:[], audit:[] };
+
+// Every Kind the Creator dialog can produce maps onto one master_type partition in the
+// shared admin_accounting_masters table, and onto the Data key its rows live under here.
+const MASTER_TYPE_BY_KIND: Record<Kind, string> = {
+  "GL Account":"GL_ACCOUNT", "Sub Ledger":"SUB_LEDGER", "Tax Master":"TAX_MASTER", "Bank Account":"BANK_ACCOUNT",
+  "Cash Master":"CASH_MASTER", "Voucher Type":"VOUCHER_TYPE", "Payment Term":"PAYMENT_TERM",
+  "Financial Year":"FINANCIAL_YEAR", "Opening Balance":"OPENING_BALANCE", "Mapping Rule":"MAPPING_RULE",
+};
+const DATA_KEY_BY_KIND: Record<Kind, keyof Data> = {
+  "GL Account":"gl", "Sub Ledger":"sl", "Tax Master":"taxes", "Bank Account":"banks", "Cash Master":"cash",
+  "Voucher Type":"vouchers", "Payment Term":"terms", "Financial Year":"years", "Opening Balance":"openings", "Mapping Rule":"mappings",
 };
 
-const load=():Data=>{try{return{...defaults,...JSON.parse(localStorage.getItem(KEY)||"{}")}}catch{return defaults}};
+// Builds one typed row for a kind from a flat field bag — used both for a freshly created
+// row (source = the Creator dialog's form state) and for a row just loaded from the API
+// (source = the raw saved item), so the two paths can't drift out of shape.
+const buildRow = (kind:Kind, id:string, v:Record<string,unknown>): GL|SL|Tax|Bank|Cash|Voucher|Term|FY|Opening|Mapping => {
+  const s = (k:string, fallback="") => String(v[k] ?? fallback);
+  const n = (k:string) => Number(v[k] ?? 0) || 0;
+  const b = (k:string) => Boolean(v[k]);
+  if (kind==="GL Account") return {id,code:s("code"),name:s("name"),parent:s("parent","—"),category:s("category"),type:s("type"),normal:s("normal"),control:v.type==="Control Account"||b("control"),slType:s("slType"),direct:v.direct!==undefined?b("direct"):(v.type!=="Header"&&v.type!=="Control Account"),balance:n("balance"),status:(s("status","Active")) as Status} as GL;
+  if (kind==="Sub Ledger") return {id,code:s("code"),name:s("name"),type:s("type"),source:s("source"),entity:s("entity"),control:s("control"),terms:s("terms","Immediate"),balance:n("balance"),drcr:(v.drcr as "Dr"|"Cr")||"Dr",status:(s("status","Active")) as Status} as SL;
+  if (kind==="Tax Master") return {id,code:s("code"),name:s("name"),section:s("section"),rate:n("rate"),nature:s("nature"),input:s("input"),output:s("output"),effective:s("effective"),status:(s("status","Active")) as Status} as Tax;
+  if (kind==="Bank Account") return {id,code:s("code"),name:s("name"),account:s("account").startsWith("••••")?s("account"):`•••• ${s("account").slice(-4)}`,ifsc:s("ifsc"),branch:s("branch"),gl:s("gl"),balance:n("balance"),status:(s("status","Active")) as Status} as Bank;
+  if (kind==="Cash Master") return {id,code:s("code"),location:s("location"),custodian:s("custodian"),centre:s("centre"),gl:s("gl"),limit:n("limit"),status:(s("status","Active")) as Status} as Cash;
+  if (kind==="Voucher Type") return {id,code:s("code"),name:s("name"),prefix:s("prefix"),numbering:s("numbering"),approval:b("approval"),posting:s("posting"),status:(s("status","Active")) as Status} as Voucher;
+  if (kind==="Payment Term") return {id,code:s("code"),name:s("name"),days:n("days"),description:s("description"),status:(s("status","Active")) as Status} as Term;
+  if (kind==="Financial Year") return {id,name:s("name"),start:s("start"),end:s("end"),status:(s("fyStatus")||s("status","Open")) as FY["status"],current:b("current"),lock:s("lock")} as FY;
+  if (kind==="Opening Balance") return {id,type:s("ledgerType")||s("type"),ledger:s("ledger"),date:s("date"),debit:n("debit"),credit:n("credit"),reference:s("reference")} as Opening;
+  return {id,scope:s("scope"),source:s("source"),target:s("target"),gl:s("gl"),auto:b("auto"),status:(s("status","Active")) as Status} as Mapping;
+};
+
 const costContext=()=>{try{const v=JSON.parse(localStorage.getItem(LEGACY)||"{}");return{projects:v?.costing?.projects||[],departments:v?.costing?.departments||[],legalEntity:v?.organisation?.legalEntity||"SAI BIORESOURCES PRIVATE LIMITED"}}catch{return{projects:[],departments:[],legalEntity:"SAI BIORESOURCES PRIVATE LIMITED"}}};
 const tabs:Array<{label:Tab;icon:ElementType}>=[{label:"Chart of Accounts",icon:FolderTree},{label:"Sub Ledgers",icon:Users},{label:"Cost Centre",icon:Building2},{label:"Cost Attribution",icon:Target},{label:"Tax & Statutory",icon:Receipt},{label:"Banks & Cash",icon:Landmark},{label:"Voucher Setup",icon:FileKey},{label:"Financial Setup",icon:CalendarDays},{label:"Mapping & Controls",icon:Network}];
 
@@ -95,29 +94,67 @@ function Creator({open,kind,data,onClose,onCreate}:{open:boolean;kind:Kind;data:
 }
 
 export default function AccountingMaster(){
-  const [tab,setTab]=useState<Tab>("Chart of Accounts"),[data,setData]=useState<Data>(load),[search,setSearch]=useState(""),[status,setStatus]=useState("All"),[group,setGroup]=useState("All"),[tree,setTree]=useState(false),[kind,setKind]=useState<Kind>("GL Account"),[create,setCreate]=useState(false),[audit,setAudit]=useState(false);
+  const [tab,setTab]=useState<Tab>("Chart of Accounts"),[data,setData]=useState<Data>(EMPTY_DATA),[search,setSearch]=useState(""),[status,setStatus]=useState("All"),[group,setGroup]=useState("All"),[tree,setTree]=useState(false),[kind,setKind]=useState<Kind>("GL Account"),[create,setCreate]=useState(false),[audit,setAudit]=useState(false);
+  const [loading,setLoading]=useState(true),[loadError,setLoadError]=useState("");
   const importRef=useRef<HTMLInputElement>(null),cost=useMemo(costContext,[]),q=search.toLowerCase();
-  const save=(next:Data,action?:string,detail="")=>{const final=action?{...next,audit:[{id:`a${Date.now()}`,action,detail,at:new Date().toLocaleString("en-IN"),user:"SBR Admin"},...next.audit]}:next;setData(final);localStorage.setItem(KEY,JSON.stringify(final))};
+  const baseUrl=String(getBaseUrl()??"").replace(/\/$/,"");
+
+  const fetchAll=()=>{
+    setLoading(true);setLoadError("");
+    fetch(`${baseUrl}/admin_accounting_masters/list_all`).then(r=>r.json()).then(res=>{
+      if(!res?.success)throw new Error(res?.detail||"Failed to load accounting masters");
+      const grouped=res.data as Record<string,Array<Record<string,unknown>>>;
+      const next:Data={...EMPTY_DATA};
+      (Object.keys(MASTER_TYPE_BY_KIND) as Kind[]).forEach(k=>{
+        const items=grouped[MASTER_TYPE_BY_KIND[k]]??[];
+        (next[DATA_KEY_BY_KIND[k]] as unknown[])=items.map(it=>buildRow(k,String(it.item_id),it));
+      });
+      next.audit=(grouped.AUDIT_LOG??[]).map(it=>({id:String(it.item_id),action:String(it.action??""),detail:String(it.detail??""),at:String(it.at??""),user:String(it.user??"")})).reverse();
+      setData(next);
+    }).catch(e=>setLoadError(e instanceof Error?e.message:"Failed to load accounting masters")).finally(()=>setLoading(false));
+  };
+  useEffect(fetchAll,[]);
+
+  const postAudit=async(action:string,detail:string)=>{
+    const at=new Date().toLocaleString("en-IN"),user="SBR Admin";
+    setData(current=>({...current,audit:[{id:`pending-${Date.now()}`,action,detail,at,user},...current.audit]}));
+    try{await fetch(`${baseUrl}/admin_accounting_masters/save`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({master_type:"AUDIT_LOG",data:{action,detail,at,user}})})}catch{/* best-effort log */}
+  };
   const match=(...x:unknown[])=>!q||x.some(v=>String(v??"").toLowerCase().includes(q));
   const open=(k?:Kind)=>{const map:Partial<Record<Tab,Kind>>={"Chart of Accounts":"GL Account","Sub Ledgers":"Sub Ledger","Tax & Statutory":"Tax Master","Banks & Cash":"Bank Account","Voucher Setup":"Voucher Type","Financial Setup":"Financial Year","Mapping & Controls":"Mapping Rule"};setKind(k||map[tab]||"GL Account");setCreate(true)};
-  const add=(v:Record<string,string|number|boolean>)=>{const id=`x${Date.now()}`;const n={...data};
-    if(kind==="GL Account")n.gl=[...data.gl,{id,code:String(v.code),name:String(v.name),parent:String(v.parent||"—"),category:String(v.category),type:String(v.type),normal:String(v.normal),control:v.type==="Control Account",slType:String(v.slType||""),direct:v.type!=="Header"&&v.type!=="Control Account",balance:Number(v.balance||0),status:"Active"}];
-    if(kind==="Sub Ledger")n.sl=[...data.sl,{id,code:String(v.code),name:String(v.name),type:String(v.type),source:String(v.source),entity:String(v.entity||""),control:String(v.control||""),terms:String(v.terms||"Immediate"),balance:Number(v.balance||0),drcr:v.drcr as "Dr"|"Cr",status:"Active"}];
-    if(kind==="Tax Master")n.taxes=[...data.taxes,{id,code:String(v.code),name:String(v.name),section:String(v.section),rate:Number(v.rate||0),nature:String(v.nature||""),input:String(v.input||""),output:String(v.output||""),effective:String(v.effective||""),status:"Active"}];
-    if(kind==="Bank Account")n.banks=[...data.banks,{id,code:String(v.code),name:String(v.name),account:`•••• ${String(v.account||"").slice(-4)}`,ifsc:String(v.ifsc||""),branch:String(v.branch||""),gl:String(v.gl||""),balance:Number(v.balance||0),status:"Active"}];
-    if(kind==="Cash Master")n.cash=[...data.cash,{id,code:String(v.code),location:String(v.location),custodian:String(v.custodian||""),centre:String(v.centre||""),gl:String(v.gl||""),limit:Number(v.limit||0),status:"Active"}];
-    if(kind==="Voucher Type")n.vouchers=[...data.vouchers,{id,code:String(v.code),name:String(v.name),prefix:String(v.prefix||""),numbering:String(v.numbering),approval:false,posting:String(v.posting),status:"Active"}];
-    if(kind==="Payment Term")n.terms=[...data.terms,{id,code:String(v.code),name:String(v.name),days:Number(v.days||0),description:String(v.description||""),status:"Active"}];
-    if(kind==="Financial Year")n.years=[...data.years,{id,name:String(v.name),start:String(v.start||""),end:String(v.end||""),status:(v.fyStatus||"Open") as FY["status"],current:false,lock:String(v.lock||"")}];
-    if(kind==="Opening Balance")n.openings=[...data.openings,{id,type:String(v.ledgerType),ledger:String(v.ledger),date:String(v.date||""),debit:Number(v.debit||0),credit:Number(v.credit||0),reference:String(v.reference||"")}];
-    if(kind==="Mapping Rule")n.mappings=[...data.mappings,{id,scope:String(v.scope),source:String(v.source),target:String(v.target||""),gl:String(v.gl||""),auto:false,status:"Active"}];
-    save(n,`${kind} created`,String(v.name||v.source||v.ledger||v.code));toast.success(`${kind} created`)};
+  const add=async(v:Record<string,string|number|boolean>)=>{
+    try{
+      const response=await fetch(`${baseUrl}/admin_accounting_masters/save`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({master_type:MASTER_TYPE_BY_KIND[kind],data:v})});
+      const result=await response.json().catch(()=>null);
+      if(!response.ok||!result?.success)throw new Error(result?.detail||result?.message||"Failed to save");
+      const dataKey=DATA_KEY_BY_KIND[kind];
+      const row=buildRow(kind,String(result.data.item_id),v);
+      setData(current=>({...current,[dataKey]:[...(current[dataKey] as unknown[]),row]} as Data));
+      toast.success(`${kind} created`);
+      void postAudit(`${kind} created`,String(v.name||v.source||v.ledger||v.code||""));
+    }catch(error){toast.error(error instanceof Error?error.message:"Failed to save")}
+  };
   const exp=()=>{const b=new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),u=URL.createObjectURL(b),a=document.createElement("a");a.href=u;a.download="accounting-masters.json";a.click();URL.revokeObjectURL(u)};
-  const imp=(f?:File)=>{if(!f)return;const r=new FileReader();r.onload=()=>{try{save({...defaults,...JSON.parse(String(r.result))},"Masters imported",f.name);toast.success("Masters imported")}catch{toast.error("Invalid file")}};r.readAsText(f)};
+  const imp=async(f?:File)=>{
+    if(!f)return;
+    try{
+      const parsed=JSON.parse(await f.text()) as Partial<Data>;
+      for(const k of Object.keys(MASTER_TYPE_BY_KIND) as Kind[]){
+        const rows=(parsed[DATA_KEY_BY_KIND[k]] as Array<Record<string,unknown>> | undefined)??[];
+        for(const row of rows){
+          await fetch(`${baseUrl}/admin_accounting_masters/save`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({master_type:MASTER_TYPE_BY_KIND[k],data:row})});
+        }
+      }
+      await postAudit("Masters imported",f.name);
+      fetchAll();
+      toast.success("Masters imported");
+    }catch{toast.error("Invalid file")}
+  };
   const readiness=[data.gl.some(x=>x.control),data.sl.length>0,data.taxes.length>0,data.banks.length>0,data.vouchers.length>0,data.mappings.length>0].filter(Boolean).length;
 
   return <div className="min-h-full bg-[#f6f8fa] p-5 lg:p-8"><div className="mx-auto max-w-[1700px] space-y-5">
-    <header className="flex flex-col gap-4 xl:flex-row xl:items-center"><div><p className="text-[10px] font-extrabold uppercase tracking-[.18em] text-[#18765f]">Accounts · Master Creations</p><h1 className="mt-1 text-2xl font-bold">Master Creations</h1><p className="mt-1 text-sm text-slate-500">Configure accounting structure, ledgers, taxes, banks and posting controls.</p></div><div className="ml-auto flex flex-wrap gap-2"><input ref={importRef} type="file" className="hidden" accept="application/json" onChange={e=>imp(e.target.files?.[0])}/><Button variant="outline" onClick={()=>importRef.current?.click()}><Upload className="mr-2 h-4 w-4"/>Import</Button><Button variant="outline" onClick={exp}><Download className="mr-2 h-4 w-4"/>Export</Button><Button variant="outline" onClick={()=>setAudit(true)}><History className="mr-2 h-4 w-4"/>Audit Log</Button><Button onClick={()=>open()} className="bg-[#0d5c4d]"><Plus className="mr-2 h-4 w-4"/>Create Master</Button></div></header>
+    <header className="flex flex-col gap-4 xl:flex-row xl:items-center"><div><p className="text-[10px] font-extrabold uppercase tracking-[.18em] text-[#18765f]">Accounts · Master Creations</p><h1 className="mt-1 text-2xl font-bold">Master Creations{loading&&<span className="ml-2 align-middle text-xs font-semibold text-slate-400">Loading…</span>}</h1><p className="mt-1 text-sm text-slate-500">Configure accounting structure, ledgers, taxes, banks and posting controls.</p></div><div className="ml-auto flex flex-wrap gap-2"><input ref={importRef} type="file" className="hidden" accept="application/json" onChange={e=>imp(e.target.files?.[0])}/><Button variant="outline" onClick={()=>importRef.current?.click()}><Upload className="mr-2 h-4 w-4"/>Import</Button><Button variant="outline" onClick={exp}><Download className="mr-2 h-4 w-4"/>Export</Button><Button variant="outline" onClick={()=>setAudit(true)}><History className="mr-2 h-4 w-4"/>Audit Log</Button><Button onClick={()=>open()} className="bg-[#0d5c4d]"><Plus className="mr-2 h-4 w-4"/>Create Master</Button></div></header>
+    {loadError&&<div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-sm font-semibold text-amber-800">{loadError}</div>}
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Stat label="General Ledgers" value={data.gl.length} detail={`${data.gl.filter(x=>x.control).length} control accounts`} icon={BookOpen}/><Stat label="Sub Ledgers" value={data.sl.length} detail={`${new Set(data.sl.map(x=>x.entity)).size} linked ERP entities`} icon={Users}/><Stat label="Active Financial Year" value={data.years.find(x=>x.current)?.name||"—"} detail={data.years.find(x=>x.current)?.status||"Not configured"} icon={CalendarDays}/><Stat label="Posting Readiness" value={`${readiness} / 6`} detail={readiness===6?"Core setup complete":"Configuration required"} icon={CheckCircle2}/></div>
     <nav className="overflow-x-auto rounded-xl border bg-white p-1"><div className="flex min-w-max gap-1">{tabs.map(({label,icon:Icon})=><button key={label} onClick={()=>{setTab(label);setSearch("");setStatus("All");setGroup("All")}} className={cn("inline-flex h-10 items-center gap-2 rounded-lg px-3 text-xs font-bold",tab===label?"bg-[#0d5c4d] text-white":"text-slate-500 hover:bg-slate-100")}><Icon className="h-3.5 w-3.5"/>{label}</button>)}</div></nav>
     {!(["Cost Centre","Cost Attribution"] as Tab[]).includes(tab)&&<div className="flex flex-col gap-2 rounded-xl border bg-white p-3 sm:flex-row"><div className="relative flex-1"><Search className="absolute left-3 top-3 h-4 w-4 text-slate-400"/><input className="h-10 w-full rounded-lg border bg-slate-50 pl-9 text-sm outline-none" placeholder="Search ledger, code, entity, category..." value={search} onChange={e=>setSearch(e.target.value)}/></div><select className={cn(input,"sm:w-36")} value={status} onChange={e=>setStatus(e.target.value)}><option>All</option><option>Active</option><option>Inactive</option></select><select className={cn(input,"sm:w-44")} value={group} onChange={e=>setGroup(e.target.value)}><option>All</option>{tab==="Chart of Accounts"&&["Asset","Liability","Equity","Income","Expense"].map(x=><option key={x}>{x}</option>)}{tab==="Sub Ledgers"&&["Vendor","Contractor","Customer","Employee","Landowner"].map(x=><option key={x}>{x}</option>)}{tab==="Tax & Statutory"&&["GST","TDS","RCM"].map(x=><option key={x}>{x}</option>)}</select><Button variant="outline" onClick={()=>{setSearch("");setStatus("All");setGroup("All")}}><Filter className="mr-2 h-4 w-4"/>Clear</Button></div>}
