@@ -33,6 +33,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import getBaseUrl from "@/lib/config";
 import { getGrnById, type GRNRecord } from "@/lib/grnApi";
+import { mergeSbrGlSeed } from "@/data/sbrGlSeed";
 import GrnDocumentPreview from "@/components/grn/GrnDocumentPreview";
 import { MakePurchaseOrderPopup } from "@/components/ho-inbox/MakePurchaseOrderPopup";
 import type { ComparativeModel } from "@/components/purchase/ComparativeStatementPreview";
@@ -1841,7 +1842,7 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
       .then((data) => {
         if (cancelled || !data?.success) return;
         setMasters({
-          glAccounts: data.data?.GL_ACCOUNT ?? [],
+          glAccounts: mergeSbrGlSeed(data.data?.GL_ACCOUNT ?? []) as MasterItem[],
           subLedgers: data.data?.SUB_LEDGER ?? [],
           costCentres: data.data?.COST_CENTRE ?? [],
           costAttributions: data.data?.COST_ATTRIBUTION ?? [],

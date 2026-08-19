@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CostAccountingSetup from "@/components/accounting/CostAccountingSetup";
 import getBaseUrl from "@/lib/config";
+import { SBR_GL_SEED, mergeSbrGlSeed } from "@/data/sbrGlSeed";
 
 type Tab = "Chart of Accounts" | "Sub Ledgers" | "Cost Centre" | "Cost Attribution" | "Tax & Statutory" | "Banks & Cash" | "Voucher Setup" | "Financial Setup" | "Mapping & Controls";
 type Status = "Active" | "Inactive";
@@ -96,8 +97,27 @@ function Creator({open,kind,data,onClose,onCreate}:{open:boolean;kind:Kind;data:
 export default function AccountingMaster(){
   const [tab,setTab]=useState<Tab>("Chart of Accounts"),[data,setData]=useState<Data>(EMPTY_DATA),[search,setSearch]=useState(""),[status,setStatus]=useState("All"),[group,setGroup]=useState("All"),[tree,setTree]=useState(false),[kind,setKind]=useState<Kind>("GL Account"),[create,setCreate]=useState(false),[audit,setAudit]=useState(false);
   const [loading,setLoading]=useState(true),[loadError,setLoadError]=useState("");
-  const importRef=useRef<HTMLInputElement>(null),cost=useMemo(costContext,[]),q=search.toLowerCase();
+  const importRef=useRef<HTMLInputElement>(null),glSeedSyncRef=useRef(false),cost=useMemo(costContext,[]),q=search.toLowerCase();
   const baseUrl=String(getBaseUrl()??"").replace(/\/$/,"");
+
+  const syncMissingGlAccounts=async(existing:Array<Record<string,unknown>>)=>{
+    if(glSeedSyncRef.current)return;
+    const codes=new Set(existing.map(item=>String(item.code??"")));
+    const missing=SBR_GL_SEED.filter(item=>!codes.has(item.code));
+    if(!missing.length)return;
+    glSeedSyncRef.current=true;
+    let created=0;
+    for(let index=0;index<missing.length;index+=8){
+      const batch=missing.slice(index,index+8);
+      const results=await Promise.all(batch.map(async item=>{
+        const {item_id:_itemId,seeded:_seeded,...payload}=item;
+        try{const response=await fetch(`${baseUrl}/admin_accounting_masters/save`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({master_type:"GL_ACCOUNT",data:payload})});return response.ok}catch{return false}
+      }));
+      created+=results.filter(Boolean).length;
+    }
+    if(created)toast.success(`${created} SBR GL account${created===1?"":"s"} created`);
+    if(created<missing.length)toast.warning(`${missing.length-created} GL accounts could not be synced; they remain available in the seeded master.`);
+  };
 
   const fetchAll=()=>{
     setLoading(true);setLoadError("");
@@ -106,12 +126,14 @@ export default function AccountingMaster(){
       const grouped=res.data as Record<string,Array<Record<string,unknown>>>;
       const next:Data={...EMPTY_DATA};
       (Object.keys(MASTER_TYPE_BY_KIND) as Kind[]).forEach(k=>{
-        const items=grouped[MASTER_TYPE_BY_KIND[k]]??[];
+        const apiItems=grouped[MASTER_TYPE_BY_KIND[k]]??[];
+        const items=k==="GL Account"?mergeSbrGlSeed(apiItems):apiItems;
         (next[DATA_KEY_BY_KIND[k]] as unknown[])=items.map(it=>buildRow(k,String(it.item_id),it));
       });
       next.audit=(grouped.AUDIT_LOG??[]).map(it=>({id:String(it.item_id),action:String(it.action??""),detail:String(it.detail??""),at:String(it.at??""),user:String(it.user??"")})).reverse();
       setData(next);
-    }).catch(e=>setLoadError(e instanceof Error?e.message:"Failed to load accounting masters")).finally(()=>setLoading(false));
+      void syncMissingGlAccounts(grouped.GL_ACCOUNT??[]);
+    }).catch(e=>{setData(current=>({...current,gl:SBR_GL_SEED.map(item=>buildRow("GL Account",item.item_id,item) as GL)}));setLoadError(e instanceof Error?e.message:"Failed to load accounting masters")}).finally(()=>setLoading(false));
   };
   useEffect(fetchAll,[]);
 
