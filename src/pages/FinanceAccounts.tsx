@@ -33,6 +33,7 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import getBaseUrl from "@/lib/config";
+import { useAuth } from "@/context/AuthContext";
 import { getGrnById, type GRNRecord } from "@/lib/grnApi";
 import { mergeSbrGlSeed } from "@/data/sbrGlSeed";
 import GrnDocumentPreview from "@/components/grn/GrnDocumentPreview";
@@ -98,6 +99,10 @@ export type FinanceRecord = {
   sourceBillId?: string;
   sourceBillInwardNo?: string;
   prrDetails?: PRRDetails;
+  // Set once a PRR is approved — what happens next depends on PRR Type (see
+  // PRR_TYPE_SKIPS_PAYMENT_DETAILS). Undefined until then; "ledger_posted" is terminal.
+  prrStage?: "awaiting_payment_details" | "awaiting_ledger_posting" | "ledger_posted";
+  paymentDetails?: { utr?: string; paymentDate?: string; paymentMode?: string; chequeNumber?: string };
 };
 
 // One row of the PRR's budget allocation — a specific line item within a specific budget,
@@ -162,10 +167,10 @@ export type PRRDetails = {
   supportingDocuments: string[];
   requesterRemarks: string;
   accountsRemarks: string;
+  // Stamped signature strings — "{name} | {designation} | {date} | {time} | Approved" — set
+  // once by the actual action that happens (send-for-approval / director-approve), not editable.
   preparedBy: string;
-  checkedBy: string;
   approvedBy: string;
-  financeApproval: string;
 };
 
 export type TabDefinition = {
@@ -249,11 +254,10 @@ const FINANCE_MODULES: ModuleDefinition[] = [
     icon: CreditCard,
     accent: "bg-emerald-50 text-emerald-700",
     tabs: [
-      { label: "Requests", description: "Raise and monitor requests before payment approval.", features: ["Payment Request / PRR", "Payment Allocation"] },
-      { label: "Payments", description: "Process vendor, employee and part payments.", features: ["Vendor Payments", "Employee Payments", "Part Payments", "Payment Allocation"] },
-      { label: "Receipts", description: "Record and allocate incoming funds.", features: ["Receipts", "Payment Allocation"] },
-      { label: "Advances", description: "Issue, adjust and settle advances.", features: ["Advances", "Employee Payments", "Vendor Payments"] },
-      { label: "History", description: "Audit every payment, receipt and allocation event.", features: ["Payment History", "Part Payments", "Payment Allocation"] },
+      { label: "Requests", description: "Raise and monitor requests before approval.", features: ["Payment Request / PRR"] },
+      { label: "Ledger Posting", description: "Post the accounting entry for approved PRRs.", features: ["Ledger Entry"] },
+      { label: "Receipts", description: "Record payment details for approved PRRs awaiting disbursement.", features: ["Payment Details"] },
+      { label: "History", description: "Every PRR, every stage, permanently.", features: ["Payment History"] },
     ],
   },
   {
@@ -359,26 +363,69 @@ const loadRecords = (): FinanceRecord[] => {
 // record (not just a summary) so the approval page can render it through the exact same
 // PrrDocumentPreview this module itself uses — same layout, same fields, everywhere.
 export const getLocalPendingPrrRecords = (): FinanceRecord[] =>
-  loadRecords().filter((record) => record.module === "payments-receipts" && record.tab === "Requests" && record.status === "Submitted");
+  loadRecords().filter((record) => record.module === "payments-receipts" && record.tab === "Requests" && ["Submitted", "Pending Approval"].includes(record.status));
+
+// A PRR's own attachmentUrl is always blank (this form doesn't take its own upload) — its real
+// Tax Invoice / supporting-document URLs live on the Bill Inward record it was raised against,
+// looked up by sourceBillId. Used by PRRApprovalInbox.tsx to resolve that linked bill.
+export const getLocalRecordById = (id: string): FinanceRecord | undefined =>
+  loadRecords().find((record) => record.id === id);
 
 // Approve/Reject from PRRApprovalPanel.tsx write straight back to this same localStorage
 // register — there's no backend record for these, so nothing calls director_approve_payment /
-// director_reject_payment for them.
-export const updateLocalPrrStatus = (id: string, status: "Approved" | "Rejected", rejectionReason?: string): void => {
+// director_reject_payment for them. On approval this is also where "Approved By" gets stamped
+// with the director's real signature — the same "{name} | {designation} | {date} | {time} |
+// Approved" format Send for Approval stamps onto "Prepared By".
+export const updateLocalPrrStatus = (
+  id: string,
+  status: "Approved" | "Rejected",
+  signer: { name: string; designation?: string },
+  rejectionReason?: string,
+): void => {
   const records = loadRecords();
   const next = records.map((record) => {
     if (record.id !== id) return record;
     const prrDetails = record.prrDetails ? { ...record.prrDetails } : undefined;
+    let prrStage = record.prrStage;
+    if (status === "Approved") {
+      // The stage transition must not depend on prrDetails existing — records created
+      // without it (e.g. the "Request Payment" button on a Bill Inward) would otherwise
+      // get stamped "Approved" but never receive a prrStage, leaving them invisible in
+      // every Payments & Receipts tab (each one filters on either status or prrStage).
+      if (prrDetails) prrDetails.approvedBy = formatPrrSignature(signer.name, signer.designation || "");
+      prrStage = prrSkipsPaymentDetails(prrDetails?.prrType ?? "") ? "awaiting_ledger_posting" : "awaiting_payment_details";
+    }
     if (prrDetails && rejectionReason) {
       prrDetails.accountsRemarks = [prrDetails.accountsRemarks, `Rejected: ${rejectionReason}`].filter(Boolean).join(" — ");
     }
-    return { ...record, status, prrDetails };
+    return { ...record, status, prrDetails, prrStage };
   });
   localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 };
 
 const formatCurrency = (value: number) =>
   new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 }).format(value || 0);
+
+// "{name} | {designation} | {date} | {time} | Approved" — stamped once, at the moment each
+// step actually happens (Prepared By when sent for approval, Approved By when the director
+// approves) rather than editable free text.
+const formatPrrSignature = (name: string, designation: string, when: Date = new Date()) =>
+  `${name} | ${designation || "—"} | ${when.toLocaleDateString("en-IN")} | ${when.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })} | Approved`;
+
+// TYPE 2 (Accounting) skips payment-details capture and goes straight to ledger posting once
+// approved. Every other PRR Type (Payment, Advance, Reimbursement, Statutory, Salary) is
+// TYPE 1 — payment details first, then ledger posting.
+const prrSkipsPaymentDetails = (prrType: string) => prrType === "Accounting";
+
+// Falls back to deriving the stage from status when prrStage itself is missing — covers
+// records already sitting in localStorage from before prrStage was reliably stamped on
+// every approval path (see updateLocalPrrStatus), so they self-heal into the right tab on
+// the next render instead of staying stuck invisible in every Payments & Receipts tab.
+const effectivePrrStage = (record: FinanceRecord): FinanceRecord["prrStage"] => {
+  if (record.prrStage) return record.prrStage;
+  if (record.status === "Approved") return prrSkipsPaymentDetails(record.prrDetails?.prrType ?? "") ? "awaiting_ledger_posting" : "awaiting_payment_details";
+  return record.prrStage;
+};
 
 const formatRegisterDate = (value?: string) => {
   if (!value) return "—";
@@ -644,22 +691,17 @@ type AccountingDimensions = {
   requireSiteLand: boolean;
 };
 
-const loadAccountingDimensions = (): AccountingDimensions => {
+// Departments/projects/sites still come from this legacy local settings blob (unchanged,
+// out of scope) — only costCentres/costAttributions below are wired to live Accounting
+// Master data, since those are the two dimensions actually being connected right now.
+const loadAccountingDimensionDefaults = (): AccountingDimensions => {
   try {
     const raw = localStorage.getItem("sbr-accounting-master-v1");
     const costing = raw ? JSON.parse(raw)?.costing ?? {} : {};
-    const costCentreRaw = localStorage.getItem("sbr-cost-accounting-centres-v1");
-    const attributionRaw = localStorage.getItem("sbr-cost-attributions-v1");
-    const registeredCentres = costCentreRaw ? JSON.parse(costCentreRaw) : [];
-    const registeredAttributions = attributionRaw ? JSON.parse(attributionRaw) : [];
-    const activeCentres = Array.isArray(registeredCentres) ? registeredCentres.filter((item) => item?.status === "Active").map((item) => ({ id: String(item.id), code: String(item.code), name: String(item.name) })) : [];
-    const configuredCentres = Array.isArray(costing.costCentres) ? costing.costCentres : [];
-    const centreByCode = new Map<string, AccountingDimension>();
-    [...configuredCentres, ...activeCentres].forEach((item) => centreByCode.set(String(item.code || item.id), { id: String(item.id), code: String(item.code || ""), name: String(item.name || "") }));
     return {
       departments: Array.isArray(costing.departments) ? costing.departments : [],
-      costCentres: Array.from(centreByCode.values()),
-      costAttributions: Array.isArray(registeredAttributions) ? registeredAttributions.filter((item) => item?.status === "Active").map((item) => ({ id: String(item.id), code: String(item.code), name: String(item.name), level: String(item.level || "") })) : [],
+      costCentres: [],
+      costAttributions: [],
       projects: Array.isArray(costing.projects) ? costing.projects : [],
       sites: Array.isArray(costing.sites) ? costing.sites : [],
       requireDepartment: costing.requireDepartment !== false,
@@ -670,6 +712,44 @@ const loadAccountingDimensions = (): AccountingDimensions => {
   } catch {
     return { departments: [], costCentres: [], costAttributions: [], projects: [], sites: [], requireDepartment: true, requireCostCentre: true, requireProject: true, requireSiteLand: false };
   }
+};
+
+// Cost Centre / Cost Attribution options for the PRR form, read straight from the same
+// admin_accounting_masters backend the Accounting Master "Cost Centre"/"Cost Attribution"
+// tabs save to (COST_CENTRE / COST_ATTRIBUTION) — previously these came from three
+// localStorage keys nothing ever wrote to, so the dropdowns were permanently empty no
+// matter what was configured in Accounting Master. Only Active, direct-posting-eligible
+// cost centres are offered — "Parent / Group" centres exist purely for hierarchy roll-up
+// and can't take a direct posting (see CostCentreMaster.tsx's "Posting Allowed" state).
+const useAccountingDimensions = (): AccountingDimensions => {
+  const [dimensions, setDimensions] = useState<AccountingDimensions>(loadAccountingDimensionDefaults);
+  useEffect(() => {
+    let cancelled = false;
+    const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+    (async () => {
+      try {
+        const [centresRes, attributionsRes] = await Promise.all([
+          fetch(`${baseUrl}/admin_accounting_masters/list/COST_CENTRE`, { headers: { Accept: "application/json" } }),
+          fetch(`${baseUrl}/admin_accounting_masters/list/COST_ATTRIBUTION`, { headers: { Accept: "application/json" } }),
+        ]);
+        const centresPayload = centresRes.ok ? await centresRes.json().catch(() => null) : null;
+        const attributionsPayload = attributionsRes.ok ? await attributionsRes.json().catch(() => null) : null;
+        const centreItems: Array<Record<string, unknown>> = Array.isArray(centresPayload?.data) ? centresPayload.data : [];
+        const attributionItems: Array<Record<string, unknown>> = Array.isArray(attributionsPayload?.data) ? attributionsPayload.data : [];
+        const costCentres = centreItems
+          .filter((item) => String(item.status ?? "") === "Active" && Boolean(item.directPosting))
+          .map((item) => ({ id: String(item.item_id ?? ""), code: String(item.code ?? ""), name: String(item.name ?? "") }));
+        const costAttributions = attributionItems
+          .filter((item) => String(item.status ?? "") === "Active")
+          .map((item) => ({ id: String(item.item_id ?? ""), code: String(item.code ?? ""), name: String(item.name ?? ""), level: String(item.level ?? "") }));
+        if (!cancelled) setDimensions((current) => ({ ...current, costCentres, costAttributions }));
+      } catch {
+        // Accounting Master unreachable — PRR form still works, just without live dimension options.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  return dimensions;
 };
 
 const vendorOrderLabel = (orderType: string) => {
@@ -709,7 +789,7 @@ export function BillInwardModal({ module, tab, existing, onClose, onSaved, initi
   const [completionReferences, setCompletionReferences] = useState<CompletionReference[]>([]);
   const [completionReferencesLoading, setCompletionReferencesLoading] = useState(false);
   const [completionReferencesError, setCompletionReferencesError] = useState("");
-  const [accountingDimensions] = useState<AccountingDimensions>(loadAccountingDimensions);
+  const accountingDimensions = useAccountingDimensions();
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => () => {
@@ -784,7 +864,9 @@ export function BillInwardModal({ module, tab, existing, onClose, onSaved, initi
         // ID rather than an encoded value such as SBR%2FVEN%2F0001.
         const response = await fetch(`${baseUrl}/purchase_flow/get_order_info_by_vendor_id/${vendorId}`, { headers: { Accept: "application/json" } });
         let payload = response.ok ? await response.json().catch(() => null) : null;
-        let list = Array.isArray(payload?.purchase_flows) ? payload.purchase_flows : [];
+        // This endpoint returns its list under "order_info", not "purchase_flows"
+        // (that key belongs to the /get_purchase_flows fallback below).
+        let list = Array.isArray(payload?.order_info) ? payload.order_info : [];
 
         // Some deployments do not expose the vendor-specific route. Fall back to the
         // live Purchase Flow register and resolve its approved vendor metadata.
@@ -1357,13 +1439,58 @@ const initialPrrDetails = (record: FinanceRecord, bill?: FinanceRecord): PRRDeta
     supportingDocuments: source.supportingDocumentNames || [],
     requesterRemarks: "",
     accountsRemarks: "",
-    preparedBy: "SBR Admin",
-    checkedBy: "Pending",
-    approvedBy: "Pending",
-    financeApproval: "Pending",
+    preparedBy: "",
+    approvedBy: "",
     ...record.prrDetails,
   };
 };
+
+// TYPE 1 PRRs (everything except "Accounting") land here once approved — how it was actually
+// paid, captured before the ledger entry gets posted. Reachable only from the "Receipts" tab's
+// row action, one PRR at a time.
+function PrrPaymentDetailsModal({
+  record, onClose, onSave,
+}: { record: FinanceRecord; onClose: () => void; onSave: (details: NonNullable<FinanceRecord["paymentDetails"]>) => void }) {
+  const [utr, setUtr] = useState(record.paymentDetails?.utr || "");
+  const [paymentDate, setPaymentDate] = useState(record.paymentDetails?.paymentDate || new Date().toISOString().slice(0, 10));
+  const [paymentMode, setPaymentMode] = useState(record.paymentDetails?.paymentMode || "NEFT");
+  const [chequeNumber, setChequeNumber] = useState(record.paymentDetails?.chequeNumber || "");
+
+  const inputClass = "h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none transition focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10";
+  const labelClass = "space-y-2 text-xs font-bold text-slate-600";
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!utr.trim()) { toast.error("Enter the UTR before saving."); return; }
+    onSave({ utr: utr.trim(), paymentDate, paymentMode, chequeNumber: paymentMode === "Cheque" ? chequeNumber.trim() : "" });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-[2px]" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <form onSubmit={submit} className="w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
+        <div className="flex items-start justify-between bg-[#0d473f] px-6 py-5 text-white">
+          <div>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Payments & Receipts · Receipts</p>
+            <h2 className="mt-1 text-lg font-bold">Payment Details — {record.reference}</h2>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg p-2 text-white/70 hover:bg-white/10 hover:text-white"><X className="h-5 w-5" /></button>
+        </div>
+        <div className="space-y-4 p-6">
+          <label className={labelClass}>UTR<span className="text-red-500"> *</span><input required className={inputClass} value={utr} onChange={(event) => setUtr(event.target.value)} placeholder="Unique Transaction Reference" /></label>
+          <label className={labelClass}>Payment Date<input required type="date" className={inputClass} value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} /></label>
+          <label className={labelClass}>Payment Mode<select className={inputClass} value={paymentMode} onChange={(event) => setPaymentMode(event.target.value)}>{["NEFT", "RTGS", "IMPS", "UPI", "Cheque", "Cash"].map((item) => <option key={item}>{item}</option>)}</select></label>
+          {paymentMode === "Cheque" && (
+            <label className={labelClass}>Cheque Number<span className="ml-2 font-medium normal-case text-slate-400">(optional)</span><input className={inputClass} value={chequeNumber} onChange={(event) => setChequeNumber(event.target.value)} placeholder="Cheque number" /></label>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4">
+          <button type="button" onClick={onClose} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50">Cancel</button>
+          <button type="submit" className="h-11 rounded-xl bg-[#0d5c4d] px-6 text-sm font-bold text-white hover:bg-[#0a4b3f]">Save & Move to Ledger Posting</button>
+        </div>
+      </form>
+    </div>
+  );
+}
 
 type PrrModalProps = {
   record: FinanceRecord;
@@ -1457,8 +1584,8 @@ export function PrrDocumentPreview({ record, details, taxInvoiceName, poWoName, 
       <div className="grid min-h-16 grid-cols-2 border border-slate-200 text-[10px]"><div className="border-r border-slate-200 p-2"><b>Requester:</b> {value(details.requesterRemarks)}</div><div className="p-2"><b>Accounts:</b> {value(details.accountsRemarks)}</div></div>
 
       {band("APPROVAL TRAIL")}
-      <div className="grid grid-cols-4 border-x border-b border-slate-200 text-center text-[9px]">
-        {[["Prepared By", details.preparedBy], ["Checked By", details.checkedBy], ["Approved By", details.approvedBy], ["Finance Approval", details.financeApproval]].map(([label, person]) => <div key={label} className="min-h-20 border-r border-slate-200 p-2 last:border-r-0"><div className="font-extrabold text-[#0D3A35]">{label}</div><div className="mt-4 text-slate-600">{value(person)}</div><div className="mt-2 border-t border-dashed border-slate-300 pt-1 text-slate-400">Signature / Date</div></div>)}
+      <div className="grid grid-cols-2 border-x border-b border-slate-200 text-center text-[9px]">
+        {[["Prepared By", details.preparedBy], ["Approved By", details.approvedBy]].map(([label, person]) => <div key={label} className="min-h-20 border-r border-slate-200 p-2 last:border-r-0"><div className="font-extrabold text-[#0D3A35]">{label}</div><div className="mt-4 text-slate-600">{value(person)}</div></div>)}
       </div>
       <div className="mt-3 flex justify-between border-t border-slate-200 pt-2 text-[8px] text-slate-400"><span>System-generated Payment Request</span><span>{record.reference || "Draft PRR"}</span><span>Page 1</span></div>
     </div>
@@ -1466,10 +1593,11 @@ export function PrrDocumentPreview({ record, details, taxInvoiceName, poWoName, 
 }
 
 function PrrModal({ record, bills, onClose, onSave }: PrrModalProps) {
+  const { user } = useAuth();
   const linkedBill = bills.find((bill) => bill.id === record.sourceBillId || bill.billInwardNo === record.sourceBillInwardNo);
   const [form, setForm] = useState<FinanceRecord>(() => ({ ...record, status: record.status === "Pending Approval" ? "Draft" : record.status || "Draft" }));
   const [details, setDetails] = useState<PRRDetails>(() => initialPrrDetails(record, linkedBill));
-  const [accountingDimensions] = useState<AccountingDimensions>(loadAccountingDimensions);
+  const accountingDimensions = useAccountingDimensions();
 
   const update = <K extends keyof PRRDetails>(key: K, value: PRRDetails[K]) => setDetails((current) => ({ ...current, [key]: value }));
   const numberUpdate = (key: keyof PRRDetails, value: string) => update(key, (Number(value) || 0) as never);
@@ -1616,8 +1744,11 @@ function PrrModal({ record, bills, onClose, onSave }: PrrModalProps) {
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
-    const status = submitter?.value === "send" ? "Submitted" : form.status || "Draft";
-    onSave({ ...form, entryType: "Payment Request / PRR", party: form.party, vendorId: details.vendorCode || form.vendorId, amount: details.requestedPaymentAmount || details.netPayableAmount, notes: details.accountingNarration || details.requesterRemarks, department: details.requestingDepartment, costCentre: details.costCentre, costAttribution: details.costAttribution, project: details.projectCluster, site: details.landSite, status, prrDetails: details });
+    const sending = submitter?.value === "send";
+    if (sending && !user?.name) { toast.error("You must be logged in to send this for approval."); return; }
+    const status = sending ? "Submitted" : form.status || "Draft";
+    const nextDetails = sending ? { ...details, preparedBy: formatPrrSignature(user!.name, user!.designation || "") } : details;
+    onSave({ ...form, entryType: "Payment Request / PRR", party: form.party, vendorId: details.vendorCode || form.vendorId, amount: details.requestedPaymentAmount || details.netPayableAmount, notes: details.accountingNarration || details.requesterRemarks, department: details.requestingDepartment, costCentre: details.costCentre, costAttribution: details.costAttribution, project: details.projectCluster, site: details.landSite, status, prrDetails: nextDetails });
   };
 
   return (
@@ -1633,7 +1764,7 @@ function PrrModal({ record, bills, onClose, onSave }: PrrModalProps) {
             {section("PRR Header", "Request identity and priority.", <>
               <label className={labelClass}>PRR No.<input readOnly className={`${inputClass} bg-slate-50`} value={form.reference} /></label>
               <label className={labelClass}>PRR Date<input required type="date" className={inputClass} value={form.date} onChange={(event) => setForm((current) => ({ ...current, date: event.target.value }))} /></label>
-              <label className={labelClass}>PRR Type<select className={inputClass} value={details.prrType} onChange={(event) => update("prrType", event.target.value)}>{["Payment", "Accounting", "Advance", "Reimbursement", "Statutory"].map((item) => <option key={item}>{item}</option>)}</select></label>
+              <label className={labelClass}>PRR Type<select className={inputClass} value={details.prrType} onChange={(event) => update("prrType", event.target.value)}>{["Payment", "Accounting", "Advance", "Reimbursement", "Statutory", "Salary"].map((item) => <option key={item}>{item}</option>)}</select></label>
               <label className={labelClass}>Requesting Department<select className={inputClass} value={details.requestingDepartment} onChange={(event) => update("requestingDepartment", event.target.value)}><option value="">Select department</option>{Array.from(new Set(["Accounts", "Procurement", "Operations", "HR", ...accountingDimensions.departments.map((item) => item.name)])).map((item) => <option key={item}>{item}</option>)}</select></label>
               <label className={labelClass}>Requested By<input required className={inputClass} value={details.requestedBy} onChange={(event) => update("requestedBy", event.target.value)} placeholder="Employee name" /></label>
               <label className={labelClass}>Priority<select className={inputClass} value={details.priority} onChange={(event) => update("priority", event.target.value)}>{["Normal", "Urgent", "Critical"].map((item) => <option key={item}>{item}</option>)}</select></label>
@@ -1742,11 +1873,14 @@ function PrrModal({ record, bills, onClose, onSave }: PrrModalProps) {
             </>)}
 
             {section("Approval", "Workflow ownership and current status.", <>
-              <label className={labelClass}>Prepared By<input readOnly className={`${inputClass} bg-slate-50`} value={details.preparedBy} /></label>
-              <label className={labelClass}>Checked By<input readOnly className={`${inputClass} bg-slate-50`} value={details.checkedBy} /></label>
-              <label className={labelClass}>Approved By<input readOnly className={`${inputClass} bg-slate-50`} value={details.approvedBy} /></label>
-              <label className={labelClass}>Finance Approval<input readOnly className={`${inputClass} bg-slate-50`} value={details.financeApproval} /></label>
-              <label className={labelClass}>Status<select className={inputClass} value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))}>{["Draft", "Submitted", "Under Review", "Approved", "Rejected", "Paid"].map((item) => <option key={item}>{item}</option>)}</select></label>
+              <label className={labelClass}>Prepared By<input readOnly className={`${inputClass} bg-slate-50`} value={details.preparedBy || "Stamped when sent for approval"} /></label>
+              <label className={labelClass}>Approved By<input readOnly className={`${inputClass} bg-slate-50`} value={details.approvedBy || "Stamped on director approval"} /></label>
+              {/* Locked once a real decision exists (Approved/Rejected) — those only ever get
+                  set by the actual approve/reject actions (Send for Approval → PRR Approval
+                  page), never picked here, which is what keeps preparedBy/approvedBy in sync
+                  with whatever this shows. Still listed as options so an already-decided
+                  record's status still renders correctly here. */}
+              <label className={labelClass}>Status<select className={inputClass} value={form.status} disabled={form.status === "Approved" || form.status === "Rejected"} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))}>{["Draft", "Submitted", "Under Review", "Approved", "Rejected", "Paid"].map((item) => <option key={item}>{item}</option>)}</select></label>
             </>)}
             </div>
           </div>
@@ -2083,6 +2217,28 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
     setSubmitting(true);
     try {
       const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+      // For a PRR with budget lines, move each line's amount Allocated-first-then-Remaining
+      // into Utilized before the real (irreversible) ledger voucher posts — a budget shortfall
+      // must block posting outright, not get discovered after the entry is already live.
+      const budgetLines = record.entryType === "Payment Request / PRR" ? (record.prrDetails?.budgetLines ?? []) : [];
+      if (budgetLines.length > 0) {
+        const budgetResponse = await fetch(`${baseUrl}/admin_accounts/consume_budget_on_ledger_post`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reference: sourceReference,
+            lines: budgetLines.map((line) => ({ budget_id: line.budgetId, category: line.category, line_item: line.lineItem, amount: line.amount })),
+          }),
+        });
+        const budgetData = await budgetResponse.json().catch(() => null);
+        if (!budgetResponse.ok || !budgetData?.success) {
+          const shortfalls: Array<{ line_item?: string; requested?: number; available?: number }> = budgetData?.detail?.shortfalls ?? [];
+          const message = shortfalls.length
+            ? `Insufficient budget for ${shortfalls.map((s) => s.line_item).join(", ")} — only ${formatCurrency(shortfalls[0].available || 0)} available against ${formatCurrency(shortfalls[0].requested || 0)} requested.`
+            : (typeof budgetData?.detail === "string" ? budgetData.detail : "Insufficient budget to post this ledger entry.");
+          throw new Error(message);
+        }
+      }
       const response = await fetch(`${baseUrl}/admin_accounts/post_journal_voucher`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2118,7 +2274,7 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
       <div className="flex max-h-[96vh] w-full max-w-[1800px] flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
         <div className="flex shrink-0 items-start justify-between bg-[#0d473f] px-6 py-5 text-white">
           <div>
-            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Bills & Payables · Ledger Posting</p>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">{record.entryType === "Payment Request / PRR" ? "Payments & Receipts" : "Bills & Payables"} · Ledger Posting</p>
             <h2 className="mt-1 text-xl font-bold">Post Accounting Entry</h2>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg p-2 text-white/70 hover:bg-white/10 hover:text-white"><X className="h-5 w-5" /></button>
@@ -2430,6 +2586,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
   const [billPreviewMode, setBillPreviewMode] = useState<"verify" | "pay">("verify");
   const [prrModalRecord, setPrrModalRecord] = useState<FinanceRecord | null>(null);
   const [ledgerEntryRecord, setLedgerEntryRecord] = useState<FinanceRecord | null>(null);
+  const [paymentDetailsRecord, setPaymentDetailsRecord] = useState<FinanceRecord | null>(null);
   const [invoicesLoading, setInvoicesLoading] = useState(false);
   const [invoicesError, setInvoicesError] = useState("");
 
@@ -2464,9 +2621,28 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
   const isBillsPaidRegister = moduleKey === "bills-payables" && activeTab.label === "Bills Paid";
   const isLedgerPostingRegister = moduleKey === "bills-payables" && activeTab.label === "Ledger Posting";
   const isRequestRegister = moduleKey === "payments-receipts" && activeTab.label === "Requests";
+  // PRRs stay tagged tab: "Requests" for life (never reassigned) — Ledger Posting/Receipts/
+  // History in this module are all different views over that same bucket, exactly like Bills &
+  // Payables' Verification/Bills Paid/Ledger Posting tabs all read the same tab: "Inward" bucket.
+  const isPrrLedgerPostingRegister = moduleKey === "payments-receipts" && activeTab.label === "Ledger Posting";
+  const isPrrReceiptsRegister = moduleKey === "payments-receipts" && activeTab.label === "Receipts";
+  const isPrrHistoryRegister = moduleKey === "payments-receipts" && activeTab.label === "History";
+  const isPrrDownstreamRegister = isPrrLedgerPostingRegister || isPrrReceiptsRegister || isPrrHistoryRegister;
+  const prrBucket = (record: FinanceRecord) => record.tab === "Requests" && record.entryType === "Payment Request / PRR";
   const tabRecords = isVerificationRegister || isBillsPaidRegister || isLedgerPostingRegister
     ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward" && (!isLedgerPostingRegister || (record.status === "Verified" && record.ledgerEntryStatus !== "completed")))
-    : moduleRecords.filter((record) => record.tab === activeTab.label);
+    : isRequestRegister
+      // "Pending Approval" is the status both PRR-creation paths actually set (see buildAutoPrr/
+      // requestPayment) — Draft/Submitted/Under Review are kept only in case something upstream
+      // still relies on them, but Pending Approval is what real records carry pre-decision.
+      ? moduleRecords.filter((record) => prrBucket(record) && ["Draft", "Submitted", "Under Review", "Pending Approval"].includes(record.status))
+      : isPrrLedgerPostingRegister
+        ? moduleRecords.filter((record) => prrBucket(record) && effectivePrrStage(record) === "awaiting_ledger_posting")
+        : isPrrReceiptsRegister
+          ? moduleRecords.filter((record) => prrBucket(record) && effectivePrrStage(record) === "awaiting_payment_details")
+          : isPrrHistoryRegister
+            ? moduleRecords.filter((record) => prrBucket(record) && effectivePrrStage(record) === "ledger_posted")
+            : moduleRecords.filter((record) => record.tab === activeTab.label);
   const isInwardRegister = moduleKey === "bills-payables" && activeTab.label === "Inward";
   const showsBillInwardRecords = isInwardRegister || isVerificationRegister || isBillsPaidRegister || isLedgerPostingRegister;
   const visibleRecords = tabRecords.filter((record) => {
@@ -2568,6 +2744,21 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
     if (prr) toast.success(`Payment request ${prr.reference} auto-created for ${updatedEntry.billInwardNo || updatedEntry.reference}`);
   };
 
+  // A PRR's own ledger posting (as opposed to markLedgerEntryPosted above, which is the Bill
+  // Inward side and auto-creates a PRR) — terminal stage, and "Posted" already picks up this
+  // register's existing green "completed" badge styling with no other changes needed.
+  const markPrrLedgerPosted = (entry: FinanceRecord) => {
+    saveRecords(records.map((record) => record.id === entry.id ? { ...record, prrStage: "ledger_posted", status: "Posted" } : record));
+    setLedgerEntryRecord(null);
+    toast.success(`${entry.reference} ledger entry posted`);
+  };
+
+  const savePrrPaymentDetails = (entry: FinanceRecord, details: NonNullable<FinanceRecord["paymentDetails"]>) => {
+    saveRecords(records.map((record) => record.id === entry.id ? { ...record, paymentDetails: details, prrStage: "awaiting_ledger_posting" } : record));
+    setPaymentDetailsRecord(null);
+    toast.success(`Payment details saved for ${entry.reference}`);
+  };
+
   const requestPayment = (entry: FinanceRecord) => {
     const existingRequest = records.find((record) => record.module === "payments-receipts" && record.tab === "Requests" && record.sourceBillId === entry.id);
     if (existingRequest) return;
@@ -2594,6 +2785,9 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
       department: entry.department,
       project: entry.project,
       site: entry.site,
+      // Without this, approval (updateLocalPrrStatus) has no prrType to key off — see the
+      // comment there — and the request can never progress to Ledger Posting/Receipts.
+      prrDetails: initialPrrDetails(entry, entry),
     };
     saveRecords([paymentRequest, ...records]);
   };
@@ -2641,7 +2835,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
           eyebrow="Finance & Accounts"
           title={module.title}
           description={module.description}
-          action={!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister ? <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : "New Entry"}</button> : undefined}
+          action={!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister && !isPrrDownstreamRegister ? <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : "New Entry"}</button> : undefined}
         />
 
         <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm">
@@ -2687,7 +2881,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
                   {visibleRecords.map((record) => (
                     <tr key={record.id} className="leading-5 hover:bg-slate-50/80">
                       <td className="whitespace-nowrap px-5 py-4 font-semibold text-[#0d5c4d]">{showsBillInwardRecords ? record.billInwardNo || record.reference : record.reference}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.date)}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.dueDate)}</td><td className="px-5 py-4 font-semibold text-slate-800">{record.entryType}</td><td className="px-5 py-4 font-medium text-slate-500">{record.party || "—"}</td><td className="whitespace-nowrap px-5 py-4 text-right font-semibold text-slate-900">{formatCurrency(record.amount)}</td><td className="px-5 py-4 text-center"><span className={cn("inline-flex whitespace-nowrap rounded-full px-3 py-1 text-sm font-semibold", record.status === "Pending Approval" ? "bg-amber-50 text-amber-700" : record.status === "Verified" || ["Posted", "Paid", "Reconciled", "Closed"].includes(record.status) ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600")}>{record.status || "Draft"}</span></td>
-                      <td className="px-5 py-4"><div className="flex justify-end gap-1">{isVerificationRegister || isBillsPaidRegister ? <button onClick={() => { setBillPreviewMode(isBillsPaidRegister ? "pay" : "verify"); setVerificationPreview(record); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="Preview bill"><Eye className="h-4 w-4" />Preview</button> : isLedgerPostingRegister ? <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Post ledger entry"><IndianRupee className="h-4 w-4" />Post Ledger Entry</button> : isRequestRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />Create PRR</button> : <><button onClick={() => { setEditing(record); setModalOpen(true); }} className={cn("inline-flex items-center gap-1.5 rounded-lg text-slate-500 hover:bg-[#eaf4f1] hover:text-[#0d5c4d]", record.entryType === "Bill Inward" ? "px-3 py-2 text-sm font-semibold" : "p-2")} title="Edit"><Pencil className="h-4 w-4" />{record.entryType === "Bill Inward" && "Edit"}</button><button onClick={() => window.confirm(`Delete ${record.reference}?`) && saveRecords(records.filter((item) => item.id !== record.id))} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Delete"><Trash2 className="h-4 w-4" /></button></>}</div></td>
+                      <td className="px-5 py-4"><div className="flex justify-end gap-1">{isVerificationRegister || isBillsPaidRegister ? <button onClick={() => { setBillPreviewMode(isBillsPaidRegister ? "pay" : "verify"); setVerificationPreview(record); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="Preview bill"><Eye className="h-4 w-4" />Preview</button> : isLedgerPostingRegister ? <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Post ledger entry"><IndianRupee className="h-4 w-4" />Post Ledger Entry</button> : isRequestRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />Create PRR</button> : isPrrLedgerPostingRegister ? <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Post ledger entry"><IndianRupee className="h-4 w-4" />Post Ledger Entry</button> : isPrrReceiptsRegister ? <button onClick={() => setPaymentDetailsRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Add payment details"><CreditCard className="h-4 w-4" />Add Payment Details</button> : isPrrHistoryRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="View PRR"><Eye className="h-4 w-4" />View PRR</button> : <><button onClick={() => { setEditing(record); setModalOpen(true); }} className={cn("inline-flex items-center gap-1.5 rounded-lg text-slate-500 hover:bg-[#eaf4f1] hover:text-[#0d5c4d]", record.entryType === "Bill Inward" ? "px-3 py-2 text-sm font-semibold" : "p-2")} title="Edit"><Pencil className="h-4 w-4" />{record.entryType === "Bill Inward" && "Edit"}</button><button onClick={() => window.confirm(`Delete ${record.reference}?`) && saveRecords(records.filter((item) => item.id !== record.id))} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Delete"><Trash2 className="h-4 w-4" /></button></>}</div></td>
                     </tr>
                   ))}
                 </tbody>
@@ -2698,7 +2892,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
               <span className="rounded-2xl bg-[#edf5f2] p-4 text-[#6c9b90]"><FileBarChart className="h-8 w-8" /></span>
               <h3 className="mt-4 text-lg font-bold text-slate-800">No {activeTab.label.toLowerCase()} entries found</h3>
               <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">{isVerificationRegister ? "Saved Bill Inward entries will appear here automatically for review and verification." : isLedgerPostingRegister ? "Director-approved (Verified) bills with a pending ledger entry will appear here for posting." : isBillsPaidRegister ? "Every Bill Inward entry will appear here. Verified bills can be marked as paid from their preview." : "Create the first entry for this workflow, or change the search and status filters."}</p>
-              {!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister && <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : `Create ${activeTab.features[0] ?? "Entry"}`}</button>}
+              {!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister && !isPrrDownstreamRegister && <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : `Create ${activeTab.features[0] ?? "Entry"}`}</button>}
             </div>
           )}
         </section>
@@ -2706,7 +2900,20 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
       {modalOpen && <EntryModal module={module} tab={activeTab} existing={editing} onClose={() => { setModalOpen(false); setEditing(null); }} onSave={saveEntry} onSaved={loadInvoices} />}
       {prrModalRecord && <PrrModal record={prrModalRecord} bills={records.filter((record) => record.module === "bills-payables" && record.tab === "Inward" && record.entryType === "Bill Inward" && ["Verified", "Paid"].includes(record.status))} onClose={() => setPrrModalRecord(null)} onSave={savePrr} />}
       {verificationPreview && <BillVerificationPreview record={verificationPreview} actionMode={billPreviewMode} paymentRequested={records.some((record) => record.module === "payments-receipts" && record.tab === "Requests" && record.sourceBillId === verificationPreview.id)} onClose={() => setVerificationPreview(null)} onVerify={() => billPreviewMode === "pay" ? markBillPaid(verificationPreview) : verifyBill(verificationPreview)} onRequestPayment={() => requestPayment(verificationPreview)} onPostLedgerEntry={() => { setVerificationPreview(null); setLedgerEntryRecord(verificationPreview); }} />}
-      {ledgerEntryRecord && <LedgerEntryModal record={ledgerEntryRecord} onClose={() => setLedgerEntryRecord(null)} onPosted={(voucher) => markLedgerEntryPosted(ledgerEntryRecord, voucher)} />}
+      {ledgerEntryRecord && (
+        <LedgerEntryModal
+          record={ledgerEntryRecord}
+          onClose={() => setLedgerEntryRecord(null)}
+          onPosted={(voucher) => ledgerEntryRecord.entryType === "Payment Request / PRR" ? markPrrLedgerPosted(ledgerEntryRecord) : markLedgerEntryPosted(ledgerEntryRecord, voucher)}
+        />
+      )}
+      {paymentDetailsRecord && (
+        <PrrPaymentDetailsModal
+          record={paymentDetailsRecord}
+          onClose={() => setPaymentDetailsRecord(null)}
+          onSave={(details) => savePrrPaymentDetails(paymentDetailsRecord, details)}
+        />
+      )}
     </div>
   );
 }
