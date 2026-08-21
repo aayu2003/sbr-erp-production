@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { X, Download, Printer, ArrowUpRight, Loader2, AlertCircle } from 'lucide-react';
-import jsPDF from 'jspdf';
+import { jsPDF } from 'jspdf';
 import autoTable, { type RowInput } from 'jspdf-autotable';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { useAuth } from '@/context/AuthContext';
 import logo3f from '@/Assets/3f-logo.png';
+import { MakeWorkOrderPopup } from '@/components/ho-inbox/MakeWorkOrderPopup';
+import type { ComparativeModel } from '@/components/purchase/ComparativeStatementPreview';
 import type { ApiWorkDoneEntry, ApiOperationalWorkDoneEntry, ApiTaskDetails, WccScopeLand } from './WccModal';
 import { WCC_WORK_TEMPLATES, calculateWccTotals, type WccEnterpriseDraft } from '@/lib/wccEnterprise';
 
@@ -16,6 +18,39 @@ const BASE_URL = getBaseUrl().replace(/\/$/, '');
 const COMPANY_NAME = 'SAI BIORESOURCES PRIVATE LIMITED';
 const COMPANY_ADDRESS = 'Khasra No. 121/1, Kachandur-Dhour Road, Village Jeora (Jeora-Sirsa), Durg, Chhattisgarh – 491001';
 
+const FullWorkOrderPreview = ({ order }: { order: Record<string, unknown> }) => {
+  const quote = order.purchase_quote && typeof order.purchase_quote === 'object'
+    ? order.purchase_quote as Record<string, unknown>
+    : {};
+  const orderNumber = String(order.order_number ?? quote.order_number ?? quote.poNo ?? quote.po_no ?? '').trim();
+  const requestNumber = String(order.pr_number ?? quote.pr_number ?? '').trim();
+  const comparisonId = String(order.comparison_id ?? quote.comparison_id ?? '').trim();
+  const vendorId = String(quote.vendor_id ?? quote.vendorId ?? quote.vendor_name ?? '').trim();
+  const comparative = {
+    id: comparisonId || requestNumber || orderNumber,
+    indentId: requestNumber,
+    pr_number: requestNumber,
+    comparisonId,
+    comparison_id: comparisonId,
+    hoSelectedVendorId: vendorId,
+    indent_type: 'SPR',
+  } as unknown as ComparativeModel;
+
+  return (
+    <MakeWorkOrderPopup
+      open
+      comparative={comparative}
+      vendorId={vendorId}
+      poNumber={orderNumber}
+      onClose={() => undefined}
+      variant="inline"
+      inlineSimulatePrint
+      reviewOnly
+      documentStatus="approved"
+    />
+  );
+};
+
 const formatDate = (d?: string) => {
   if (!d) return '—';
   try { return new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); }
@@ -23,6 +58,9 @@ const formatDate = (d?: string) => {
 };
 
 const formatInr = (n: number) => `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+// jsPDF's built-in Helvetica font does not contain the Unicode rupee glyph. Keep the
+// on-screen symbol, but use an ASCII currency label in generated PDFs so it never corrupts.
+const formatPdfMoney = (n: number) => `INR ${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 // ─────────────────────────────────────────────────────────────
 // Annexure: one flat, numbered line per completed activity — cultivation lines are one row
@@ -40,12 +78,59 @@ export interface AnnexureLine {
   quantity: number;
   rate: number;
   landId?: string; // used to resolve the certificate's block label
+  taskIds?: string[]; // links the certified line to its task-photo evidence
+}
+
+export interface AnnexurePhoto {
+  id: string;
+  taskId: string;
+  imageUrl: string;
+  activity: string;
+  place: string;
+  dateOfCompletion: string;
 }
 
 export interface AnnexurePivot {
   lines: AnnexureLine[];
+  photos?: AnnexurePhoto[];
   enterprise?: WccEnterpriseDraft;
+  adjustment?: number;
+  note?: string;
+  certification?: { text?: string; paragraph1?: string; paragraph2?: string };
 }
+
+interface AnnexurePhotoEvidenceRow {
+  id: string;
+  annexureRowNumber: number;
+  activity: string;
+  place: string;
+  dateOfCompletion: string;
+  photos: AnnexurePhoto[];
+  photoOffset: number;
+}
+
+const buildAnnexurePhotoEvidenceRows = (lines: AnnexureLine[], photos: AnnexurePhoto[]): AnnexurePhotoEvidenceRow[] => {
+  const rows: AnnexurePhotoEvidenceRow[] = [];
+  lines.forEach((line, lineIndex) => {
+    const taskIds = new Set(line.taskIds || []);
+    const matchingPhotos = photos.filter((photo) => taskIds.size > 0
+      ? taskIds.has(photo.taskId)
+      : photo.activity === line.activity && photo.place === line.place && photo.dateOfCompletion === line.dateOfCompletion);
+    const chunkCount = Math.max(1, Math.ceil(matchingPhotos.length / 3));
+    for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+      rows.push({
+        id: `${line.id}__evidence__${chunkIndex}`,
+        annexureRowNumber: lineIndex + 1,
+        activity: line.activity,
+        place: line.place,
+        dateOfCompletion: line.dateOfCompletion,
+        photos: matchingPhotos.slice(chunkIndex * 3, chunkIndex * 3 + 3),
+        photoOffset: chunkIndex * 3,
+      });
+    }
+  });
+  return rows;
+};
 
 // One row of the certificate's "Activity-wise Certified Value" running-account table —
 // actualQuantity/ratePerUnit come from the linked WO's line item when one matches by
@@ -101,6 +186,7 @@ const buildAnnexurePivot = (
       const existing = grid.get(key);
       if (existing) {
         existing.quantity += area;
+        if (entry.task_id && !existing.taskIds?.includes(entry.task_id)) existing.taskIds = [...(existing.taskIds || []), entry.task_id];
         continue;
       }
       grid.set(key, {
@@ -112,6 +198,7 @@ const buildAnnexurePivot = (
         quantity: area,
         rate: 0,
         landId: entry.farm_id,
+        taskIds: entry.task_id ? [entry.task_id] : [],
       });
     }
   }
@@ -127,13 +214,54 @@ const buildAnnexurePivot = (
     quantity: Number(entry.quantity) || 0,
     rate: 0,
     landId: entry.farm_id,
+    taskIds: entry.task_id ? [entry.task_id] : [],
   }));
 
   const lines = [...grid.values(), ...operationalLines].sort((a, b) =>
     a.dateOfCompletion.localeCompare(b.dateOfCompletion) || a.place.localeCompare(b.place) || a.activity.localeCompare(b.activity),
   );
 
-  return { lines };
+  const photoContexts = new Map<string, { activities: Set<string>; places: Set<string>; dates: Set<string> }>();
+  const addPhotoContext = (taskId: string | undefined, activity: string, place: string, date: string) => {
+    if (!taskId) return;
+    const context = photoContexts.get(taskId) || { activities: new Set<string>(), places: new Set<string>(), dates: new Set<string>() };
+    if (activity) context.activities.add(activity);
+    if (place) context.places.add(place);
+    if (date) context.dates.add(date);
+    photoContexts.set(taskId, context);
+  };
+
+  for (const entry of workDone) {
+    const details = taskDetailsById[entry.task_id];
+    const activity = details?.assigned_acres?.find((item) => item.farm_id === entry.farm_id)?.activity || 'Unknown Activity';
+    addPhotoContext(entry.task_id, activity, ownerNameFor(entry.farm_id), entry.date);
+  }
+  for (const entry of operationalWorkDone) {
+    addPhotoContext(
+      entry.task_id,
+      entry.activity,
+      entry.farm_id ? ownerNameFor(entry.farm_id) : '—',
+      entry.completion_date || entry.to_date || entry.from_date,
+    );
+  }
+
+  const photos: AnnexurePhoto[] = [];
+  for (const [taskId, context] of photoContexts) {
+    const imageUrls = Array.from(new Set(taskDetailsById[taskId]?.progress_images || [])).filter(Boolean);
+    imageUrls.forEach((imageUrl, index) => {
+      photos.push({
+        id: `${taskId}__photo__${index}`,
+        taskId,
+        imageUrl,
+        activity: Array.from(context.activities).join(', ') || 'Task activity',
+        place: Array.from(context.places).join(', ') || '—',
+        dateOfCompletion: Array.from(context.dates).sort().at(-1) || '',
+      });
+    });
+  }
+  photos.sort((a, b) => a.dateOfCompletion.localeCompare(b.dateOfCompletion) || a.activity.localeCompare(b.activity) || a.id.localeCompare(b.id));
+
+  return { lines, photos };
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -229,7 +357,17 @@ const blobToDataUrl = (blob: Blob) => new Promise<string>((resolve, reject) => {
 });
 
 const fetchImageDataUrl = async (url: string) => {
-  const res = await fetch(url);
+  if (url.startsWith('data:')) return url;
+  let fetchUrl = url;
+  try {
+    const parsed = new URL(url, typeof window === 'undefined' ? undefined : window.location.href);
+    const isTaskMedia = parsed.hostname === 'sbr-task-media-prod.s3.amazonaws.com';
+    const isLocalApp = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    if (isTaskMedia && isLocalApp) fetchUrl = `/__task-media${parsed.pathname}${parsed.search}`;
+  } catch {
+    // Keep the supplied URL when it is already relative or cannot be parsed.
+  }
+  const res = await fetch(fetchUrl);
   if (!res.ok) throw new Error(`Failed to fetch image: ${res.status}`);
   return blobToDataUrl(await res.blob());
 };
@@ -255,11 +393,11 @@ export interface PdfExportParams {
   activityProgress?: ActivityProgressRow[];
 }
 
-// Builds the certificate PDF document (Annexure + WCC pages) without saving/exporting it —
+// Builds the certificate PDF document (WCC followed by Annexure pages) without saving/exporting it —
 // shared by the direct-download path and the "generate & attach to purchase flow" path.
-const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAutoTable> => {
+export const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAutoTable> => {
   const { pivot, vendorName, fromDate, toDate, certNo, certDate, woNumber, blockLabel, scopeOfWorkLabel, preparedBy, verifiedBy, approvedBy, activityProgress } = p;
-  const doc = new jsPDF() as JsPdfWithAutoTable;
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' }) as JsPdfWithAutoTable;
   const enterprise = pivot.enterprise;
   const enterpriseTotals = enterprise ? calculateWccTotals(enterprise) : null;
   const enterpriseTemplate = enterprise ? WCC_WORK_TEMPLATES.find((item) => item.id === enterprise.header.workCategory) : undefined;
@@ -272,16 +410,39 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     activityTotalsMap.set(line.activity, (activityTotalsMap.get(line.activity) || 0) + line.quantity * line.rate);
   }
 
-  // ── Page 1: Annexure ──
+  // Build the service-line annexure first, then move it behind every certificate page once
+  // the WCC has been rendered. This keeps the WCC as page 1 even if its tables overflow.
+  doc.setFillColor(234, 244, 241);
+  doc.rect(14, 10, 182, 9, 'F');
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(14);
-  doc.text('ANNEXURE', 105, 15, { align: 'center' });
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(10);
-  doc.text(vendorName, 105, 22, { align: 'center' });
-  doc.text(`${formatDate(fromDate)} - ${formatDate(toDate)}`, 105, 27, { align: 'center' });
+  doc.setFontSize(12);
+  doc.setTextColor(13, 58, 53);
+  doc.text('WORK COMPLETION CERTIFICATE - ANNEXURE - 1', 105, 16, { align: 'center' });
+  doc.setTextColor(0, 0, 0);
 
-  const annexureHead = [['S.No', 'Activity', 'Place', 'Date of Completion', 'UOM', 'Quantity', 'Rate/Unit (₹)', 'Value (₹)']];
+  autoTable(doc, {
+    startY: 22,
+    theme: 'grid',
+    margin: { left: 14, right: 14 },
+    styles: { fontSize: 7.5, cellPadding: 1.5, lineColor: [185, 210, 203], lineWidth: 0.2 },
+    columnStyles: { 0: { cellWidth: 38 }, 1: { cellWidth: 53 }, 2: { cellWidth: 38 }, 3: { cellWidth: 53 } },
+    body: [
+      [
+        { content: 'Vendor / Contractor', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
+        vendorName || '—',
+        { content: 'Work Order No.', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
+        woNumber || '—',
+      ],
+      [
+        { content: 'WCC No.', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
+        certNo || '—',
+        { content: 'Work Period', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
+        `${formatDate(fromDate)} - ${formatDate(toDate)}`,
+      ],
+    ],
+  });
+
+  const annexureHead = [['S. No.', 'Activity', 'Place', 'Date of Completion', 'UOM', 'Quantity', 'Rate/Unit (INR)', 'Value (INR)']];
   const annexureBody: RowInput[] = pivot.lines.map((line, i) => [
     i + 1,
     line.activity,
@@ -293,15 +454,49 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     line.rate ? (line.quantity * line.rate).toFixed(2) : '—',
   ]);
   annexureBody.push([
-    { content: 'Total', colSpan: 5, styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
-    { content: totalQuantity.toFixed(2), styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
+    { content: 'Total', colSpan: 5, styles: { fontStyle: 'bold', fillColor: [234, 244, 241], textColor: [13, 71, 63] } },
+    { content: totalQuantity.toFixed(2), styles: { fontStyle: 'bold', fillColor: [234, 244, 241], textColor: [13, 71, 63] } },
     '',
-    { content: totalValue ? totalValue.toFixed(2) : '—', styles: { fontStyle: 'bold', fillColor: [224, 231, 255] } },
+    { content: totalValue ? totalValue.toFixed(2) : '—', styles: { fontStyle: 'bold', fillColor: [234, 244, 241], textColor: [13, 71, 63] } },
   ]);
 
-  autoTable(doc, { startY: 32, head: annexureHead, body: annexureBody, styles: { fontSize: 7 }, headStyles: { fillColor: [30, 41, 59] } });
+  autoTable(doc, {
+    startY: doc.lastAutoTable.finalY + 3,
+    head: annexureHead,
+    body: annexureBody,
+    theme: 'grid',
+    margin: { left: 14, right: 14 },
+    styles: {
+      fontSize: 6.5,
+      cellPadding: 1.15,
+      valign: 'middle',
+      lineColor: [185, 210, 203],
+      lineWidth: 0.2,
+    },
+    headStyles: {
+      fillColor: [13, 58, 53],
+      textColor: [255, 255, 255],
+      fontStyle: 'bold',
+      halign: 'center',
+      valign: 'middle',
+      cellPadding: 1,
+      lineColor: [108, 151, 142],
+      lineWidth: 0.2,
+    },
+    columnStyles: {
+      0: { cellWidth: 10, halign: 'center' },
+      1: { cellWidth: 40 },
+      2: { cellWidth: 47 },
+      3: { cellWidth: 24, halign: 'center' },
+      4: { cellWidth: 12, halign: 'center' },
+      5: { cellWidth: 14, halign: 'right' },
+      6: { cellWidth: 17, halign: 'right' },
+      7: { cellWidth: 18, halign: 'right' },
+    },
+    alternateRowStyles: { fillColor: [249, 251, 250] },
+  });
 
-  // ── Page 2: Work Completion Certificate ──
+  // ── Work Completion Certificate ──
   doc.addPage();
 
   let logoDataUrl: string | null = null;
@@ -316,9 +511,11 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
   doc.text(COMPANY_ADDRESS, 105, 33, { align: 'center' });
+  doc.setFillColor(234, 244, 241);
+  doc.rect(14, 36, 182, 8, 'F');
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11);
-  doc.text('WORK COMPLETION CERTIFICATE', 105, 40, { align: 'center' });
+  doc.text('WORK COMPLETION CERTIFICATE', 105, 41.5, { align: 'center' });
   doc.setFont('helvetica', 'normal');
 
   autoTable(doc, {
@@ -326,68 +523,76 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     theme: 'grid',
     styles: { fontSize: 8, cellPadding: 2 },
     body: [[
-      { content: 'Certificate No.:', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } },
+      { content: 'Certificate No.:', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
       certNo || '—',
-      { content: 'Date:', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } },
+      { content: 'Date:', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
       formatDate(certDate),
     ]],
-    columnStyles: { 0: { cellWidth: 32 }, 2: { cellWidth: 18 } },
+    columnStyles: {
+      0: { cellWidth: 32 },
+      1: { cellWidth: 59 },
+      2: { cellWidth: 32 },
+      3: { cellWidth: 59 },
+    },
   });
 
   autoTable(doc, {
     startY: doc.lastAutoTable.finalY + 2,
     theme: 'grid',
     styles: { fontSize: 8, cellPadding: 2 },
-    columnStyles: { 0: { cellWidth: 50 } },
+    headStyles: { fillColor: [13, 58, 53], textColor: [255, 255, 255], halign: 'center', fontStyle: 'bold', cellPadding: 1.2 },
+    columnStyles: { 0: { cellWidth: 60.66 }, 1: { cellWidth: 121.34 } },
+    head: [['PARTICULARS', 'DETAILS']],
     body: [
-      [{ content: 'Order No.', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, woNumber || '—'],
-      [{ content: 'WCC Type', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, enterprise?.header.wccType?.replace(/_/g, ' ') || 'Partial'],
-      [{ content: 'Project / Site', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, enterprise?.header.projectSiteLabel || blockLabel || '—'],
-      [{ content: 'Work Category', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, enterpriseTemplate?.label || 'Cultivation & Agricultural Fieldwork'],
-      [{ content: 'Work Location / Land', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, enterprise?.landIds?.length ? enterprise.landIds.join(', ') : 'As per Annexure / Service Lines'],
-      [{ content: 'Vendor / Contractor Name', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, vendorName],
-      [{ content: 'Scope of Work', styles: { fontStyle: 'bold', fillColor: [241, 245, 249] } }, scopeOfWorkLabel || '—'],
+      [{ content: 'Work Order No.', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } }, woNumber || '—'],
+      [{ content: 'WCC Type', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } }, enterprise?.header.wccType?.replace(/_/g, ' ') || 'Partial'],
+      [{ content: 'Project / Site', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } }, enterprise?.header.projectSiteLabel || blockLabel || '—'],
+      [{ content: 'Work Category', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } }, enterpriseTemplate?.label || 'Cultivation & Agricultural Fieldwork'],
+      [{ content: 'Work Location / Land', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } }, enterprise?.landIds?.length ? enterprise.landIds.join(', ') : 'As per Annexure / Service Lines'],
+      [{ content: 'Vendor / Contractor Name', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } }, vendorName],
+      [{ content: 'Scope of Work', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } }, scopeOfWorkLabel || '—'],
     ],
   });
 
   let y = doc.lastAutoTable.finalY + 6;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8);
-  doc.text('Activity-wise Certified Value', 14, y);
-  y += 2;
   if (activityProgress && activityProgress.length > 0) {
     autoTable(doc, {
       startY: y,
-      styles: { fontSize: 6, cellPadding: 1 },
-      headStyles: { fillColor: [30, 41, 59] },
+      theme: 'grid',
+      styles: { fontSize: 7.5, cellPadding: 1.15, lineColor: [200, 216, 211], lineWidth: 0.15, valign: 'middle' },
+      headStyles: { fillColor: [13, 58, 53], halign: 'center', lineColor: [108, 151, 142], lineWidth: 0.15, cellPadding: 0.9, fontSize: 7.5 },
       columnStyles: {
-        0: { cellWidth: 8 }, 3: { halign: 'right' }, 4: { halign: 'right' }, 5: { halign: 'right' },
-        6: { halign: 'right' }, 7: { halign: 'right' }, 8: { halign: 'right' }, 9: { halign: 'right' }, 10: { halign: 'right' },
+        0: { cellWidth: 10, halign: 'center' },
+        1: { cellWidth: 50 },
+        2: { cellWidth: 14 },
+        3: { cellWidth: 18, halign: 'right' },
+        4: { cellWidth: 18, halign: 'right' },
+        5: { cellWidth: 18, halign: 'right' },
+        6: { cellWidth: 18, halign: 'right' },
+        7: { cellWidth: 20, halign: 'right' },
+        8: { cellWidth: 16, halign: 'right' },
       },
       margin: { left: 14, right: 14 },
-      head: [['S.No', 'Activity', 'UOM', 'Rate/Unit', 'Actual Qty', 'Qty (Prev.)', 'Qty (Curr.)', 'Qty (Bal.)', 'Total Amt', 'Amt (Prev.)', 'Amt (Curr.)']],
+      head: [['S. No.', 'Activity', 'UOM', 'WO Qty.', 'Prev. Qty.', 'Quantity', 'Bal. Qty.', 'Rate/Unit', 'Value']],
       body: [
         ...activityProgress.map((row, i) => [
           i + 1,
           row.activity,
           row.uom || '—',
-          row.ratePerUnit ? row.ratePerUnit.toFixed(2) : '—',
           row.actualQuantity.toFixed(2),
           row.quantityPrevious.toFixed(2),
           row.quantityCurrent.toFixed(2),
           row.quantityBalance.toFixed(2),
-          row.totalAmount ? row.totalAmount.toFixed(2) : '—',
-          row.totalAmountPrevious.toFixed(2),
+          row.ratePerUnit ? row.ratePerUnit.toFixed(2) : '—',
           row.totalAmountCurrent ? row.totalAmountCurrent.toFixed(2) : '—',
         ]),
         [
-          { content: 'Total', colSpan: 4, styles: { fontStyle: 'bold' } },
+          { content: 'Total', colSpan: 3, styles: { fontStyle: 'bold' } },
           { content: activityProgress.reduce((sum, row) => sum + row.actualQuantity, 0).toFixed(2), styles: { fontStyle: 'bold' } },
           { content: activityProgress.reduce((sum, row) => sum + row.quantityPrevious, 0).toFixed(2), styles: { fontStyle: 'bold' } },
           { content: activityProgress.reduce((sum, row) => sum + row.quantityCurrent, 0).toFixed(2), styles: { fontStyle: 'bold' } },
           { content: activityProgress.reduce((sum, row) => sum + row.quantityBalance, 0).toFixed(2), styles: { fontStyle: 'bold' } },
-          { content: activityProgress.reduce((sum, row) => sum + row.totalAmount, 0).toFixed(2), styles: { fontStyle: 'bold' } },
-          { content: activityProgress.reduce((sum, row) => sum + row.totalAmountPrevious, 0).toFixed(2), styles: { fontStyle: 'bold' } },
+          '',
           { content: totalValue ? totalValue.toFixed(2) : '—', styles: { fontStyle: 'bold' } },
         ],
       ],
@@ -409,50 +614,208 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
     });
   }
   y = doc.lastAutoTable.finalY + 6;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  const certifiedValue = enterpriseTotals ? formatInr(enterpriseTotals.gross) : totalValue ? formatInr(totalValue) : '—';
-  doc.text(`Total Certified Value (₹): ${certifiedValue}`, 14, y);
-  y += 5;
-  doc.text(`Cumulative Certified Value: ${enterpriseTotals ? formatInr(enterpriseTotals.cumulative) : certifiedValue}`, 14, y);
-  y += 5;
-  doc.text(`Net Recommended for Invoice Matching: ${enterpriseTotals ? formatInr(enterpriseTotals.net) : certifiedValue}`, 14, y);
-  y += 9;
+  const certifiedAmount = enterpriseTotals ? enterpriseTotals.gross : totalValue;
+  const adjustmentAmount = Number(pivot.adjustment) || 0;
+  const recommendedAmount = certifiedAmount - adjustmentAmount;
+  autoTable(doc, {
+    startY: y,
+    theme: 'grid',
+    margin: { left: 14, right: 14 },
+    styles: { fontSize: 8, cellPadding: 1.5, halign: 'center' },
+    headStyles: { fillColor: [243, 248, 246], textColor: [13, 71, 63], fontStyle: 'bold', cellPadding: 1 },
+    bodyStyles: { fontStyle: 'bold', textColor: [30, 41, 59] },
+    columnStyles: { 0: { cellWidth: 60.66 }, 1: { cellWidth: 60.66 }, 2: { cellWidth: 60.66 } },
+    head: [['Certified Value (INR)', 'Adjustment (INR)', 'Recommended Value (INR)']],
+    body: [[formatPdfMoney(certifiedAmount), formatPdfMoney(adjustmentAmount), formatPdfMoney(recommendedAmount)]],
+  });
+  y = doc.lastAutoTable.finalY + 9;
 
-  doc.text('CERTIFICATION', 14, y);
-  y += 5;
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  const certLine1 = doc.splitTextToSize(
-    `This is to certify that the work described above has been completed by ${vendorName} in accordance with the terms and conditions of the linked order and has been physically verified by the undersigned.`,
-    180,
-  );
-  doc.text(certLine1, 14, y);
-  y += certLine1.length * 4 + 3;
-  const certLine2 = doc.splitTextToSize(
-    'The quality and quantity of work executed have been found satisfactory and the work is recommended for processing of payment.',
-    180,
-  );
-  doc.text(certLine2, 14, y);
-  y += certLine2.length * 4 + 6;
+  const defaultCertification1 = `This is to certify that the work described above has been completed by ${vendorName} in accordance with the terms and conditions of the linked order and has been physically verified by the undersigned.`;
+  const defaultCertification2 = 'The quality and quantity of work executed have been found satisfactory and the work is recommended for processing of payment.';
+  const certificationText = pivot.certification?.text
+    || [pivot.certification?.paragraph1, pivot.certification?.paragraph2].filter(Boolean).join('\n\n')
+    || `${defaultCertification1}\n\n${defaultCertification2}`;
 
   autoTable(doc, {
     startY: y,
+    theme: 'grid',
+    margin: { left: 14, right: 14 },
+    styles: { fontSize: 8, cellPadding: 2.5, lineColor: [185, 210, 203], lineWidth: 0.2, textColor: [30, 41, 59] },
+    headStyles: { fillColor: [243, 248, 246], textColor: [13, 71, 63], fontStyle: 'bold', halign: 'center', cellPadding: 1.2 },
+    head: [['NOTE']],
+    body: [[pivot.note?.trim() || '—']],
+  });
+  y = doc.lastAutoTable.finalY + 4;
+
+  autoTable(doc, {
+    startY: y,
+    theme: 'grid',
+    margin: { left: 14, right: 14 },
+    styles: { fontSize: 8, cellPadding: 2.5, lineColor: [185, 210, 203], lineWidth: 0.2, textColor: [30, 41, 59] },
+    headStyles: { fillColor: [243, 248, 246], textColor: [13, 71, 63], fontStyle: 'bold', halign: 'center', cellPadding: 1.2 },
+    head: [['CERTIFICATION']],
+    body: [[certificationText]],
+  });
+  y = doc.lastAutoTable.finalY + 6;
+
+  autoTable(doc, {
+    startY: y,
+    theme: 'grid',
     head: [['Prepared By', 'Verified By', 'Approved By']],
     body: [[
       `Name: ${preparedBy.name}\nDesignation: ${preparedBy.designation}\n\nSignature:`,
       verifiedBy ? `Name: ${verifiedBy.name}\nDesignation: ${verifiedBy.designation}\n\nSignature:` : 'Pending',
       approvedBy ? `Name: ${approvedBy.name}\nDesignation: ${approvedBy.designation}\n\nSignature:` : 'Pending',
     ]],
-    styles: { fontSize: 8, minCellHeight: 25, valign: 'top' },
-    headStyles: { fillColor: [30, 41, 59] },
+    margin: { left: 14, right: 14 },
+    styles: { fontSize: 8, valign: 'top', lineColor: [185, 210, 203], lineWidth: 0.2 },
+    headStyles: { fillColor: [13, 58, 53], cellPadding: 1.2, minCellHeight: 0, halign: 'center' },
+    bodyStyles: { minCellHeight: 25, cellPadding: 2, fillColor: [255, 255, 255] },
+    alternateRowStyles: { fillColor: [255, 255, 255] },
+    columnStyles: { 0: { cellWidth: 60.66 }, 1: { cellWidth: 60.66 }, 2: { cellWidth: 60.66 } },
   });
+
+  // The annexure was originally page 1. Move it after the complete WCC section before
+  // adding any enterprise evidence annexures.
+  doc.movePage(1, doc.getNumberOfPages());
+
+  // Annexure - 2: one evidence row per Annexure - 1 line, with three photo slots across.
+  // Extra photos continue on another row for that same Annexure - 1 line.
+  const taskPhotos = pivot.photos || [];
+  const photoEvidenceRows = buildAnnexurePhotoEvidenceRows(pivot.lines, taskPhotos);
+  const photoImageData = await Promise.all(taskPhotos.map(async (photo) => {
+    try { return await fetchImageDataUrl(photo.imageUrl); }
+    catch { return null; }
+  }));
+  const photoImageDataById = new Map(taskPhotos.map((photo, index) => [photo.id, photoImageData[index]]));
+  const photoPageCount = Math.max(1, Math.ceil(photoEvidenceRows.length / 3));
+  const singleLine = (value: string, width: number) => {
+    const lines = doc.splitTextToSize(value || '—', width) as string[];
+    return lines[0] || '—';
+  };
+
+  for (let photoPage = 0; photoPage < photoPageCount; photoPage += 1) {
+    doc.addPage();
+    doc.setFillColor(234, 244, 241);
+    doc.rect(14, 10, 182, 9, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(13, 58, 53);
+    doc.text(`ANNEXURE - 2: TASK PHOTOGRAPHS${photoPage > 0 ? ' (CONTINUED)' : ''}`, 105, 16, { align: 'center' });
+    doc.setTextColor(0, 0, 0);
+
+    autoTable(doc, {
+      startY: 22,
+      theme: 'grid',
+      margin: { left: 14, right: 14 },
+      styles: { fontSize: 7.5, cellPadding: 1.5, lineColor: [185, 210, 203], lineWidth: 0.2 },
+      columnStyles: { 0: { cellWidth: 38 }, 1: { cellWidth: 53 }, 2: { cellWidth: 38 }, 3: { cellWidth: 53 } },
+      body: [
+        [
+          { content: 'WCC No.', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
+          certNo || '—',
+          { content: 'Work Order No.', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
+          woNumber || '—',
+        ],
+        [
+          { content: 'Vendor / Contractor', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
+          vendorName || '—',
+          { content: 'Work Period', styles: { fontStyle: 'bold', fillColor: [243, 248, 246], textColor: [13, 71, 63] } },
+          `${formatDate(fromDate)} - ${formatDate(toDate)}`,
+        ],
+      ],
+    });
+
+    const pageEvidenceRows = photoEvidenceRows.slice(photoPage * 3, photoPage * 3 + 3);
+    const startY = doc.lastAutoTable.finalY + 4;
+    if (pageEvidenceRows.length === 0) {
+      doc.setDrawColor(185, 210, 203);
+      doc.setLineWidth(0.2);
+      doc.rect(14, startY, 182, 28);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(100, 116, 139);
+      doc.text('No task photographs were available for this WCC.', 105, startY + 15, { align: 'center' });
+      doc.setTextColor(0, 0, 0);
+      continue;
+    }
+
+    pageEvidenceRows.forEach((evidenceRow, pageRowIndex) => {
+      const x = 14;
+      const y = startY + pageRowIndex * 76;
+      const rowWidth = 182;
+      const rowHeight = 72;
+      const headingHeight = 10;
+      const photoCellWidth = rowWidth / 3;
+      doc.setDrawColor(185, 210, 203);
+      doc.setLineWidth(0.2);
+      doc.rect(x, y, rowWidth, rowHeight);
+      doc.setFillColor(243, 248, 246);
+      doc.rect(x, y, rowWidth, headingHeight, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(13, 71, 63);
+      const continuationLabel = evidenceRow.photoOffset > 0 ? ' (continued)' : '';
+      doc.text(singleLine(`Annexure Row ${evidenceRow.annexureRowNumber}${continuationLabel} - ${evidenceRow.activity}`, rowWidth - 4), x + 2, y + 4.2);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6.2);
+      doc.setTextColor(71, 85, 105);
+      doc.text(singleLine(`Location: ${evidenceRow.place}  |  Completion Date: ${formatDate(evidenceRow.dateOfCompletion)}`, rowWidth - 4), x + 2, y + 8);
+
+      for (let photoSlot = 0; photoSlot < 3; photoSlot += 1) {
+        const photo = evidenceRow.photos[photoSlot];
+        const cellX = x + photoSlot * photoCellWidth;
+        if (photoSlot > 0) doc.line(cellX, y + headingHeight, cellX, y + rowHeight);
+        const imageX = cellX + 2;
+        const imageY = y + headingHeight + 2;
+        const imageWidth = photoCellWidth - 4;
+        const imageHeight = 43;
+        doc.setFillColor(248, 250, 249);
+        doc.rect(imageX, imageY, imageWidth, imageHeight, 'F');
+
+        const imageData = photo ? photoImageDataById.get(photo.id) : null;
+        if (photo && imageData) {
+          try {
+            const properties = doc.getImageProperties(imageData);
+            const scale = Math.min(imageWidth / properties.width, imageHeight / properties.height);
+            const renderedWidth = properties.width * scale;
+            const renderedHeight = properties.height * scale;
+            doc.addImage(
+              imageData,
+              properties.fileType || 'JPEG',
+              imageX + (imageWidth - renderedWidth) / 2,
+              imageY + (imageHeight - renderedHeight) / 2,
+              renderedWidth,
+              renderedHeight,
+            );
+          } catch {
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(7);
+            doc.setTextColor(148, 163, 184);
+            doc.text('Image unavailable', cellX + photoCellWidth / 2, imageY + imageHeight / 2, { align: 'center' });
+          }
+        } else {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(7);
+          doc.setTextColor(148, 163, 184);
+          doc.text(photo ? 'Image unavailable' : 'Photo not available', cellX + photoCellWidth / 2, imageY + imageHeight / 2, { align: 'center' });
+        }
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(6.3);
+        doc.setTextColor(51, 65, 85);
+        doc.text(`Photo ${evidenceRow.photoOffset + photoSlot + 1}`, cellX + 2, y + 60);
+        doc.text(singleLine(photo ? `Task ID: ${photo.taskId}` : 'No task photo uploaded', photoCellWidth - 4), cellX + 2, y + 66);
+      }
+      doc.setTextColor(0, 0, 0);
+    });
+  }
 
   if (enterprise) {
     doc.addPage();
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(12);
-    doc.text('MEASUREMENT, QUALITY & EVIDENCE ANNEXURES', 105, 15, { align: 'center' });
+    doc.text('ANNEXURE - 3: MEASUREMENT, QUALITY & EVIDENCE', 105, 15, { align: 'center' });
     autoTable(doc, {
       startY: 22,
       head: [['Date', 'Location', 'Description', 'Calculated Qty.', 'Accepted Qty.', 'Unit', 'Source Ref.']],
@@ -493,6 +856,9 @@ const buildCertificatePdfDoc = async (p: PdfExportParams): Promise<JsPdfWithAuto
   const pageCount = doc.getNumberOfPages();
   for (let page = 1; page <= pageCount; page += 1) {
     doc.setPage(page);
+    doc.setDrawColor(185, 210, 203);
+    doc.setLineWidth(0.25);
+    doc.rect(10, 5, 190, 287);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7);
     doc.setTextColor(100);
@@ -551,9 +917,9 @@ const ParticularRow = ({
   staticValue?: string;
   trailingAction?: ReactNode;
 }) => (
-  <tr className="border-b border-gray-200">
-    <td className="w-1/3 px-3 py-1.5 font-semibold bg-slate-50 border-r border-gray-200 align-top">{label}</td>
-    <td className="px-3 py-1.5">
+  <tr className="border-b border-[#dce7e3] last:border-b-0">
+    <td className="w-1/3 border-r border-[#dce7e3] bg-[#f3f8f6] px-4 py-2 font-bold text-[#0D3A35] align-top">{label}</td>
+    <td className="px-4 py-2 text-slate-700">
       <div className="flex items-center gap-2">
         <div className="flex-1">
           {staticValue !== undefined ? (
@@ -681,7 +1047,9 @@ const WccCertificatePreview = ({
       const maxDate = maxCertifiedDateByActivity[line.activity];
       return !maxDate || line.dateOfCompletion > maxDate;
     });
-    return { ...raw, lines };
+    const includedTaskIds = new Set(lines.flatMap((line) => line.taskIds || []));
+    const photos = raw.photos?.filter((photo) => includedTaskIds.has(photo.taskId)) || [];
+    return { ...raw, lines, photos };
   }, [isCreateMode, workDone, taskDetailsById, scopeItems, operationalWorkDone, farmerNames, maxCertifiedDateByActivity]);
   const pivot = record ? record.annexure : livePivot;
   const enterprise = pivot.enterprise;
@@ -729,8 +1097,27 @@ const WccCertificatePreview = ({
     });
   }, [enterprise, pivot.lines, lineEdits]);
 
+  const taskPhotos = pivot.photos || [];
+  const taskPhotoEvidenceRows = buildAnnexurePhotoEvidenceRows(effectiveLines, taskPhotos);
+  const taskPhotoPages: AnnexurePhotoEvidenceRow[][] = taskPhotoEvidenceRows.length > 0
+    ? Array.from({ length: Math.ceil(taskPhotoEvidenceRows.length / 3) }, (_, pageIndex) => taskPhotoEvidenceRows.slice(pageIndex * 3, pageIndex * 3 + 3))
+    : [[]];
+
   const totalQuantity = effectiveLines.reduce((sum, line) => sum + line.quantity, 0);
   const totalValue = effectiveLines.reduce((sum, line) => sum + line.quantity * line.rate, 0);
+  const initialAdjustment = existingRecord?.annexure.adjustment
+    ?? (enterpriseTotals ? Math.max(0, enterpriseTotals.gross - enterpriseTotals.net) : 0);
+  const [adjustmentEdit, setAdjustmentEdit] = useState(String(initialAdjustment || ''));
+  const adjustmentValue = Number(adjustmentEdit) || 0;
+  const certifiedAmount = enterpriseTotals ? enterpriseTotals.gross : totalValue;
+  const recommendedValue = certifiedAmount - adjustmentValue;
+  const [noteEdit, setNoteEdit] = useState(existingRecord?.annexure.note ?? '');
+  const [certificationEdit, setCertificationEdit] = useState(() => {
+    const saved = existingRecord?.annexure.certification;
+    return saved?.text
+      || [saved?.paragraph1, saved?.paragraph2].filter(Boolean).join('\n\n')
+      || `This is to certify that the work described above has been completed by ${vendorName} in accordance with the terms and conditions of the linked order and has been physically verified by the undersigned.\n\nThe quality and quantity of work executed have been found satisfactory and the work is recommended for processing of payment.`;
+  });
 
   // Per-activity WO line item lookup (uom / rate / assigned quantity) — same
   // get_active_vendor_orders endpoint the on-field task flow uses, matched by activity name
@@ -815,27 +1202,59 @@ const WccCertificatePreview = ({
   const [orderDocUrl, setOrderDocUrl] = useState<string | null>(null);
   const [orderDocLoading, setOrderDocLoading] = useState(false);
   const [orderDocError, setOrderDocError] = useState<string | null>(null);
+  const [orderPreviewRecord, setOrderPreviewRecord] = useState<Record<string, unknown> | null>(null);
+  const [orderPreviewItems, setOrderPreviewItems] = useState<Array<{ name: string; description?: string; uom: string; quantity: number; unit_rate: number }>>([]);
 
-  const handleOpenOrderPreview = () => {
+  const handleOpenOrderPreview = async () => {
     const orderNumber = displayWoNumber.trim();
     if (!orderNumber) return;
     setShowOrderPreview(true);
     setOrderDocUrl(null);
     setOrderDocError(null);
+    setOrderPreviewRecord(null);
+    setOrderPreviewItems([]);
     setOrderDocLoading(true);
-    fetch(`${BASE_URL}/purchase_flow/get_doc_url_of_order/${orderNumber}`)
-      .then(async (res) => {
-        const data = await res.json().catch(() => null);
-        if (!res.ok || !data?.document_url) {
-          throw new Error(data?.detail || 'Document not found for this order number');
-        }
-        setOrderDocUrl(data.document_url);
-      })
-      .catch((err) => setOrderDocError(err instanceof Error ? err.message : 'Failed to load order document'))
-      .finally(() => setOrderDocLoading(false));
-  };
+    try {
+      const documentResponse = await fetch(`${BASE_URL}/purchase_flow/get_doc_url_of_order/${encodeURIComponent(orderNumber)}`);
+      const documentData = await documentResponse.json().catch(() => null) as { document_url?: string } | null;
+      if (documentResponse.ok && documentData?.document_url) {
+        setOrderDocUrl(documentData.document_url);
+        return;
+      }
 
-  const certifiedValue = totalValue ? formatInr(totalValue) : '—';
+      const allOrdersResponse = await fetch(`${BASE_URL}/purchase_flow/get_all_purchase_orders`, {
+        headers: { Accept: 'application/json' },
+      });
+      const allOrdersData = allOrdersResponse.ok
+        ? await allOrdersResponse.json().catch(() => null) as { purchase_orders?: Record<string, unknown>[] } | null
+        : null;
+      const fullOrder = (Array.isArray(allOrdersData?.purchase_orders) ? allOrdersData.purchase_orders : []).find((order) => {
+        const quote = order.purchase_quote && typeof order.purchase_quote === 'object'
+          ? order.purchase_quote as Record<string, unknown>
+          : {};
+        return [order.order_number, quote.order_number, quote.poNo, quote.po_no]
+          .some((value) => String(value ?? '').trim() === orderNumber);
+      });
+      if (fullOrder) {
+        setOrderPreviewRecord(fullOrder);
+        return;
+      }
+
+      if (!effectiveVendorId) throw new Error('Vendor is missing for this Work Order');
+      const orderResponse = await fetch(`${BASE_URL}/admin_wcc_certificate/get_active_vendor_orders/${effectiveVendorId}`);
+      const orderData = await orderResponse.json().catch(() => null) as {
+        success?: boolean;
+        items_details?: Record<string, Array<{ name: string; description?: string; uom: string; quantity: number; unit_rate: number }>>;
+      } | null;
+      const items = orderData?.success ? orderData.items_details?.[orderNumber] ?? [] : [];
+      if (!items.length) throw new Error('Work Order details are not available');
+      setOrderPreviewItems(items.map((item) => ({ ...item, quantity: Number(item.quantity) || 0, unit_rate: Number(item.unit_rate) || 0 })));
+    } catch (error) {
+      setOrderDocError(error instanceof Error ? error.message : 'Failed to load Work Order');
+    } finally {
+      setOrderDocLoading(false);
+    }
+  };
 
   // Already known from the vendor's scope-of-work (get_scope_of_work_for_vendor) —
   // no need to type it in again.
@@ -893,9 +1312,8 @@ const WccCertificatePreview = ({
   const [showRejectInput, setShowRejectInput] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
 
-  const handleDownload = () => {
-    downloadCertificateAsPdf({
-      pivot: { ...pivot, lines: effectiveLines },
+  const currentPdfParams = (): PdfExportParams => ({
+      pivot: { ...pivot, lines: effectiveLines, adjustment: adjustmentValue, note: noteEdit, certification: { text: certificationEdit } },
       vendorName,
       fromDate,
       toDate,
@@ -908,7 +1326,33 @@ const WccCertificatePreview = ({
       verifiedBy: verifiedByDisplay,
       approvedBy: approvedByDisplay,
       activityProgress,
-    }).catch((err) => console.error('Failed to generate WCC PDF:', err));
+  });
+
+  const handleDownload = () => {
+    downloadCertificateAsPdf(currentPdfParams()).catch((err) => console.error('Failed to generate WCC PDF:', err));
+  };
+
+  const handlePrint = async () => {
+    // Print the same generated PDF used by Download. This keeps the carefully measured A4
+    // layout intact and prevents editable popup controls/global print CSS leaking into print.
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      toast.error('Please allow pop-ups to print the certificate.');
+      return;
+    }
+
+    try {
+      printWindow.document.write('<!doctype html><html><head><title>Preparing WCC print</title></head><body style="font:16px Arial;padding:24px">Preparing certificate…</body></html>');
+      printWindow.document.close();
+      const doc = await buildCertificatePdfDoc(currentPdfParams());
+      doc.autoPrint();
+      const pdfUrl = URL.createObjectURL(doc.output('blob'));
+      printWindow.location.replace(pdfUrl);
+      window.setTimeout(() => URL.revokeObjectURL(pdfUrl), 120_000);
+    } catch (error) {
+      printWindow.close();
+      toast.error(error instanceof Error ? error.message : 'Failed to prepare certificate for printing.');
+    }
   };
 
   const handleSubmitForVerification = async () => {
@@ -916,9 +1360,9 @@ const WccCertificatePreview = ({
     if (!vendorId) { toast.error('Missing vendor.'); return; }
     if (effectiveLines.length === 0) { toast.error('No completed work to certify.'); return; }
     if (effectiveLines.some((line) => !line.rate)) { toast.error('Please enter a rate for every activity line before submitting.'); return; }
-    if (!displayWoNumber.trim()) { toast.error('Please enter an Order No. before submitting.'); return; }
+    if (!displayWoNumber.trim()) { toast.error('Please enter a Work Order No. before submitting.'); return; }
 
-    const annexure = { ...pivot, lines: effectiveLines };
+    const annexure = { ...pivot, lines: effectiveLines, adjustment: adjustmentValue, note: noteEdit, certification: { text: certificationEdit } };
     const avgRate = totalQuantity > 0 ? totalValue / totalQuantity : 0;
 
     setSubmitting(true);
@@ -982,7 +1426,7 @@ const WccCertificatePreview = ({
     if (!user?.id || !user?.name) { toast.error('You must be logged in to resubmit a certificate.'); return; }
     if (effectiveLines.some((line) => !line.rate)) { toast.error('Please enter a rate for every activity line before resubmitting.'); return; }
 
-    const annexure = { ...existingRecord.annexure, lines: effectiveLines };
+    const annexure = { ...existingRecord.annexure, lines: effectiveLines, adjustment: adjustmentValue, note: noteEdit, certification: { text: certificationEdit } };
     const avgRate = totalQuantity > 0 ? totalValue / totalQuantity : 0;
 
     setSubmitting(true);
@@ -1062,51 +1506,67 @@ const WccCertificatePreview = ({
   };
 
   return (
-    <div className="fixed inset-0 z-[110] flex items-center justify-center gap-4 bg-black/50 backdrop-blur-sm p-4">
+    <div className="wcc-print-root fixed inset-0 z-[140] flex items-center justify-center gap-4 bg-slate-950/60 p-3 backdrop-blur-sm sm:p-5">
       <style>{`
+        .wcc-certificate-page { order: 1; }
+        .wcc-annexure-page { order: 2; }
+        .wcc-photo-annexure-page { order: 3; }
+        .wcc-activity-table th { border: 1px solid rgba(255, 255, 255, 0.18); }
+        .wcc-activity-table td { border: 1px solid #dce7e3; }
         @media print {
-          body * { visibility: hidden; }
-          .wcc-print-area, .wcc-print-area * { visibility: visible; }
-          .wcc-print-area { position: absolute; left: 0; top: 0; width: 100%; }
+          @page { size: A4 portrait; margin: 10mm; }
+          body * { visibility: hidden !important; }
+          .wcc-print-root, .wcc-print-root *, .wcc-print-shell, .wcc-print-area, .wcc-print-area * { visibility: visible !important; }
+          html, body { width: 210mm; min-width: 210mm; margin: 0 !important; padding: 0 !important; background: white !important; }
+          .wcc-print-root { position: static !important; display: block !important; width: 190mm !important; height: auto !important; padding: 0 !important; background: white !important; backdrop-filter: none !important; }
+          .wcc-print-shell { position: static !important; display: block !important; width: 190mm !important; max-width: 190mm !important; height: auto !important; overflow: visible !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; transform: none !important; animation: none !important; }
+          .wcc-print-area { position: static !important; display: flex !important; box-sizing: border-box; width: 190mm !important; max-width: 190mm !important; height: auto !important; padding: 0 !important; background: white !important; gap: 0 !important; overflow: visible !important; }
+          .wcc-certificate-page, .wcc-annexure-page, .wcc-photo-annexure-page { box-sizing: border-box; width: 190mm !important; max-width: 190mm !important; }
+          .wcc-certificate-page { break-after: page; page-break-after: always; border-radius: 0 !important; box-shadow: none !important; }
+          .wcc-annexure-page, .wcc-photo-annexure-page { break-before: page; page-break-before: always; border-radius: 0 !important; box-shadow: none !important; }
+          .wcc-document-table { break-inside: auto; }
+          .wcc-document-table { width: 100% !important; min-width: 0 !important; table-layout: fixed !important; font-size: 7pt !important; }
+          .wcc-document-table th, .wcc-document-table td { padding: 1.5mm 1mm !important; overflow-wrap: anywhere; }
+          .wcc-document-table tr { break-inside: avoid; page-break-inside: avoid; }
           .wcc-no-print { display: none !important; }
         }
       `}</style>
       <div
         className={cn(
-          'h-[90vh] bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95 duration-200',
-          showOrderPreview ? 'w-full max-w-2xl' : 'w-full max-w-4xl',
+          'wcc-print-shell flex h-[92vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-white shadow-[0_30px_90px_rgba(2,20,17,0.35)] animate-in zoom-in-95 duration-200',
+          showOrderPreview ? 'w-full max-w-2xl' : 'w-full max-w-[1180px]',
         )}
       >
         {/* Header */}
-        <div className="wcc-no-print flex items-center justify-between px-5 py-3 border-b border-gray-100 shrink-0">
+        <div className="wcc-no-print flex shrink-0 items-center justify-between gap-4 bg-[#0D3A35] px-6 py-4 text-white">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h3 className="text-sm font-bold text-slate-800 truncate">Certificate Preview</h3>
+              <h3 className="truncate text-lg font-bold tracking-tight">Work Completion Certificate</h3>
               {record && (
-                <span className={cn('shrink-0 px-2 py-0.5 rounded-full text-[10px] font-bold border', STATUS_TONE[record.status])}>
+                <span className={cn('shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold', STATUS_TONE[record.status])}>
                   {STATUS_LABEL[record.status]}
                 </span>
               )}
             </div>
-            <p className="text-[11px] text-slate-400 truncate">{vendorName} · {formatDate(fromDate)} – {formatDate(toDate)}</p>
+            <p className="mt-1 truncate text-xs font-medium text-white/60">{vendorName} · {formatDate(fromDate)} – {formatDate(toDate)}</p>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex shrink-0 items-center gap-2">
             <button
               type="button"
               onClick={handleDownload}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+              className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 text-xs font-bold text-white transition-colors hover:bg-white/20"
             >
               <Download className="w-3.5 h-3.5" /> Download PDF
             </button>
             <button
               type="button"
-              onClick={() => window.print()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white hover:bg-gray-50 transition-colors"
+              onClick={handlePrint}
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-white px-4 text-xs font-bold text-[#0D3A35] transition-colors hover:bg-[#eef7f4]"
             >
               <Printer className="w-3.5 h-3.5" /> Print
             </button>
-            <button type="button" onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors">
-              <X className="w-4 h-4 text-gray-500" />
+            <button type="button" onClick={onClose} className="grid h-10 w-10 place-items-center rounded-xl text-white/60 transition-colors hover:bg-white/10 hover:text-white" aria-label="Close preview">
+              <X className="h-5 w-5" />
             </button>
           </div>
         </div>
@@ -1119,7 +1579,7 @@ const WccCertificatePreview = ({
         )}
 
         {/* Printable content */}
-        <div className="wcc-print-area flex-1 overflow-y-auto p-6 space-y-8 bg-slate-100">
+        <div className="wcc-print-area flex flex-1 flex-col gap-7 overflow-y-auto bg-[#eef2f4] p-5 sm:p-7 lg:p-8">
           {effectiveLines.length === 0 ? (
             <div className="py-16 text-center text-sm text-slate-400">
               No completed work found for this vendor in the selected period.
@@ -1127,33 +1587,54 @@ const WccCertificatePreview = ({
           ) : (
             <>
               {/* Annexure */}
-              <div className="bg-white rounded-lg border border-gray-200 p-4">
-                <h2 className="text-center text-base font-bold text-slate-900 uppercase tracking-wide">Annexure</h2>
-                <p className="text-center text-xs text-slate-500 mt-0.5">{vendorName} · {formatDate(fromDate)} – {formatDate(toDate)}</p>
-                <div className="mt-4 overflow-x-auto rounded-lg border border-gray-200">
-                  <table className="w-full text-xs border-collapse">
+              <div className="wcc-annexure-page mx-auto min-h-[1123px] w-full max-w-[794px] shrink-0 overflow-hidden rounded-2xl border border-[#b9d2cb] bg-white shadow-[0_14px_40px_rgba(15,23,42,0.06)]">
+                <div className="border-b border-[#dce7e3] bg-[#f3f8f6] px-6 py-5 text-center">
+                  <p className="text-[10px] font-extrabold uppercase tracking-[0.2em] text-[#18765f]">Work Completion Certificate</p>
+                  <h2 className="mt-1 text-xl font-bold uppercase tracking-wide text-slate-950">Annexure - 1</h2>
+                </div>
+                <div className="px-5 pt-5">
+                  <table className="wcc-document-table w-full table-fixed border-collapse border border-[#b9d2cb] text-xs">
+                    <tbody>
+                      <tr>
+                        <th className="w-1/5 border border-[#b9d2cb] bg-[#f3f8f6] px-3 py-2 text-left font-bold text-[#0D3A35]">Vendor / Contractor</th>
+                        <td className="w-[30%] border border-[#b9d2cb] px-3 py-2 text-slate-700">{vendorName}</td>
+                        <th className="w-1/5 border border-[#b9d2cb] bg-[#f3f8f6] px-3 py-2 text-left font-bold text-[#0D3A35]">Work Order No.</th>
+                        <td className="w-[30%] border border-[#b9d2cb] px-3 py-2 text-slate-700">{displayWoNumber || '—'}</td>
+                      </tr>
+                      <tr>
+                        <th className="border border-[#b9d2cb] bg-[#f3f8f6] px-3 py-2 text-left font-bold text-[#0D3A35]">WCC No.</th>
+                        <td className="border border-[#b9d2cb] px-3 py-2 text-slate-700">{certNoDisplay || '—'}</td>
+                        <th className="border border-[#b9d2cb] bg-[#f3f8f6] px-3 py-2 text-left font-bold text-[#0D3A35]">Work Period</th>
+                        <td className="border border-[#b9d2cb] px-3 py-2 text-slate-700">{formatDate(fromDate)} – {formatDate(toDate)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="overflow-x-auto p-5 pt-3">
+                  <div className="overflow-hidden rounded-xl border border-slate-200">
+                  <table className="wcc-document-table wcc-activity-table w-full border-collapse text-xs">
                     <thead>
-                      <tr className="bg-slate-800 text-white">
-                        <th className="px-2 py-2 text-left font-semibold">S.No</th>
-                        <th className="px-2 py-2 text-left font-semibold">Activity</th>
-                        <th className="px-2 py-2 text-left font-semibold">Place</th>
-                        <th className="px-2 py-2 text-left font-semibold whitespace-nowrap">Date of Completion</th>
-                        <th className="px-2 py-2 text-left font-semibold">UOM</th>
-                        <th className="px-2 py-2 text-right font-semibold">Quantity</th>
-                        <th className="px-2 py-2 text-right font-semibold whitespace-nowrap">Rate / Unit (₹)</th>
-                        <th className="px-2 py-2 text-right font-semibold">Value (₹)</th>
+                      <tr className="bg-[#0D3A35] text-white">
+                        <th className="px-3 py-3 text-center text-[10px] font-bold uppercase tracking-wide">S. No.</th>
+                        <th className="px-3 py-3 text-left text-[10px] font-bold uppercase tracking-wide">Activity</th>
+                        <th className="px-3 py-3 text-left text-[10px] font-bold uppercase tracking-wide">Place</th>
+                        <th className="whitespace-nowrap px-3 py-3 text-left text-[10px] font-bold uppercase tracking-wide">Date of Completion</th>
+                        <th className="px-3 py-3 text-left text-[10px] font-bold uppercase tracking-wide">UOM</th>
+                        <th className="px-3 py-3 text-right text-[10px] font-bold uppercase tracking-wide">Quantity</th>
+                        <th className="whitespace-nowrap px-3 py-3 text-right text-[10px] font-bold uppercase tracking-wide">Rate / Unit (₹)</th>
+                        <th className="px-3 py-3 text-right text-[10px] font-bold uppercase tracking-wide">Value (₹)</th>
                       </tr>
                     </thead>
                     <tbody>
                       {effectiveLines.map((line, i) => (
-                        <tr key={line.id} className={cn('border-b border-gray-100', i % 2 === 1 && 'bg-slate-50/50')}>
-                          <td className="px-2 py-1.5">{i + 1}</td>
-                          <td className="px-2 py-1.5">{line.activity}</td>
-                          <td className="px-2 py-1.5">{line.place}</td>
-                          <td className="px-2 py-1.5 whitespace-nowrap">{formatDate(line.dateOfCompletion)}</td>
-                          <td className="px-2 py-1.5">{line.uom}</td>
-                          <td className="px-2 py-1.5 text-right whitespace-nowrap">{line.quantity.toFixed(2)}</td>
-                          <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                        <tr key={line.id} className={cn('border-b border-slate-100 transition-colors hover:bg-[#0D3A35]/[0.025]', i % 2 === 1 && 'bg-slate-50/50')}>
+                          <td className="px-3 py-2.5 text-center text-slate-500">{i + 1}</td>
+                          <td className="px-3 py-2.5 font-semibold text-slate-800">{line.activity}</td>
+                          <td className="px-3 py-2.5 text-slate-600">{line.place}</td>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{formatDate(line.dateOfCompletion)}</td>
+                          <td className="px-3 py-2.5 text-slate-600">{line.uom}</td>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-right font-medium tabular-nums">{line.quantity.toFixed(2)}</td>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">
                             {linesEditable ? (
                               <input
                                 type="number"
@@ -1166,36 +1647,117 @@ const WccCertificatePreview = ({
                               line.rate ? line.rate.toFixed(2) : '—'
                             )}
                           </td>
-                          <td className="px-2 py-1.5 text-right whitespace-nowrap font-semibold">{line.rate ? (line.quantity * line.rate).toFixed(2) : '—'}</td>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-right font-bold tabular-nums text-slate-800">{line.rate ? (line.quantity * line.rate).toFixed(2) : '—'}</td>
                         </tr>
                       ))}
-                      <tr className="bg-emerald-50 font-bold">
-                        <td className="px-2 py-2" colSpan={5}>Total</td>
-                        <td className="px-2 py-2 text-right whitespace-nowrap">{totalQuantity.toFixed(2)}</td>
-                        <td className="px-2 py-2" />
-                        <td className="px-2 py-2 text-right whitespace-nowrap">{totalValue ? totalValue.toFixed(2) : '—'}</td>
+                      <tr className="bg-[#eaf4f1] font-bold text-[#0D3A35]">
+                        <td className="px-3 py-3" colSpan={5}>Total certified work</td>
+                        <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums">{totalQuantity.toFixed(2)}</td>
+                        <td className="px-3 py-3" />
+                        <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums">{totalValue ? totalValue.toFixed(2) : '—'}</td>
                       </tr>
                     </tbody>
                   </table>
+                  </div>
                 </div>
               </div>
 
+              {/* Annexure - 2: task photographs, six structured cards per sheet. */}
+              {taskPhotoPages.map((photoPage, photoPageIndex) => (
+                <div key={`photo-annexure-${photoPageIndex}`} className="wcc-photo-annexure-page mx-auto min-h-[1123px] w-full max-w-[794px] shrink-0 overflow-hidden rounded-2xl border border-[#b9d2cb] bg-white shadow-[0_14px_40px_rgba(15,23,42,0.06)]">
+                  <div className="border-b border-[#dce7e3] bg-[#f3f8f6] px-6 py-5 text-center">
+                    <p className="text-[10px] font-extrabold uppercase tracking-[0.2em] text-[#18765f]">Work Completion Certificate</p>
+                    <h2 className="mt-1 text-xl font-bold uppercase tracking-wide text-slate-950">
+                      Annexure - 2: Task Photographs{photoPageIndex > 0 ? ' (Continued)' : ''}
+                    </h2>
+                  </div>
+                  <div className="px-5 pt-5">
+                    <table className="wcc-document-table w-full table-fixed border-collapse border border-[#b9d2cb] text-xs">
+                      <tbody>
+                        <tr>
+                          <th className="w-1/5 border border-[#b9d2cb] bg-[#f3f8f6] px-3 py-2 text-left font-bold text-[#0D3A35]">WCC No.</th>
+                          <td className="w-[30%] border border-[#b9d2cb] px-3 py-2 text-slate-700">{certNoDisplay || '—'}</td>
+                          <th className="w-1/5 border border-[#b9d2cb] bg-[#f3f8f6] px-3 py-2 text-left font-bold text-[#0D3A35]">Work Order No.</th>
+                          <td className="w-[30%] border border-[#b9d2cb] px-3 py-2 text-slate-700">{displayWoNumber || '—'}</td>
+                        </tr>
+                        <tr>
+                          <th className="border border-[#b9d2cb] bg-[#f3f8f6] px-3 py-2 text-left font-bold text-[#0D3A35]">Vendor / Contractor</th>
+                          <td className="border border-[#b9d2cb] px-3 py-2 text-slate-700">{vendorName || '—'}</td>
+                          <th className="border border-[#b9d2cb] bg-[#f3f8f6] px-3 py-2 text-left font-bold text-[#0D3A35]">Work Period</th>
+                          <td className="border border-[#b9d2cb] px-3 py-2 text-slate-700">{formatDate(fromDate)} – {formatDate(toDate)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {photoPage.length > 0 ? (
+                    <div className="space-y-4 p-5 pt-4">
+                      {photoPage.map((evidenceRow) => (
+                        <section key={evidenceRow.id} className="overflow-hidden rounded-lg border border-[#b9d2cb] bg-white">
+                          <div className="border-b border-[#b9d2cb] bg-[#f3f8f6] px-3 py-2">
+                            <p className="text-xs font-bold text-[#0D3A35]">
+                              Annexure Row {evidenceRow.annexureRowNumber}{evidenceRow.photoOffset > 0 ? ' (continued)' : ''} - {evidenceRow.activity}
+                            </p>
+                            <p className="mt-0.5 text-[10px] text-slate-500">
+                              Location: {evidenceRow.place || '—'} · Completion Date: {formatDate(evidenceRow.dateOfCompletion)}
+                            </p>
+                          </div>
+                          <div className="grid grid-cols-3 divide-x divide-[#b9d2cb]">
+                            {Array.from({ length: 3 }, (_, photoSlot) => {
+                              const photo = evidenceRow.photos[photoSlot];
+                              const photoNumber = evidenceRow.photoOffset + photoSlot + 1;
+                              return (
+                                <figure key={`${evidenceRow.id}__slot__${photoSlot}`} className="min-w-0">
+                                  <div className="flex h-40 items-center justify-center bg-slate-50 p-2">
+                                    {photo ? (
+                                      <img src={photo.imageUrl} alt={`${evidenceRow.activity} evidence ${photoNumber}`} className="h-full w-full object-contain" />
+                                    ) : (
+                                      <span className="text-[11px] font-medium text-slate-400">Photo not available</span>
+                                    )}
+                                  </div>
+                                  <figcaption className="border-t border-[#dce7e3] px-3 py-2 text-[10px] leading-4">
+                                    <p className="font-bold text-[#0D3A35]">Photo {photoNumber}</p>
+                                    <p className="truncate text-slate-500">{photo ? `Task ID: ${photo.taskId}` : 'No task photo uploaded'}</p>
+                                  </figcaption>
+                                </figure>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="m-5 rounded-lg border border-[#b9d2cb] px-6 py-12 text-center text-sm text-slate-400">
+                      No task photographs were available for this WCC.
+                    </div>
+                  )}
+                </div>
+              ))}
+
               {/* Work Completion Certificate — replica of the real document */}
-              <div className="bg-white rounded-lg border-2 border-gray-800 overflow-hidden">
+              <div className="wcc-certificate-page mx-auto min-h-[1123px] w-full max-w-[794px] shrink-0 overflow-hidden rounded-2xl border border-[#0D3A35]/30 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.06)]">
                 {/* Letterhead */}
-                <div className="text-center py-4 px-4 border-b-2 border-gray-800">
-                  <img src={logo3f} alt="3F Logo" className="h-12 w-auto mx-auto mb-1" />
-                  <h1 className="text-lg font-bold text-slate-900 tracking-wide">{COMPANY_NAME}</h1>
-                  <p className="text-[11px] text-slate-600 mt-0.5">{COMPANY_ADDRESS}</p>
-                  <h2 className="text-sm font-bold text-slate-900 mt-2 uppercase tracking-wide">Work Completion Certificate</h2>
+                <div className="border-b border-[#0D3A35]/20 bg-white px-6 py-5 text-center">
+                  <img src={logo3f} alt="3F Logo" className="mx-auto mb-2 h-12 w-auto" />
+                  <h1 className="text-xl font-bold tracking-wide text-slate-950">{COMPANY_NAME}</h1>
+                  <p className="mt-1 text-[11px] font-medium text-slate-500">{COMPANY_ADDRESS}</p>
+                  <h2 className="-mx-6 -mb-5 mt-4 border-y border-[#dce7e3] bg-[#eaf4f1] px-6 py-3 text-base font-bold uppercase tracking-wide text-[#0D3A35]">
+                    Work Completion Certificate
+                  </h2>
                 </div>
 
                 {/* Certificate No. / Date */}
-                <table className="w-full text-xs border-collapse">
+                <table className="wcc-document-table w-full table-fixed border-collapse text-xs">
+                  <colgroup>
+                    <col className="w-[18%]" />
+                    <col className="w-[32%]" />
+                    <col className="w-[18%]" />
+                    <col className="w-[32%]" />
+                  </colgroup>
                   <tbody>
-                    <tr className="border-b border-gray-300">
-                      <td className="w-36 px-3 py-2 font-semibold bg-slate-50 border-r border-gray-300">Certificate No.:</td>
-                      <td className="px-3 py-2 border-r border-gray-300">
+                    <tr className="border-b border-[#dce7e3]">
+                      <td className="border-r border-[#dce7e3] bg-[#f3f8f6] px-4 py-2.5 font-bold text-[#0D3A35]">Certificate No.</td>
+                      <td className="border-r border-[#dce7e3] px-4 py-2.5 font-mono font-semibold text-slate-800">
                         {locked || !isCreateMode ? (
                           <span>{certNoDisplay || '—'}</span>
                         ) : (
@@ -1207,8 +1769,8 @@ const WccCertificatePreview = ({
                           />
                         )}
                       </td>
-                      <td className="w-16 px-3 py-2 font-semibold bg-slate-50 border-r border-gray-300">Date:</td>
-                      <td className="w-36 px-3 py-2">
+                      <td className="border-r border-[#dce7e3] bg-[#f3f8f6] px-4 py-2.5 font-bold text-[#0D3A35]">Date</td>
+                      <td className="px-4 py-2.5 font-semibold text-slate-700">
                         {locked || !isCreateMode ? (
                           <span>{formatDate(certDateDisplay)}</span>
                         ) : (
@@ -1220,16 +1782,17 @@ const WccCertificatePreview = ({
                 </table>
 
                 {/* Particulars */}
-                <div className="bg-slate-100 border-y border-gray-300 px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-center text-slate-600">
-                  Particulars
+                <div className="grid grid-cols-[1fr_2fr] border-b border-[#dce7e3] bg-[#0D3A35] text-center text-[10px] font-bold uppercase tracking-[0.14em] text-white">
+                  <div className="border-r border-white/15 px-4 py-2">Particulars</div>
+                  <div className="px-4 py-2">Details</div>
                 </div>
-                <table className="w-full text-xs border-collapse">
+                <table className="wcc-document-table w-full border-collapse text-xs">
                   <tbody>
                     {locked || !isCreateMode ? (
-                      <ParticularRow label="Order No." staticValue={displayWoNumber || '—'} />
+                      <ParticularRow label="Work Order No." staticValue={displayWoNumber || '—'} />
                     ) : (
                       <ParticularRow
-                        label="Order No."
+                        label="Work Order No."
                         value={meta.woNumber}
                         onChange={setField('woNumber')}
                         placeholder="SBRPL/BIO-CG/WO/26-27/XXX"
@@ -1271,49 +1834,43 @@ const WccCertificatePreview = ({
                     Annexure above; this rolls those lines up by activity as a running-account
                     progress table. "Previous" columns are placeholders (always 0) until the
                     backend can report quantity already certified in earlier WCCs. */}
-                <div className="px-3 py-2 border-t border-gray-300 text-xs">
-                  <div className="font-semibold text-slate-600 mb-1">Activity-wise Certified Value</div>
-                  <div className="overflow-x-auto rounded border border-gray-200">
-                    <table className="w-full min-w-[860px] border-collapse text-[11px]">
+                <div className="border-t border-[#dce7e3] px-5 py-4 text-xs">
+                  <div className="overflow-x-auto rounded-xl border border-slate-200">
+                    <table className="wcc-activity-table wcc-document-table w-full min-w-[720px] border-collapse text-xs">
                       <thead>
-                        <tr className="bg-slate-100 text-slate-600">
-                          <th className="px-1.5 py-1 text-left font-semibold">S.No</th>
-                          <th className="px-1.5 py-1 text-left font-semibold">Activity</th>
-                          <th className="px-1.5 py-1 text-left font-semibold">UOM</th>
-                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Rate/Unit (₹)</th>
-                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Actual Qty</th>
-                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Qty (Prev.)</th>
-                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Qty (Curr.)</th>
-                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Qty (Bal.)</th>
-                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Total Amt (₹)</th>
-                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Amt (Prev.) (₹)</th>
-                          <th className="px-1.5 py-1 text-right font-semibold whitespace-nowrap">Amt (Curr.) (₹)</th>
+                        <tr className="bg-[#0D3A35] text-white">
+                          <th className="px-2 py-2 text-center font-bold">S. No.</th>
+                          <th className="px-2 py-2 text-center font-bold">Activity</th>
+                          <th className="px-2 py-2 text-center font-bold">UOM</th>
+                          <th className="whitespace-nowrap px-2 py-2 text-center font-bold">WO Qty.</th>
+                          <th className="whitespace-nowrap px-2 py-2 text-center font-bold">Prev. Qty.</th>
+                          <th className="whitespace-nowrap px-2 py-2 text-center font-bold">Quantity</th>
+                          <th className="whitespace-nowrap px-2 py-2 text-center font-bold">Bal. Qty.</th>
+                          <th className="whitespace-nowrap px-2 py-2 text-center font-bold">Rate/Unit (₹)</th>
+                          <th className="whitespace-nowrap px-2 py-2 text-center font-bold">Value</th>
                         </tr>
                       </thead>
                       <tbody>
                         {activityProgress.map((row, i) => (
-                          <tr key={row.activity} className="border-t border-gray-100">
-                            <td className="px-1.5 py-1">{i + 1}</td>
+                          <tr key={row.activity} className="border-t border-slate-100 hover:bg-[#0D3A35]/[0.025]">
+                            <td className="px-1.5 py-1 text-center">{i + 1}</td>
                             <td className="px-1.5 py-1 text-slate-700">{row.activity}</td>
                             <td className="px-1.5 py-1 text-slate-500">{row.uom || '—'}</td>
-                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.ratePerUnit ? formatInr(row.ratePerUnit) : '—'}</td>
                             <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.actualQuantity.toFixed(2)}</td>
                             <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.quantityPrevious.toFixed(2)}</td>
                             <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.quantityCurrent.toFixed(2)}</td>
                             <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.quantityBalance.toFixed(2)}</td>
-                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.totalAmount ? formatInr(row.totalAmount) : '—'}</td>
-                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{formatInr(row.totalAmountPrevious)}</td>
+                            <td className="px-1.5 py-1 text-right whitespace-nowrap">{row.ratePerUnit ? formatInr(row.ratePerUnit) : '—'}</td>
                             <td className="px-1.5 py-1 text-right whitespace-nowrap font-medium">{row.totalAmountCurrent ? formatInr(row.totalAmountCurrent) : '—'}</td>
                           </tr>
                         ))}
-                        <tr className="border-t border-gray-300 bg-slate-50 font-bold text-slate-800">
-                          <td className="px-1.5 py-1" colSpan={4}>Total</td>
+                        <tr className="border-t border-[#cde2dc] bg-[#eaf4f1] font-bold text-[#0D3A35]">
+                          <td className="px-1.5 py-1" colSpan={3}>Total</td>
                           <td className="px-1.5 py-1 text-right whitespace-nowrap">{activityProgress.reduce((sum, row) => sum + row.actualQuantity, 0).toFixed(2)}</td>
                           <td className="px-1.5 py-1 text-right whitespace-nowrap">{activityProgress.reduce((sum, row) => sum + row.quantityPrevious, 0).toFixed(2)}</td>
                           <td className="px-1.5 py-1 text-right whitespace-nowrap">{activityProgress.reduce((sum, row) => sum + row.quantityCurrent, 0).toFixed(2)}</td>
                           <td className="px-1.5 py-1 text-right whitespace-nowrap">{activityProgress.reduce((sum, row) => sum + row.quantityBalance, 0).toFixed(2)}</td>
-                          <td className="px-1.5 py-1 text-right whitespace-nowrap">{formatInr(activityProgress.reduce((sum, row) => sum + row.totalAmount, 0))}</td>
-                          <td className="px-1.5 py-1 text-right whitespace-nowrap">{formatInr(activityProgress.reduce((sum, row) => sum + row.totalAmountPrevious, 0))}</td>
+                          <td className="px-1.5 py-1" />
                           <td className="px-1.5 py-1 text-right whitespace-nowrap">{totalValue ? formatInr(totalValue) : '—'}</td>
                         </tr>
                       </tbody>
@@ -1321,40 +1878,80 @@ const WccCertificatePreview = ({
                   </div>
                 </div>
 
-                {/* Certified value */}
-                <div className="px-3 py-2 border-t border-gray-300 text-xs space-y-1">
-                  <div className="flex justify-between font-bold text-slate-800">
-                    <span>Current Gross Certified Value (₹):</span><span>{enterpriseTotals ? formatInr(enterpriseTotals.gross) : certifiedValue}</span>
-                  </div>
-                  <div className="flex justify-between font-bold text-slate-800">
-                    <span>Cumulative Certified Value:</span><span>{enterpriseTotals ? formatInr(enterpriseTotals.cumulative) : certifiedValue}</span>
-                  </div>
-                  <div className="flex justify-between font-bold text-slate-800">
-                    <span>Net Recommended for Invoice Matching:</span><span>{enterpriseTotals ? formatInr(enterpriseTotals.net) : certifiedValue}</span>
-                  </div>
+                {/* Certified-value summary */}
+                <div className="overflow-hidden border-t border-[#dce7e3]">
+                  <table className="wcc-document-table w-full table-fixed border-collapse text-xs">
+                    <thead className="bg-[#f1f7f5] text-[#0D3A35]">
+                      <tr>
+                        <th className="w-1/3 border-r border-[#dce7e3] px-3 py-1.5 text-center font-extrabold">Certified Value (₹)</th>
+                        <th className="w-1/3 border-r border-[#dce7e3] px-3 py-1.5 text-center font-extrabold">Adjustment</th>
+                        <th className="w-1/3 px-3 py-1.5 text-center font-extrabold">Recommended Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="border-t border-[#dce7e3]">
+                        <td className="border-r border-[#dce7e3] bg-white px-3 py-1.5 text-center font-bold tabular-nums text-slate-800">{formatInr(certifiedAmount)}</td>
+                        <td className="border-r border-[#dce7e3] bg-white px-3 py-1 text-center">
+                          {locked ? (
+                            <span className="font-bold tabular-nums text-slate-800">{formatInr(adjustmentValue)}</span>
+                          ) : (
+                            <label className="relative mx-auto block max-w-[180px]">
+                              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-bold text-slate-400">₹</span>
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={adjustmentEdit}
+                                onChange={(event) => setAdjustmentEdit(event.target.value)}
+                                placeholder="0.00"
+                                className="h-7 w-full rounded-md border border-slate-200 bg-white pl-7 pr-3 text-right font-bold tabular-nums text-slate-800 outline-none focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10"
+                              />
+                            </label>
+                          )}
+                        </td>
+                        <td className="bg-[#eaf4f1] px-3 py-1.5 text-center font-black tabular-nums text-[#0D3A35]">{formatInr(recommendedValue)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Note */}
+                <div className="mx-5 mt-4 rounded-lg border border-slate-300 px-4 py-3 text-xs leading-5 text-slate-600">
+                  <div className="mb-2 text-center text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#18765f]">Note</div>
+                  {locked ? (
+                    <p className="whitespace-pre-wrap font-medium">{noteEdit.trim() || '—'}</p>
+                  ) : (
+                    <textarea
+                      rows={2}
+                      value={noteEdit}
+                      onChange={(event) => setNoteEdit(event.target.value)}
+                      placeholder="Enter a note for this certificate"
+                      className="w-full resize-y rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium leading-5 text-slate-600 outline-none focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10"
+                    />
+                  )}
                 </div>
 
                 {/* Certification paragraph */}
-                <div className="px-3 py-3 border-t border-gray-300 text-xs">
-                  <div className="bg-slate-100 text-center font-bold uppercase tracking-wide py-1 mb-2 -mx-3 px-3 text-slate-600">Certification</div>
-                  <p>
-                    This is to certify that the work described above has been completed by <b>{vendorName}</b> in
-                    accordance with the terms and conditions of the linked order and has been physically verified by
-                    the undersigned.
-                  </p>
-                  <p className="mt-2">
-                    The quality and quantity of work executed have been found satisfactory and the work is
-                    recommended for processing of payment.
-                  </p>
+                <div className="mx-5 my-4 rounded-lg border border-slate-300 px-4 py-3 text-xs leading-5 text-slate-600">
+                  <div className="mb-2 text-center text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#18765f]">Certification</div>
+                  {locked ? (
+                    <p className="whitespace-pre-wrap font-medium">{certificationEdit}</p>
+                  ) : (
+                    <textarea
+                      rows={4}
+                      value={certificationEdit}
+                      onChange={(event) => setCertificationEdit(event.target.value)}
+                      className="w-full resize-y rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium leading-5 text-slate-600 outline-none focus:border-[#0D3A35] focus:ring-2 focus:ring-[#0D3A35]/10"
+                    />
+                  )}
                 </div>
 
                 {/* Sign-off */}
-                <table className="w-full text-xs border-collapse border-t border-gray-300">
+                <table className="wcc-document-table w-full table-fixed border-collapse border border-[#b9d2cb] text-xs">
                   <thead>
-                    <tr className="bg-slate-100">
-                      <th className="px-3 py-1.5 border-r border-gray-300 text-center font-bold text-slate-600">Prepared By</th>
-                      <th className="px-3 py-1.5 border-r border-gray-300 text-center font-bold text-slate-600">Verified By</th>
-                      <th className="px-3 py-1.5 text-center font-bold text-slate-600">Approved By</th>
+                    <tr className="bg-[#0D3A35] text-white">
+                      <th className="w-1/3 border-r border-white/15 px-3 py-2 text-center font-bold">Prepared By</th>
+                      <th className="w-1/3 border-r border-white/15 px-3 py-2 text-center font-bold">Verified By</th>
+                      <th className="w-1/3 px-3 py-2 text-center font-bold">Approved By</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1364,11 +1961,11 @@ const WccCertificatePreview = ({
                         { key: 'verified', signer: verifiedByDisplay },
                         { key: 'approved', signer: approvedByDisplay },
                       ] as const).map(({ key, signer }, idx) => (
-                        <td key={key} className={cn('px-3 py-2 align-top', idx < 2 && 'border-r border-gray-300')}>
+                        <td key={key} className={cn('border-[#b9d2cb] px-4 py-3 align-top', idx < 2 && 'border-r')}>
                           <div className="mb-1"><span className="text-slate-500">Name: </span><span className="font-medium">{signer?.name || '—'}</span></div>
                           <div className="mb-4"><span className="text-slate-500">Designation: </span><span className="font-medium">{signer?.designation || '—'}</span></div>
                           <div className="text-slate-400">{signer ? 'Signature:' : 'Pending'}</div>
-                          <div className="h-10 border-b border-gray-300 mt-1" />
+                          <div className="mt-1 h-10 border-b border-[#b9d2cb]" />
                         </td>
                       ))}
                     </tr>
@@ -1383,7 +1980,7 @@ const WccCertificatePreview = ({
         {(isCreateMode || isReviseMode || isReviewMode) && (
           <div className="wcc-no-print px-6 py-4 border-t border-gray-100 bg-gray-50/50 flex items-center justify-between gap-3 shrink-0">
             <div className="text-xs text-slate-400 min-w-0 truncate">
-              {isCreateMode && !locked && 'Fill in the rate and Order No., then submit for verification.'}
+              {isCreateMode && !locked && 'Fill in the rate and Work Order No., then submit for verification.'}
               {isCreateMode && locked && `Submitted as ${certNoDisplay}.`}
               {isReviseMode && !locked && 'Adjust the rate and resubmit for verification.'}
               {isReviseMode && locked && `Resubmitted as ${certNoDisplay}.`}
@@ -1473,6 +2070,38 @@ const WccCertificatePreview = ({
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-400">
                 <Loader2 className="w-8 h-8 animate-spin" />
                 <span className="text-sm font-medium">Loading order document…</span>
+              </div>
+            ) : orderPreviewRecord ? (
+              <div className="h-full overflow-auto bg-[#eef2f4] p-4">
+                <div className="mx-auto w-[794px] max-w-none">
+                  <FullWorkOrderPreview order={orderPreviewRecord} />
+                </div>
+              </div>
+            ) : orderPreviewItems.length > 0 ? (
+              <div className="h-full overflow-y-auto bg-[#eef2f4] p-5">
+                <div className="mx-auto min-h-full max-w-[794px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                  <div className="border-b border-[#dce7e3] bg-[#f3f8f6] px-6 py-6 text-center">
+                    <p className="text-[10px] font-extrabold uppercase tracking-[0.2em] text-[#18765f]">Procurement · Active Work Order</p>
+                    <h4 className="mt-2 text-xl font-bold text-slate-950">WORK ORDER</h4>
+                    <p className="mt-2 font-mono text-sm font-bold text-[#0D3A35]">{displayWoNumber}</p>
+                  </div>
+                  <div className="grid border-b border-slate-200 sm:grid-cols-2">
+                    <div className="border-b border-slate-200 px-5 py-4 sm:border-b-0 sm:border-r"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Vendor / Contractor</p><p className="mt-1 text-sm font-bold text-slate-800">{vendorName}</p></div>
+                    <div className="px-5 py-4"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Order status</p><p className="mt-1 inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-700">Active</p></div>
+                  </div>
+                  <div className="p-5">
+                    <h5 className="mb-3 text-xs font-extrabold uppercase tracking-[0.12em] text-[#18765f]">Work Order Line Items</h5>
+                    <div className="overflow-hidden rounded-xl border border-slate-200">
+                      <table className="w-full table-fixed border-collapse text-xs">
+                        <thead className="bg-[#0D3A35] text-white"><tr><th className="w-[8%] px-3 py-3 text-center font-bold">S. No.</th><th className="w-[37%] px-3 py-3 text-left font-bold">Activity / Service</th><th className="w-[11%] px-3 py-3 text-center font-bold">UOM</th><th className="w-[13%] px-3 py-3 text-right font-bold">WO Qty.</th><th className="w-[14%] px-3 py-3 text-right font-bold">Rate (₹)</th><th className="w-[17%] px-3 py-3 text-right font-bold">Value (₹)</th></tr></thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {orderPreviewItems.map((item, index) => <tr key={`${item.name}-${index}`} className="hover:bg-[#0D3A35]/[0.025]"><td className="px-3 py-3 text-center text-slate-500">{index + 1}</td><td className="px-3 py-3"><p className="font-semibold text-slate-800">{item.name}</p>{item.description && <p className="mt-0.5 text-[10px] text-slate-400">{item.description}</p>}</td><td className="px-3 py-3 text-center text-slate-600">{item.uom || '—'}</td><td className="px-3 py-3 text-right font-semibold tabular-nums">{item.quantity.toFixed(2)}</td><td className="px-3 py-3 text-right tabular-nums">{formatInr(item.unit_rate)}</td><td className="px-3 py-3 text-right font-bold tabular-nums text-slate-800">{formatInr(item.quantity * item.unit_rate)}</td></tr>)}
+                        </tbody>
+                        <tfoot><tr className="bg-[#eaf4f1] font-bold text-[#0D3A35]"><td className="px-3 py-3" colSpan={5}>Total Work Order Value</td><td className="px-3 py-3 text-right tabular-nums">{formatInr(orderPreviewItems.reduce((sum, item) => sum + item.quantity * item.unit_rate, 0))}</td></tr></tfoot>
+                      </table>
+                    </div>
+                  </div>
+                </div>
               </div>
             ) : orderDocError ? (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-red-400 px-6 text-center">

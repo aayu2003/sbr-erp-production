@@ -53,9 +53,29 @@ type InvoiceIntake = {
 // in one call today, but are checked independently below so the stepper stays correct if that
 // ever changes.
 type PaymentRequestDict = {
-  payment?: { payment_amount?: number; liability_before_payment?: number; liability_after_payment?: number };
+  payment?: {
+    payment_amount?: number;
+    liability_before_payment?: number;
+    liability_after_payment?: number;
+    actual_payable_amount?: number;
+  };
   linvestment_impact?: Record<string, unknown>;
   budget_impact?: Record<string, unknown>;
+  tds_tax_details?: {
+    tds_applicable?: string;
+    tds_section?: string;
+    tds_rate?: number;
+    tds_base_amount?: number;
+    tds_amount?: number;
+    rcm_applicable?: string;
+  };
+  payment_details?: {
+    payment_mode?: string;
+    payment_due_date?: string;
+    payment_terms?: string;
+    bank_account_from?: string;
+    payment_extent?: string;
+  };
 };
 
 type InvoicePayment = {
@@ -1961,6 +1981,34 @@ const PaymentRequestPanel = ({ invoice, onGoToApprovals }: { invoice: InvoicePay
   }, [balance, savedPaymentAmount]);
   const [remarks, setRemarks] = useState("");
 
+  // Defaults to the requested Amount, but stays independently editable — the creator lowers it
+  // when part of the payment is held/disputed, without losing the calculated Amount above.
+  const savedActualPayable = invoice.payment_request_dict?.payment?.actual_payable_amount;
+  const [actualPayableAmount, setActualPayableAmount] = useState("");
+  const actualPayableTouchedRef = useRef(false);
+  useEffect(() => {
+    if (savedActualPayable !== undefined) { setActualPayableAmount(savedActualPayable.toFixed(2)); actualPayableTouchedRef.current = true; return; }
+    if (!actualPayableTouchedRef.current) setActualPayableAmount(amount);
+  }, [amount, savedActualPayable]);
+
+  // TDS / Tax and Payment Details — seeded once from whatever was last saved on this payment.
+  const savedTds = invoice.payment_request_dict?.tds_tax_details;
+  const savedPaymentDetails = invoice.payment_request_dict?.payment_details;
+  const [tdsApplicable, setTdsApplicable] = useState<"No" | "Yes">(savedTds?.tds_applicable === "Yes" ? "Yes" : "No");
+  const [tdsSection, setTdsSection] = useState(safeStr(savedTds?.tds_section));
+  const [tdsRate, setTdsRate] = useState(savedTds?.tds_rate !== undefined ? String(savedTds.tds_rate) : "");
+  const [tdsBaseAmount, setTdsBaseAmount] = useState(savedTds?.tds_base_amount !== undefined ? String(savedTds.tds_base_amount) : "");
+  const [rcmApplicable, setRcmApplicable] = useState<"No" | "Yes">(savedTds?.rcm_applicable === "Yes" ? "Yes" : "No");
+  const tdsAmountCalc = tdsApplicable === "Yes" ? (num(tdsBaseAmount) * num(tdsRate)) / 100 : 0;
+
+  const [paymentMode, setPaymentMode] = useState(safeStr(savedPaymentDetails?.payment_mode));
+  const [paymentDueDate, setPaymentDueDate] = useState(safeStr(savedPaymentDetails?.payment_due_date));
+  const [paymentTerms, setPaymentTerms] = useState(safeStr(savedPaymentDetails?.payment_terms));
+  const [bankAccountFrom, setBankAccountFrom] = useState(safeStr(savedPaymentDetails?.bank_account_from));
+  const [paymentExtent, setPaymentExtent] = useState<"Full Payment" | "Partial Payment">(
+    savedPaymentDetails?.payment_extent === "Partial Payment" ? "Partial Payment" : "Full Payment",
+  );
+
   const amountNum = num(amount);
   const remainingLiability = balance !== undefined ? balance - amountNum : undefined;
   const liabilityBeforePayment = balance ?? 0;
@@ -2006,6 +2054,22 @@ const PaymentRequestPanel = ({ invoice, onGoToApprovals }: { invoice: InvoicePay
             remarks,
           },
           budget_impact,
+          actual_payable_amount: num(actualPayableAmount) || amountNum,
+          tds_tax_details: {
+            tds_applicable: tdsApplicable,
+            tds_section: tdsSection,
+            tds_rate: num(tdsRate),
+            tds_base_amount: num(tdsBaseAmount),
+            tds_amount: tdsAmountCalc,
+            rcm_applicable: rcmApplicable,
+          },
+          payment_details: {
+            payment_mode: paymentMode,
+            payment_due_date: paymentDueDate,
+            payment_terms: paymentTerms,
+            bank_account_from: bankAccountFrom,
+            payment_extent: paymentExtent,
+          },
         }),
       });
       const resData: { success?: boolean; message?: string } | null = await res.json().catch(() => null);
@@ -2116,6 +2180,21 @@ const PaymentRequestPanel = ({ invoice, onGoToApprovals }: { invoice: InvoicePay
               </div>
             </div>
 
+            <div className="space-y-1.5">
+              <label className="text-xs font-extrabold text-slate-500">Actual Payable Amount</label>
+              <p className="text-[11px] font-medium text-slate-400">If part of this payment is on hold or disputed, lower this below the Amount above.</p>
+              <div className="relative">
+                <IndianRupee className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  value={actualPayableAmount}
+                  onChange={(e) => { actualPayableTouchedRef.current = true; setActualPayableAmount(e.target.value); }}
+                  className="h-11 w-full rounded-md border border-slate-200 bg-white pl-9 pr-3 text-base font-extrabold text-slate-900 outline-none focus:border-slate-300"
+                />
+              </div>
+            </div>
+
             {balance !== undefined && (
               <div className="space-y-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-3">
                 <div className="flex items-center justify-between text-xs">
@@ -2164,6 +2243,76 @@ const PaymentRequestPanel = ({ invoice, onGoToApprovals }: { invoice: InvoicePay
             {!docsLoading && docs.length === 0 && (
               <p className="text-xs font-semibold text-slate-400">No documents on file for this order.</p>
             )}
+          </div>
+        </section>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <section className="flex flex-col rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+          <h3 className="text-sm font-extrabold text-slate-900">TDS / Tax</h3>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <label className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">TDS Applicable</span>
+              <select value={tdsApplicable} onChange={(e) => setTdsApplicable(e.target.value === "Yes" ? "Yes" : "No")} className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300">
+                <option>No</option><option>Yes</option>
+              </select>
+            </label>
+            <label className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">RCM Applicable</span>
+              <select value={rcmApplicable} onChange={(e) => setRcmApplicable(e.target.value === "Yes" ? "Yes" : "No")} className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300">
+                <option>No</option><option>Yes</option>
+              </select>
+            </label>
+            <label className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">TDS Section</span>
+              <select disabled={tdsApplicable !== "Yes"} value={tdsSection} onChange={(e) => setTdsSection(e.target.value)} className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300 disabled:bg-slate-50 disabled:text-slate-400">
+                <option value="">Select section</option>
+                {["194C", "194J", "194I", "194H", "194Q"].map((item) => <option key={item}>{item}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">TDS Rate (%)</span>
+              <input disabled={tdsApplicable !== "Yes"} type="number" min="0" step="0.01" value={tdsRate} onChange={(e) => setTdsRate(e.target.value)} className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300 disabled:bg-slate-50 disabled:text-slate-400" />
+            </label>
+            <label className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">TDS Base Amount</span>
+              <input disabled={tdsApplicable !== "Yes"} type="number" min="0" step="0.01" value={tdsBaseAmount} onChange={(e) => setTdsBaseAmount(e.target.value)} className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300 disabled:bg-slate-50 disabled:text-slate-400" />
+            </label>
+            <div className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">TDS Amount</span>
+              <p className="flex h-10 items-center rounded-md border border-slate-200 bg-slate-50 px-2.5 text-sm font-extrabold text-slate-700">{inr(tdsAmountCalc)}</p>
+            </div>
+          </div>
+        </section>
+
+        <section className="flex flex-col rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+          <h3 className="text-sm font-extrabold text-slate-900">Payment Details</h3>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <label className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">Payment Mode</span>
+              <select value={paymentMode} onChange={(e) => setPaymentMode(e.target.value)} className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300">
+                <option value="">Select mode</option>
+                {["NEFT", "RTGS", "IMPS", "UPI", "Cheque", "Cash"].map((item) => <option key={item}>{item}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">Partial / Full Payment</span>
+              <select value={paymentExtent} onChange={(e) => setPaymentExtent(e.target.value === "Partial Payment" ? "Partial Payment" : "Full Payment")} className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300">
+                <option>Full Payment</option><option>Partial Payment</option>
+              </select>
+            </label>
+            <label className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">Payment Due Date</span>
+              <input type="date" value={paymentDueDate} onChange={(e) => setPaymentDueDate(e.target.value)} className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300" />
+            </label>
+            <label className="space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">Bank Account From</span>
+              <input value={bankAccountFrom} onChange={(e) => setBankAccountFrom(e.target.value)} placeholder="Company bank account" className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300" />
+            </label>
+            <label className="col-span-2 space-y-1.5">
+              <span className="block text-xs font-extrabold text-slate-500">Payment Terms</span>
+              <input value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} placeholder="e.g. Net 30" className="h-10 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300" />
+            </label>
           </div>
         </section>
       </div>

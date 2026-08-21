@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import getBaseUrl from "@/lib/config";
 import { useAuth } from "@/context/AuthContext";
 import PRRDocumentPreview, { type PRRInvoiceData } from "./PRRDocumentPreview";
+import { updateLocalPrrStatus, PrrDocumentPreview as LocalPrrDocumentPreview, type FinanceRecord } from "@/pages/FinanceAccounts";
 
 const safeStr = (v: unknown) => String(v ?? "").trim();
 const inr = (n: number) => `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -12,6 +13,15 @@ export type PRRApprovalInvoice = PRRInvoiceData & {
   vendor_name?: string;
   admin_ops_approval_status?: string;
   director_approval_status?: string;
+  // Set when this card came from the localStorage-only Payments & Receipts "Create PRR" form
+  // (FinanceAccounts.tsx) rather than the real backend-tracked admin_payment_flow — approve/
+  // reject writes straight back to that same localStorage register instead of calling the API.
+  origin?: "backend" | "local";
+  localRecordId?: string;
+  // The full local record, so the "PRR Document" popup below can render it through the exact
+  // same PrrDocumentPreview the Payments & Receipts form itself uses — same layout, same
+  // fields — instead of force-fitting it into the backend-shaped PRRDocumentPreview.
+  localRecord?: FinanceRecord;
 };
 
 type StepStatus = "done" | "pending" | "rejected";
@@ -112,6 +122,15 @@ const PRRApprovalPanel = ({
   const canDecide = safeStr(invoice.director_approval_status).toLowerCase() === "pending";
 
   const handleApprove = async () => {
+    if (invoice.origin === "local") {
+      if (!invoice.localRecordId) { toast.error("Missing record id."); return; }
+      setApproving(true);
+      updateLocalPrrStatus(invoice.localRecordId, "Approved");
+      toast.success("Approved");
+      setApproving(false);
+      onDecided();
+      return;
+    }
     if (!invoice.payment_id) { toast.error("Missing payment id."); return; }
     if (!user?.id || !user?.name) { toast.error("You must be logged in to approve this."); return; }
     setApproving(true);
@@ -135,6 +154,17 @@ const PRRApprovalPanel = ({
 
   const handleReject = async () => {
     if (!showRejectInput) { setShowRejectInput(true); return; }
+    if (invoice.origin === "local") {
+      if (!invoice.localRecordId) { toast.error("Missing record id."); return; }
+      setRejecting(true);
+      updateLocalPrrStatus(invoice.localRecordId, "Rejected", rejectReason.trim());
+      toast.success("Rejected");
+      setShowRejectInput(false);
+      setRejectReason("");
+      setRejecting(false);
+      onDecided();
+      return;
+    }
     if (!invoice.payment_id) { toast.error("Missing payment id."); return; }
     if (!user?.id || !user?.name) { toast.error("You must be logged in to reject this."); return; }
     setRejecting(true);
@@ -186,7 +216,17 @@ const PRRApprovalPanel = ({
       <div className="grid grid-cols-1 items-stretch gap-4 xl:grid-cols-2">
         <ReviewPopup title="PRR Document" bodyClassName="bg-slate-100 p-4">
           <A4PageFrame>
-            <PRRDocumentPreview invoice={invoice} />
+            {invoice.origin === "local" && invoice.localRecord?.prrDetails ? (
+              <LocalPrrDocumentPreview
+                record={invoice.localRecord}
+                details={invoice.localRecord.prrDetails}
+                taxInvoiceName={invoice.localRecord.attachmentName || "Not linked"}
+                poWoName={invoice.localRecord.poWoReference || "Not linked"}
+                completionName={invoice.localRecord.grnServiceReference || "Not linked"}
+              />
+            ) : (
+              <PRRDocumentPreview invoice={invoice} />
+            )}
           </A4PageFrame>
         </ReviewPopup>
         <ReviewPopup title="Investment Impact">

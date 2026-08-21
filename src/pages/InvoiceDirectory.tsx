@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  FileText, FileImage, Folder, FolderOpen, Plus, Trash2, UploadCloud, X, CheckCircle2, Inbox, RefreshCw,
+  FileText, FileImage, Folder, FolderOpen, Plus, Trash2, UploadCloud, X, CheckCircle2, Inbox, RefreshCw, Search, SlidersHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
-import { cn } from "@/lib/utils";
+import { cn, uid } from "@/lib/utils";
 import getBaseUrl from "@/lib/config";
 import { BillInwardModal, moduleByKey } from "./FinanceAccounts";
 
@@ -63,11 +63,17 @@ interface InvoiceFolder {
   processed: boolean;
   vendorId: string;
   vendorName: string;
+  orderNumber: string;
 }
 
 interface DirectoryVendor {
   id: string;
   name: string;
+}
+
+interface DirectoryOrder {
+  orderNumber: string;
+  orderType: string;
 }
 
 const inferMimeFromUrl = (url: string): string => {
@@ -125,12 +131,44 @@ function AddInvoiceModal({
   const [selectedType, setSelectedType] = useState(DOCUMENT_TYPES[0]);
   const [customType, setCustomType] = useState("");
   const [selectedVendorId, setSelectedVendorId] = useState("");
+  const [selectedOrderNumber, setSelectedOrderNumber] = useState("");
+  const [orders, setOrders] = useState<DirectoryOrder[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const documentsRef = useRef<InvoiceDocument[]>([]);
   const committedRef = useRef(false);
 
   useEffect(() => { documentsRef.current = documents; }, [documents]);
+
+  // Same order source Bill Inward itself uses (/purchase_flow/get_order_info_by_vendor_id) —
+  // an order number picked here just pre-fills the PO/WO reference once this folder is
+  // processed into a real Bill Inward, same as the vendor already does.
+  useEffect(() => {
+    let cancelled = false;
+    setOrders([]);
+    setSelectedOrderNumber("");
+    if (!selectedVendorId) return () => { cancelled = true; };
+    const loadOrders = async () => {
+      setOrdersLoading(true);
+      try {
+        const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+        const response = await fetch(`${baseUrl}/purchase_flow/get_order_info_by_vendor_id/${selectedVendorId}`, { headers: { Accept: "application/json" } });
+        const payload = response.ok ? await response.json().catch(() => null) : null;
+        const list = Array.isArray(payload?.order_info) ? payload.order_info : [];
+        const mapped: DirectoryOrder[] = list
+          .map((order: Record<string, unknown>) => ({ orderNumber: String(order.order_number ?? "").trim(), orderType: String(order.order_type ?? "").trim() }))
+          .filter((order: DirectoryOrder) => order.orderNumber);
+        if (!cancelled) setOrders(mapped);
+      } catch {
+        if (!cancelled) setOrders([]);
+      } finally {
+        if (!cancelled) setOrdersLoading(false);
+      }
+    };
+    void loadOrders();
+    return () => { cancelled = true; };
+  }, [selectedVendorId]);
   useEffect(() => () => {
     if (!committedRef.current) documentsRef.current.forEach((document) => { if (document.file) URL.revokeObjectURL(document.url); });
   }, []);
@@ -144,7 +182,7 @@ function AddInvoiceModal({
       return;
     }
     const document: InvoiceDocument = {
-      id: crypto.randomUUID(),
+      id: uid(),
       type: selectedType === OTHER_DOCUMENT_TYPE ? customType.trim() : selectedType,
       file: selected,
       url: URL.createObjectURL(selected),
@@ -201,7 +239,7 @@ function AddInvoiceModal({
       const response = await fetch(`${baseUrl}/admin_accounts/add_invoice`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invoice_doc_url: invoiceDocUrl, other_documents: otherDocuments, vendor_id: selectedVendorId }),
+        body: JSON.stringify({ invoice_doc_url: invoiceDocUrl, other_documents: otherDocuments, vendor_id: selectedVendorId, order_number: selectedOrderNumber || undefined }),
       });
       const data = await response.json().catch(() => null);
       if (!response.ok || !data?.success || !data?.invoice_id) throw new Error(data?.detail || "Failed to save invoice folder");
@@ -215,6 +253,7 @@ function AddInvoiceModal({
         processed: false,
         vendorId: selectedVendorId,
         vendorName: selectedVendor?.name || "",
+        orderNumber: selectedOrderNumber,
       });
       toast.success(`${data.invoice_id} folder created`);
     } catch (error) {
@@ -284,6 +323,18 @@ function AddInvoiceModal({
               </select>
               {vendorsError && <span className="block text-[11px] font-semibold text-red-600">{vendorsError}</span>}
             </label>
+            <label className="mb-5 block space-y-2 text-xs font-bold text-slate-600">
+              Order Reference <span className="font-medium text-slate-400">(Optional)</span>
+              <select
+                disabled={!selectedVendorId || ordersLoading}
+                value={selectedOrderNumber}
+                onChange={(event) => setSelectedOrderNumber(event.target.value)}
+                className="h-11 w-full cursor-pointer rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+              >
+                <option value="">{!selectedVendorId ? "Select vendor first" : ordersLoading ? "Loading orders…" : "No order reference"}</option>
+                {orders.map((order) => <option key={order.orderNumber} value={order.orderNumber}>{order.orderType || "Order"} · {order.orderNumber}</option>)}
+              </select>
+            </label>
             <div className="space-y-3">
               <label className="block space-y-2 text-xs font-bold text-slate-600">
                 Document Type
@@ -344,10 +395,10 @@ const mapInvoiceToFolder = (invoice: Record<string, unknown>): InvoiceFolder => 
   const otherUrls = Array.isArray(invoice.other_documents) ? invoice.other_documents.map((url) => String(url)) : [];
   const documents: InvoiceDocument[] = [];
   if (invoiceDocUrl) {
-    documents.push({ id: crypto.randomUUID(), type: PRIMARY_DOCUMENT_TYPE, url: invoiceDocUrl, fileName: filenameFromUrl(invoiceDocUrl), mimeType: inferMimeFromUrl(invoiceDocUrl) });
+    documents.push({ id: uid(), type: PRIMARY_DOCUMENT_TYPE, url: invoiceDocUrl, fileName: filenameFromUrl(invoiceDocUrl), mimeType: inferMimeFromUrl(invoiceDocUrl) });
   }
   otherUrls.filter(Boolean).forEach((url) => {
-    documents.push({ id: crypto.randomUUID(), type: REMOTE_OTHER_DOCUMENT_TYPE, url, fileName: filenameFromUrl(url), mimeType: inferMimeFromUrl(url) });
+    documents.push({ id: uid(), type: REMOTE_OTHER_DOCUMENT_TYPE, url, fileName: filenameFromUrl(url), mimeType: inferMimeFromUrl(url) });
   });
   const status = String(invoice.inward_status ?? "").trim().toLowerCase();
   return {
@@ -358,6 +409,7 @@ const mapInvoiceToFolder = (invoice: Record<string, unknown>): InvoiceFolder => 
     processed: status !== "" && status !== "pending",
     vendorId: String(invoice.vendor_id ?? ""),
     vendorName: "",
+    orderNumber: String(invoice.order_number ?? ""),
   };
 };
 
@@ -386,6 +438,8 @@ export default function InvoiceDirectory() {
   const [vendorsError, setVendorsError] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [processingFolder, setProcessingFolder] = useState<InvoiceFolder | null>(null);
+  const [filterVendorId, setFilterVendorId] = useState("");
+  const [filterOrderNumber, setFilterOrderNumber] = useState("");
 
   const loadFolders = () => {
     setFoldersLoading(true);
@@ -437,6 +491,14 @@ export default function InvoiceDirectory() {
 
   const vendorNameFor = (folder: InvoiceFolder) => folder.vendorName || vendors.find((vendor) => vendor.id === folder.vendorId)?.name || folder.vendorId || "Vendor not recorded";
 
+  const visibleFolders = folders.filter((folder) => {
+    if (filterVendorId && folder.vendorId !== filterVendorId) return false;
+    const orderQuery = filterOrderNumber.trim().toLowerCase();
+    if (orderQuery && !folder.orderNumber.toLowerCase().includes(orderQuery)) return false;
+    return true;
+  });
+  const isFiltered = Boolean(filterVendorId || filterOrderNumber.trim());
+
   const addFolder = (folder: InvoiceFolder) => {
     setFolders((current) => [folder, ...current]);
     setIsAddOpen(false);
@@ -486,16 +548,58 @@ export default function InvoiceDirectory() {
 
         {foldersError && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-sm font-semibold text-amber-800">{foldersError}</div>}
 
-        {folders.length === 0 ? (
+        {folders.length > 0 && (
+          <div className="flex flex-col gap-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.035)] sm:flex-row sm:items-center">
+            <div className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-[0.1em] text-slate-400">
+              <SlidersHorizontal className="h-4 w-4" /> Filter
+            </div>
+            <label className="relative block flex-1 sm:max-w-xs">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                value={filterOrderNumber}
+                onChange={(event) => setFilterOrderNumber(event.target.value)}
+                placeholder="Filter by order number"
+                className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:bg-white focus:ring-4 focus:ring-[#278b76]/10"
+              />
+            </label>
+            <select
+              value={filterVendorId}
+              onChange={(event) => setFilterVendorId(event.target.value)}
+              disabled={vendorsLoading}
+              className="h-10 min-w-[220px] cursor-pointer rounded-xl border border-slate-200 bg-slate-50 px-3.5 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:bg-white focus:ring-4 focus:ring-[#278b76]/10 disabled:cursor-not-allowed disabled:text-slate-400"
+            >
+              <option value="">{vendorsLoading ? "Loading vendors…" : "All vendors"}</option>
+              {vendors.map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name} · {vendor.id}</option>)}
+            </select>
+            {isFiltered && (
+              <button
+                onClick={() => { setFilterVendorId(""); setFilterOrderNumber(""); }}
+                className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-200 px-4 text-sm font-bold text-slate-500 hover:bg-slate-50"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+
+        {visibleFolders.length === 0 ? (
           <div className="flex min-h-[360px] flex-col items-center justify-center rounded-3xl border border-slate-200/80 bg-white px-6 py-12 text-center shadow-[0_18px_45px_rgba(15,23,42,0.05)]">
             <span className="rounded-2xl bg-[#edf5f2] p-4 text-[#6c9b90]"><Inbox className="h-8 w-8" /></span>
-            <h3 className="mt-4 text-lg font-bold text-slate-800">{foldersLoading ? "Loading invoice folders…" : "No invoice folders yet"}</h3>
-            <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">Add an invoice and its supporting documents to create the first folder.</p>
-            <button onClick={() => setIsAddOpen(true)} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" /> Add Invoice</button>
+            <h3 className="mt-4 text-lg font-bold text-slate-800">
+              {foldersLoading ? "Loading invoice folders…" : isFiltered ? "No invoice folders match this filter" : "No invoice folders yet"}
+            </h3>
+            <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">
+              {isFiltered ? "Try a different order number or vendor." : "Add an invoice and its supporting documents to create the first folder."}
+            </p>
+            {isFiltered ? (
+              <button onClick={() => { setFilterVendorId(""); setFilterOrderNumber(""); }} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]">Clear filters</button>
+            ) : (
+              <button onClick={() => setIsAddOpen(true)} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" /> Add Invoice</button>
+            )}
           </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {folders.map((folder) => (
+            {visibleFolders.map((folder) => (
               <div key={folder.id} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_10px_28px_rgba(15,23,42,0.035)] transition hover:-translate-y-0.5 hover:border-[#8bbcaf] hover:shadow-[0_14px_34px_rgba(13,71,63,0.09)]">
                 <div className="flex items-start justify-between gap-3">
                   <span className="rounded-xl bg-amber-50 p-3 text-amber-600"><Folder className="h-5 w-5" /></span>
@@ -537,6 +641,7 @@ export default function InvoiceDirectory() {
           initialFileName={primaryDocument?.fileName}
           initialVendorId={processingFolder.vendorId || undefined}
           initialVendorName={processingFolder.vendorName || undefined}
+          initialOrderNumber={processingFolder.orderNumber || undefined}
           initialInvoiceDirectoryId={processingFolder.id}
           initialSupportingFiles={initialSupportingFiles}
           initialAdditionalDocuments={initialAdditionalDocuments}

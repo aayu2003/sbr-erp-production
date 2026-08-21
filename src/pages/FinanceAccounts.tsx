@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type ElementType, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ElementType, type FormEvent, type ReactNode } from "react";
+import * as XLSX from "xlsx";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowRight,
@@ -33,6 +34,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import getBaseUrl from "@/lib/config";
 import { getGrnById, type GRNRecord } from "@/lib/grnApi";
+import { mergeSbrGlSeed } from "@/data/sbrGlSeed";
 import GrnDocumentPreview from "@/components/grn/GrnDocumentPreview";
 import { MakePurchaseOrderPopup } from "@/components/ho-inbox/MakePurchaseOrderPopup";
 import type { ComparativeModel } from "@/components/purchase/ComparativeStatementPreview";
@@ -47,7 +49,7 @@ type FinanceModuleKey =
   | "budget-costing"
   | "masters-controls";
 
-type FinanceRecord = {
+export type FinanceRecord = {
   id: string;
   module: FinanceModuleKey;
   tab: string;
@@ -98,7 +100,20 @@ type FinanceRecord = {
   prrDetails?: PRRDetails;
 };
 
-type PRRDetails = {
+// One row of the PRR's budget allocation — a specific line item within a specific budget,
+// and how much of this payment is being drawn from it. Replaces the old free-text
+// Ledger Head / Sub Ledger / Budget Head fields with real budget/line-item selection.
+export type PrrBudgetLine = {
+  key: string; // `${budgetId}::${lineItemId}`
+  budgetId: string;
+  budgetName: string;
+  category: string;
+  lineItem: string;
+  lineItemId: string;
+  amount: number;
+};
+
+export type PRRDetails = {
   prrType: string;
   requestingDepartment: string;
   requestedBy: string;
@@ -129,17 +144,15 @@ type PRRDetails = {
   tdsDeduction: number;
   otherDeduction: number;
   netPayableAmount: number;
+  actualPayableAmount: number;
   tdsApplicable: string;
   tdsSection: string;
   tdsRate: number;
   tdsBaseAmount: number;
   tdsAmount: number;
   rcmApplicable: string;
-  ledgerHead: string;
-  subLedger: string;
   accountingCostCentre: string;
-  budgetHead: string;
-  budgetAvailable: number;
+  budgetLines: PrrBudgetLine[];
   accountingNarration: string;
   paymentMode: string;
   paymentTerms: string;
@@ -222,6 +235,7 @@ const FINANCE_MODULES: ModuleDefinition[] = [
     tabs: [
       { label: "Inward", description: "Receive, catalogue and attach incoming bills.", features: ["Bill Inward", "Vendor Bills", "Bill Attachments"] },
       { label: "Verification", description: "Validate supporting documents, taxes and approvals.", features: ["Bill Verification", "Bill Attachments"] },
+      { label: "Ledger Posting", description: "Book ledger liability entries for bills awaiting posting.", features: ["Ledger Entry", "Bill Attachments"] },
       { label: "Bills Paid", description: "Track every Bill Inward entry through final payment.", features: ["Bills Paid", "Payment Status", "Debit/Credit Notes"] },
       { label: "Outstanding", description: "Track unpaid and partially settled liabilities.", features: ["Outstanding Payables", "Bill Attachments"] },
     ],
@@ -243,6 +257,8 @@ const FINANCE_MODULES: ModuleDefinition[] = [
     ],
   },
   {
+    // Rendered by the standalone src/pages/Vouchers.tsx now, not FinanceAccountsModule —
+    // kept here only so the dashboard's module-card grid and counts still include it.
     key: "vouchers",
     title: "Vouchers",
     shortTitle: "Vouchers",
@@ -335,6 +351,30 @@ const loadRecords = (): FinanceRecord[] => {
   } catch {
     return [];
   }
+};
+
+// This module has no backend of its own — PRR Approval (PRRApprovalInbox.tsx) reads this to
+// surface locally-drafted, submitted PRRs alongside the real backend-tracked ones in the same
+// director inbox, without making this module depend on the API for anything. Returns the full
+// record (not just a summary) so the approval page can render it through the exact same
+// PrrDocumentPreview this module itself uses — same layout, same fields, everywhere.
+export const getLocalPendingPrrRecords = (): FinanceRecord[] =>
+  loadRecords().filter((record) => record.module === "payments-receipts" && record.tab === "Requests" && record.status === "Submitted");
+
+// Approve/Reject from PRRApprovalPanel.tsx write straight back to this same localStorage
+// register — there's no backend record for these, so nothing calls director_approve_payment /
+// director_reject_payment for them.
+export const updateLocalPrrStatus = (id: string, status: "Approved" | "Rejected", rejectionReason?: string): void => {
+  const records = loadRecords();
+  const next = records.map((record) => {
+    if (record.id !== id) return record;
+    const prrDetails = record.prrDetails ? { ...record.prrDetails } : undefined;
+    if (prrDetails && rejectionReason) {
+      prrDetails.accountsRemarks = [prrDetails.accountsRemarks, `Rejected: ${rejectionReason}`].filter(Boolean).join(" — ");
+    }
+    return { ...record, status, prrDetails };
+  });
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 };
 
 const formatCurrency = (value: number) =>
@@ -586,7 +626,7 @@ const initialForm = (module: ModuleDefinition, tab: TabDefinition): Omit<Finance
   supportingDocumentNames: [],
 });
 
-type EntryModalProps = { module: ModuleDefinition; tab: TabDefinition; existing?: FinanceRecord | null; onClose: () => void; onSave: (record: FinanceRecord) => void; onSaved?: () => void; initialFile?: File; initialInvoiceDocUrl?: string; initialFileName?: string; initialVendorId?: string; initialVendorName?: string; initialInvoiceDirectoryId?: string; initialSupportingFiles?: File[]; initialAdditionalDocuments?: Array<{ name: string; url: string }> };
+type EntryModalProps = { module: ModuleDefinition; tab: TabDefinition; existing?: FinanceRecord | null; onClose: () => void; onSave: (record: FinanceRecord) => void; onSaved?: () => void; initialFile?: File; initialInvoiceDocUrl?: string; initialFileName?: string; initialVendorId?: string; initialVendorName?: string; initialOrderNumber?: string; initialInvoiceDirectoryId?: string; initialSupportingFiles?: File[]; initialAdditionalDocuments?: Array<{ name: string; url: string }> };
 
 type DirectoryVendor = { id: string; name: string; phone?: string; address?: string };
 type VendorOrder = { flowId: string; orderNumber: string; orderType: string; status: string };
@@ -639,10 +679,10 @@ const vendorOrderLabel = (orderType: string) => {
   return "PO";
 };
 
-export function BillInwardModal({ module, tab, existing, onClose, onSaved, initialFile, initialInvoiceDocUrl, initialFileName, initialVendorId, initialVendorName, initialInvoiceDirectoryId, initialSupportingFiles, initialAdditionalDocuments }: EntryModalProps) {
+export function BillInwardModal({ module, tab, existing, onClose, onSaved, initialFile, initialInvoiceDocUrl, initialFileName, initialVendorId, initialVendorName, initialOrderNumber, initialInvoiceDirectoryId, initialSupportingFiles, initialAdditionalDocuments }: EntryModalProps) {
   const [form, setForm] = useState<Omit<FinanceRecord, "id">>(() => {
     const base = existing ? { ...initialForm(module, tab), ...existing } : initialForm(module, tab);
-    if (!existing && initialVendorId) return { ...base, vendorId: initialVendorId, party: initialVendorName || base.party };
+    if (!existing && initialVendorId) return { ...base, vendorId: initialVendorId, party: initialVendorName || base.party, poWoReference: initialOrderNumber || base.poWoReference };
     return base;
   });
   const [file, setFile] = useState<File | null>(null);
@@ -790,6 +830,18 @@ export function BillInwardModal({ module, tab, existing, onClose, onSaved, initi
     void loadOrders();
     return () => { cancelled = true; };
   }, [form.vendorId]);
+
+  // The order number pre-filled from an Invoice Directory folder is right, but its PO/WO
+  // Reference Type defaults to "PO" until the vendor's real orders load — correct it once
+  // they do, so the (type-filtered) order dropdown actually shows the pre-filled value.
+  useEffect(() => {
+    if (existing || !initialOrderNumber || !vendorOrders.length) return;
+    const match = vendorOrders.find((order) => order.orderNumber === initialOrderNumber);
+    if (!match) return;
+    const derivedType = vendorOrderLabel(match.orderType);
+    setForm((current) => (current.referenceType === derivedType && current.poWoReference === initialOrderNumber ? current : { ...current, referenceType: derivedType, poWoReference: initialOrderNumber }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vendorOrders]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1287,17 +1339,15 @@ const initialPrrDetails = (record: FinanceRecord, bill?: FinanceRecord): PRRDeta
     tdsDeduction: 0,
     otherDeduction: 0,
     netPayableAmount: gross,
+    actualPayableAmount: gross,
     tdsApplicable: source.tdsApplicable || "No",
     tdsSection: "",
     tdsRate: 0,
     tdsBaseAmount: base,
     tdsAmount: 0,
     rcmApplicable: "No",
-    ledgerHead: "",
-    subLedger: source.party || "",
     accountingCostCentre: source.costCentre || "",
-    budgetHead: "",
-    budgetAvailable: 0,
+    budgetLines: [],
     accountingNarration: source.notes || "",
     paymentMode: "NEFT",
     paymentTerms: source.paymentTerms || "",
@@ -1322,7 +1372,7 @@ type PrrModalProps = {
   onSave: (record: FinanceRecord) => void;
 };
 
-function PrrDocumentPreview({ record, details, taxInvoiceName, poWoName, completionName }: { record: FinanceRecord; details: PRRDetails; taxInvoiceName: string; poWoName: string; completionName: string }) {
+export function PrrDocumentPreview({ record, details, taxInvoiceName, poWoName, completionName }: { record: FinanceRecord; details: PRRDetails; taxInvoiceName: string; poWoName: string; completionName: string }) {
   const value = (input?: string | number) => input === undefined || input === null || input === "" ? "—" : String(input);
   const Kv = ({ label, children }: { label: string; children?: ReactNode }) => <><td className="w-1/5 border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10px] font-bold text-slate-600">{label}</td><td className="w-[30%] border border-slate-200 px-2.5 py-1.5 text-[10px] text-slate-700">{children || "—"}</td></>;
   const band = (title: string) => <div className="mt-3 rounded-t-md bg-[#0D3A35] py-1.5 text-center text-[10px] font-extrabold tracking-[0.16em] text-white">{title}</div>;
@@ -1364,18 +1414,38 @@ function PrrDocumentPreview({ record, details, taxInvoiceName, poWoName, complet
       <div className="grid grid-cols-2 border-x border-slate-200">
         {amountRows.map(([label, amount]) => <div key={label} className="flex items-center justify-between border-b border-slate-200 px-3 py-1.5 text-[10px]"><span className="font-semibold text-slate-600">{label}</span><span className="font-bold tabular-nums">{formatCurrency(Number(amount || 0))}</span></div>)}
       </div>
-      <div className="flex items-center justify-between border-2 border-[#0D3A35] bg-emerald-50/50 px-4 py-3"><span className="text-[12px] font-extrabold text-[#0D3A35]">NET PAYABLE AMOUNT</span><span className="text-[16px] font-extrabold text-[#0D3A35]">{formatCurrency(details.netPayableAmount)}</span></div>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex items-center justify-between border-2 border-[#0D3A35] bg-emerald-50/50 px-4 py-3"><span className="text-[12px] font-extrabold text-[#0D3A35]">NET PAYABLE AMOUNT</span><span className="text-[16px] font-extrabold text-[#0D3A35]">{formatCurrency(details.netPayableAmount)}</span></div>
+        <div className="flex items-center justify-between border-2 border-amber-600 bg-amber-50/50 px-4 py-3"><span className="text-[12px] font-extrabold text-amber-700">ACTUAL PAYABLE AMOUNT</span><span className="text-[16px] font-extrabold text-amber-700">{formatCurrency(details.actualPayableAmount)}</span></div>
+      </div>
 
       {band("ACCOUNTING & PAYMENT DETAILS")}
       <table className="w-full border-collapse"><tbody>
-        <tr><Kv label="Ledger Head">{value(details.ledgerHead)}</Kv><Kv label="Sub Ledger">{value(details.subLedger)}</Kv></tr>
         <tr><Kv label="Cost Centre">{value(details.accountingCostCentre)}</Kv><Kv label="Cost Attribution">{value(details.costAttribution)}</Kv></tr>
-        <tr><Kv label="Budget Head">{value(details.budgetHead)}</Kv><Kv label="Budget Available">{formatCurrency(details.budgetAvailable)}</Kv></tr>
         <tr><Kv label="TDS">{details.tdsApplicable === "Yes" ? `${value(details.tdsSection)} @ ${details.tdsRate || 0}%` : "Not Applicable"}</Kv><Kv label="RCM Applicable">{value(details.rcmApplicable)}</Kv></tr>
         <tr><Kv label="Payment Mode">{value(details.paymentMode)}</Kv><Kv label="Payment Type">{value(details.paymentExtent)}</Kv></tr>
         <tr><Kv label="Bank Account From">{value(details.bankAccountFrom)}</Kv><Kv label="Requested Amount">{formatCurrency(details.requestedPaymentAmount)}</Kv></tr>
         <tr><Kv label="Payment Terms">{value(details.paymentTerms)}</Kv><Kv label="Narration">{value(details.accountingNarration)}</Kv></tr>
       </tbody></table>
+
+      {band("BUDGET LINE ITEMS")}
+      <table className="w-full border-collapse text-[10px]">
+        <thead><tr className="bg-slate-800 text-white"><th className="border border-slate-200 px-2 py-1.5 text-left">Budget</th><th className="border border-slate-200 px-2 py-1.5 text-left">Line Item</th><th className="border border-slate-200 px-2 py-1.5 text-right">Amount</th></tr></thead>
+        <tbody>
+          {details.budgetLines.length === 0 ? (
+            <tr><td colSpan={3} className="border border-slate-200 px-2 py-3 text-center text-slate-400">No budget line items selected.</td></tr>
+          ) : details.budgetLines.map((line) => (
+            <tr key={line.key}>
+              <td className="border border-slate-200 px-2 py-1.5">{line.budgetName}</td>
+              <td className="border border-slate-200 px-2 py-1.5">{line.lineItem}{line.category ? ` · ${line.category}` : ""}</td>
+              <td className="border border-slate-200 px-2 py-1.5 text-right font-bold">{formatCurrency(line.amount)}</td>
+            </tr>
+          ))}
+          {details.budgetLines.length > 0 && (
+            <tr className="bg-slate-50 font-bold"><td className="border border-slate-200 px-2 py-1.5" colSpan={2}>Total</td><td className="border border-slate-200 px-2 py-1.5 text-right">{formatCurrency(details.budgetLines.reduce((sum, l) => sum + (Number(l.amount) || 0), 0))}</td></tr>
+          )}
+        </tbody>
+      </table>
 
       {band("SUPPORTING DOCUMENTS")}
       <table className="w-full border-collapse"><tbody>
@@ -1443,6 +1513,88 @@ function PrrModal({ record, bills, onClose, onSave }: PrrModalProps) {
     return () => { active = false; };
   }, [details.vendorCode]);
 
+  // ── Budget line item picker — pick a budget, then a line item within it, then an amount ──
+  const [availableBudgets, setAvailableBudgets] = useState<{ budget_id: string; budget_name: string }[]>([]);
+  const [budgetLineItemsCache, setBudgetLineItemsCache] = useState<Record<string, { line_item_id: string; category: string; line_item: string }[]>>({});
+  const [pickedBudgetId, setPickedBudgetId] = useState("");
+  const [pickedLineItemId, setPickedLineItemId] = useState("");
+  const [pickedLineItemAmount, setPickedLineItemAmount] = useState("");
+  const [budgetLineItemsLoading, setBudgetLineItemsLoading] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+        const response = await fetch(`${baseUrl}/admin_accounts/get_budgets`, { headers: { Accept: "application/json" } });
+        const payload = await response.json().catch(() => null);
+        const list: { budget_id?: string; budget_name?: string; locked?: boolean }[] = Array.isArray(payload?.data) ? payload.data : [];
+        if (!active) return;
+        setAvailableBudgets(list.filter((b) => b.budget_id && !b.locked).map((b) => ({ budget_id: b.budget_id!, budget_name: b.budget_name || b.budget_id! })));
+      } catch {
+        // best-effort — budget picker just stays empty
+      }
+    })();
+    return () => { active = false; };
+  }, []);
+
+  // A budget's line items only live in its xlsx — fetched and parsed on demand, same recipe
+  // AccountsPayments.tsx's Budget Impact picker uses (admin_accounts.get_budget/{budget_id}).
+  const fetchBudgetLineItems = useCallback(async (budgetId: string) => {
+    if (budgetLineItemsCache[budgetId]) return budgetLineItemsCache[budgetId];
+    setBudgetLineItemsLoading(true);
+    try {
+      const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+      const response = await fetch(`${baseUrl}/admin_accounts/get_budget/${budgetId}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const buf = await response.arrayBuffer();
+      const workbook = XLSX.read(new Uint8Array(buf), { type: "array" });
+      const sheet = workbook.Sheets["budget"] || workbook.Sheets[workbook.SheetNames[0]];
+      const rows: Record<string, unknown>[] = sheet ? XLSX.utils.sheet_to_json(sheet) : [];
+      const items = rows
+        .map((r, i) => {
+          const rawId = String(r.line_item_id ?? "").trim().toLowerCase();
+          const hasRealId = rawId && rawId !== "undefined" && rawId !== "null";
+          return {
+            line_item_id: hasRealId ? String(r.line_item_id) : `item_${i}`,
+            category: String(r.category ?? "").trim(),
+            line_item: String(r.line_item ?? "").trim(),
+          };
+        })
+        .filter((item) => item.line_item);
+      setBudgetLineItemsCache((prev) => ({ ...prev, [budgetId]: items }));
+      return items;
+    } catch {
+      toast.error("Failed to load line items for this budget");
+      return [];
+    } finally {
+      setBudgetLineItemsLoading(false);
+    }
+  }, [budgetLineItemsCache]);
+
+  useEffect(() => {
+    setPickedLineItemId("");
+    if (pickedBudgetId) void fetchBudgetLineItems(pickedBudgetId);
+  }, [pickedBudgetId, fetchBudgetLineItems]);
+
+  const pickedBudgetLineItems = budgetLineItemsCache[pickedBudgetId] ?? [];
+
+  const addBudgetLine = () => {
+    const budget = availableBudgets.find((b) => b.budget_id === pickedBudgetId);
+    const lineItem = pickedBudgetLineItems.find((li) => li.line_item_id === pickedLineItemId);
+    const amountNum = Number(pickedLineItemAmount) || 0;
+    if (!budget || !lineItem || amountNum <= 0) { toast.error("Select a budget, a line item and an amount first."); return; }
+    const key = `${budget.budget_id}::${lineItem.line_item_id}`;
+    update("budgetLines", [
+      ...details.budgetLines.filter((l) => l.key !== key),
+      { key, budgetId: budget.budget_id, budgetName: budget.budget_name, category: lineItem.category, lineItem: lineItem.line_item, lineItemId: lineItem.line_item_id, amount: amountNum },
+    ]);
+    setPickedLineItemId("");
+    setPickedLineItemAmount("");
+  };
+
+  const removeBudgetLine = (key: string) => update("budgetLines", details.budgetLines.filter((l) => l.key !== key));
+
   const selectBill = (billId: string) => {
     const bill = bills.find((item) => item.id === billId);
     if (!bill) {
@@ -1458,9 +1610,14 @@ function PrrModal({ record, bills, onClose, onSave }: PrrModalProps) {
   const poWoName = form.poWoReference || "Not linked";
   const completionName = form.grnServiceReference || "Not linked";
 
-  const submit = (event: FormEvent) => {
+  // Two submit buttons below share this one form (so required-field validation still runs
+  // natively on both) — which one was clicked decides the status the record is saved with,
+  // regardless of whatever's currently sitting in the Approval section's Status dropdown.
+  const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    onSave({ ...form, entryType: "Payment Request / PRR", party: form.party, vendorId: details.vendorCode || form.vendorId, amount: details.requestedPaymentAmount || details.netPayableAmount, notes: details.accountingNarration || details.requesterRemarks, department: details.requestingDepartment, costCentre: details.costCentre, costAttribution: details.costAttribution, project: details.projectCluster, site: details.landSite, status: form.status || "Draft", prrDetails: details });
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    const status = submitter?.value === "send" ? "Submitted" : form.status || "Draft";
+    onSave({ ...form, entryType: "Payment Request / PRR", party: form.party, vendorId: details.vendorCode || form.vendorId, amount: details.requestedPaymentAmount || details.netPayableAmount, notes: details.accountingNarration || details.requesterRemarks, department: details.requestingDepartment, costCentre: details.costCentre, costAttribution: details.costAttribution, project: details.projectCluster, site: details.landSite, status, prrDetails: details });
   };
 
   return (
@@ -1506,6 +1663,7 @@ function PrrModal({ record, bills, onClose, onSave }: PrrModalProps) {
 
             {section("Amount Details", "Invoice value, adjustments and net payable amount.", <>
               {moneyField("Basic Amount", "basicAmount")}{moneyField("Taxable Amount", "taxableAmount")}{moneyField("CGST", "cgst")}{moneyField("SGST", "sgst")}{moneyField("IGST", "igst")}{moneyField("Other Charges", "otherCharges")}{moneyField("Gross Invoice Amount", "grossInvoiceAmount")}{moneyField("Advance Adjusted", "advanceAdjusted")}{moneyField("Debit / Credit Note Adjustment", "noteAdjustment")}{moneyField("Retention / Hold Amount", "retentionAmount")}{moneyField("TDS Deduction", "tdsDeduction", true)}{moneyField("Other Deduction", "otherDeduction")}{moneyField("Net Payable Amount", "netPayableAmount", true)}
+              <label className={`${labelClass} sm:col-span-2`}>Actual Payable Amount<span className="ml-2 font-medium normal-case text-slate-400">(lower this if part of the payment is on hold or disputed)</span><div className="relative"><IndianRupee className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input type="number" min="0" step="0.01" className={`${inputClass} pl-9`} value={String(details.actualPayableAmount ?? "")} onChange={(event) => numberUpdate("actualPayableAmount", event.target.value)} placeholder="0.00" /></div></label>
             </>)}
 
             {section("TDS / Tax", "Configure withholding tax and reverse charge.", <>
@@ -1516,13 +1674,48 @@ function PrrModal({ record, bills, onClose, onSave }: PrrModalProps) {
               <label className={labelClass}>RCM Applicable<select className={inputClass} value={details.rcmApplicable} onChange={(event) => update("rcmApplicable", event.target.value)}><option>No</option><option>Yes</option></select></label>
             </>)}
 
-            {section("Accounting", "Ledger, budget and cost allocation.", <>
-              <label className={labelClass}>Expense / Ledger Head<select className={inputClass} value={details.ledgerHead} onChange={(event) => update("ledgerHead", event.target.value)}><option value="">Select ledger head</option>{["Purchases", "Contractor Charges", "Repairs & Maintenance", "Employee Reimbursement", "Statutory Payable", "Other Expense"].map((item) => <option key={item}>{item}</option>)}</select></label>
-              <label className={labelClass}>Sub Ledger<input className={inputClass} value={details.subLedger} onChange={(event) => update("subLedger", event.target.value)} placeholder="Vendor / employee" /></label>
+            {section("Accounting", "Budget and cost allocation.", <>
               <label className={labelClass}>Cost Centre<select className={inputClass} value={details.accountingCostCentre} onChange={(event) => setDetails((current) => ({ ...current, accountingCostCentre: event.target.value, costCentre: event.target.value }))}><option value="">Select active cost centre</option>{accountingDimensions.costCentres.map((item) => <option key={item.id} value={item.name}>{item.code} · {item.name}</option>)}</select></label>
               <label className={labelClass}>Cost Attribution<select className={inputClass} value={details.costAttribution} onChange={(event) => update("costAttribution", event.target.value)}><option value="">Select active cost attribution</option>{accountingDimensions.costAttributions.map((item) => <option key={item.id} value={item.code}>{item.code} · {item.name}{item.level ? ` · ${item.level}` : ""}</option>)}</select></label>
-              <label className={labelClass}>Budget Head<select className={inputClass} value={details.budgetHead} onChange={(event) => update("budgetHead", event.target.value)}><option value="">Select budget head</option><option>Operating Expenses</option><option>Project Expenses</option><option>Capital Expenditure</option></select></label>
-              <label className={labelClass}>Budget Available<input readOnly className={`${inputClass} bg-slate-50`} value={formatCurrency(details.budgetAvailable)} /></label>
+
+              <div className="sm:col-span-2 space-y-3 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                <p className="text-xs font-bold text-slate-600">Budget Line Items</p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1.2fr_1.2fr_0.8fr_auto]">
+                  <select className={inputClass} value={pickedBudgetId} onChange={(event) => setPickedBudgetId(event.target.value)}>
+                    <option value="">Select budget</option>
+                    {availableBudgets.map((b) => <option key={b.budget_id} value={b.budget_id}>{b.budget_name}</option>)}
+                  </select>
+                  <select className={inputClass} value={pickedLineItemId} onChange={(event) => setPickedLineItemId(event.target.value)} disabled={!pickedBudgetId || budgetLineItemsLoading}>
+                    <option value="">{budgetLineItemsLoading ? "Loading line items…" : "Select line item"}</option>
+                    {pickedBudgetLineItems.map((li) => <option key={li.line_item_id} value={li.line_item_id}>{li.line_item}{li.category ? ` · ${li.category}` : ""}</option>)}
+                  </select>
+                  <div className="relative"><IndianRupee className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input type="number" min="0" step="0.01" className={`${inputClass} pl-9`} value={pickedLineItemAmount} onChange={(event) => setPickedLineItemAmount(event.target.value)} placeholder="Amount" /></div>
+                  <button type="button" onClick={addBudgetLine} className="h-11 rounded-xl border border-[#278b76] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf7f4]">Add</button>
+                </div>
+
+                {details.budgetLines.length === 0 ? (
+                  <p className="text-xs text-slate-400">No budget line items added yet.</p>
+                ) : (
+                  <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                    <table className="w-full border-collapse text-xs"><tbody>
+                      {details.budgetLines.map((line) => (
+                        <tr key={line.key} className="border-b border-slate-100 last:border-b-0">
+                          <td className="px-3 py-2 font-semibold text-slate-700">{line.budgetName}</td>
+                          <td className="px-3 py-2 text-slate-600">{line.lineItem}{line.category ? ` · ${line.category}` : ""}</td>
+                          <td className="px-3 py-2 text-right font-bold text-slate-800">{formatCurrency(line.amount)}</td>
+                          <td className="w-8 px-2 text-center"><button type="button" onClick={() => removeBudgetLine(line.key)} className="text-slate-400 hover:text-red-500"><Trash2 className="h-3.5 w-3.5" /></button></td>
+                        </tr>
+                      ))}
+                      <tr className="bg-slate-50 font-bold">
+                        <td className="px-3 py-2" colSpan={2}>Total</td>
+                        <td className="px-3 py-2 text-right">{formatCurrency(details.budgetLines.reduce((sum, l) => sum + (Number(l.amount) || 0), 0))}</td>
+                        <td />
+                      </tr>
+                    </tbody></table>
+                  </div>
+                )}
+              </div>
+
               <label className={`${labelClass} sm:col-span-2`}>Accounting Narration<textarea rows={3} className={textareaClass} value={details.accountingNarration} onChange={(event) => update("accountingNarration", event.target.value)} placeholder="Accounting narration" /></label>
             </>)}
 
@@ -1569,7 +1762,11 @@ function PrrModal({ record, bills, onClose, onSave }: PrrModalProps) {
         </div>
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 bg-white px-7 py-4">
           <p className="text-xs font-medium text-slate-400">Net payable: <span className="font-extrabold text-[#0d5c4d]">{formatCurrency(details.netPayableAmount)}</span></p>
-          <div className="flex gap-3"><button type="button" onClick={onClose} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50">Cancel</button><button type="submit" className="h-11 rounded-xl bg-[#0d5c4d] px-6 text-sm font-bold text-white hover:bg-[#0a4b3f]">Save PRR</button></div>
+          <div className="flex gap-3">
+            <button type="button" onClick={onClose} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50">Cancel</button>
+            <button type="submit" name="intent" value="draft" className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-600 hover:bg-slate-50">Save Draft</button>
+            <button type="submit" name="intent" value="send" className="h-11 rounded-xl bg-[#0d5c4d] px-6 text-sm font-bold text-white hover:bg-[#0a4b3f]">Send for Approval</button>
+          </div>
         </div>
       </form>
     </div>
@@ -1700,7 +1897,17 @@ function MediaPreviewFrame({ name, type, url }: { name: string; type: string; ur
         <button onClick={() => changeZoom(0.15)} disabled={zoom >= 2.5} className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-35" title="Zoom in" aria-label="Zoom in"><ZoomIn className="h-4 w-4" /></button>
         <button onClick={fitPage} className="ml-1 rounded-lg border border-[#b8d6ce] px-3 py-2 text-xs font-bold text-[#0d5c4d] hover:bg-[#eaf4f1]">Fit Page</button>
       </div>
-      {type === "application/pdf" ? <iframe key={pdfUrl} title={name} src={pdfUrl} className="min-h-0 flex-1 bg-white" /> : <div className="min-h-0 flex-1 overflow-auto p-2"><img src={url} alt={name} className="mx-auto h-auto max-w-none object-contain shadow-lg" style={{ width: `${zoom * 100}%` }} /></div>}
+      {type === "application/pdf" ? (
+        <iframe key={pdfUrl} title={name} src={pdfUrl} className="min-h-0 flex-1 bg-white" />
+      ) : (
+        <div className={cn("min-h-0 flex-1 p-2", fitMode ? "flex items-center justify-center overflow-hidden" : "overflow-auto")}>
+          {fitMode ? (
+            <img src={url} alt={name} className="h-full max-h-full w-full max-w-full object-contain shadow-lg" />
+          ) : (
+            <img src={url} alt={name} className="mx-auto h-auto max-w-none object-contain shadow-lg" style={{ width: `${zoom * 100}%` }} />
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1802,13 +2009,57 @@ function ExactPurchaseOrderPreview({ order }: { order: Record<string, unknown> }
 // Shown right after a bill is verified — books the liability against the vendor's accounts
 // ledger via the same add_accounts_ledger_entry endpoint AccountsPayments.tsx already uses
 // for its own "intake" step, so both flows post to the same place.
-function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord; onClose: () => void; onPosted: () => void }) {
+type JournalLine = { id: string; glAccount: string; subLedger: string; costCentre: string; costAttribution: string; debit: string; credit: string };
+type MasterItem = Record<string, unknown>;
+
+type PostedVoucherLine = { gl_account: string; sub_ledger?: string; cost_centre?: string; cost_attribution?: string; debit?: number; credit?: number };
+type PostedVoucherData = { voucher_no: string; party?: string; narration?: string; lines: PostedVoucherLine[] };
+
+const masterOptionLabel = (item: MasterItem): string => {
+  const code = String(item.code ?? "").trim();
+  const name = String(item.name ?? item.label ?? "").trim();
+  if (code && name) return `${code} - ${name}`;
+  return name || code || String(item.item_id ?? "");
+};
+
+function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord; onClose: () => void; onPosted: (voucher: PostedVoucherData) => void }) {
   const totalGst = Number(record.cgstAmount || 0) + Number(record.sgstAmount || 0) + Number(record.igstAmount || 0);
   const totalPayable = Number(record.amount || 0) || (Number(record.baseAmount || 0) + totalGst + Number(record.otherAdjustment || 0));
-  const [liabilityAmount, setLiabilityAmount] = useState(String(totalPayable || ""));
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const sourceReference = record.billInwardNo || record.reference || "";
+  const [postingDate, setPostingDate] = useState(new Date().toISOString().slice(0, 10));
+  const [voucherType, setVoucherType] = useState("Purchase");
+  const [narration, setNarration] = useState(`${record.entryType || "Bill Inward"} ${sourceReference} - ${record.party || ""}`.trim());
+  const [voucherNo, setVoucherNo] = useState("Generating…");
+  const [lines, setLines] = useState<JournalLine[]>(() => [
+    { id: "l1", glAccount: "", subLedger: "", costCentre: "", costAttribution: "", debit: totalPayable ? String(totalPayable) : "", credit: "" },
+    { id: "l2", glAccount: "", subLedger: record.party || "", costCentre: "", costAttribution: "", debit: "", credit: totalPayable ? String(totalPayable) : "" },
+  ]);
   const [submitting, setSubmitting] = useState(false);
   const [selectedDocKey, setSelectedDocKey] = useState("");
+  const [masters, setMasters] = useState<{ glAccounts: MasterItem[]; subLedgers: MasterItem[]; costCentres: MasterItem[]; costAttributions: MasterItem[]; voucherTypes: MasterItem[] }>({ glAccounts: [], subLedgers: [], costCentres: [], costAttributions: [], voucherTypes: [] });
+
+  useEffect(() => {
+    const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+    let cancelled = false;
+    fetch(`${baseUrl}/admin_accounts/get_next_voucher_number`)
+      .then((res) => res.json())
+      .then((data) => { if (!cancelled && data?.success) setVoucherNo(data.next_voucher_number); })
+      .catch(() => { if (!cancelled) setVoucherNo("—"); });
+    fetch(`${baseUrl}/admin_accounting_masters/list_all`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled || !data?.success) return;
+        setMasters({
+          glAccounts: mergeSbrGlSeed(data.data?.GL_ACCOUNT ?? []) as MasterItem[],
+          subLedgers: data.data?.SUB_LEDGER ?? [],
+          costCentres: data.data?.COST_CENTRE ?? [],
+          costAttributions: data.data?.COST_ATTRIBUTION ?? [],
+          voucherTypes: data.data?.VOUCHER_TYPE ?? [],
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   const documents = [
     ...(record.attachmentUrl ? [{ key: "bill", name: record.attachmentName || "Bill attachment", role: "bill" as const, type: record.attachmentType || (/\.pdf(\?|$)/i.test(record.attachmentUrl) ? "application/pdf" : "image/jpeg"), url: record.attachmentUrl }] : []),
@@ -1816,57 +2067,69 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
   ];
   const selectedDocument = documents.find((document) => document.key === selectedDocKey) ?? documents[0];
 
+  const updateLine = (id: string, patch: Partial<JournalLine>) => setLines((prev) => prev.map((line) => (line.id === id ? { ...line, ...patch } : line)));
+  const addLine = () => setLines((prev) => [...prev, { id: `l${Date.now()}`, glAccount: "", subLedger: "", costCentre: "", costAttribution: "", debit: "", credit: "" }]);
+  const removeLine = (id: string) => setLines((prev) => (prev.length > 2 ? prev.filter((line) => line.id !== id) : prev));
+
+  const totalDebit = lines.reduce((sum, line) => sum + (Number(line.debit) || 0), 0);
+  const totalCredit = lines.reduce((sum, line) => sum + (Number(line.credit) || 0), 0);
+  const difference = Math.round((totalDebit - totalCredit) * 100) / 100;
+  const isBalanced = difference === 0 && totalDebit > 0;
+
   const handlePost = async () => {
-    const amount = Number(liabilityAmount);
-    if (!amount || amount <= 0) { toast.error("Enter the liability amount to book."); return; }
-    if (!record.vendorId) { toast.error("This bill has no vendor on record."); return; }
+    const completedLines = lines.filter((line) => line.glAccount.trim() && ((Number(line.debit) || 0) > 0 || (Number(line.credit) || 0) > 0));
+    if (completedLines.length < 2) { toast.error("Add at least two ledger lines with a GL Account and an amount."); return; }
+    if (!isBalanced) { toast.error("Debit and Credit totals must match before posting."); return; }
     setSubmitting(true);
     try {
       const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
-      const response = await fetch(`${baseUrl}/admin_accounts/add_accounts_ledger_entry`, {
+      const response = await fetch(`${baseUrl}/admin_accounts/post_journal_voucher`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          vendor_id: record.vendorId,
-          vendor_details: { vendor_name: record.party, gst_number: record.vendorGstin || "" },
-          invoice_no: record.billInwardNo || record.reference || "",
-          transfer_type: "debit",
-          base_amount: amount,
-          discount_percentage: 0,
-          GST_percentage: 0,
-          freight_charges: 0,
-          other_charges: 0,
-          tds_percentage: 0,
-          date,
+          posting_date: postingDate,
+          voucher_type: voucherType,
+          source_module: "Purchase",
+          source_reference: sourceReference,
+          invoice_no: record.reference || "",
+          invoice_id: record.id,
+          party: record.party || "",
+          vendor_id: record.vendorId || "",
+          narration,
+          lines: completedLines.map((line) => ({ gl_account: line.glAccount, sub_ledger: line.subLedger, cost_centre: line.costCentre, cost_attribution: line.costAttribution, debit: Number(line.debit) || 0, credit: Number(line.credit) || 0 })),
         }),
       });
       const data = await response.json().catch(() => null);
-      if (!response.ok || !data?.success) throw new Error(data?.detail || data?.message || "Failed to post ledger entry");
-      toast.success(`Liability of ${formatCurrency(amount)} booked for ${record.billInwardNo || record.reference}`);
-      onPosted();
+      if (!response.ok || !data?.success) throw new Error(data?.detail || data?.message || "Failed to post journal voucher");
+      toast.success(`${data.data?.voucher_no || voucherNo} posted for ${sourceReference}`);
+      onPosted(data.data as PostedVoucherData);
       onClose();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to post ledger entry");
+      toast.error(error instanceof Error ? error.message : "Failed to post journal voucher");
     } finally {
       setSubmitting(false);
     }
   };
 
+  const smallInput = "h-9 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-800 outline-none focus:border-[#278b76] focus:ring-2 focus:ring-[#278b76]/10";
+
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-[2px]">
-      <div className="flex max-h-[94vh] w-full max-w-[1300px] flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
+      <div className="flex max-h-[96vh] w-full max-w-[1800px] flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
         <div className="flex shrink-0 items-start justify-between bg-[#0d473f] px-6 py-5 text-white">
           <div>
-            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Bills & Payables · Verification</p>
-            <h2 className="mt-1 text-xl font-bold">Ledger Entry</h2>
-            <p className="mt-1 text-xs font-medium text-white/60">{record.billInwardNo || record.reference} · {record.party} · verified, ready to book</p>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Bills & Payables · Ledger Posting</p>
+            <h2 className="mt-1 text-xl font-bold">Post Accounting Entry</h2>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg p-2 text-white/70 hover:bg-white/10 hover:text-white"><X className="h-5 w-5" /></button>
         </div>
 
-        <div className="grid min-h-0 flex-1 overflow-y-auto bg-[#eef3f6] lg:grid-cols-[minmax(0,1fr)_minmax(400px,0.85fr)] lg:overflow-hidden">
-          <section className="flex min-h-[420px] flex-col border-b border-slate-200 p-4 lg:min-h-0 lg:border-b-0 lg:border-r lg:p-5">
-            <p className="mb-3 text-xs font-extrabold uppercase tracking-[0.13em] text-slate-400">Documents on file</p>
+        <div className="grid min-h-0 flex-1 overflow-y-auto bg-[#eef3f6] lg:grid-cols-[3fr_7fr] lg:overflow-hidden">
+          <section className="flex min-h-[460px] flex-col border-b border-slate-200 p-4 lg:min-h-0 lg:border-b-0 lg:border-r lg:p-5">
+            <div className="mb-3 flex shrink-0 items-center justify-between">
+              <p className="text-xs font-extrabold uppercase tracking-[0.13em] text-slate-400">Documents on file</p>
+              {selectedDocument && <span className="truncate text-[11px] font-semibold text-slate-500">{selectedDocument.name}</span>}
+            </div>
             {documents.length > 1 && (
               <div className="mb-3 flex shrink-0 gap-2 overflow-x-auto pb-1">
                 {documents.map((document) => (
@@ -1877,7 +2140,7 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
                 ))}
               </div>
             )}
-            <div className="flex min-h-[380px] flex-1 items-center justify-center overflow-hidden rounded-2xl bg-slate-200/70 p-3 ring-1 ring-slate-300/70">
+            <div className="flex min-h-[400px] flex-1 items-center justify-center overflow-hidden rounded-2xl bg-slate-200/70 p-3 ring-1 ring-slate-300/70">
               {!selectedDocument ? (
                 <div className="flex max-w-sm flex-col items-center px-6 text-center text-slate-400"><FileText className="h-9 w-9" /><p className="mt-3 text-sm font-bold text-slate-600">No documents on file</p></div>
               ) : selectedDocument.type === "application/pdf" || selectedDocument.type.startsWith("image/") ? (
@@ -1889,36 +2152,78 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
           </section>
 
           <section className="overflow-y-auto bg-white p-5 sm:p-6">
-            <div className="mb-4"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">Invoice summary</p><h3 className="mt-1 text-lg font-bold text-slate-900">Confirm the liability to book</h3></div>
-            <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
-              <div className="flex justify-between"><span className="text-slate-500">Taxable / Base Amount</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.baseAmount || 0))}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">CGST</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.cgstAmount || 0))}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">SGST</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.sgstAmount || 0))}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">IGST</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.igstAmount || 0))}</span></div>
-              <div className="flex justify-between border-t border-slate-200 pt-2"><span className="text-slate-500">Total GST</span><span className="font-semibold text-slate-800">{formatCurrency(totalGst)}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">Other Charges / Adjustment</span><span className="font-semibold text-slate-800">{formatCurrency(Number(record.otherAdjustment || 0))}</span></div>
-              <div className="flex justify-between border-t border-slate-200 pt-2 text-base"><span className="font-bold text-slate-700">Total Invoiced</span><span className="font-bold text-[#0d5c4d]">{formatCurrency(totalPayable)}</span></div>
+            <div className="mb-4 grid grid-cols-2 gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs sm:grid-cols-4">
+              {[["Voucher No.", voucherNo], ["Date", formatRegisterDate(postingDate)], ["Source", record.entryType || "Bill Inward"], ["Reference No.", sourceReference || "—"], ["Party", record.party || "—"], ["Amount", formatCurrency(totalPayable)], ["Status", "Draft"]].map(([label, value]) => (
+                <div key={label}><p className="font-bold uppercase tracking-[0.08em] text-slate-400">{label}</p><p className="mt-1 truncate font-bold text-slate-800">{value}</p></div>
+              ))}
+            </div>
+            <p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">A. Source Details</p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Posting Date *
+                <input required type="date" value={postingDate} onChange={(event) => setPostingDate(event.target.value)} className={smallInput} />
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Voucher Type *
+                <input required list="ledger-voucher-types" value={voucherType} onChange={(event) => setVoucherType(event.target.value)} className={smallInput} placeholder="Purchase" />
+                <datalist id="ledger-voucher-types">{(masters.voucherTypes.length ? masters.voucherTypes.map((item) => masterOptionLabel(item)) : ["Purchase", "Journal", "Payment"]).map((label) => <option key={label} value={label} />)}</datalist>
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Source Module
+                <input disabled value="Bill Inward" className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Source Reference
+                <input disabled value={sourceReference || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Invoice / Document No.
+                <input disabled value={record.reference || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Party *
+                <input disabled value={record.party || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+              </label>
+            </div>
+            <label className="mt-3 block space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Narration
+              <textarea rows={2} value={narration} onChange={(event) => setNarration(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 outline-none focus:border-[#278b76] focus:ring-2 focus:ring-[#278b76]/10" />
+            </label>
+
+            <div className="mt-5 flex items-center justify-between">
+              <p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">B. Accounting Entry</p>
+              <button type="button" onClick={addLine} className="inline-flex items-center gap-1.5 text-xs font-bold text-[#0d5c4d] hover:underline"><Plus className="h-3.5 w-3.5" />Add Ledger Line</button>
+            </div>
+            <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200">
+              <table className="w-full min-w-[760px] text-left text-xs">
+                <thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["#", "GL Account *", "Sub Ledger", "Cost Centre", "Cost Attribution", "Debit (₹)", "Credit (₹)", ""].map((label) => <th key={label} className="px-2.5 py-2 font-bold">{label}</th>)}</tr></thead>
+                <tbody className="divide-y divide-slate-100">
+                  {lines.map((line, index) => (
+                    <tr key={line.id}>
+                      <td className="px-2.5 py-2 font-semibold text-slate-500">{index + 1}</td>
+                      <td className="px-2.5 py-2"><input list="ledger-gl-accounts" value={line.glAccount} onChange={(event) => updateLine(line.id, { glAccount: event.target.value })} className={smallInput} placeholder="Select GL account" /></td>
+                      <td className="px-2.5 py-2"><input list="ledger-sub-ledgers" value={line.subLedger} onChange={(event) => updateLine(line.id, { subLedger: event.target.value })} className={smallInput} placeholder="—" /></td>
+                      <td className="px-2.5 py-2"><input list="ledger-cost-centres" value={line.costCentre} onChange={(event) => updateLine(line.id, { costCentre: event.target.value })} className={smallInput} placeholder="—" /></td>
+                      <td className="px-2.5 py-2"><input list="ledger-cost-attributions" value={line.costAttribution} onChange={(event) => updateLine(line.id, { costAttribution: event.target.value })} className={smallInput} placeholder="—" /></td>
+                      <td className="px-2.5 py-2"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.debit} onChange={(event) => updateLine(line.id, { debit: event.target.value, credit: event.target.value ? "" : line.credit })} className={smallInput} /></td>
+                      <td className="px-2.5 py-2"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.credit} onChange={(event) => updateLine(line.id, { credit: event.target.value, debit: event.target.value ? "" : line.debit })} className={smallInput} /></td>
+                      <td className="px-2.5 py-2 text-center"><button type="button" onClick={() => removeLine(line.id)} disabled={lines.length <= 2} className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="h-3.5 w-3.5" /></button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <datalist id="ledger-gl-accounts">{masters.glAccounts.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+              <datalist id="ledger-sub-ledgers">{masters.subLedgers.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+              <datalist id="ledger-cost-centres">{masters.costCentres.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+              <datalist id="ledger-cost-attributions">{masters.costAttributions.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
             </div>
 
-            <div className="mt-5 grid gap-4 sm:grid-cols-2">
-              <label className="space-y-2 text-xs font-bold text-slate-600">Liability Amount to Book *
-                <input required type="number" min="0" step="0.01" value={liabilityAmount} onChange={(event) => setLiabilityAmount(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10" />
-              </label>
-              <label className="space-y-2 text-xs font-bold text-slate-600">Entry Date *
-                <input required type="date" value={date} onChange={(event) => setDate(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-semibold text-slate-800 outline-none focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10" />
-              </label>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
+              <span><span className="text-slate-500">Total Debit (₹) </span><span className="font-bold text-slate-800">{formatCurrency(totalDebit)}</span></span>
+              <span><span className="text-slate-500">Total Credit (₹) </span><span className="font-bold text-slate-800">{formatCurrency(totalCredit)}</span></span>
+              <span className={cn("inline-flex items-center gap-1.5 font-bold", isBalanced ? "text-emerald-700" : "text-amber-700")}>Difference (₹) {formatCurrency(Math.abs(difference))} {isBalanced ? <CheckCircle2 className="h-3.5 w-3.5" /> : null}</span>
             </div>
-            {Number(liabilityAmount || 0) !== totalPayable && (
-              <p className="mt-2 text-[11px] font-semibold text-amber-700">This differs from the invoice's total ({formatCurrency(totalPayable)}) — booking a partial or adjusted liability.</p>
-            )}
           </section>
         </div>
 
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-100 bg-white px-6 py-4">
-          <p className="text-xs font-medium text-slate-400">Posts to the vendor's accounts ledger as a liability.</p>
+          <p className="text-xs font-medium text-slate-400">{isBalanced ? "Ready to post — debit and credit are balanced." : "Debit and credit must be equal before this can be posted."}</p>
           <div className="flex gap-3">
             <button type="button" onClick={onClose} disabled={submitting} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Skip for now</button>
-            <button type="button" onClick={handlePost} disabled={submitting} className="h-11 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f] disabled:opacity-60">{submitting ? "Posting…" : "Post Ledger Entry"}</button>
+            <button type="button" onClick={handlePost} disabled={submitting || !isBalanced} className="h-11 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f] disabled:opacity-60">{submitting ? "Posting…" : "Post Ledger Entry"}</button>
           </div>
         </div>
       </div>
@@ -2157,12 +2462,13 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
   const moduleRecords = records.filter((record) => record.module === moduleKey);
   const isVerificationRegister = moduleKey === "bills-payables" && activeTab.label === "Verification";
   const isBillsPaidRegister = moduleKey === "bills-payables" && activeTab.label === "Bills Paid";
+  const isLedgerPostingRegister = moduleKey === "bills-payables" && activeTab.label === "Ledger Posting";
   const isRequestRegister = moduleKey === "payments-receipts" && activeTab.label === "Requests";
-  const tabRecords = isVerificationRegister || isBillsPaidRegister
-    ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward")
+  const tabRecords = isVerificationRegister || isBillsPaidRegister || isLedgerPostingRegister
+    ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward" && (!isLedgerPostingRegister || (record.status === "Verified" && record.ledgerEntryStatus !== "completed")))
     : moduleRecords.filter((record) => record.tab === activeTab.label);
   const isInwardRegister = moduleKey === "bills-payables" && activeTab.label === "Inward";
-  const showsBillInwardRecords = isInwardRegister || isVerificationRegister || isBillsPaidRegister;
+  const showsBillInwardRecords = isInwardRegister || isVerificationRegister || isBillsPaidRegister || isLedgerPostingRegister;
   const visibleRecords = tabRecords.filter((record) => {
     const query = search.toLowerCase().trim();
     const matchesSearch = !query || [record.billInwardNo, record.reference, record.entryType, record.party, record.notes].some((value) => String(value ?? "").toLowerCase().includes(query));
@@ -2208,12 +2514,58 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
     }
   };
 
+  // Everything a PRR needs — party, reference, amount, TDS/tax, payment terms and
+  // supporting documents — already lives on the Bill Inward record; the only thing the
+  // ledger posting step adds is the real Cost Centre/Cost Attribution that were actually
+  // posted, replacing initialPrrDetails' blank guesses for those fields.
+  // Budget lines are deliberately left blank — no budget selection in this flow.
+  const buildAutoPrr = (bill: FinanceRecord, voucher: PostedVoucherData, currentRecords: FinanceRecord[]): FinanceRecord | null => {
+    const existingRequest = currentRecords.find((record) => record.module === "payments-receipts" && record.tab === "Requests" && record.sourceBillId === bill.id);
+    if (existingRequest) return null;
+    const debitLine = voucher.lines.find((line) => (line.debit || 0) > 0);
+    const details: PRRDetails = {
+      ...initialPrrDetails(bill, bill),
+      accountingCostCentre: debitLine?.cost_centre || "",
+      costAttribution: debitLine?.cost_attribution || "",
+      accountingNarration: voucher.narration || bill.notes || "",
+    };
+    return {
+      id: crypto.randomUUID(),
+      module: "payments-receipts",
+      tab: "Requests",
+      entryType: "Payment Request / PRR",
+      reference: nextPaymentRequestNumber(currentRecords),
+      party: bill.party,
+      vendorId: details.vendorCode || bill.vendorId,
+      date: new Date().toISOString().slice(0, 10),
+      dueDate: bill.dueDate,
+      amount: details.requestedPaymentAmount || details.netPayableAmount,
+      status: "Pending Approval",
+      notes: details.accountingNarration,
+      sourceBillId: bill.id,
+      sourceBillInwardNo: bill.billInwardNo || bill.reference,
+      poWoReference: bill.poWoReference,
+      referenceType: bill.referenceType,
+      grnServiceReference: bill.grnServiceReference,
+      department: details.requestingDepartment,
+      costCentre: details.costCentre,
+      costAttribution: details.costAttribution,
+      project: bill.project,
+      site: bill.site,
+      prrDetails: details,
+    };
+  };
+
   // No backend endpoint updates the invoice's own ledger_entery_status yet, so this is
   // recorded locally (preserved across get_invoices refetches by mergeInvoiceRecords) —
   // the real ledger entry itself is already posted for real via add_accounts_ledger_entry.
-  const markLedgerEntryPosted = (entry: FinanceRecord) => {
-    saveRecords(records.map((record) => record.id === entry.id ? { ...record, ledgerEntryStatus: "completed" } : record));
+  const markLedgerEntryPosted = (entry: FinanceRecord, voucher: PostedVoucherData) => {
+    const updatedEntry = { ...entry, ledgerEntryStatus: "completed" };
+    const next = records.map((record) => record.id === entry.id ? updatedEntry : record);
+    const prr = buildAutoPrr(updatedEntry, voucher, next);
+    saveRecords(prr ? [prr, ...next] : next);
     setLedgerEntryRecord(null);
+    if (prr) toast.success(`Payment request ${prr.reference} auto-created for ${updatedEntry.billInwardNo || updatedEntry.reference}`);
   };
 
   const requestPayment = (entry: FinanceRecord) => {
@@ -2289,7 +2641,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
           eyebrow="Finance & Accounts"
           title={module.title}
           description={module.description}
-          action={!isVerificationRegister && !isBillsPaidRegister ? <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : "New Entry"}</button> : undefined}
+          action={!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister ? <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : "New Entry"}</button> : undefined}
         />
 
         <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm">
@@ -2335,7 +2687,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
                   {visibleRecords.map((record) => (
                     <tr key={record.id} className="leading-5 hover:bg-slate-50/80">
                       <td className="whitespace-nowrap px-5 py-4 font-semibold text-[#0d5c4d]">{showsBillInwardRecords ? record.billInwardNo || record.reference : record.reference}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.date)}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.dueDate)}</td><td className="px-5 py-4 font-semibold text-slate-800">{record.entryType}</td><td className="px-5 py-4 font-medium text-slate-500">{record.party || "—"}</td><td className="whitespace-nowrap px-5 py-4 text-right font-semibold text-slate-900">{formatCurrency(record.amount)}</td><td className="px-5 py-4 text-center"><span className={cn("inline-flex whitespace-nowrap rounded-full px-3 py-1 text-sm font-semibold", record.status === "Pending Approval" ? "bg-amber-50 text-amber-700" : record.status === "Verified" || ["Posted", "Paid", "Reconciled", "Closed"].includes(record.status) ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600")}>{record.status || "Draft"}</span></td>
-                      <td className="px-5 py-4"><div className="flex justify-end gap-1">{isVerificationRegister || isBillsPaidRegister ? <button onClick={() => { setBillPreviewMode(isBillsPaidRegister ? "pay" : "verify"); setVerificationPreview(record); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="Preview bill"><Eye className="h-4 w-4" />Preview</button> : isRequestRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />Create PRR</button> : <><button onClick={() => { setEditing(record); setModalOpen(true); }} className={cn("inline-flex items-center gap-1.5 rounded-lg text-slate-500 hover:bg-[#eaf4f1] hover:text-[#0d5c4d]", record.entryType === "Bill Inward" ? "px-3 py-2 text-sm font-semibold" : "p-2")} title="Edit"><Pencil className="h-4 w-4" />{record.entryType === "Bill Inward" && "Edit"}</button><button onClick={() => window.confirm(`Delete ${record.reference}?`) && saveRecords(records.filter((item) => item.id !== record.id))} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Delete"><Trash2 className="h-4 w-4" /></button></>}</div></td>
+                      <td className="px-5 py-4"><div className="flex justify-end gap-1">{isVerificationRegister || isBillsPaidRegister ? <button onClick={() => { setBillPreviewMode(isBillsPaidRegister ? "pay" : "verify"); setVerificationPreview(record); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="Preview bill"><Eye className="h-4 w-4" />Preview</button> : isLedgerPostingRegister ? <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Post ledger entry"><IndianRupee className="h-4 w-4" />Post Ledger Entry</button> : isRequestRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />Create PRR</button> : <><button onClick={() => { setEditing(record); setModalOpen(true); }} className={cn("inline-flex items-center gap-1.5 rounded-lg text-slate-500 hover:bg-[#eaf4f1] hover:text-[#0d5c4d]", record.entryType === "Bill Inward" ? "px-3 py-2 text-sm font-semibold" : "p-2")} title="Edit"><Pencil className="h-4 w-4" />{record.entryType === "Bill Inward" && "Edit"}</button><button onClick={() => window.confirm(`Delete ${record.reference}?`) && saveRecords(records.filter((item) => item.id !== record.id))} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Delete"><Trash2 className="h-4 w-4" /></button></>}</div></td>
                     </tr>
                   ))}
                 </tbody>
@@ -2345,8 +2697,8 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
             <div className="flex min-h-[300px] flex-col items-center justify-center px-6 py-12 text-center">
               <span className="rounded-2xl bg-[#edf5f2] p-4 text-[#6c9b90]"><FileBarChart className="h-8 w-8" /></span>
               <h3 className="mt-4 text-lg font-bold text-slate-800">No {activeTab.label.toLowerCase()} entries found</h3>
-              <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">{isVerificationRegister ? "Saved Bill Inward entries will appear here automatically for review and verification." : isBillsPaidRegister ? "Every Bill Inward entry will appear here. Verified bills can be marked as paid from their preview." : "Create the first entry for this workflow, or change the search and status filters."}</p>
-              {!isVerificationRegister && !isBillsPaidRegister && <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : `Create ${activeTab.features[0] ?? "Entry"}`}</button>}
+              <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">{isVerificationRegister ? "Saved Bill Inward entries will appear here automatically for review and verification." : isLedgerPostingRegister ? "Director-approved (Verified) bills with a pending ledger entry will appear here for posting." : isBillsPaidRegister ? "Every Bill Inward entry will appear here. Verified bills can be marked as paid from their preview." : "Create the first entry for this workflow, or change the search and status filters."}</p>
+              {!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister && <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : `Create ${activeTab.features[0] ?? "Entry"}`}</button>}
             </div>
           )}
         </section>
@@ -2354,14 +2706,13 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
       {modalOpen && <EntryModal module={module} tab={activeTab} existing={editing} onClose={() => { setModalOpen(false); setEditing(null); }} onSave={saveEntry} onSaved={loadInvoices} />}
       {prrModalRecord && <PrrModal record={prrModalRecord} bills={records.filter((record) => record.module === "bills-payables" && record.tab === "Inward" && record.entryType === "Bill Inward" && ["Verified", "Paid"].includes(record.status))} onClose={() => setPrrModalRecord(null)} onSave={savePrr} />}
       {verificationPreview && <BillVerificationPreview record={verificationPreview} actionMode={billPreviewMode} paymentRequested={records.some((record) => record.module === "payments-receipts" && record.tab === "Requests" && record.sourceBillId === verificationPreview.id)} onClose={() => setVerificationPreview(null)} onVerify={() => billPreviewMode === "pay" ? markBillPaid(verificationPreview) : verifyBill(verificationPreview)} onRequestPayment={() => requestPayment(verificationPreview)} onPostLedgerEntry={() => { setVerificationPreview(null); setLedgerEntryRecord(verificationPreview); }} />}
-      {ledgerEntryRecord && <LedgerEntryModal record={ledgerEntryRecord} onClose={() => setLedgerEntryRecord(null)} onPosted={() => markLedgerEntryPosted(ledgerEntryRecord)} />}
+      {ledgerEntryRecord && <LedgerEntryModal record={ledgerEntryRecord} onClose={() => setLedgerEntryRecord(null)} onPosted={(voucher) => markLedgerEntryPosted(ledgerEntryRecord, voucher)} />}
     </div>
   );
 }
 
 export const BillsPayables = () => <FinanceAccountsModule moduleKey="bills-payables" />;
 export const PaymentsReceipts = () => <FinanceAccountsModule moduleKey="payments-receipts" />;
-export const Vouchers = () => <FinanceAccountsModule moduleKey="vouchers" />;
 export const Banking = () => <FinanceAccountsModule moduleKey="banking" />;
 export const LedgersReports = () => <FinanceAccountsModule moduleKey="ledgers-reports" />;
 export const BudgetCosting = () => <FinanceAccountsModule moduleKey="budget-costing" />;

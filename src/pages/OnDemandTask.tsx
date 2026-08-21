@@ -1,14 +1,51 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
-import { X, Plus, UserCheck, Save, Lock } from 'lucide-react';
+import { X, Plus, UserCheck, Save, Lock, ClipboardCheck, Boxes, Shapes, Search, ChevronLeft, Camera, Video, MapPin, FileText, MoreHorizontal, Zap, ListChecks } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { toast } from 'sonner';
+import { listWccOrderReferences } from '@/lib/wccEnterpriseApi';
+import { getGateEntries, listGrns } from '@/lib/grnApi';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type TaskStepType = 'inventory' | 'logistics' | 'inspection' | 'cultivation' | 'on_field' | 'other';
 
 type OnFieldTaskMode = 'cultivation' | 'non_cultivation';
+type WorkspaceTab = 'task' | 'allocation' | 'templates';
+type CreateMode = 'quick' | 'structured' | 'template';
+type BuilderSection = 'details' | 'assignment' | 'work' | 'controls' | 'review';
+type TaskWorkspaceSection = 'overview' | 'steps' | 'resources' | 'evidence' | 'activity';
+type SystemRecordOption = { id: string; label: string; detail?: string };
+
+interface UniversalTaskDraft {
+  title: string;
+  category: string;
+  description: string;
+  priority: string;
+  plannedStart: string;
+  dueDate: string;
+  department: string;
+  project: string;
+  costCentre: string;
+  tags: string;
+  relatedTo: string;
+  relatedId: string;
+  locationType: string;
+  locationId: string;
+  owner: string;
+  supervisor: string;
+  verifier: string;
+  approvalMode: string;
+  evidenceRule: string;
+  recurrence: string;
+  taskQuantity: string;
+  taskUnit: string;
+  specification: string;
+  verificationRequired: boolean;
+  requiredPhotos: number;
+  requiredVideos: number;
+  landIds: string[];
+}
 
 // Pseudo-vendor selectable when no vendor is in scope for the land — the task is done in-house
 const SELF_VENDOR_ID = 'self';
@@ -23,6 +60,7 @@ interface TaskFlowStep {
     assigneeDesignation: string;
     title: string;
     notes: string;
+    capabilities: string[];
     inventoryItems: Record<string, number>;
     allocationNeeded: boolean;
     // Add-ons attached to an inventory step, managed inline in the same popup rather than as separate steps
@@ -117,6 +155,8 @@ interface OnDemandTaskStepApi {
   equipment_otp?: string;
   handover_proof_delivery?: string;
   task_media?: string[];
+  task_details?: Partial<UniversalTaskDraft>;
+  required_media?: { photos?: number; videos?: number };
 }
 
 interface OnDemandTaskApi {
@@ -136,6 +176,7 @@ interface StepViewModel {
   equipmentOtp?: string;
   handoverProof?: string;
   taskMedia: string[];
+  taskDetails?: Partial<UniversalTaskDraft>;
 }
 
 interface TaskViewModel {
@@ -252,6 +293,41 @@ const taskStepTypeMeta: Record<TaskStepType, { label: string; badge: string; she
     panel: 'border-slate-200 bg-white',
   },
 };
+
+const EMPTY_UNIVERSAL_TASK: UniversalTaskDraft = {
+  title: '', category: 'field_operations', description: '', priority: 'medium', plannedStart: '', dueDate: '',
+  department: '', project: '', costCentre: '', tags: '', relatedTo: 'none', relatedId: '', locationType: 'none',
+  locationId: '', owner: '', supervisor: '', verifier: '', approvalMode: 'none', evidenceRule: 'none', recurrence: 'one_time',
+  taskQuantity: '', taskUnit: 'Nos.', specification: '', verificationRequired: false,
+  requiredPhotos: 0, requiredVideos: 0,
+  landIds: [],
+};
+
+const TASK_CATEGORIES = [
+  ['field_operations', 'Field Operations'], ['cultivation', 'Cultivation'], ['maintenance', 'Maintenance'],
+  ['inspection', 'Inspection'], ['inventory', 'Inventory'], ['logistics', 'Logistics'], ['procurement', 'Procurement'],
+  ['finance', 'Finance'], ['hr_admin', 'HR / Administration'], ['documentation', 'Documentation'],
+  ['compliance', 'Compliance'], ['project', 'Project'], ['it', 'IT'], ['other', 'Other'],
+];
+
+const UNIVERSAL_TASK_TEMPLATES = [
+  { id: 'borewell', name: 'Borewell Drilling', category: 'field_operations', priority: 'high', description: 'Drill, measure, test and document a borewell.', steps: ['on_field', 'inspection'] as TaskStepType[] },
+  { id: 'farm-inspection', name: 'Farm Inspection', category: 'inspection', priority: 'medium', description: 'Inspect field condition and submit evidence.', steps: ['inspection'] as TaskStepType[] },
+  { id: 'manure', name: 'Organic Manure Spreading', category: 'cultivation', priority: 'medium', description: 'Allocate material and execute manure spreading against measured acreage.', steps: ['inventory', 'on_field', 'inspection'] as TaskStepType[] },
+  { id: 'vehicle-maintenance', name: 'Vehicle Maintenance', category: 'maintenance', priority: 'medium', description: 'Inspect, repair and verify a vehicle.', steps: ['logistics', 'inspection'] as TaskStepType[] },
+  { id: 'inventory-transfer', name: 'Inventory Transfer', category: 'inventory', priority: 'high', description: 'Allocate, transport and confirm inventory handover.', steps: ['inventory', 'logistics', 'inspection'] as TaskStepType[] },
+  { id: 'document-collection', name: 'Document Collection', category: 'documentation', priority: 'low', description: 'Collect and verify required documents.', steps: ['other', 'inspection'] as TaskStepType[] },
+];
+
+const BUILDER_SECTIONS: Array<[BuilderSection, string]> = [
+  ['details', 'Details'], ['assignment', 'Assignment'], ['work', 'Work'], ['controls', 'Controls'], ['review', 'Review'],
+];
+
+const STEP_CAPABILITIES = [
+  'Quantity / Work Measurement', 'Inventory', 'Logistics', 'Vehicle', 'Equipment', 'Manpower',
+  'Vendor', 'Work Order', 'Inspection Form', 'Checklist', 'Photos', 'Videos', 'Documents', 'GPS', 'Signature',
+  'Approval', 'Expense', 'Material Consumption', 'Custom Fields',
+];
 
 // ─── Display helpers (task list) ──────────────────────────────────────────────
 
@@ -538,6 +614,7 @@ const normalizeTaskSteps = (stepsDict: Record<string, OnDemandTaskStepApi> = {})
       equipmentOtp: step?.equipment_otp,
       handoverProof: step?.handover_proof_delivery,
       taskMedia: Array.isArray(step?.task_media) ? step.task_media : [],
+      taskDetails: step?.task_details,
     };
   }).sort((a, b) => a.stepNumber - b.stepNumber);
 
@@ -580,7 +657,22 @@ const OnDemandTask = () => {
   // submitted as a paired create_new_allocation_schema + allocate_inventory_to_farm call (see handleAssignTask).
   const [stepAllocation, setStepAllocation] = useState<Record<string, { farms: string[]; distribution: Record<string, Record<string, string>>; farmSelector: string }>>({});
   const [isCreatingTask, setIsCreatingTask] = useState(false);
-  const [activeTab, setActiveTab] = useState<'task' | 'allocation'>('task');
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('task');
+  const [createMode, setCreateMode] = useState<CreateMode>('structured');
+  const [builderSection, setBuilderSection] = useState<BuilderSection>('details');
+  const [universalTask, setUniversalTask] = useState<UniversalTaskDraft>(EMPTY_UNIVERSAL_TASK);
+  const [isCreateChooserOpen, setIsCreateChooserOpen] = useState(false);
+  const [taskSearch, setTaskSearch] = useState('');
+  const [taskStatusFilter, setTaskStatusFilter] = useState('all');
+  const [taskCategoryFilter, setTaskCategoryFilter] = useState('all');
+  const [selectedTask, setSelectedTask] = useState<TaskViewModel | null>(null);
+  const [taskWorkspaceSection, setTaskWorkspaceSection] = useState<TaskWorkspaceSection>('overview');
+  const [showMoreDetails, setShowMoreDetails] = useState(false);
+  const [templateSearch, setTemplateSearch] = useState('');
+  const [templateCategory, setTemplateCategory] = useState('all');
+  const [relatedRecordOptions, setRelatedRecordOptions] = useState<Record<string, SystemRecordOption[]>>({});
+  const [relatedRecordsLoading, setRelatedRecordsLoading] = useState(false);
+  const [relatedRecordsError, setRelatedRecordsError] = useState('');
 
   // On Field Task: vendor scope + plots, fetched per-step since each step can target a different farm/vendor
   const [scopeByStep, setScopeByStep] = useState<Record<string, Record<string, VendorScopeEntry>>>({});
@@ -679,6 +771,61 @@ const OnDemandTask = () => {
 
   useEffect(() => { fetchOnDemandTasks(); }, []);
 
+  useEffect(() => {
+    const type = universalTask.relatedTo;
+    if (!isModalOpen || !type || ['none', 'custom'].includes(type) || relatedRecordOptions[type]) return;
+    let cancelled = false;
+    const loadRelatedRecords = async () => {
+      setRelatedRecordsLoading(true);
+      setRelatedRecordsError('');
+      try {
+        let options: SystemRecordOption[] = [];
+        if (['purchase_requirement', 'purchase_request', 'purchase_order', 'work_order', 'vendor'].includes(type)) {
+          const orders = await listWccOrderReferences();
+          if (type === 'purchase_requirement' || type === 'purchase_request') {
+            options = Array.from(new Map(orders.filter((row) => row.prNumber).map((row) => [row.prNumber, { id: row.prNumber, label: row.prNumber, detail: row.department || row.vendorName }])).values());
+          } else if (type === 'vendor') {
+            options = Array.from(new Map(orders.filter((row) => row.vendorId).map((row) => [row.vendorId, { id: row.vendorId, label: row.vendorName || row.vendorId, detail: row.vendorId }])).values());
+          } else {
+            options = orders.filter((row) => {
+              const isWorkOrder = row.orderType.toLowerCase().includes('work') || /(^|\/)WO(\/|$)/i.test(row.orderNumber);
+              return type === 'work_order' ? isWorkOrder : !isWorkOrder;
+            }).map((row) => ({ id: row.orderNumber, label: row.orderNumber, detail: row.vendorName || row.department }));
+          }
+        } else if (type === 'grn') {
+          options = (await listGrns()).map((row) => ({ id: row.grnNo, label: row.grnNo, detail: [row.poNo, row.vendorName].filter(Boolean).join(' · ') }));
+        } else if (type === 'gate_entry') {
+          options = (await getGateEntries()).map((row) => ({ id: row.enteryId, label: row.siteEntryNo || row.enteryId, detail: [row.vendorName, row.orderNumber].filter(Boolean).join(' · ') }));
+        } else if (type === 'wcc') {
+          const response = await fetch(`${BASE_URL}/admin_wcc_certificate/list`, { headers: { Accept: 'application/json' } });
+          const data = await response.json().catch(() => null);
+          if (!response.ok) throw new Error(data?.detail || 'Failed to load WCC records');
+          const certificates = Array.isArray(data?.certificates) ? data.certificates : [];
+          options = certificates.map((row: any) => ({ id: String(row?.certificate_id || row?.wcc_number || ''), label: String(row?.certificate_id || row?.wcc_number || 'WCC'), detail: [row?.order_number, row?.vendor_name].filter(Boolean).join(' · ') })).filter((row: SystemRecordOption) => row.id);
+        } else if (type === 'land_parcel' || type === 'plot' || type === 'farm') {
+          options = farms.map((farm) => ({ id: String(farm?.farm_id || farm?.id || ''), label: String(farm?.land_data?.village || farm?.owner_name || farm?.farm_id || 'Land parcel'), detail: String(farm?.farm_id || '') })).filter((row) => row.id);
+        } else if (type === 'vehicle') {
+          options = vehicles.map((vehicle) => ({ id: getVehicleId(vehicle), label: getVehicleName(vehicle), detail: getVehicleId(vehicle) })).filter((row) => row.id);
+        } else if (type === 'inventory_item' || type === 'equipment' || type === 'asset') {
+          options = inventoryItems.map((item) => ({ id: getInventoryItemId(item), label: getInventoryItemName(item), detail: String(item?.unit || '') })).filter((row) => row.id);
+        } else if (type === 'employee') {
+          options = Object.values(staffByDesignation).flat().map((staff) => ({ id: String(staff.staff_id || ''), label: String(staff.staff_information?.staff_name || staff.staff_id || 'Employee'), detail: String(staff.staff_information?.staff_designation || '') })).filter((row) => row.id);
+        } else if (type === 'calendar_activity' || type === 'cultivation_plan') {
+          options = cultivationActivities.map((activity) => ({ id: activity.id, label: activity.name, detail: activity.category || '' }));
+        } else if (type === 'another_task') {
+          options = ondemandTasks.map((task) => ({ id: task.taskId, label: String(task.steps.find((step) => step.taskDetails)?.taskDetails?.title || task.taskId), detail: task.taskId }));
+        }
+        if (!cancelled) setRelatedRecordOptions((current) => ({ ...current, [type]: options }));
+      } catch (error) {
+        if (!cancelled) setRelatedRecordsError(error instanceof Error ? error.message : 'Unable to load system records');
+      } finally {
+        if (!cancelled) setRelatedRecordsLoading(false);
+      }
+    };
+    void loadRelatedRecords();
+    return () => { cancelled = true; };
+  }, [isModalOpen, universalTask.relatedTo, relatedRecordOptions, farms, vehicles, inventoryItems, ondemandTasks, staffByDesignation, cultivationActivities]);
+
   // ── Fetch allocations ───────────────────────────────────────────────────────
 
   const fetchAllocations = async () => {
@@ -710,13 +857,16 @@ const OnDemandTask = () => {
     type: '',
     expanded: true,
     details: {
-      assignee: '', assigneeDesignation: '', title: `Step ${stepNumber}`, notes: '', inventoryItems: {}, allocationNeeded: false, includeLogistics: false, includeOnField: false, vehicleIds: [], inspectionInputType: 'text', inspectionFields: [], landId: '', otherDescription: '',
+      assignee: '', assigneeDesignation: '', title: `Step ${stepNumber}`, notes: '', capabilities: [], inventoryItems: {}, allocationNeeded: false, includeLogistics: false, includeOnField: false, vehicleIds: [], inspectionInputType: 'text', inspectionFields: [], landId: '', otherDescription: '',
       onFieldMode: 'cultivation', onFieldCalendarId: '', vendorId: '', vendorName: '', onFieldOrderNumber: '', onFieldActivity: '', onFieldLineItemQuantities: {}, onFieldStartDate: '', onFieldWorkQuantity: '', onFieldFromDate: '', onFieldToDate: '', onFieldQty: '', onFieldUnit: '', onFieldSpecValue: '', onFieldSpecUnit: '',
     },
   });
 
-  const openModal = async () => {
+  const openModal = async (mode: CreateMode = 'structured') => {
     setIsModalOpen(true);
+    setCreateMode(mode);
+    setBuilderSection(mode === 'quick' ? 'details' : 'details');
+    setUniversalTask(EMPTY_UNIVERSAL_TASK);
     setTaskAssignment({ designation: '', staffId: '', staffName: '' });
     setTaskFlowSteps([]);
     setResourcePopup(null);
@@ -742,6 +892,9 @@ const OnDemandTask = () => {
 
   const closeModal = () => {
     setIsModalOpen(false);
+    setCreateMode('structured');
+    setBuilderSection('details');
+    setUniversalTask(EMPTY_UNIVERSAL_TASK);
     setTaskAssignment({ designation: '', staffId: '', staffName: '' });
     setTaskFlowSteps([]);
     setResourcePopup(null);
@@ -823,7 +976,15 @@ const OnDemandTask = () => {
       }
       acc[nextKey()] = { type: 'others', status: 'pending', data: [{ description: String(step.details.otherDescription || '') }] };
     }
-    return acc;
+    const taskDetails = {
+      ...universalTask,
+      source_type: 'manual',
+      source_id: null,
+      creation_mode: createMode,
+      capabilities: Array.from(new Set(steps.flatMap((step) => step.details.capabilities))),
+      evidence_rules: { photos: universalTask.requiredPhotos, videos: universalTask.requiredVideos },
+    };
+    return Object.fromEntries(Object.entries(acc).map(([key, value]) => [key, { ...value, task_details: taskDetails, required_media: { photos: universalTask.requiredPhotos, videos: universalTask.requiredVideos } }]));
   };
 
   const updateStep = (stepId: string, patch: Partial<TaskFlowStep>) =>
@@ -1013,9 +1174,64 @@ const OnDemandTask = () => {
       return { ...s, details: { ...s.details, vehicleIds: cur.includes(vehicleId) ? cur.filter(id => id !== vehicleId) : [...cur, vehicleId] } };
     }));
 
+  const updateUniversalTask = (patch: Partial<UniversalTaskDraft>) =>
+    setUniversalTask((current) => ({ ...current, ...patch }));
+
+  const handleSaveDraft = () => {
+    window.localStorage.setItem('on-demand-task-draft', JSON.stringify({ task: universalTask, assignment: taskAssignment, steps: taskFlowSteps, savedAt: new Date().toISOString() }));
+    toast.success('Task draft saved');
+  };
+
+  const applyTaskTemplate = (template: (typeof UNIVERSAL_TASK_TEMPLATES)[number]) => {
+    void openModal('template');
+    setUniversalTask({ ...EMPTY_UNIVERSAL_TASK, title: template.name, category: template.category, priority: template.priority, description: template.description });
+    setTaskFlowSteps(template.steps.map((type, index) => ({ ...createTaskStep(index + 1), type, details: { ...createTaskStep(index + 1).details, title: `${template.name} - Step ${index + 1}` } })));
+    setBuilderSection('details');
+    setActiveTab('task');
+  };
+
+  const handleCreateQuickTask = async () => {
+    const staffId = String(taskAssignment.staffId || '').trim();
+    if (!universalTask.title.trim()) { toast.error('Task title is required'); return; }
+    if (!staffId) { toast.error('Please choose an assignee'); return; }
+    if (!universalTask.dueDate) { toast.error('Due date is required'); return; }
+    setIsCreatingTask(true);
+    try {
+      const response = await fetch(`${BASE_URL}/admin_ops_requests/create_on_demand_tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          staff_id: staffId,
+          steps_dict: {
+            step_1: {
+              type: 'others', status: 'pending',
+              data: [{ description: universalTask.description || universalTask.title, title: universalTask.title, priority: universalTask.priority, due_date: universalTask.dueDate }],
+              task_details: { ...universalTask, source_type: 'manual', source_id: null, creation_mode: 'quick', evidence_rules: { photos: universalTask.requiredPhotos, videos: universalTask.requiredVideos } },
+              required_media: { photos: universalTask.requiredPhotos, videos: universalTask.requiredVideos },
+            },
+          },
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(payload?.message || payload?.detail || `Request failed (${response.status})`);
+      toast.success('Quick task created successfully');
+      closeModal();
+      fetchOnDemandTasks();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to create quick task');
+    } finally {
+      setIsCreatingTask(false);
+    }
+  };
+
   const handleAssignTask = async () => {
     const assignedSteps = taskFlowSteps.filter(s => s.type);
     const staffId = String(taskAssignment?.staffId || '').trim();
+    if (!universalTask.title.trim()) { toast.error('Task title is required'); return; }
+    if (!universalTask.category) { toast.error('Task category is required'); return; }
+    if (!universalTask.description.trim()) { toast.error('Task description is required'); return; }
+    if (!universalTask.plannedStart) { toast.error('Planned start date is required'); return; }
+    if (!universalTask.dueDate) { toast.error('Due date is required'); return; }
     if (assignedSteps.length === 0) { toast.error('Please add at least one task step'); return; }
     if (!staffId) { toast.error('Please choose an assignee first'); return; }
 
@@ -1395,39 +1611,97 @@ const OnDemandTask = () => {
   const designationOptions = Object.keys(staffByDesignation).sort();
   const assigneeOptions = taskAssignment.designation ? (staffByDesignation[taskAssignment.designation] || []) : [];
   const canAddSteps = Boolean(taskAssignment.designation && taskAssignment.staffId);
-  const taskIdsWithAllocation = new Set(apiAllocations.map(a => a.task_id));
+  const taskKpis = {
+    total: ondemandTasks.length,
+    todo: ondemandTasks.filter((task) => task.completedSteps === 0).length,
+    inProgress: ondemandTasks.filter((task) => task.completedSteps > 0 && task.completedSteps < task.totalSteps).length,
+    verification: pendingAllocationTasks.length,
+    overdue: ondemandTasks.filter((task) => { const due = task.steps.find((step) => step.taskDetails)?.taskDetails?.dueDate; return Boolean(due && new Date(`${due}T23:59:59`) < new Date() && task.completedSteps < task.totalSteps); }).length,
+    completed: ondemandTasks.filter((task) => task.totalSteps > 0 && task.completedSteps === task.totalSteps).length,
+  };
+  const getTaskMeta = (task: TaskViewModel) => task.steps.find((step) => step.taskDetails)?.taskDetails || {};
+  const filteredTasks = ondemandTasks.filter((task) => {
+    const meta = getTaskMeta(task);
+    const title = String(meta.title || task.steps[0]?.title || task.taskId);
+    const category = String(meta.category || 'other');
+    const pct = task.totalSteps > 0 ? Math.round((task.completedSteps / task.totalSteps) * 100) : 0;
+    const status = pct === 100 ? 'completed' : pct > 0 ? 'in_progress' : 'to_do';
+    const query = taskSearch.trim().toLowerCase();
+    return (!query || [title, task.taskId, task.staffId, meta.locationId].some((value) => String(value || '').toLowerCase().includes(query)))
+      && (taskStatusFilter === 'all' || taskStatusFilter === status)
+      && (taskCategoryFilter === 'all' || taskCategoryFilter === category);
+  });
+  const systemRelatedTypes = new Set(['purchase_requirement', 'purchase_request', 'purchase_order', 'work_order', 'grn', 'wcc', 'gate_entry', 'vendor', 'land_parcel', 'plot', 'farm', 'vehicle', 'inventory_item', 'equipment', 'asset', 'employee', 'cultivation_plan', 'calendar_activity', 'another_task']);
+  const renderRelatedRecordSelector = () => {
+    const type = universalTask.relatedTo;
+    const options = relatedRecordOptions[type] || [];
+    if (!type || type === 'none') return <select disabled className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 text-sm text-slate-400"><option>Select a document type first</option></select>;
+    if (!systemRelatedTypes.has(type) || type === 'custom' || (!relatedRecordsLoading && options.length === 0)) return <><input value={universalTask.relatedId} onChange={(event) => updateUniversalTask({ relatedId: event.target.value })} placeholder={relatedRecordsError || 'No system records found — enter reference manually'} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-[#0D3A35]" />{relatedRecordsError && <span className="mt-1 block text-[10px] text-amber-700">System list unavailable; manual reference is allowed.</span>}</>;
+    return <select value={universalTask.relatedId} disabled={relatedRecordsLoading} onChange={(event) => updateUniversalTask({ relatedId: event.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-100"><option value="">{relatedRecordsLoading ? 'Loading system records…' : `Select from ${options.length} available record${options.length === 1 ? '' : 's'}`}</option>{options.map((record) => <option key={record.id} value={record.id}>{record.label}{record.detail ? ` — ${record.detail}` : ''}</option>)}</select>;
+  };
+  const renderOptionalLandSelector = () => (
+    <div className="rounded-xl border border-slate-200 bg-white p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-xs font-bold text-slate-700">Lands <span className="font-medium text-slate-400">(optional)</span></p><p className="mt-0.5 text-[11px] text-slate-500">Choose one or more land parcels where this task applies.</p></div>{universalTask.landIds.length > 0 && <button type="button" onClick={() => updateUniversalTask({ landIds: [] })} className="text-[10px] font-bold text-slate-400 hover:text-red-600">Clear all</button>}</div>
+      {farms.length === 0 ? <p className="mt-3 rounded-lg bg-slate-50 px-3 py-3 text-xs text-slate-400">No land parcels are currently available.</p> : <div className="mt-3 grid max-h-44 gap-2 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">{farms.map((farm) => { const id = String(farm?.farm_id || farm?.id || ''); const selected = universalTask.landIds.includes(id); const label = String(farm?.land_data?.village || farm?.owner_name || farm?.farmer_name || id || 'Land parcel'); const detail = [id, farm?.area ? `${farm.area} acre` : '', farm?.crop_type || ''].filter(Boolean).join(' · '); return <button key={id} type="button" onClick={() => updateUniversalTask({ landIds: selected ? universalTask.landIds.filter((landId) => landId !== id) : [...universalTask.landIds, id] })} className={cn('flex items-start gap-2 rounded-lg border p-2.5 text-left transition', selected ? 'border-emerald-400 bg-emerald-50' : 'border-slate-200 hover:border-emerald-200 hover:bg-slate-50')}><span className={cn('mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px] font-bold', selected ? 'border-[#0D3A35] bg-[#0D3A35] text-white' : 'border-slate-300 bg-white')}>{selected ? '✓' : ''}</span><span className="min-w-0"><span className="block truncate text-xs font-bold text-slate-700">{label}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400">{detail}</span></span></button>; })}</div>}
+    </div>
+  );
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-8 space-y-6 bg-gray-50/50 min-h-screen">
+    <div className="min-h-screen space-y-6 bg-slate-50/70 p-4 font-sans sm:p-6 lg:p-8">
       {/* Page header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">On Demand</h1>
-          <p className="text-sm text-muted-foreground">Create and track step-wise on-demand tasks and allocations.</p>
+      <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+        <div className="flex items-start gap-4">
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#0D3A35] text-white shadow-lg shadow-emerald-950/10">
+            <ClipboardCheck className="h-7 w-7" />
+          </div>
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-[#0D3A35]">Operations · Universal Task Engine</p>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">Task Workspace</h1>
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">Create, assign and monitor operational work through one consistent task workflow.</p>
+          </div>
         </div>
-        {activeTab === 'allocation' && (
-          <button onClick={openAllocationModal} className="px-4 py-2 bg-green-800 text-white rounded-md text-sm font-medium hover:bg-green-900 transition-colors">
-            + Create New Allocation
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => { setActiveTab('task'); setSelectedTask(null); setIsCreateChooserOpen(true); }} className="inline-flex h-11 items-center gap-2 rounded-xl bg-[#0D3A35] px-4 text-sm font-bold text-white shadow-sm transition hover:bg-[#164E46]">
+            <Plus className="h-4 w-4" /> Create Task
           </button>
-        )}
+          {activeTab === 'allocation' && (
+            <button onClick={openAllocationModal} className="inline-flex h-11 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-bold text-[#0D3A35] shadow-sm transition hover:border-emerald-200 hover:bg-emerald-50">
+              <Boxes className="h-4 w-4" /> New Allocation
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="grid overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm sm:grid-cols-2 lg:grid-cols-6">
+        {[
+          ['Total Tasks', taskKpis.total], ['To Do', taskKpis.todo], ['In Progress', taskKpis.inProgress],
+          ['Verification', taskKpis.verification], ['Overdue', taskKpis.overdue], ['Completed', taskKpis.completed],
+        ].map(([label, value], index) => (
+          <div key={String(label)} className={cn('relative px-5 py-4', index > 0 && 'lg:border-l', index > 1 && 'sm:border-t lg:border-t-0', 'border-slate-200')}>
+            <span className="absolute inset-x-5 top-0 h-0.5 rounded-full bg-emerald-700/0 transition group-hover:bg-emerald-700" />
+            <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">{label}</p>
+            <p className="mt-1.5 text-2xl font-semibold tracking-tight text-slate-900">{value}</p>
+          </div>
+        ))}
       </div>
 
       {/* ── Tabs ── */}
-      <div className="flex gap-2 border-b border-gray-200">
+      <div className="inline-flex w-full gap-1 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm sm:w-auto">
         {([
-          { key: 'task',       label: 'On Demand Task'       },
-          { key: 'allocation', label: 'On Demand Allocation' },
+          { key: 'task',       label: 'Tasks'       },
+          { key: 'allocation', label: 'Allocations' },
+          { key: 'templates',  label: 'Templates'   },
         ] as const).map(tab => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
             className={cn(
-              'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+              'flex-1 rounded-xl px-5 py-2.5 text-sm font-bold transition-colors sm:flex-none',
               activeTab === tab.key
-                ? 'border-green-700 text-green-800'
-                : 'border-transparent text-gray-500 hover:text-gray-800 hover:border-gray-300',
+                ? 'bg-[#0D3A35] text-white shadow-sm'
+                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800',
             )}
           >
             {tab.label}
@@ -1435,64 +1709,189 @@ const OnDemandTask = () => {
         ))}
       </div>
 
+      {isCreateChooserOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.currentTarget === event.target) setIsCreateChooserOpen(false); }}>
+          <div className="w-full max-w-2xl overflow-hidden rounded-2xl border border-white/20 bg-white shadow-2xl">
+            <div className="flex items-start justify-between bg-[#0D3A35] px-6 py-5 text-white">
+              <div><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-200">Create Task</p><h2 className="mt-1 text-xl font-semibold">How do you want to create it?</h2></div>
+              <button type="button" onClick={() => setIsCreateChooserOpen(false)} className="rounded-lg p-2 text-emerald-100 hover:bg-white/10 hover:text-white"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="grid gap-3 p-5 md:grid-cols-3">
+              {([
+                ['quick', 'Quick Task', 'Simple assignment', Zap],
+                ['structured', 'Structured Task', 'Steps and resources', ListChecks],
+                ['template', 'From Template', 'Use a saved workflow', Shapes],
+              ] as const).map(([mode, title, detail, Icon]) => (
+                <button key={mode} type="button" onClick={() => { setIsCreateChooserOpen(false); if (mode === 'template') setActiveTab('templates'); else void openModal(mode); }} className="group rounded-2xl border border-slate-200 p-5 text-left transition hover:-translate-y-0.5 hover:border-emerald-300 hover:bg-emerald-50/50 hover:shadow-md">
+                  <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-[#0D3A35] group-hover:bg-[#0D3A35] group-hover:text-white"><Icon className="h-5 w-5" /></span>
+                  <p className="mt-4 text-sm font-bold text-slate-900">{title}</p><p className="mt-1 text-xs text-slate-500">{detail}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'task' && selectedTask && (() => {
+        const meta = getTaskMeta(selectedTask);
+        const pct = selectedTask.totalSteps > 0 ? Math.round((selectedTask.completedSteps / selectedTask.totalSteps) * 100) : 0;
+        const title = String(meta.title || selectedTask.steps[0]?.title || selectedTask.taskId);
+        const taskStatus = pct === 100 ? 'Completed' : pct > 0 ? 'In Progress' : 'Assigned';
+        const mediaFiles = selectedTask.steps.flatMap((step) => step.taskMedia);
+        const uploadedVideos = mediaFiles.filter((url) => /\.(mp4|mov|webm|avi)(\?|$)/i.test(url)).length;
+        const uploadedPhotos = mediaFiles.length - uploadedVideos;
+        return (
+          <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-200 bg-slate-50/70 px-5 py-5 sm:px-6">
+              <button type="button" onClick={() => setSelectedTask(null)} className="inline-flex items-center gap-1 text-xs font-bold text-slate-500 hover:text-[#0D3A35]"><ChevronLeft className="h-4 w-4" /> Tasks</button>
+              <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div><div className="flex flex-wrap items-center gap-2"><span className="text-xs font-bold uppercase tracking-[0.12em] text-slate-400">{selectedTask.taskId}</span><span className="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold uppercase text-emerald-800">{taskStatus}</span></div><h2 className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">{title}</h2><p className="mt-1 text-sm text-slate-500">{meta.landIds?.length ? `${meta.landIds.length} land parcel${meta.landIds.length === 1 ? '' : 's'}` : String(meta.locationId || 'No land selected')} · Due {meta.dueDate ? formatShortDate(String(meta.dueDate)) : '—'}</p></div>
+                <div className="flex gap-2"><button className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-bold text-slate-600">On Hold</button><button className="h-10 rounded-xl bg-[#0D3A35] px-4 text-sm font-bold text-white">Submit</button><button className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600"><MoreHorizontal className="h-4 w-4" /></button></div>
+              </div>
+            </div>
+            <div className="border-b border-slate-200 px-4 pt-3 sm:px-6"><div className="flex gap-1 overflow-x-auto">{(['overview','steps','resources','evidence','activity'] as TaskWorkspaceSection[]).map((item) => <button key={item} type="button" onClick={() => setTaskWorkspaceSection(item)} className={cn('shrink-0 border-b-2 px-4 py-3 text-xs font-bold capitalize', taskWorkspaceSection === item ? 'border-[#0D3A35] text-[#0D3A35]' : 'border-transparent text-slate-400 hover:text-slate-700')}>{item}</button>)}</div></div>
+            <div className="p-5 sm:p-6">
+              {taskWorkspaceSection === 'overview' && <div className="grid gap-5 lg:grid-cols-[1.2fr_1fr]"><div className="rounded-2xl border border-slate-200 p-5"><div className="flex justify-between"><h3 className="font-bold text-slate-900">Progress</h3><span className="text-sm font-bold text-[#0D3A35]">{pct}%</span></div><div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-[#0D3A35]" style={{ width: `${pct}%` }} /></div><div className="mt-6 grid gap-4 sm:grid-cols-3">{[['Planned', selectedTask.totalSteps], ['Completed', selectedTask.completedSteps], ['Remaining', Math.max(selectedTask.totalSteps - selectedTask.completedSteps, 0)]].map(([label, value]) => <div key={label} className="rounded-xl bg-slate-50 p-4"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</p><p className="mt-1 text-xl font-semibold text-slate-900">{value}</p></div>)}</div></div><div className="rounded-2xl border border-slate-200 p-5"><h3 className="font-bold text-slate-900">Task Details</h3><dl className="mt-4 space-y-3 text-sm">{[['Owner', meta.owner || '—'], ['Executor', selectedTask.staffId], ['Supervisor', meta.supervisor || '—'], ['Verifier', meta.verifier || '—'], ['Lands', meta.landIds?.join(', ') || 'None selected'], ['Start', meta.plannedStart || '—'], ['Due', meta.dueDate || '—']].map(([label, value]) => <div key={label} className="flex justify-between gap-4"><dt className="text-slate-400">{label}</dt><dd className="max-w-[65%] text-right font-semibold text-slate-700">{value}</dd></div>)}</dl></div></div>}
+              {taskWorkspaceSection === 'steps' && <div><div className="mb-4 flex items-center justify-between"><h3 className="font-bold text-slate-900">Steps</h3><span className="text-xs font-bold text-slate-500">{selectedTask.completedSteps} / {selectedTask.totalSteps} completed</span></div><div className="space-y-2">{selectedTask.steps.map((step) => <details key={step.key} className="group rounded-xl border border-slate-200 bg-white"><summary className="flex cursor-pointer list-none items-center gap-3 p-4"><span className={cn('flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold', step.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500')}>{step.status === 'completed' ? '✓' : step.stepNumber}</span><span className="flex-1 text-sm font-semibold text-slate-800">{step.title}</span><span className="text-[10px] font-bold uppercase text-slate-400">{step.status.replaceAll('_', ' ')}</span></summary><div className="border-t border-slate-100 p-4">{renderStepCard(step)}</div></details>)}</div></div>}
+              {taskWorkspaceSection === 'resources' && <div className="grid gap-3 md:grid-cols-2">{[['Inventory','No inventory allocated'],['Equipment','Review task steps'],['Vehicle','Review task steps'],['Vendor',selectedTask.staffId]].map(([label,value]) => <div key={label} className="flex items-center justify-between rounded-xl border border-slate-200 p-4"><div><p className="text-sm font-bold text-slate-800">{label}</p><p className="mt-1 text-xs text-slate-500">{value}</p></div><button className="text-xs font-bold text-emerald-800">+ Allocate</button></div>)}</div>}
+              {taskWorkspaceSection === 'evidence' && <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{[[Camera,'Completion Photos',`${uploadedPhotos} uploaded · ${Number(meta.requiredPhotos || 0)} required`],[Video,'Completion Videos',`${uploadedVideos} uploaded · ${Number(meta.requiredVideos || 0)} required`],[MapPin,'GPS','Not captured'],[FileText,'Documents','No attachments']].map(([Icon,label,value]) => <div key={String(label)} className="rounded-xl border border-slate-200 p-4"><Icon className="h-5 w-5 text-[#0D3A35]" /><p className="mt-3 text-sm font-bold text-slate-800">{String(label)}</p><p className="mt-1 text-xs text-slate-500">{String(value)}</p></div>)}</div>}
+              {taskWorkspaceSection === 'activity' && <div className="space-y-4 border-l-2 border-emerald-100 pl-5"><div><p className="text-xs font-bold text-slate-400">{selectedTask.createdAt}</p><p className="mt-1 text-sm text-slate-700">Task created and assigned to {selectedTask.staffId}</p></div>{selectedTask.steps.filter((step) => step.status === 'completed').map((step) => <div key={step.key}><p className="text-xs font-bold text-slate-400">Latest activity</p><p className="mt-1 text-sm text-slate-700">{step.title} completed</p></div>)}</div>}
+            </div>
+          </section>
+        );
+      })()}
+
       {/* ── On Demand Task tab ── */}
-      {activeTab === 'task' && (
-      <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
-        <h2 className="text-sm font-semibold text-slate-900">On demand tasks</h2>
+      {activeTab === 'task' && !selectedTask && (
+      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4 sm:px-6">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight text-slate-900">Task Register</h2>
+            <p className="mt-0.5 text-xs text-slate-500">{ondemandTasks.length} task{ondemandTasks.length === 1 ? '' : 's'} across all operational categories</p>
+          </div>
+          <span className="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-bold text-emerald-800">Live workspace</span>
+        </div>
+        <div className="space-y-5 p-4 sm:p-6">
 
         {/* ── Inline task creator row ── */}
         {!isModalOpen ? (
-          <button
-            type="button"
-            onClick={openModal}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/60 px-5 py-4 text-sm font-medium text-slate-500 transition-colors hover:border-emerald-400 hover:bg-emerald-50/40 hover:text-emerald-700"
-          >
-            <Plus className="h-4 w-4" /> Create a new task
-          </button>
+          <div className="grid gap-3 lg:grid-cols-[minmax(240px,1fr)_repeat(2,180px)_auto]">
+            <label className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={taskSearch} onChange={(event) => setTaskSearch(event.target.value)} placeholder="Search tasks, IDs or assignees..." className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-3 text-sm outline-none focus:border-[#0D3A35]" /></label>
+            <select value={taskStatusFilter} onChange={(event) => setTaskStatusFilter(event.target.value)} className="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-600"><option value="all">All statuses</option><option value="to_do">To Do</option><option value="in_progress">In Progress</option><option value="completed">Completed</option></select>
+            <select value={taskCategoryFilter} onChange={(event) => setTaskCategoryFilter(event.target.value)} className="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-600"><option value="all">All categories</option>{TASK_CATEGORIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+            <button type="button" onClick={() => setIsCreateChooserOpen(true)} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0D3A35] px-4 text-sm font-bold text-white"><Plus className="h-4 w-4" /> Create Task</button>
+          </div>
         ) : (
-          <div className="rounded-xl border-2 border-emerald-300 bg-white shadow-md overflow-hidden">
+          <div className="overflow-hidden rounded-2xl border border-emerald-900/20 bg-white shadow-xl shadow-emerald-950/10">
             {/* Creator header — title + compact designation/assignee selects + close */}
-            <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-b border-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-emerald-900/30 bg-[#0D3A35] px-5 py-4 text-white">
               <div>
-                <h3 className="text-base font-semibold text-slate-900">Create On Demand Task</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">Build a step-wise task and allocate resources.</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-200">New operational task</p>
+                <h3 className="mt-0.5 text-lg font-semibold">Create On Demand Task</h3>
               </div>
               <div className="flex items-center gap-2">
-                <select
-                  value={taskAssignment.designation}
-                  onChange={e => {
-                    setTaskAssignment({ designation: e.target.value, staffId: '', staffName: '' });
-                    setTaskFlowSteps([]);
-                  }}
-                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs focus:border-slate-900 focus:outline-none"
-                >
-                  <option value="">Designation</option>
-                  {designationOptions.length > 0
-                    ? designationOptions.map(d => <option key={d} value={d}>{formatDesignationLabel(d)}</option>)
-                    : <option value="" disabled>Loading...</option>}
-                </select>
-                <select
-                  value={taskAssignment.staffId}
-                  disabled={!taskAssignment.designation}
-                  onChange={e => {
-                    const staffId = e.target.value;
-                    const matched = assigneeOptions.find(s => String(s?.staff_id || '') === staffId);
-                    const staffName = String(matched?.staff_information?.staff_name || '');
-                    setTaskAssignment(prev => ({ ...prev, staffId, staffName }));
-                    setTaskFlowSteps([]);
-                  }}
-                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs focus:border-slate-900 focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100"
-                >
-                  <option value="">{taskAssignment.designation ? 'Assign to' : 'Select designation first'}</option>
-                  {assigneeOptions.length > 0
-                    ? assigneeOptions.map(s => <option key={String(s?.staff_id || '')} value={String(s?.staff_id || '')}>{String(s?.staff_information?.staff_name || 'Unknown')}</option>)
-                    : <option value="" disabled>No staff for this designation</option>}
-                </select>
-                <button onClick={closeModal} className="p-1.5 rounded-md hover:bg-gray-100"><X className="w-4 h-4 text-gray-500" /></button>
+                <span className="rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-[11px] font-bold">{createMode === 'quick' ? 'Quick Task' : 'Structured Task'}</span>
+                <button onClick={closeModal} className="rounded-lg p-2 text-emerald-100 transition hover:bg-white/10 hover:text-white"><X className="h-4 w-4" /></button>
               </div>
             </div>
 
             <div className="px-5 py-4 space-y-4">
+              {createMode === 'quick' ? (
+                <div className="grid gap-4 rounded-xl border border-slate-200 bg-slate-50/50 p-4 md:grid-cols-2">
+                  <label className="md:col-span-2"><span className="text-xs font-bold text-slate-700">Task title *</span><input value={universalTask.title} onChange={(e) => updateUniversalTask({ title: e.target.value })} placeholder="e.g. Call vendor regarding pump quotation" className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-[#0D3A35]" /></label>
+                  <label><span className="text-xs font-bold text-slate-700">Category *</span><select value={universalTask.category} onChange={(e) => updateUniversalTask({ category: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm">{TASK_CATEGORIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                  <label><span className="text-xs font-bold text-slate-700">Priority *</span><select value={universalTask.priority} onChange={(e) => updateUniversalTask({ priority: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+                  <label><span className="text-xs font-bold text-slate-700">Designation *</span><select value={taskAssignment.designation} onChange={(e) => setTaskAssignment({ designation: e.target.value, staffId: '', staffName: '' })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="">Select designation</option>{designationOptions.map((value) => <option key={value} value={value}>{formatDesignationLabel(value)}</option>)}</select></label>
+                  <label><span className="text-xs font-bold text-slate-700">Assign to *</span><select value={taskAssignment.staffId} disabled={!taskAssignment.designation} onChange={(e) => { const staffId = e.target.value; const matched = assigneeOptions.find((staff) => String(staff.staff_id || '') === staffId); setTaskAssignment((previous) => ({ ...previous, staffId, staffName: String(matched?.staff_information?.staff_name || '') })); }} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-100"><option value="">Select assignee</option>{assigneeOptions.map((staff) => <option key={String(staff.staff_id || '')} value={String(staff.staff_id || '')}>{staff.staff_information?.staff_name || 'Unknown'}</option>)}</select></label>
+                  <label><span className="text-xs font-bold text-slate-700">Due date *</span><input type="date" value={universalTask.dueDate} onChange={(e) => updateUniversalTask({ dueDate: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" /></label>
+                  <label><span className="text-xs font-bold text-slate-700">Related to</span><select value={universalTask.relatedTo} onChange={(e) => updateUniversalTask({ relatedTo: e.target.value, relatedId: '' })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm">{['None','Purchase Requirement','Purchase Order','Work Order','GRN','WCC','Gate Entry','Land Parcel','Vendor','Vehicle','Equipment','Inventory Item','Employee','Cultivation Plan','Calendar Activity','Another Task','Other Document'].map((item) => <option key={item} value={item === 'Other Document' ? 'custom' : item.toLowerCase().replaceAll(' ', '_')}>{item}</option>)}</select></label>
+                  <label><span className="text-xs font-bold text-slate-700">Related record</span>{renderRelatedRecordSelector()}</label>
+                  <div className="md:col-span-2">{renderOptionalLandSelector()}</div>
+                  <div className="md:col-span-2">
+                    <div className="mb-2"><p className="text-xs font-bold text-slate-700">Completion evidence</p><p className="mt-0.5 text-[11px] text-slate-500">Ask the assignee to submit photos, video, or both before completing the task.</p></div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className={cn('rounded-xl border p-3 transition', universalTask.requiredPhotos > 0 ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200 bg-white')}>
+                        <div className="flex items-center gap-3"><button type="button" onClick={() => updateUniversalTask({ requiredPhotos: universalTask.requiredPhotos > 0 ? 0 : 1 })} className={cn('flex h-10 w-10 items-center justify-center rounded-xl', universalTask.requiredPhotos > 0 ? 'bg-[#0D3A35] text-white' : 'bg-slate-100 text-slate-400')}><Camera className="h-5 w-5" /></button><button type="button" onClick={() => updateUniversalTask({ requiredPhotos: universalTask.requiredPhotos > 0 ? 0 : 1 })} className="flex-1 text-left"><span className="block text-sm font-bold text-slate-800">Require photos</span><span className="mt-0.5 block text-[11px] text-slate-500">Photo proof at completion</span></button>{universalTask.requiredPhotos > 0 && <label className="text-[10px] font-bold uppercase text-slate-400">Minimum<input type="number" min="1" max="20" value={universalTask.requiredPhotos} onChange={(event) => updateUniversalTask({ requiredPhotos: Math.max(1, Number(event.target.value) || 1) })} className="mt-1 block h-8 w-16 rounded-lg border border-emerald-200 bg-white px-2 text-center text-sm text-slate-700" /></label>}</div>
+                      </div>
+                      <div className={cn('rounded-xl border p-3 transition', universalTask.requiredVideos > 0 ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200 bg-white')}>
+                        <div className="flex items-center gap-3"><button type="button" onClick={() => updateUniversalTask({ requiredVideos: universalTask.requiredVideos > 0 ? 0 : 1 })} className={cn('flex h-10 w-10 items-center justify-center rounded-xl', universalTask.requiredVideos > 0 ? 'bg-[#0D3A35] text-white' : 'bg-slate-100 text-slate-400')}><Video className="h-5 w-5" /></button><button type="button" onClick={() => updateUniversalTask({ requiredVideos: universalTask.requiredVideos > 0 ? 0 : 1 })} className="flex-1 text-left"><span className="block text-sm font-bold text-slate-800">Require video</span><span className="mt-0.5 block text-[11px] text-slate-500">Video proof at completion</span></button>{universalTask.requiredVideos > 0 && <label className="text-[10px] font-bold uppercase text-slate-400">Minimum<input type="number" min="1" max="5" value={universalTask.requiredVideos} onChange={(event) => updateUniversalTask({ requiredVideos: Math.max(1, Number(event.target.value) || 1) })} className="mt-1 block h-8 w-16 rounded-lg border border-emerald-200 bg-white px-2 text-center text-sm text-slate-700" /></label>}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <label className="md:col-span-2"><span className="text-xs font-bold text-slate-700">Description</span><textarea value={universalTask.description} onChange={(e) => updateUniversalTask({ description: e.target.value })} rows={3} placeholder="Optional instructions or remarks" className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-[#0D3A35]" /></label>
+                </div>
+              ) : (
+                <>
+                  <div className="flex gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-slate-50 p-1.5">
+                    {BUILDER_SECTIONS.map(([key, label], index) => (
+                      <button key={key} type="button" onClick={() => setBuilderSection(key)} className={cn('shrink-0 rounded-lg px-3 py-2 text-xs font-bold transition', builderSection === key ? 'bg-[#0D3A35] text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800')}><span className={cn('mr-1.5 inline-flex h-4 w-4 items-center justify-center rounded-full text-[9px]', builderSection === key ? 'bg-white/15' : 'bg-slate-200')}>{index + 1}</span>{label}</button>
+                    ))}
+                  </div>
+
+                  {builderSection === 'details' && (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="md:col-span-2"><span className="text-xs font-bold text-slate-700">Task title *</span><input value={universalTask.title} onChange={(e) => updateUniversalTask({ title: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" placeholder="What needs to be done?" /></label>
+                      <label><span className="text-xs font-bold text-slate-700">Category *</span><select value={universalTask.category} onChange={(e) => updateUniversalTask({ category: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm">{TASK_CATEGORIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                      <label><span className="text-xs font-bold text-slate-700">Priority *</span><select value={universalTask.priority} onChange={(e) => updateUniversalTask({ priority: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+                      <label><span className="text-xs font-bold text-slate-700">Planned start *</span><input type="date" value={universalTask.plannedStart} onChange={(e) => updateUniversalTask({ plannedStart: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" /></label>
+                      <label><span className="text-xs font-bold text-slate-700">Due date *</span><input type="date" value={universalTask.dueDate} onChange={(e) => updateUniversalTask({ dueDate: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" /></label>
+                      <label className="md:col-span-2"><span className="text-xs font-bold text-slate-700">Description *</span><textarea value={universalTask.description} onChange={(e) => updateUniversalTask({ description: e.target.value })} rows={3} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" /></label>
+                      <button type="button" onClick={() => setShowMoreDetails((value) => !value)} className="text-left text-xs font-bold text-emerald-800 md:col-span-2">{showMoreDetails ? '− Hide more details' : '+ More Details'}</button>
+                      {showMoreDetails && <><label><span className="text-xs font-bold text-slate-700">Department</span><input value={universalTask.department} onChange={(e) => updateUniversalTask({ department: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" /></label><label><span className="text-xs font-bold text-slate-700">Tags</span><input value={universalTask.tags} onChange={(e) => updateUniversalTask({ tags: e.target.value })} placeholder="farm, urgent, vendor" className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" /></label></>}
+                    </div>
+                  )}
+
+                  {builderSection === 'details' && (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label><span className="text-xs font-bold text-slate-700">Related to</span><select value={universalTask.relatedTo} onChange={(e) => updateUniversalTask({ relatedTo: e.target.value, relatedId: '' })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm">{['None','Land Parcel','Plot','Project','Site','Office','Warehouse','Vehicle','Equipment','Asset','Employee','Vendor','Purchase Request','Purchase Order','Work Order','GRN','WCC','Gate Entry','Bill','Inventory Item','Cultivation Plan','Calendar Activity','Another Task','Other Document'].map((item) => <option key={item} value={item === 'Other Document' ? 'custom' : item.toLowerCase().replaceAll(' ', '_')}>{item}</option>)}</select></label>
+                      <label><span className="text-xs font-bold text-slate-700">Related record</span>{renderRelatedRecordSelector()}</label>
+                      <label><span className="text-xs font-bold text-slate-700">Location type</span><select value={universalTask.locationType} onChange={(e) => updateUniversalTask({ locationType: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm">{['No Location','Farm','Plot','Site','Office','Warehouse','Vendor Location','Customer Location','GPS Location','Other'].map((item) => <option key={item} value={item.toLowerCase().replaceAll(' ', '_')}>{item}</option>)}</select></label>
+                      <label><span className="text-xs font-bold text-slate-700">Location / route</span><input value={universalTask.locationId} onChange={(e) => updateUniversalTask({ locationId: e.target.value })} placeholder="Location, source → destination, or GPS" className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" /></label>
+                      <div className="md:col-span-2">{renderOptionalLandSelector()}</div>
+                    </div>
+                  )}
+
+                  {builderSection === 'assignment' && (
+                    <div className="grid gap-4 md:grid-cols-3">
+                      <div className="md:col-span-3"><p className="text-xs font-bold text-slate-700">Execution by</p><div className="mt-2 flex flex-wrap gap-4">{['Employee','Team','Vendor'].map((item, index) => <label key={item} className="inline-flex items-center gap-2 text-sm text-slate-600"><input type="radio" name="execution-by" defaultChecked={index === 0} className="accent-[#0D3A35]" /> {item}</label>)}</div></div>
+                      <label><span className="text-xs font-bold text-slate-700">Designation *</span><select value={taskAssignment.designation} onChange={(e) => { setTaskAssignment({ designation: e.target.value, staffId: '', staffName: '' }); setTaskFlowSteps([]); }} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="">Select designation</option>{designationOptions.map((value) => <option key={value} value={value}>{formatDesignationLabel(value)}</option>)}</select></label>
+                      <label><span className="text-xs font-bold text-slate-700">Executor *</span><select value={taskAssignment.staffId} disabled={!taskAssignment.designation} onChange={(e) => { const staffId = e.target.value; const matched = assigneeOptions.find((staff) => String(staff.staff_id || '') === staffId); setTaskAssignment((previous) => ({ ...previous, staffId, staffName: String(matched?.staff_information?.staff_name || '') })); setTaskFlowSteps([]); }} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-100"><option value="">Select executor</option>{assigneeOptions.map((staff) => <option key={String(staff.staff_id || '')} value={String(staff.staff_id || '')}>{staff.staff_information?.staff_name || 'Unknown'}</option>)}</select></label>
+                      <label><span className="text-xs font-bold text-slate-700">Task owner</span><input value={universalTask.owner} onChange={(e) => updateUniversalTask({ owner: e.target.value })} placeholder="Accountable person" className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" /></label>
+                      <label><span className="text-xs font-bold text-slate-700">Supervisor</span><input value={universalTask.supervisor} onChange={(e) => updateUniversalTask({ supervisor: e.target.value })} placeholder="Monitoring person" className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" /></label>
+                      <label><span className="text-xs font-bold text-slate-700">Verifier</span><input value={universalTask.verifier} onChange={(e) => updateUniversalTask({ verifier: e.target.value })} placeholder="Completion verifier" className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" /></label>
+                    </div>
+                  )}
+
+                  {builderSection === 'controls' && (
+                    <div className="grid gap-3 md:grid-cols-4">
+                      {['Inventory','Vehicle','Equipment','Manpower'].map((item) => <button key={item} type="button" onClick={() => setBuilderSection('work')} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 p-4 text-left hover:border-emerald-300 hover:bg-emerald-50"><p className="text-sm font-bold text-slate-800">{item}</p><span className="text-xs font-bold text-emerald-800">+ Add</span></button>)}
+                    </div>
+                  )}
+
+                  {builderSection === 'controls' && (
+                    <div className="grid gap-4 md:grid-cols-3">
+                      <label><span className="text-xs font-bold text-slate-700">Approval mode</span><select value={universalTask.approvalMode} onChange={(e) => updateUniversalTask({ approvalMode: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="none">No Approval</option><option value="before_assignment">Before Assignment</option><option value="before_start">Before Start</option><option value="before_completion">Before Completion</option><option value="before_closure">Before Closure</option></select></label>
+                      <label><span className="text-xs font-bold text-slate-700">Evidence rule</span><select value={universalTask.evidenceRule} onChange={(e) => updateUniversalTask({ evidenceRule: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="none">No additional evidence</option><option value="before_after">Before + After photos</option><option value="document">Document</option><option value="gps_photo">GPS + Photo</option><option value="signature">Signature</option><option value="verification">Supervisor verification</option></select></label>
+                      <label><span className="text-xs font-bold text-slate-700">Recurrence</span><select value={universalTask.recurrence} onChange={(e) => updateUniversalTask({ recurrence: e.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="one_time">One Time</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="custom">Custom</option><option value="event">Event-Based</option></select></label>
+                      <label><span className="text-xs font-bold text-slate-700">Minimum photos</span><div className="relative mt-1"><Camera className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input type="number" min="0" max="20" value={universalTask.requiredPhotos} onChange={(event) => updateUniversalTask({ requiredPhotos: Math.max(0, Number(event.target.value) || 0) })} className="h-10 w-full rounded-lg border border-slate-200 pl-9 pr-3 text-sm" /></div></label>
+                      <label><span className="text-xs font-bold text-slate-700">Minimum videos</span><div className="relative mt-1"><Video className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input type="number" min="0" max="5" value={universalTask.requiredVideos} onChange={(event) => updateUniversalTask({ requiredVideos: Math.max(0, Number(event.target.value) || 0) })} className="h-10 w-full rounded-lg border border-slate-200 pl-9 pr-3 text-sm" /></div></label>
+                      <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 md:col-span-3"><input type="checkbox" checked={universalTask.verificationRequired} onChange={(event) => updateUniversalTask({ verificationRequired: event.target.checked })} className="h-4 w-4 accent-[#0D3A35]" /><span><span className="block text-xs font-bold text-slate-700">Verification required</span><span className="mt-0.5 block text-[11px] text-slate-500">Require verifier confirmation before closure.</span></span></label>
+                    </div>
+                  )}
+
+                  {builderSection === 'review' && (
+                    <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 md:grid-cols-3">
+                      {[['Task', universalTask.title || 'Not entered'], ['Category', TASK_CATEGORIES.find(([value]) => value === universalTask.category)?.[1] || universalTask.category], ['Schedule', `${universalTask.plannedStart || '—'} → ${universalTask.dueDate || '—'}`], ['Executor', taskAssignment.staffName || 'Not selected'], ['Steps', String(taskFlowSteps.filter((step) => step.type).length)], ['Evidence', `${universalTask.requiredPhotos} photo(s) · ${universalTask.requiredVideos} video(s)`], ['Approval', universalTask.approvalMode.replaceAll('_', ' ')]].map(([label, value]) => <div key={label} className="rounded-lg bg-white p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</p><p className="mt-1 text-sm font-semibold capitalize text-slate-800">{value}</p></div>)}
+                    </div>
+                  )}
+
+                  {builderSection === 'work' && (<>
+              <div className="grid gap-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4 md:grid-cols-[160px_180px_1fr]">
+                <label><span className="text-xs font-bold text-slate-700">Task Quantity</span><input type="number" min="0" value={universalTask.taskQuantity} onChange={(event) => updateUniversalTask({ taskQuantity: event.target.value })} placeholder="2" className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" /></label>
+                <label><span className="text-xs font-bold text-slate-700">Unit</span><select value={universalTask.taskUnit} onChange={(event) => updateUniversalTask({ taskUnit: event.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option>Nos.</option><option>Acre</option><option>Kg</option><option>Litre</option><option>Hours</option><option>Feet</option></select></label>
+                <label><span className="text-xs font-bold text-slate-700">Specification</span><input value={universalTask.specification} onChange={(event) => updateUniversalTask({ specification: event.target.value })} placeholder="e.g. Up to 250 feet depth" className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" /></label>
+              </div>
+              <div className="flex items-center justify-between"><div><h4 className="text-sm font-bold text-slate-900">Work Steps</h4><p className="mt-0.5 text-xs text-slate-500">Add instructions, responsibility and required evidence.</p></div><span className="text-xs font-semibold text-slate-400">{taskFlowSteps.length} step{taskFlowSteps.length === 1 ? '' : 's'}</span></div>
               {/* Steps rail — one by one: click the dashed "+" card to add the next step,
                   pick its type, and only that type's fields appear inside the card. */}
               <div className="overflow-x-auto pb-1">
@@ -1553,6 +1952,7 @@ const OnDemandTask = () => {
 
                             {/* Step card body — compact summary; clicking it reopens the popup to edit this step's fields */}
                             <div className="flex-1 p-3">
+                              <p className="mb-2 truncate text-sm font-bold text-slate-900">{step.details.title || `Step ${step.stepNumber}`}</p>
                               {step.type ? (
                                 <button
                                   type="button"
@@ -1597,6 +1997,22 @@ const OnDemandTask = () => {
                                   <button type="button" onClick={() => setStepFieldsPopupId(null)} className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-50"><X className="h-4 w-4" /></button>
                                 </div>
                                 <div className="flex-1 space-y-3 overflow-y-auto p-4">
+                                  <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-3 md:grid-cols-2">
+                                    <label className="md:col-span-2"><span className="text-xs font-bold text-slate-700">Step name</span><input value={step.details.title} onChange={(event) => updateStepDetails(step.id, { title: event.target.value })} placeholder="e.g. Borewell drilling" className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" /></label>
+                                    <label className="md:col-span-2"><span className="text-xs font-bold text-slate-700">Instructions</span><textarea value={step.details.notes} onChange={(event) => updateStepDetails(step.id, { notes: event.target.value })} rows={2} placeholder="What must be completed in this step?" className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" /></label>
+                                    <label><span className="text-xs font-bold text-slate-700">Assigned designation</span><select value={step.details.assigneeDesignation} onChange={(event) => updateStepDetails(step.id, { assigneeDesignation: event.target.value, assignee: '' })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"><option value="">Use task executor</option>{designationOptions.map((value) => <option key={value} value={value}>{formatDesignationLabel(value)}</option>)}</select></label>
+                                    <label><span className="text-xs font-bold text-slate-700">Assigned to</span><select value={step.details.assignee} disabled={!step.details.assigneeDesignation} onChange={(event) => updateStepDetails(step.id, { assignee: event.target.value })} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-100"><option value="">Use task executor</option>{(staffByDesignation[step.details.assigneeDesignation] || []).map((staff) => <option key={String(staff.staff_id || '')} value={String(staff.staff_id || '')}>{staff.staff_information?.staff_name || 'Unknown'}</option>)}</select></label>
+                                  </div>
+                                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                    <p className="text-xs font-bold text-slate-900">What does this step require?</p>
+                                    <p className="mt-0.5 text-[11px] text-slate-500">Select every capability needed for this step. The primary workflow below keeps the legacy API compatible.</p>
+                                    <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                      {STEP_CAPABILITIES.map((capability) => {
+                                        const checked = step.details.capabilities.includes(capability);
+                                        return <label key={capability} className={cn('flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 text-[11px] font-semibold transition', checked ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-white text-slate-600')}><input type="checkbox" checked={checked} onChange={() => updateStepDetails(step.id, { capabilities: checked ? step.details.capabilities.filter((item) => item !== capability) : [...step.details.capabilities, capability] })} className="accent-emerald-700" />{capability}</label>;
+                                      })}
+                                    </div>
+                                  </div>
                                   {/* Inventory */}
                                   {step.type === 'inventory' && (
                                     <div className="space-y-3">
@@ -2132,120 +2548,56 @@ const OnDemandTask = () => {
                     })}
                   </div>
                 </div>
+                  </>)}
+                </>
+              )}
             </div>
 
             {/* Creator footer */}
-            <div className="flex items-center gap-2 px-5 py-3 border-t border-slate-200">
-              <button type="button" onClick={handleAssignTask} disabled={isCreatingTask} className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
-                <UserCheck className="h-4 w-4" />
-                {isCreatingTask ? 'Creating...' : 'Assign Task'}
-              </button>
-              <button type="button" onClick={closeModal} className="ml-auto rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+            <div className="flex items-center gap-2 border-t border-slate-200 bg-slate-50/80 px-5 py-4">
+              {createMode !== 'quick' && <button type="button" onClick={handleSaveDraft} className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-bold text-slate-600 hover:bg-slate-100"><Save className="h-4 w-4" /> Save Draft</button>}
+              <button type="button" onClick={closeModal} className="ml-auto h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-bold text-slate-600 transition hover:bg-slate-100">
                 Cancel
+              </button>
+              <button type="button" onClick={createMode === 'quick' ? handleCreateQuickTask : handleAssignTask} disabled={isCreatingTask} className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#0D3A35] px-4 text-sm font-bold text-white shadow-sm transition hover:bg-[#164E46] disabled:opacity-50">
+                <UserCheck className="h-4 w-4" />
+                {isCreatingTask ? 'Creating...' : createMode === 'quick' ? 'Create Quick Task' : 'Create & Assign'}
               </button>
             </div>
           </div>
         )}
 
-        {ondemandTasksLoading ? (
-          <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-muted-foreground">Loading on demand tasks...</div>
-        ) : ondemandTasksError ? (
-          <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">{ondemandTasksError}</div>
-        ) : ondemandTasks.length === 0 ? (
-          <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-muted-foreground">No on demand tasks found.</div>
-        ) : (
-          <div className="space-y-4">
-            {ondemandTasks.map(task => {
-              const pct = task.totalSteps > 0 ? Math.round((task.completedSteps / task.totalSteps) * 100) : 0;
-              const isAllDone = task.completedSteps === task.totalSteps && task.totalSteps > 0;
-              const needsAllocation = task.steps.some(s => s.type === 'inventory') && !taskIdsWithAllocation.has(task.taskId);
-              return (
-                <div key={task.taskId} className={cn('rounded-xl border bg-white shadow-sm overflow-hidden', needsAllocation ? 'border-red-400 animate-pulse' : 'border-slate-200')}>
-                  {/* Task header */}
-                  <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 border-b border-slate-100 bg-slate-50/60">
-                    <div className="flex items-center gap-3">
-                      <div className={cn('flex h-9 w-9 items-center justify-center rounded-lg text-white text-xs font-bold shrink-0', needsAllocation ? 'bg-red-600' : 'bg-slate-900')}>
-                        {task.taskId.replace('TASK-', '')}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-slate-900">{task.taskId}</span>
-                          <span className={cn('inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border', isAllDone ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-amber-100 text-amber-700 border-amber-200')}>
-                            {isAllDone ? 'Completed' : 'In Progress'}
-                          </span>
-                          {needsAllocation && (
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-600 border border-red-300">
-                              Allocation Required
-                            </span>
-                          )}
-                        </div>
-                        {needsAllocation && (
-                          <button
-                            type="button"
-                            onClick={() => setActiveTab('allocation')}
-                            className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-red-600 hover:text-red-700 hover:underline"
-                          >
-                            Fill Allocation →
-                          </button>
-                        )}
-                        <p className="text-[11px] text-slate-400 mt-0.5">Staff: {task.staffId} · {task.createdAt}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3 shrink-0">
-                      <div className="text-right">
-                        <div className="text-xs font-semibold text-slate-700">{task.completedSteps}/{task.totalSteps} steps</div>
-                        <div className="text-[10px] text-slate-400">{pct}% complete</div>
-                      </div>
-                      <div className="w-24 h-1.5 rounded-full bg-slate-200 overflow-hidden">
-                        <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Steps rail */}
-                  <div className="overflow-x-auto px-5 py-4">
-                    <div className="flex items-start gap-0 min-w-max">
-                      {task.steps.map((step, index) => (
-                        <div key={step.key} className="flex items-start">
-                          {/* Step card */}
-                          <div className="w-[272px] rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-                            {/* Step card header */}
-                            <div className={cn('flex items-center justify-between px-3 py-2 border-b', stepTypeColor[step.type] ? `border-b ${stepTypeColor[step.type].split(' ')[0]}/30` : 'border-slate-100')}>
-                              <div className="flex items-center gap-2">
-                                <span className={cn('inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold border uppercase tracking-wide', stepTypeColor[step.type] || 'bg-slate-100 text-slate-600 border-slate-200')}>
-                                  {step.type === 'others' ? 'Other' : step.type === 'on_field' ? 'On Field' : step.type}
-                                </span>
-                                <span className="text-[10px] font-semibold text-slate-400">#{step.stepNumber}</span>
-                              </div>
-                              <span className={cn('inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold border', getStepStatusClasses(step.status))}>
-                                {step.status === 'completed' ? '✓ Done' : step.status.replace(/_/g, ' ')}
-                              </span>
-                            </div>
-                            {/* Step card body */}
-                            <div className="p-3">
-                              {step.data.length > 0 ? renderStepCard(step) : (
-                                <p className="text-xs text-slate-400 italic">No data</p>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Connector arrow */}
-                          {index < task.steps.length - 1 && (
-                            <div className="flex items-center self-center mx-1.5 shrink-0">
-                              <div className="h-px w-4 bg-slate-300" />
-                              <div className="w-0 h-0 border-t-4 border-b-4 border-l-4 border-t-transparent border-b-transparent border-l-slate-300" />
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+        {ondemandTasksLoading ? <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center text-sm text-slate-500">Loading tasks...</div> : ondemandTasksError ? <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{ondemandTasksError}</div> : filteredTasks.length === 0 ? <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center text-sm text-slate-500">No tasks match the selected filters.</div> : (
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
+            <table className="w-full min-w-[920px] border-collapse text-left">
+              <thead><tr className="bg-[#0D3A35] text-white">{['Task','Category','Location','Assigned To','Due','Status','Progress'].map((heading) => <th key={heading} className="px-4 py-3 text-[10px] font-bold uppercase tracking-[0.12em]">{heading}</th>)}</tr></thead>
+              <tbody>{filteredTasks.map((task) => { const meta = getTaskMeta(task); const pct = task.totalSteps > 0 ? Math.round((task.completedSteps / task.totalSteps) * 100) : 0; const isDone = pct === 100; const title = String(meta.title || task.steps[0]?.title || task.taskId); const category = TASK_CATEGORIES.find(([value]) => value === meta.category)?.[1] || String(meta.category || 'General'); return <tr key={task.taskId} onClick={() => { setSelectedTask(task); setTaskWorkspaceSection('overview'); }} className="cursor-pointer border-b border-slate-100 transition last:border-0 hover:bg-emerald-50/40"><td className="px-4 py-4"><p className="text-sm font-bold text-slate-900">{title}</p><p className="mt-1 text-[10px] font-semibold text-slate-400">{task.taskId}</p></td><td className="px-4 py-4 text-sm text-slate-600">{category}</td><td className="px-4 py-4 text-sm text-slate-600">{String(meta.locationId || '—')}</td><td className="px-4 py-4 text-sm font-semibold text-slate-700">{task.staffId}</td><td className="px-4 py-4 text-sm text-slate-600">{meta.dueDate ? formatShortDate(String(meta.dueDate)) : '—'}</td><td className="px-4 py-4"><span className={cn('rounded-full px-2.5 py-1 text-[10px] font-bold uppercase', isDone ? 'bg-emerald-100 text-emerald-700' : pct > 0 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600')}>{isDone ? 'Completed' : pct > 0 ? 'In Progress' : 'Assigned'}</span></td><td className="px-4 py-4"><div className="flex items-center gap-2"><div className="h-1.5 w-20 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-[#0D3A35]" style={{ width: `${pct}%` }} /></div><span className="text-xs font-bold text-slate-500">{pct}%</span></div></td></tr>; })}</tbody>
+            </table>
           </div>
         )}
-      </div>
+        </div>
+      </section>
+      )}
+
+      {activeTab === 'templates' && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div><h2 className="text-lg font-bold text-slate-900">Task Templates</h2><p className="mt-1 text-sm text-slate-500">Reusable starting points with editable steps, evidence and resources.</p></div>
+            <button type="button" onClick={() => { setActiveTab('task'); void openModal('structured'); }} className="h-10 rounded-xl bg-[#0D3A35] px-4 text-sm font-bold text-white shadow-sm hover:bg-[#164E46]">+ Blank Structured Task</button>
+          </div>
+          <div className="mt-5 flex flex-col gap-3 border-y border-slate-100 py-4 lg:flex-row lg:items-center lg:justify-between"><label className="relative w-full lg:max-w-sm"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={templateSearch} onChange={(event) => setTemplateSearch(event.target.value)} placeholder="Search templates..." className="h-10 w-full rounded-xl border border-slate-200 pl-10 pr-3 text-sm outline-none focus:border-[#0D3A35]" /></label><div className="flex flex-wrap gap-1">{[['all','All'],['field_operations','Field'],['inspection','Inspection'],['inventory','Inventory'],['maintenance','Maintenance']].map(([value,label]) => <button key={value} type="button" onClick={() => setTemplateCategory(value)} className={cn('rounded-lg px-3 py-2 text-xs font-bold', templateCategory === value ? 'bg-[#0D3A35] text-white' : 'bg-slate-100 text-slate-500 hover:text-slate-800')}>{label}</button>)}</div></div>
+          <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {UNIVERSAL_TASK_TEMPLATES.filter((template) => (templateCategory === 'all' || template.category === templateCategory) && (!templateSearch.trim() || `${template.name} ${template.description}`.toLowerCase().includes(templateSearch.trim().toLowerCase()))).map((template) => (
+              <article key={template.id} className="flex flex-col rounded-2xl border border-slate-200 bg-slate-50/60 p-5 transition hover:-translate-y-0.5 hover:border-emerald-300 hover:bg-emerald-50/30 hover:shadow-md">
+                <div className="flex items-start justify-between gap-3"><span className="rounded-lg bg-[#0D3A35] p-2 text-white"><Save className="h-4 w-4" /></span><span className="rounded-full bg-white px-2 py-1 text-[10px] font-bold uppercase text-slate-500">{template.priority}</span></div>
+                <h3 className="mt-4 font-bold text-slate-900">{template.name}</h3>
+                <p className="mt-2 flex-1 text-xs leading-5 text-slate-500">{template.description}</p>
+                <p className="mt-3 text-[11px] font-semibold text-slate-500">{template.steps.length} default step{template.steps.length === 1 ? '' : 's'} · {TASK_CATEGORIES.find(([value]) => value === template.category)?.[1]}</p>
+                <button type="button" onClick={() => applyTaskTemplate(template)} className="mt-4 rounded-xl border border-emerald-200 bg-white px-3 py-2.5 text-xs font-bold text-emerald-800 hover:bg-emerald-50">Use Template</button>
+              </article>
+            ))}
+          </div>
+        </section>
       )}
 
       {/* ── On Demand Allocation tab ── */}

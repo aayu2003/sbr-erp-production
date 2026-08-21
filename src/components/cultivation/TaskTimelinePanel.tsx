@@ -298,6 +298,7 @@ export const TaskTimelinePanel = ({
   renderActivityIcon,
   onExpandMap,
   progressImagesByTaskId,
+  columns = 1,
 }: {
   tasks: TimelineTask[];
   farmsById: Record<string, TimelineFarm>;
@@ -306,8 +307,9 @@ export const TaskTimelinePanel = ({
   renderActivityIcon: (activity: string) => React.ReactNode;
   onExpandMap: (task: TimelineTask) => void;
   progressImagesByTaskId: Record<string, string[]>;
+  columns?: 1 | 2 | 3;
 }) => (
-  <div className="flex h-full flex-col rounded-xl border border-gray-200 bg-white shadow-sm">
+  <div className="flex h-full min-h-0 flex-col rounded-xl border border-gray-200 bg-white shadow-sm">
     <div className="flex shrink-0 items-center justify-between border-b border-gray-100 px-4 py-3">
       <h3 className="text-sm font-bold text-slate-900">Task Timeline</h3>
       <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[11px] font-bold text-blue-700">{tasks.length} Tasks</span>
@@ -323,11 +325,11 @@ export const TaskTimelinePanel = ({
           No tasks scheduled in these months
         </div>
       ) : (
-        <div className="relative flex flex-col gap-5 pl-1">
-          <div className="pointer-events-none absolute left-[13px] top-2 bottom-2 w-0.5 bg-slate-200" />
+        <div className={cn(columns === 1 ? 'relative flex flex-col gap-5 pl-1' : 'grid grid-cols-1 gap-4 lg:grid-cols-2', columns === 3 && 'xl:grid-cols-3')}>
+          {columns === 1 && <div className="pointer-events-none absolute left-[13px] top-2 bottom-2 w-0.5 bg-slate-200" />}
           {tasks.map((task) => (
-            <div key={task.key} className="relative z-10 flex items-start gap-3">
-              <span className="relative mt-1 flex h-3.5 w-3.5 shrink-0">
+            <div key={task.key} className={cn('min-w-0', columns === 1 && 'relative z-10 flex items-start gap-3')}>
+              {columns === 1 && <span className="relative mt-1 flex h-3.5 w-3.5 shrink-0">
                 {task.statusTone === 'orange' && (
                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400 opacity-75" />
                 )}
@@ -337,7 +339,7 @@ export const TaskTimelinePanel = ({
                     task.statusTone === 'orange' ? 'bg-orange-500' : 'bg-emerald-500',
                   )}
                 />
-              </span>
+              </span>}
               <div className="min-w-0 flex-1">
                 <TimelineTaskCard
                   task={task}
