@@ -33,10 +33,24 @@ export type PRRInvoiceData = {
   admin_ops_signature?: string;
   director_signature?: string;
   payment_request_dict?: {
-    payment?: { payment_amount?: number; liability_before_payment?: number; liability_after_payment?: number; remarks?: string };
+    payment?: { payment_amount?: number; liability_before_payment?: number; liability_after_payment?: number; remarks?: string; actual_payable_amount?: number };
     linvestment_impact?: Record<string, unknown>;
     budget_impact?: Record<string, unknown>;
   };
+};
+
+// The full structured record written by POST /admin_accounts/send_for_approval into
+// admin_accounts_prr — fetched here by prr_number once the PRR has actually been sent, since
+// the reference/TDS/payment-method detail it carries doesn't exist anywhere on `invoice` itself.
+type PRRRecord = {
+  prr_number?: string;
+  reference_details?: { order_number?: string; grn?: string[]; wcc?: string[]; log_book?: string[]; invoice_no?: string; invoice_date?: string };
+  amount_details?: { net_payable_amount?: number; actual_payable_amount?: number };
+  tds_tax_details?: { tds_applicable?: string; tds_section?: string; tds_rate?: number; tds_base_amount?: number; tds_amount?: number; rcm_applicable?: string };
+  payment_details?: { payment_mode?: string; payment_due_date?: string; payment_terms?: string; bank_account_from?: string; payment_extent?: string };
+  budget_details?: Record<string, { line_item?: string; line_item_category?: string; amount?: number }[]>;
+  supporting_document_details?: { document?: string; doc_link?: string }[];
+  status?: string;
 };
 
 export type PRRDocumentPreviewHandle = {
@@ -109,8 +123,29 @@ const PRRDocumentPreview = forwardRef<PRRDocumentPreviewHandle, { invoice: PRRIn
     return () => ac.abort();
   }, [invoice.ledger_entry]);
 
+  const [prrRecord, setPrrRecord] = useState<PRRRecord | null>(null);
+  useEffect(() => {
+    const prrNumber = safeStr(invoice.prr_number);
+    if (!prrNumber) { setPrrRecord(null); return; }
+    const ac = new AbortController();
+    (async () => {
+      try {
+        const baseUrl = safeStr(getBaseUrl()).replace(/\/$/, "");
+        const res = await fetch(`${baseUrl}/admin_accounts/get_prr/${encodeURIComponent(prrNumber)}`, {
+          headers: { Accept: "application/json" }, signal: ac.signal,
+        });
+        const data: { success?: boolean; data?: PRRRecord } | null = await res.json().catch(() => null);
+        if (res.ok && data?.success && data.data) setPrrRecord(data.data);
+      } catch {
+        // best-effort — falls back to payment_request_dict-derived rendering below
+      }
+    })();
+    return () => ac.abort();
+  }, [invoice.prr_number]);
+
   const budgetImpact = invoice.payment_request_dict?.budget_impact;
-  const hasBudgetImpact = !!budgetImpact && typeof budgetImpact === "object" && Object.keys(budgetImpact).length > 0;
+  const hasBudgetImpact = (!!prrRecord?.budget_details && Object.keys(prrRecord.budget_details).length > 0)
+    || (!!budgetImpact && typeof budgetImpact === "object" && Object.keys(budgetImpact).length > 0);
 
   const [budgetNames, setBudgetNames] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -181,8 +216,31 @@ const PRRDocumentPreview = forwardRef<PRRDocumentPreviewHandle, { invoice: PRRIn
   // which budget's line item. The line-items table mirrors that 1:1 — one row per line item,
   // with "Now Proposed" being the amount actually taken from it (not the invoice total).
   const budgetRows = useMemo(() => {
-    if (!budgetImpact || typeof budgetImpact !== "object") return [];
     const rows: { budgetName: string; category: string; lineItem: string; asPerBudget?: number; amount: number }[] = [];
+
+    // Prefer the PRR's own structured budget_details (dict of budget_id -> array of line
+    // items) once it exists — payment_request_dict.budget_impact below is only the pre-PRR
+    // draft shape and won't be up to date once the PRR has actually been sent.
+    if (prrRecord?.budget_details && Object.keys(prrRecord.budget_details).length > 0) {
+      Object.entries(prrRecord.budget_details).forEach(([budgetId, lineItems]) => {
+        (lineItems ?? []).forEach((li) => {
+          const category = safeStr(li.line_item_category);
+          const lineItem = safeStr(li.line_item);
+          const amount = Number(li.amount) || 0;
+          if (amount <= 0) return;
+          rows.push({
+            budgetName: budgetNames[budgetId] || budgetId,
+            category,
+            lineItem,
+            asPerBudget: asPerBudget[`${budgetId}::${category}::${lineItem}`],
+            amount,
+          });
+        });
+      });
+      return rows;
+    }
+
+    if (!budgetImpact || typeof budgetImpact !== "object") return [];
     Object.entries(budgetImpact as Record<string, unknown>).forEach(([budgetId, lineItems]) => {
       if (!lineItems || typeof lineItems !== "object") return;
       Object.values(lineItems as Record<string, unknown>).forEach((v) => {
@@ -201,7 +259,7 @@ const PRRDocumentPreview = forwardRef<PRRDocumentPreviewHandle, { invoice: PRRIn
       });
     });
     return rows;
-  }, [budgetImpact, budgetNames, asPerBudget]);
+  }, [prrRecord, budgetImpact, budgetNames, asPerBudget]);
 
   const totalProposed = budgetRows.reduce((s, r) => s + r.amount, 0);
 
@@ -354,6 +412,27 @@ const PRRDocumentPreview = forwardRef<PRRDocumentPreviewHandle, { invoice: PRRIn
           <p><span className="font-bold">Any other Information:</span> {safeStr(payment?.remarks) || "—"}</p>
           <p className="mt-1 text-slate-500">WO No.: {safeStr(invoice.order_number) || "—"}</p>
         </div>
+
+        {prrRecord && (
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="overflow-hidden rounded-lg border border-slate-200">
+              <table className="w-full border-collapse text-xs"><tbody>
+                <ParticularsRow label="Actual Payable Amount" value={inr(Number(prrRecord.amount_details?.actual_payable_amount) || Number(payment?.payment_amount) || 0)} />
+                <ParticularsRow label="GRN" value={(prrRecord.reference_details?.grn ?? []).join(", ") || "—"} />
+                <ParticularsRow label="WCC" value={(prrRecord.reference_details?.wcc ?? []).join(", ") || "—"} />
+                <ParticularsRow label="Log Book" value={(prrRecord.reference_details?.log_book ?? []).join(", ") || "—"} isLast />
+              </tbody></table>
+            </div>
+            <div className="overflow-hidden rounded-lg border border-slate-200">
+              <table className="w-full border-collapse text-xs"><tbody>
+                <ParticularsRow label="TDS" value={prrRecord.tds_tax_details?.tds_applicable === "Yes" ? `${safeStr(prrRecord.tds_tax_details?.tds_section)} @ ${prrRecord.tds_tax_details?.tds_rate || 0}% = ${inr(Number(prrRecord.tds_tax_details?.tds_amount) || 0)}` : "Not Applicable"} />
+                <ParticularsRow label="RCM Applicable" value={safeStr(prrRecord.tds_tax_details?.rcm_applicable) || "No"} />
+                <ParticularsRow label="Payment Mode" value={safeStr(prrRecord.payment_details?.payment_mode) || "—"} />
+                <ParticularsRow label="Payment Terms" value={safeStr(prrRecord.payment_details?.payment_terms) || "—"} isLast />
+              </tbody></table>
+            </div>
+          </div>
+        )}
 
         <div className="mt-4 grid grid-cols-1 overflow-hidden rounded-lg border border-slate-200 sm:grid-cols-3">
           <div className="border-b border-slate-200 p-3 text-xs text-slate-400 sm:border-b-0 sm:border-r">Remarks:</div>
