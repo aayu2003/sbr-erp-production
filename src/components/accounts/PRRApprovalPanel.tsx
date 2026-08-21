@@ -1,13 +1,13 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { toast } from "sonner";
 import getBaseUrl from "@/lib/config";
 import { useAuth } from "@/context/AuthContext";
 import PRRDocumentPreview, { type PRRInvoiceData } from "./PRRDocumentPreview";
 import { updateLocalPrrStatus, PrrDocumentPreview as LocalPrrDocumentPreview, type FinanceRecord } from "@/pages/FinanceAccounts";
+import { DocPreviewPane, type SupportingDocument } from "./PaymentImpactMesh";
 
 const safeStr = (v: unknown) => String(v ?? "").trim();
-const inr = (n: number) => `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 export type PRRApprovalInvoice = PRRInvoiceData & {
   vendor_name?: string;
@@ -22,6 +22,9 @@ export type PRRApprovalInvoice = PRRInvoiceData & {
   // same PrrDocumentPreview the Payments & Receipts form itself uses — same layout, same
   // fields — instead of force-fitting it into the backend-shaped PRRDocumentPreview.
   localRecord?: FinanceRecord;
+  // A PRR's own attachmentUrl is always blank — its real Tax Invoice / supporting-document
+  // URLs live on the Bill Inward record it was raised against (resolved via sourceBillId).
+  localLinkedBill?: FinanceRecord;
 };
 
 type StepStatus = "done" | "pending" | "rejected";
@@ -35,10 +38,9 @@ const StepBadge = ({ label, raw }: { label: string; raw?: string }) => (
   </div>
 );
 
-// Chrome around each of the two review popups — a titled window, not just a bare card, so the
-// PRR and Investment Impact read as two distinct popups rather than one merged panel.
+// Chrome around the single review popup — a titled window, not just a bare card.
 const ReviewPopup = ({ title, bodyClassName = "p-4", children }: { title: string; bodyClassName?: string; children: ReactNode }) => (
-  <div className="flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl" style={{ height: "75vh" }}>
+  <div className="flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl" style={{ height: "80vh" }}>
     <div className="shrink-0 border-b border-slate-200 bg-slate-50 px-4 py-2.5">
       <h4 className="text-xs font-extrabold uppercase tracking-wide text-slate-600">{title}</h4>
     </div>
@@ -46,9 +48,9 @@ const ReviewPopup = ({ title, bodyClassName = "p-4", children }: { title: string
   </div>
 );
 
-// A4 at ~63% scale — big enough to actually read as a document "page" side by side with the
-// Investment Impact popup, without needing the full 1:1 794×1123px physical size.
-const A4_WIDTH = 520;
+// Full 1:1 A4 physical size (794×1123px) — this is the only popup now, so there's no need to
+// shrink it to fit side-by-side with anything else.
+const A4_WIDTH = 794;
 const A4_HEIGHT = Math.round(A4_WIDTH * (297 / 210));
 
 const A4PageFrame = ({ children }: { children: ReactNode }) => (
@@ -57,59 +59,16 @@ const A4PageFrame = ({ children }: { children: ReactNode }) => (
   </div>
 );
 
-const InvestmentImpactTable = ({ invoice }: { invoice: PRRInvoiceData }) => {
-  const raw = invoice.payment_request_dict?.linvestment_impact as { entries?: Record<string, unknown> } | undefined;
-  const entries = raw?.entries;
-  const rows = entries && typeof entries === "object"
-    ? Object.values(entries as Record<string, unknown>).map((v) => {
-        const e = v as { land_owner?: string; acres?: number; investment_amount?: number };
-        return { ownerName: safeStr(e.land_owner), acres: Number(e.acres) || 0, investment: Number(e.investment_amount) || 0 };
-      })
-    : [];
+// step_3/"grn" and similar upload steps in purchase_flow_stage — plus a released WCC
+// certificate, wherever the document label happens to say so — are the "reference documents"
+// page; everything else (invoice, PO acceptance, proforma invoice, the order document itself)
+// is the "invoices & other documents" page.
+const isReferenceDoc = (label: string) => /grn|wcc|certificate|log.?\s*book/i.test(label);
 
-  if (rows.length === 0) {
-    return (
-      <p className="py-8 text-center text-xs font-semibold text-slate-400">
-        Not applicable for this payment — no land investment impact recorded.
-      </p>
-    );
-  }
-
-  const totalAcres = rows.reduce((s, r) => s + r.acres, 0);
-  const totalInvestment = rows.reduce((s, r) => s + r.investment, 0);
-
-  return (
-    <div className="overflow-hidden rounded-lg border border-slate-200">
-      <table className="w-full border-collapse text-left text-xs">
-        <thead>
-          <tr className="border-b border-slate-200 bg-slate-50 text-[10px] font-extrabold uppercase tracking-wide text-slate-500">
-            <th className="px-3 py-2">Land Owner</th>
-            <th className="px-3 py-2 text-right">Acres</th>
-            <th className="px-3 py-2 text-right">Investment</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i} className="border-b border-slate-100 last:border-b-0">
-              <td className="px-3 py-2 font-semibold text-slate-700">{r.ownerName || "—"}</td>
-              <td className="px-3 py-2 text-right text-slate-600">{r.acres.toFixed(2)}</td>
-              <td className="px-3 py-2 text-right font-semibold text-slate-800">{inr(r.investment)}</td>
-            </tr>
-          ))}
-          <tr className="border-t-2 border-slate-300 bg-slate-50 font-bold">
-            <td className="px-3 py-2">Total</td>
-            <td className="px-3 py-2 text-right">{totalAcres.toFixed(2)}</td>
-            <td className="px-3 py-2 text-right">{inr(totalInvestment)}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  );
-};
-
-// The director's side of the PRR workflow: review the PRR document + land investment impact,
-// then approve/reject. The initiator's (admin_ops) signature already happened when "Make PRR &
-// Send for Approval" was clicked back in the Payment Request tab — nothing here re-signs that.
+// The director's side of the PRR workflow: review the PRR document plus every reference and
+// supporting document as one continuous page-by-page set, then approve/reject. The initiator's
+// (admin_ops) signature already happened when "Make PRR & Send for Approval" was clicked back
+// in the Payment Request tab — nothing here re-signs that.
 const PRRApprovalPanel = ({
   invoice, onDecided, onClose,
 }: { invoice: PRRApprovalInvoice; onDecided: () => void; onClose?: () => void }) => {
@@ -121,11 +80,49 @@ const PRRApprovalPanel = ({
 
   const canDecide = safeStr(invoice.director_approval_status).toLowerCase() === "pending";
 
+  // Same order-scoped documents PaymentRequestPanel's "Supporting Documents" card already
+  // pulls from (admin_purchase_flow's purchase_flow_stage uploads) — order_number for a
+  // backend-tracked PRR, or the linked PO/WO reference for a local one (only populated when
+  // the PRR was linked to a real, backend-synced Bill Inward).
+  const orderNumber = safeStr(invoice.order_number) || safeStr(invoice.localRecord?.poWoReference);
+  const [docs, setDocs] = useState<SupportingDocument[]>([]);
+  useEffect(() => {
+    if (!orderNumber) { setDocs([]); return; }
+    const ac = new AbortController();
+    (async () => {
+      try {
+        const baseUrl = safeStr(getBaseUrl()).replace(/\/$/, "");
+        const res = await fetch(`${baseUrl}/admin_accounts/get_supporting_documents/${encodeURIComponent(orderNumber)}`, {
+          headers: { Accept: "application/json" }, signal: ac.signal,
+        });
+        const data: { success?: boolean; data?: SupportingDocument[] } | null = await res.json().catch(() => null);
+        if (res.ok && data?.success) setDocs(Array.isArray(data.data) ? data.data : []);
+      } catch {
+        // best-effort — the PRR page still renders without the reference/other-document pages
+      }
+    })();
+    return () => ac.abort();
+  }, [orderNumber]);
+
+  // A local PRR's own record never carries real document URLs — its Tax Invoice and any other
+  // supporting files live on the Bill Inward it was raised against (localLinkedBill), same as
+  // the "SUPPORTING DOCUMENTS" section on Page 1 itself resolves them.
+  const linkedBill = invoice.localLinkedBill;
+  const localSupportingDocs: SupportingDocument[] = [
+    ...(linkedBill?.attachmentUrl ? [{ document: "Tax Invoice", doc_link: linkedBill.attachmentUrl }] : []),
+    ...Object.entries(linkedBill?.additionalDocumentUrls ?? {}).map(([name, url]) => ({ document: name, doc_link: url })),
+  ];
+
+  const allDocs = [...docs, ...localSupportingDocs];
+  const referenceDocs = allDocs.filter((d) => isReferenceDoc(d.document));
+  const otherDocs = allDocs.filter((d) => !isReferenceDoc(d.document));
+
   const handleApprove = async () => {
     if (invoice.origin === "local") {
       if (!invoice.localRecordId) { toast.error("Missing record id."); return; }
+      if (!user?.name) { toast.error("You must be logged in to approve this."); return; }
       setApproving(true);
-      updateLocalPrrStatus(invoice.localRecordId, "Approved");
+      updateLocalPrrStatus(invoice.localRecordId, "Approved", { name: user.name, designation: user.designation });
       toast.success("Approved");
       setApproving(false);
       onDecided();
@@ -156,8 +153,9 @@ const PRRApprovalPanel = ({
     if (!showRejectInput) { setShowRejectInput(true); return; }
     if (invoice.origin === "local") {
       if (!invoice.localRecordId) { toast.error("Missing record id."); return; }
+      if (!user?.name) { toast.error("You must be logged in to reject this."); return; }
       setRejecting(true);
-      updateLocalPrrStatus(invoice.localRecordId, "Rejected", rejectReason.trim());
+      updateLocalPrrStatus(invoice.localRecordId, "Rejected", { name: user.name, designation: user.designation }, rejectReason.trim());
       toast.success("Rejected");
       setShowRejectInput(false);
       setRejectReason("");
@@ -211,28 +209,53 @@ const PRRApprovalPanel = ({
         </div>
       </div>
 
-      {/* Popup 1: PRR document, shown at A4-page scale. Popup 2: land investment impact. Two
-          fully independent floating windows, not two panes of one shared popup. */}
-      <div className="grid grid-cols-1 items-stretch gap-4 xl:grid-cols-2">
-        <ReviewPopup title="PRR Document" bodyClassName="bg-slate-100 p-4">
-          <A4PageFrame>
-            {invoice.origin === "local" && invoice.localRecord?.prrDetails ? (
-              <LocalPrrDocumentPreview
-                record={invoice.localRecord}
-                details={invoice.localRecord.prrDetails}
-                taxInvoiceName={invoice.localRecord.attachmentName || "Not linked"}
-                poWoName={invoice.localRecord.poWoReference || "Not linked"}
-                completionName={invoice.localRecord.grnServiceReference || "Not linked"}
-              />
-            ) : (
-              <PRRDocumentPreview invoice={invoice} />
-            )}
-          </A4PageFrame>
-        </ReviewPopup>
-        <ReviewPopup title="Investment Impact">
-          <InvestmentImpactTable invoice={invoice} />
-        </ReviewPopup>
-      </div>
+      {/* One popup, one continuous document set — the PRR itself, then every reference document
+          (GRN / WCC / Log Book) and every other supporting document (invoices, PO acceptance,
+          etc.), each as its own numbered page, in that order. */}
+      <ReviewPopup title="PRR & Reference Documents" bodyClassName="bg-slate-100 p-4">
+        <div className="space-y-6">
+          <div>
+            <p className="mb-2 text-center text-[11px] font-bold uppercase tracking-wide text-slate-400">Page 1 — PRR</p>
+            <A4PageFrame>
+              {invoice.origin === "local" && invoice.localRecord?.prrDetails ? (
+                <LocalPrrDocumentPreview
+                  record={invoice.localRecord}
+                  details={invoice.localRecord.prrDetails}
+                  taxInvoiceName={linkedBill?.attachmentName || invoice.localRecord.attachmentName || "Not linked"}
+                  poWoName={invoice.localRecord.poWoReference || "Not linked"}
+                  completionName={invoice.localRecord.grnServiceReference || "Not linked"}
+                />
+              ) : (
+                <PRRDocumentPreview invoice={invoice} />
+              )}
+            </A4PageFrame>
+          </div>
+
+          {referenceDocs.map((doc, i) => (
+            <div key={`ref-${i}`}>
+              <p className="mb-2 text-center text-[11px] font-bold uppercase tracking-wide text-slate-400">Page {i + 2} — {doc.document || "Reference Document"}</p>
+              <A4PageFrame>
+                <div style={{ height: A4_HEIGHT }}><DocPreviewPane doc={doc} /></div>
+              </A4PageFrame>
+            </div>
+          ))}
+
+          {otherDocs.map((doc, i) => (
+            <div key={`other-${i}`}>
+              <p className="mb-2 text-center text-[11px] font-bold uppercase tracking-wide text-slate-400">Page {referenceDocs.length + i + 2} — {doc.document || "Document"}</p>
+              <A4PageFrame>
+                <div style={{ height: A4_HEIGHT }}><DocPreviewPane doc={doc} /></div>
+              </A4PageFrame>
+            </div>
+          ))}
+
+          {allDocs.length === 0 && (
+            <p className="py-6 text-center text-xs font-semibold text-slate-400">
+              {orderNumber ? "No reference or supporting documents found for this order." : "No linked order — reference and supporting documents aren't available."}
+            </p>
+          )}
+        </div>
+      </ReviewPopup>
 
       {canDecide && (
         <div className="space-y-2 rounded-xl bg-white px-5 py-4 shadow-lg">
