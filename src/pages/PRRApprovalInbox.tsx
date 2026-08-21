@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { FileCheck, RefreshCw, Calendar } from "lucide-react";
 import getBaseUrl from "@/lib/config";
 import PRRApprovalPanel, { type PRRApprovalInvoice } from "@/components/accounts/PRRApprovalPanel";
-import { getLocalPendingPrrRecords, type FinanceRecord } from "@/pages/FinanceAccounts";
+import { getLocalPendingPrrRecords, getLocalRecordById, type FinanceRecord } from "@/pages/FinanceAccounts";
 
 const BASE_URL = getBaseUrl().replace(/\/$/, "");
 
@@ -39,6 +39,7 @@ const mapLocalRecordToApprovalInvoice = (record: FinanceRecord): PRRApprovalInvo
     origin: "local",
     localRecordId: record.id,
     localRecord: record,
+    localLinkedBill: record.sourceBillId ? getLocalRecordById(record.sourceBillId) : undefined,
     payment_request_dict: {
       payment: {
         payment_amount: record.prrDetails?.netPayableAmount ?? record.amount,
