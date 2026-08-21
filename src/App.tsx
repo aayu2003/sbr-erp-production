@@ -108,8 +108,8 @@ import {
   LedgersReports,
   MastersControls,
   PaymentsReceipts,
-  Vouchers,
 } from "./pages/FinanceAccounts";
+import Vouchers from "./pages/Vouchers";
 import AccountingMaster from "./pages/AccountingMaster";
 import ChartOfAccounts from "./pages/ChartOfAccounts";
 import Communication from "./pages/Communication";

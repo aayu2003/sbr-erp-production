@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { FileCheck, RefreshCw, Calendar } from "lucide-react";
 import getBaseUrl from "@/lib/config";
 import PRRApprovalPanel, { type PRRApprovalInvoice } from "@/components/accounts/PRRApprovalPanel";
+import { getLocalPendingPrrRecords, type FinanceRecord } from "@/pages/FinanceAccounts";
 
 const BASE_URL = getBaseUrl().replace(/\/$/, "");
 
@@ -11,9 +12,49 @@ const formatDate = (d?: string) => {
   catch { return d; }
 };
 
+// Payments & Receipts' "Create Payment Request / PRR" form has no backend of its own — a
+// Submitted record there only ever lives in localStorage. This maps one into the same shape
+// the backend-tracked cards use, so it shows up in this one director inbox either way.
+const mapLocalRecordToApprovalInvoice = (record: FinanceRecord): PRRApprovalInvoice => {
+  const budget_impact: Record<string, Record<string, unknown>> = {};
+  (record.prrDetails?.budgetLines ?? []).forEach((line, idx) => {
+    const budgetId = line.budgetId || line.budgetName || `budget_${idx}`;
+    if (!budget_impact[budgetId]) budget_impact[budgetId] = {};
+    budget_impact[budgetId][line.lineItemId || `item_${idx}`] = {
+      line_item_name: line.lineItem,
+      category: line.category,
+      type: "",
+      impact_amount: line.amount,
+    };
+  });
+
+  return {
+    payment_id: `local:${record.id}`,
+    prr_number: record.reference,
+    vendor_name: record.party,
+    vendor_id: record.vendorId,
+    created_at: record.date,
+    admin_ops_approval_status: "pending",
+    director_approval_status: "pending",
+    origin: "local",
+    localRecordId: record.id,
+    localRecord: record,
+    payment_request_dict: {
+      payment: {
+        payment_amount: record.prrDetails?.netPayableAmount ?? record.amount,
+        actual_payable_amount: record.prrDetails?.actualPayableAmount,
+        remarks: record.prrDetails?.requesterRemarks,
+      },
+      budget_impact,
+    },
+  };
+};
+
 // Director-facing inbox — mirrors WccApprovalInbox / GrnApprovalInbox's list+popup pattern.
 // No dedicated "pending PRRs" endpoint exists yet, so this scans the same get_payment_flow
 // list every other tab already uses and filters client-side, same as elsewhere in this module.
+// Local (localStorage-only) submitted PRRs are merged in alongside the backend-tracked ones —
+// this inbox is the one place both PRR sources are reviewed from.
 const PRRApprovalInbox = () => {
   const [items, setItems] = useState<PRRApprovalInvoice[]>([]);
   const [loading, setLoading] = useState(true);
@@ -22,13 +63,15 @@ const PRRApprovalInbox = () => {
 
   const fetchPending = useCallback(() => {
     setLoading(true);
+    const localItems = getLocalPendingPrrRecords().map(mapLocalRecordToApprovalInvoice);
     fetch(`${BASE_URL}/admin_accounts/get_payment_flow`)
       .then((res) => res.json())
       .then((data: { success?: boolean; data?: PRRApprovalInvoice[] }) => {
         const all = data?.success && Array.isArray(data.data) ? data.data : [];
-        setItems(all.filter((it) => String(it.director_approval_status ?? "").toLowerCase() === "pending"));
+        const pending = all.filter((it) => String(it.director_approval_status ?? "").toLowerCase() === "pending");
+        setItems([...pending, ...localItems]);
       })
-      .catch(() => setItems([]))
+      .catch(() => setItems(localItems))
       .finally(() => setLoading(false));
   }, []);
 

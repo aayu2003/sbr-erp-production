@@ -8,6 +8,7 @@ import {
   Edit3,
   Eye,
   GitBranch,
+  Loader2,
   MapPin,
   MoreHorizontal,
   Plus,
@@ -74,12 +75,9 @@ type Attribution = {
 };
 
 const CENTRE_STORAGE = "sbr-cost-accounting-centres-v1";
-const ATTRIBUTION_STORAGE = "sbr-cost-attributions-v1";
 const PROJECT = "Chhattisgarh Feedstock Project";
-const LAND_NAMES = ["Netram Agarwal", "Saksham Harshal Khichariya", "Farooqui Family", "Singhaniya Family", "Mandir Trust", "Moolchand Jain", "Nathmal Jain"];
 
 const SEEDED_CENTRE_IDS = new Set(["cc-1", "cc-2", "cc-3", "cc-4", "cc-5", "cc-6", "cc-7", "cc-8"]);
-const SEEDED_ATTRIBUTION_IDS = new Set(["ca-project", "ca-durg", "ca-khaira", ...LAND_NAMES.map((_, index) => `ca-land-${index + 1}`)]);
 
 const loadUserRecords = <T extends { id: string }>(key: string, seededIds: Set<string>): T[] => {
   try {
@@ -191,6 +189,23 @@ function CostCentreDrawer({ mode, item, centres, departments, masterOptions, onC
   </Drawer>;
 }
 
+const buildAttribution = (item: Record<string, unknown>): Attribution => ({
+  id: String(item.item_id ?? ""),
+  code: String(item.code ?? ""),
+  name: String(item.name ?? ""),
+  level: String(item.level ?? "Land"),
+  parent: String(item.parent ?? ""),
+  linkedMaster: String(item.linkedMaster ?? ""),
+  linkedRecord: String(item.linkedRecord ?? ""),
+  project: String(item.project ?? ""),
+  cluster: String(item.cluster ?? ""),
+  area: Number(item.area ?? 0),
+  allocation: String(item.allocation ?? "Equal"),
+  description: String(item.description ?? ""),
+  status: (String(item.status ?? "Active")) as Status,
+  lands: Array.isArray(item.lands) ? (item.lands as LandAllocation[]) : [],
+});
+
 const nextAttributionCode = (level: string, records: Attribution[]) => {
   const suffixByLevel: Record<string, string> = { Corporate: "COR", Project: "PRJ", Cluster: "CLU", Zone: "ZONE", Block: "BLK", Land: "LAND" };
   const prefix = `CA-${suffixByLevel[level] || "OTH"}-`;
@@ -202,48 +217,133 @@ const nextAttributionCode = (level: string, records: Attribution[]) => {
   return `${prefix}${String((sequence.length ? Math.max(...sequence) : 0) + 1).padStart(3, "0")}`;
 };
 
+// Resolves a selected Corporate/Project/Cluster/Zone/Block/Land record down to the actual
+// farm_ids under it, so a Cluster (say) attribution row carries every land beneath it —
+// Cluster -> zones -> (block -> farms), Zone -> (block -> farms), Block -> farms directly.
+const farmToAllocation = (farm: Record<string, unknown>): LandAllocation => {
+  const id = String(farm.farm_id ?? farm.land_id ?? farm.id ?? "");
+  return { id, land: id, area: Number(farm.area ?? 0), percentage: 0, amount: 0 };
+};
+// Allocation is proportional to area, not an equal per-land split: rate = 100% / total acres,
+// so each land's share = rate * its own acres — a 60-acre farm carries more of the cost than a 1-acre one.
+const withAreaWeightedSplit = (lands: LandAllocation[]): LandAllocation[] => {
+  const totalArea = lands.reduce((sum, land) => sum + land.area, 0);
+  if (!totalArea) {
+    const equal = lands.length ? Math.round((100 / lands.length) * 100) / 100 : 0;
+    return lands.map((land) => ({ ...land, percentage: equal }));
+  }
+  const rate = 100 / totalArea;
+  return lands.map((land) => ({ ...land, percentage: Math.round(rate * land.area * 100) / 100 }));
+};
+const resolveLandsForOption = async (level: string, option: MasterOption): Promise<LandAllocation[]> => {
+  const baseUrl = getBaseUrl().replace(/\/$/, "");
+  const getJson = async (path: string) => {
+    try {
+      const response = await fetch(`${baseUrl}${path}`, { headers: { Accept: "application/json" } });
+      return response.ok ? await response.json() : null;
+    } catch {
+      return null;
+    }
+  };
+  if (level === "Land") return [{ id: option.id, land: option.id, area: 0, percentage: 100, amount: 0 }];
+  if (level === "Block") {
+    const res = await getJson(`/farmer_managment/get_farms_in_block/${option.id}`);
+    const farms = Array.isArray(res?.farms) ? (res.farms as Array<Record<string, unknown>>) : [];
+    return withAreaWeightedSplit(farms.map(farmToAllocation));
+  }
+  if (level === "Zone") {
+    const res = await getJson(`/farmer_managment/get_lands_in_zone/${option.id}`);
+    const byBlock = (res?.lands ?? {}) as Record<string, Array<Record<string, unknown>>>;
+    return withAreaWeightedSplit(Object.values(byBlock).flat().map(farmToAllocation));
+  }
+  if (level === "Cluster") {
+    const zonesRes = await getJson(`/farmer_managment/get_zone_in_cluster/${option.id}`);
+    const zones = Array.isArray(zonesRes?.zones) ? (zonesRes.zones as Array<Record<string, unknown>>) : [];
+    const perZone = await Promise.all(zones.map(async (zone) => {
+      const zoneId = String(zone.zone_id ?? "");
+      if (!zoneId) return [] as Array<Record<string, unknown>>;
+      const res = await getJson(`/farmer_managment/get_lands_in_zone/${zoneId}`);
+      const byBlock = (res?.lands ?? {}) as Record<string, Array<Record<string, unknown>>>;
+      return Object.values(byBlock).flat();
+    }));
+    return withAreaWeightedSplit(perZone.flat().map(farmToAllocation));
+  }
+  return []; // Corporate/Project have no land-level resolution defined by the API
+};
+
 function AttributionDrawer({ mode, item, attributions, projectNames, masterOptions, masterOptionsLoading, onClose, onSave }: { mode: DrawerMode; item?: Attribution; attributions: Attribution[]; projectNames: string[]; masterOptions: Record<string, MasterOption[]>; masterOptionsLoading: boolean; onClose: () => void; onSave: (items: Attribution[]) => void }) {
   const blank: Attribution = { id: `ca-${Date.now()}`, code: nextAttributionCode("Land", attributions), name: "", level: "Land", parent: "", linkedMaster: "Land Parcel", linkedRecord: "", project: projectNames[0] || "", cluster: "", area: 0, allocation: "Equal", description: "", status: "Active", lands: [] };
   const [form, setForm] = useState<Attribution>(item || blank);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [selectedIds, setSelectedIds] = useState<string[]>(item?.linkedRecord ? [item.linkedRecord] : []);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  const [landsByOption, setLandsByOption] = useState<Record<string, LandAllocation[]>>({});
   const update = <K extends keyof Attribution>(key: K, value: Attribution[K]) => setForm((current) => ({ ...current, [key]: value }));
   const levelOptions = masterOptions[form.level] || [];
   const selectedOptions = levelOptions.filter((option) => selectedIds.includes(option.id));
   const linkedMasterByLevel: Record<string, string> = { Corporate: "Corporate", Project: "Project", Cluster: "Cluster", Zone: "Zone", Block: "Block", Land: "Land Parcel" };
-  const save = () => {
+
+  useEffect(() => {
+    const missing = selectedOptions.filter((option) => !(option.id in landsByOption));
+    if (!missing.length) return;
+    let cancelled = false;
+    setResolving(true);
+    Promise.all(missing.map(async (option) => [option.id, await resolveLandsForOption(form.level, option)] as const))
+      .then((entries) => { if (!cancelled) setLandsByOption((current) => ({ ...current, ...Object.fromEntries(entries) })); })
+      .finally(() => { if (!cancelled) setResolving(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds, form.level]);
+
+  const previewLands = useMemo(() => {
+    const seen = new Set<string>();
+    const combined: LandAllocation[] = [];
+    selectedOptions.forEach((option) => (landsByOption[option.id] ?? []).forEach((land) => { if (land.id && !seen.has(land.id)) { seen.add(land.id); combined.push(land); } }));
+    return combined;
+  }, [selectedOptions, landsByOption]);
+
+  const save = async () => {
     const next: Record<string, string> = {};
     if (!selectedOptions.length) next.name = `Select at least one ${form.level.toLowerCase()} record`;
     setErrors(next);
     if (Object.keys(next).length) return;
-    const existing = attributions.filter((record) => record.id !== item?.id);
-    const created: Attribution[] = [];
-    selectedOptions.forEach((option, index) => {
-      const recordsForSequence = [...existing, ...created];
-      created.push({
-        ...form,
-        id: mode === "edit" && index === 0 && item ? item.id : `ca-${Date.now()}-${index}`,
-        code: mode === "edit" && index === 0 && item ? item.code : nextAttributionCode(form.level, recordsForSequence),
-        name: option.label,
-        linkedRecord: option.id,
-        linkedMaster: linkedMasterByLevel[form.level] || form.level,
-        project: form.level === "Project" ? option.label : form.project,
-        cluster: form.level === "Cluster" ? option.label : form.cluster,
-      });
-    });
-    onSave(created);
+    setSaving(true);
+    try {
+      const existing = attributions.filter((record) => record.id !== item?.id);
+      const created: Attribution[] = [];
+      for (const [index, option] of selectedOptions.entries()) {
+        const recordsForSequence = [...existing, ...created];
+        const lands = landsByOption[option.id] ?? await resolveLandsForOption(form.level, option);
+        created.push({
+          ...form,
+          id: mode === "edit" && index === 0 && item ? item.id : `ca-${Date.now()}-${index}`,
+          code: mode === "edit" && index === 0 && item ? item.code : nextAttributionCode(form.level, recordsForSequence),
+          name: option.label,
+          linkedRecord: option.id,
+          linkedMaster: linkedMasterByLevel[form.level] || form.level,
+          project: form.level === "Project" ? option.label : form.project,
+          cluster: form.level === "Cluster" ? option.label : form.cluster,
+          area: lands.reduce((sum, land) => sum + land.area, 0) || form.area,
+          lands,
+        });
+      }
+      onSave(created);
+    } finally {
+      setSaving(false);
+    }
   };
-  if (mode === "view" && item) return <Drawer centered eyebrow="Cost Attribution Details" title={item.name} onClose={onClose}><div className="flex gap-2"><span className="rounded-full bg-[#eaf4f1] px-3 py-1 text-xs font-bold text-[#0d5c4d]">{item.level} Level</span><StatusChip status={item.status} /></div><div className="mt-5 rounded-2xl border border-slate-200 bg-white p-5"><p className="text-[10px] font-bold uppercase text-slate-400">Selected Record</p><p className="mt-2 text-sm font-bold text-slate-800">{item.name}</p><p className="mt-1 font-mono text-xs text-slate-500">{item.linkedRecord}</p></div></Drawer>;
-  const footer = <div className="flex justify-end gap-3"><button onClick={onClose} className="h-10 rounded-xl border border-slate-200 px-4 text-sm font-bold text-slate-600">Cancel</button><button onClick={save} className="h-10 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white">Save Attribution</button></div>;
+  if (mode === "view" && item) return <Drawer centered eyebrow="Cost Attribution Details" title={item.name} onClose={onClose}><div className="flex gap-2"><span className="rounded-full bg-[#eaf4f1] px-3 py-1 text-xs font-bold text-[#0d5c4d]">{item.level} Level</span><StatusChip status={item.status} /></div><div className="mt-5 rounded-2xl border border-slate-200 bg-white p-5"><p className="text-[10px] font-bold uppercase text-slate-400">Selected Record</p><p className="mt-2 text-sm font-bold text-slate-800">{item.name}</p><p className="mt-1 font-mono text-xs text-slate-500">{item.linkedRecord}</p></div>{item.lands.length > 0 && <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200"><p className="border-b border-slate-100 bg-slate-50 px-4 py-2 text-[10px] font-extrabold uppercase tracking-wider text-slate-400">{item.lands.length} Land{item.lands.length === 1 ? "" : "s"} Under This Attribution</p><div className="max-h-64 overflow-y-auto divide-y divide-slate-100">{item.lands.map((land) => <div key={land.id} className="flex items-center justify-between px-4 py-2 text-xs"><span className="font-mono font-bold text-[#0d5c4d]">{land.land}</span><span className="text-slate-500">{land.area} acres · {land.percentage}%</span></div>)}</div></div>}</Drawer>;
+  const footer = <div className="flex justify-end gap-3"><button onClick={onClose} disabled={saving} className="h-10 rounded-xl border border-slate-200 px-4 text-sm font-bold text-slate-600 disabled:opacity-50">Cancel</button><button onClick={save} disabled={saving || resolving} className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white disabled:opacity-60">{saving && <Loader2 className="h-4 w-4 animate-spin" />}{saving ? "Saving…" : "Save Attribution"}</button></div>;
   return <Drawer centered eyebrow="Cost Accounting · Attribution" title={mode === "add" ? "Add Attribution" : "Edit Attribution"} onClose={onClose} footer={footer}>
     <FormSection title="Basic Details">
       <label className={labelClass}>Attribution Code<input readOnly className={cn(fieldClass, "bg-slate-50 text-[#0d5c4d]")} value={form.code} /><span className="text-[10px] font-medium text-slate-400">Auto-generated from attribution level</span></label>
-      <label className={labelClass}>Attribution Level<select className={fieldClass} value={form.level} onChange={(e) => { const level = e.target.value; setSelectedIds([]); setOptionsOpen(false); setForm((current) => ({ ...current, level, name: "", linkedRecord: "", linkedMaster: linkedMasterByLevel[level] || level, code: mode === "add" ? nextAttributionCode(level, attributions) : current.code })); }}>{["Corporate", "Project", "Cluster", "Zone", "Block", "Land"].map((value) => <option key={value}>{value}</option>)}</select></label>
+      <label className={labelClass}>Attribution Level<select className={fieldClass} value={form.level} onChange={(e) => { const level = e.target.value; setSelectedIds([]); setOptionsOpen(false); setLandsByOption({}); setForm((current) => ({ ...current, level, name: "", linkedRecord: "", linkedMaster: linkedMasterByLevel[level] || level, code: mode === "add" ? nextAttributionCode(level, attributions) : current.code })); }}>{["Corporate", "Project", "Cluster", "Zone", "Block", "Land"].map((value) => <option key={value}>{value}</option>)}</select></label>
       <div className="relative sm:col-span-2"><p className={labelClass}>Select {form.level}</p><button type="button" disabled={masterOptionsLoading && !levelOptions.length} onClick={() => setOptionsOpen((current) => !current)} className={cn(fieldClass, "mt-1.5 flex items-center justify-between text-left", !selectedIds.length && "text-slate-400")}><span>{masterOptionsLoading && !levelOptions.length ? `Loading ${form.level.toLowerCase()} records…` : selectedIds.length ? `${selectedIds.length} ${form.level.toLowerCase()} record${selectedIds.length === 1 ? "" : "s"} selected` : `Select ${form.level.toLowerCase()} records`}</span><ChevronDown className="h-4 w-4" /></button>{optionsOpen && <div className="absolute z-30 mt-2 max-h-72 w-full overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">{levelOptions.length ? levelOptions.map((option) => <label key={option.id} className="flex cursor-pointer items-start gap-3 rounded-xl px-3 py-3 hover:bg-[#eef7f4]"><input type="checkbox" className="mt-1 h-4 w-4 accent-[#0d5c4d]" checked={selectedIds.includes(option.id)} onChange={() => setSelectedIds((current) => current.includes(option.id) ? current.filter((id) => id !== option.id) : [...current, option.id])} /><span className="min-w-0"><span className="block text-sm font-bold text-slate-800">{form.level === "Land" ? option.ownerName || option.label : option.label}</span><span className="mt-1 block text-xs text-slate-500">{form.level === "Land" ? [option.ownerId && `Owner ID: ${option.ownerId}`, `Land: ${option.id}`, option.address].filter(Boolean).join(" · ") : option.id}</span></span></label>) : <p className="px-3 py-6 text-center text-sm text-slate-400">No {form.level.toLowerCase()} records available</p>}</div>}{errors.name && <span className="mt-1 block text-[11px] text-red-600">{errors.name}</span>}</div>
       <label className={cn(labelClass, "sm:col-span-2")}>Description<textarea className="min-h-20 w-full rounded-xl border border-slate-200 p-3 text-sm" value={form.description} onChange={(e) => update("description", e.target.value)} /></label>
     </FormSection>
-    <FormSection title={`Selected Items (${selectedOptions.length})`}><div className="sm:col-span-2 overflow-hidden rounded-xl border border-slate-200"><div className="overflow-x-auto"><table className="w-full min-w-[700px] text-left text-xs"><thead className="bg-[#0d473f] uppercase tracking-wider text-white"><tr><th className="px-3 py-3">#</th><th className="px-3 py-3">{form.level} ID</th><th className="px-3 py-3">{form.level === "Land" ? "Land Owner ID" : "Name"}</th>{form.level === "Land" && <><th className="px-3 py-3">Land Owner Name</th><th className="px-3 py-3">Address</th></>}<th className="w-14 px-3 py-3" /></tr></thead><tbody className="divide-y divide-slate-100">{selectedOptions.map((option, index) => <tr key={option.id}><td className="px-3 py-3 text-slate-400">{index + 1}</td><td className="px-3 py-3 font-mono font-bold text-[#0d5c4d]">{option.id}</td><td className="px-3 py-3 font-semibold text-slate-700">{form.level === "Land" ? option.ownerId || "—" : option.label}</td>{form.level === "Land" && <><td className="px-3 py-3 font-semibold text-slate-700">{option.ownerName || option.label || "—"}</td><td className="px-3 py-3 text-slate-500">{option.address || "—"}</td></>}<td className="px-3 py-3"><button type="button" onClick={() => setSelectedIds((current) => current.filter((id) => id !== option.id))} className="rounded-lg p-2 text-red-500 hover:bg-red-50"><X className="h-4 w-4" /></button></td></tr>)}</tbody></table></div>{!selectedOptions.length && <div className="py-10 text-center text-sm text-slate-400">Selected {form.level.toLowerCase()} records will appear here.</div>}</div></FormSection>
+    <FormSection title={resolving ? "Lands (resolving…)" : `Lands (${previewLands.length})`}><div className="sm:col-span-2 overflow-hidden rounded-xl border border-slate-200">{resolving ? <div className="flex items-center justify-center gap-2 py-14 text-sm font-semibold text-slate-500"><Loader2 className="h-5 w-5 animate-spin text-[#0d5c4d]" />Fetching lands under the selected {form.level.toLowerCase()}{selectedOptions.length === 1 ? "" : "s"}…</div> : <div className="overflow-x-auto"><table className="w-full min-w-[600px] text-left text-xs"><thead className="bg-[#0d473f] uppercase tracking-wider text-white"><tr><th className="px-3 py-3">#</th><th className="px-3 py-3">Land / Farm ID</th><th className="px-3 py-3">Area (acres)</th><th className="px-3 py-3">Allocation %</th></tr></thead><tbody className="divide-y divide-slate-100">{previewLands.map((land, index) => <tr key={land.id}><td className="px-3 py-3 text-slate-400">{index + 1}</td><td className="px-3 py-3 font-mono font-bold text-[#0d5c4d]">{land.land}</td><td className="px-3 py-3 font-semibold text-slate-700">{land.area || "—"}</td><td className="px-3 py-3 text-slate-500">{land.percentage}%</td></tr>)}</tbody></table>{!previewLands.length && <div className="py-10 text-center text-sm text-slate-400">Lands under the selected {form.level.toLowerCase()} will appear here.</div>}</div>}</div></FormSection>
     <FormSection title="Status"><label className={labelClass}>Status<select className={fieldClass} value={form.status} onChange={(e) => update("status", e.target.value as Status)}><option>Active</option><option>Inactive</option><option>Suspended</option></select></label></FormSection>
   </Drawer>;
 }
@@ -262,7 +362,13 @@ export default function CostAccountingSetup({ mode, projects = [], departments =
   const projectNames = useMemo(() => activeProjects.map((project) => project.name), [activeProjects]);
   const departmentOptions = useMemo(() => departments.filter((department) => !department.status || department.status === "Active").map((department, index) => ({ id: String(department.code || department.id || `department-${index + 1}`), label: department.name })), [departments]);
   const [centres, setCentres] = useState<CostCentre[]>(() => loadUserRecords<CostCentre>(CENTRE_STORAGE, SEEDED_CENTRE_IDS).map((centre) => ({ ...centre, status: centre.status === "Suspended" ? "Blocked" : centre.status })));
-  const [attributions, setAttributions] = useState<Attribution[]>(() => loadUserRecords<Attribution>(ATTRIBUTION_STORAGE, SEEDED_ATTRIBUTION_IDS));
+  const [attributions, setAttributions] = useState<Attribution[]>([]);
+  useEffect(() => {
+    const baseUrl = getBaseUrl().replace(/\/$/, "");
+    fetch(`${baseUrl}/admin_accounting_masters/list/COST_ATTRIBUTION`).then((r) => r.json()).then((res) => {
+      if (res?.success) setAttributions((res.data as Array<Record<string, unknown>>).map(buildAttribution));
+    }).catch(() => {});
+  }, []);
   const [masterOptions, setMasterOptions] = useState<Record<string, MasterOption[]>>({ Corporate: [{ id: legalEntity, label: legalEntity }], Project: [], Cluster: [], Zone: [], Block: [], Land: [] });
   const [masterOptionsLoading, setMasterOptionsLoading] = useState(false);
   const [query, setQuery] = useState("");
@@ -357,8 +463,48 @@ export default function CostAccountingSetup({ mode, projects = [], departments =
   const pageSize = 5;
   const paged = filtered.slice((page - 1) * pageSize, page * pageSize);
   const saveCentre = (item: CostCentre) => { const next = centres.some((row) => row.id === item.id) ? centres.map((row) => row.id === item.id ? item : row) : [item, ...centres]; setCentres(next); localStorage.setItem(CENTRE_STORAGE, JSON.stringify(next)); setDrawer(null); toast.success("Cost Centre saved"); };
-  const saveAttribution = (items: Attribution[]) => { const savedIds = new Set(items.map((item) => item.id)); const next = [...items, ...attributions.filter((row) => !savedIds.has(row.id))]; setAttributions(next); localStorage.setItem(ATTRIBUTION_STORAGE, JSON.stringify(next)); setDrawer(null); toast.success(`${items.length} Cost Attribution${items.length === 1 ? "" : "s"} saved`); };
-  const toggleStatus = () => { if (!confirmId) return; if (isCentre) { const next = centres.map((row) => row.id === confirmId ? { ...row, status: row.status === "Active" ? "Inactive" as Status : "Active" as Status } : row); setCentres(next); localStorage.setItem(CENTRE_STORAGE, JSON.stringify(next)); } else { const next = attributions.map((row) => row.id === confirmId ? { ...row, status: row.status === "Active" ? "Inactive" as Status : "Active" as Status } : row); setAttributions(next); localStorage.setItem(ATTRIBUTION_STORAGE, JSON.stringify(next)); } setConfirmId(null); };
+  const saveAttribution = async (items: Attribution[]) => {
+    const baseUrl = getBaseUrl().replace(/\/$/, "");
+    try {
+      const saved: Attribution[] = [];
+      for (const item of items) {
+        const isExisting = attributions.some((row) => row.id === item.id);
+        const { id, ...data } = item;
+        const response = await fetch(`${baseUrl}/admin_accounting_masters/save`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ master_type: "COST_ATTRIBUTION", item_id: isExisting ? id : undefined, data }) });
+        const result = await response.json().catch(() => null);
+        if (!response.ok || !result?.success) throw new Error(result?.detail || result?.message || "Failed to save Cost Attribution");
+        saved.push(buildAttribution(result.data));
+      }
+      const savedIds = new Set(saved.map((item) => item.id));
+      setAttributions((current) => [...saved, ...current.filter((row) => !savedIds.has(row.id))]);
+      setDrawer(null);
+      toast.success(`${saved.length} Cost Attribution${saved.length === 1 ? "" : "s"} saved`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save Cost Attribution");
+    }
+  };
+  const toggleStatus = async () => {
+    if (!confirmId) return;
+    if (isCentre) {
+      const next = centres.map((row) => row.id === confirmId ? { ...row, status: row.status === "Active" ? "Inactive" as Status : "Active" as Status } : row); setCentres(next); localStorage.setItem(CENTRE_STORAGE, JSON.stringify(next));
+    } else {
+      const row = attributions.find((entry) => entry.id === confirmId);
+      if (row) {
+        const nextStatus = row.status === "Active" ? "Inactive" as Status : "Active" as Status;
+        const { id, ...data } = row;
+        try {
+          const baseUrl = getBaseUrl().replace(/\/$/, "");
+          const response = await fetch(`${baseUrl}/admin_accounting_masters/save`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ master_type: "COST_ATTRIBUTION", item_id: id, data: { ...data, status: nextStatus } }) });
+          const result = await response.json().catch(() => null);
+          if (!response.ok || !result?.success) throw new Error(result?.detail || result?.message || "Failed to update status");
+          setAttributions((current) => current.map((entry) => entry.id === confirmId ? buildAttribution(result.data) : entry));
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Failed to update status");
+        }
+      }
+    }
+    setConfirmId(null);
+  };
   const exportCsv = () => { const headers = isCentre ? ["Code", "Name", "Parent", "Type", "Linked Entity", "Owner", "Approving Authority", "Status"] : ["Code", "Name", "Level", "Parent", "Linked Master", "Allocation", "Status"]; const data = rows.map((row) => isCentre ? [(row as CostCentre).code, row.name, (row as CostCentre).parent, (row as CostCentre).type, (row as CostCentre).linkedEntityName || (row as CostCentre).department, (row as CostCentre).head, (row as CostCentre).secondary, row.status] : [(row as Attribution).code, row.name, (row as Attribution).level, (row as Attribution).parent, (row as Attribution).linkedMaster, (row as Attribution).allocation, row.status]); const blob = new Blob([[headers, ...data].map((line) => line.map((cell) => `"${cell}"`).join(",")).join("\n")], { type: "text/csv" }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${mode.toLowerCase().replaceAll(" ", "-")}.csv`; anchor.click(); URL.revokeObjectURL(url); };
   const columns = isCentre ? ["Parent", "Type", "Linked Entity", "Owner", "Budget Control"] : ["Level", "Parent", "Linked Master", "Allocation"];
 

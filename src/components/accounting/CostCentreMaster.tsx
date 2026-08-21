@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   Ban,
@@ -20,6 +20,7 @@ import {
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import { cn } from "@/lib/utils";
+import getBaseUrl from "@/lib/config";
 
 type CentreStatus = "Active" | "Inactive" | "Blocked";
 type CentreNature = "Parent / Group" | "Posting Cost Centre";
@@ -53,7 +54,6 @@ type CostCentre = {
   modifiedOn: string;
 };
 
-const STORAGE_KEY = "sbr-cost-centre-master-v2";
 const ROOT_NAME = "Sai Bioresources Pvt. Ltd.";
 const TYPES = ["Company Root", "Business Vertical", "Function", "Department", "Project", "Crop / Programme", "Cluster", "Location", "Operational", "Storage", "Logistics", "Shared Cost", "Other"];
 const LINK_TYPES = ["None", "Department", "Project", "Crop / Programme", "Location", "Cluster", "Storage Site", "Business Unit"];
@@ -61,145 +61,36 @@ const BUDGET_CONTROLS = ["Tracking Only", "Warning on Exceeding Budget", "Hard S
 const inputClass = "h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none transition focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10";
 const labelClass = "space-y-1.5 text-xs font-bold text-slate-600";
 
-const seedRows: Array<[string, string, string, string, CentreNature]> = [
-  ["CC-SBR-001", ROOT_NAME, "", "Company Root", "Parent / Group"],
-  ["CC-CORP-001", "Corporate & Administration", ROOT_NAME, "Business Vertical", "Parent / Group"],
-  ["CC-CORP-MGT-001", "Management / Directors Office", "Corporate & Administration", "Function", "Posting Cost Centre"],
-  ["CC-CORP-FIN-001", "Finance & Accounts", "Corporate & Administration", "Department", "Posting Cost Centre"],
-  ["CC-CORP-HR-001", "HR & Administration", "Corporate & Administration", "Department", "Posting Cost Centre"],
-  ["CC-CORP-LGL-001", "Legal & Compliance", "Corporate & Administration", "Department", "Posting Cost Centre"],
-  ["CC-CORP-IT-001", "IT & ERP", "Corporate & Administration", "Department", "Posting Cost Centre"],
-  ["CC-CORP-OFC-001", "Corporate Office Expenses", "Corporate & Administration", "Operational", "Posting Cost Centre"],
-  ["CC-AGR-001", "Agriculture Operations", ROOT_NAME, "Business Vertical", "Parent / Group"],
-  ["CC-NAP-001", "Napier Cultivation", "Agriculture Operations", "Crop / Programme", "Parent / Group"],
-  ["CC-NAP-DUR-001", "Napier Durg", "Napier Cultivation", "Cluster", "Parent / Group"],
-  ["CC-NAP-DUR-FRM", "Durg Farm Operations", "Napier Durg", "Operational", "Posting Cost Centre"],
-  ["CC-NAP-DUR-IRR", "Durg Irrigation Operations", "Napier Durg", "Operational", "Posting Cost Centre"],
-  ["CC-NAP-DUR-HRV", "Durg Harvesting Operations", "Napier Durg", "Operational", "Posting Cost Centre"],
-  ["CC-NAP-KHG-001", "Napier Khairagarh", "Napier Cultivation", "Cluster", "Parent / Group"],
-  ["CC-NAP-KHG-FRM", "Khairagarh Farm Operations", "Napier Khairagarh", "Operational", "Posting Cost Centre"],
-  ["CC-NAP-KHG-IRR", "Khairagarh Irrigation Operations", "Napier Khairagarh", "Operational", "Posting Cost Centre"],
-  ["CC-NAP-KHG-HRV", "Khairagarh Harvesting Operations", "Napier Khairagarh", "Operational", "Posting Cost Centre"],
-  ["CC-CRP-001", "Seasonal Crop Operations", "Agriculture Operations", "Crop / Programme", "Parent / Group"],
-  ["CC-PDY-DUR-001", "Paddy Cultivation - Durg", "Seasonal Crop Operations", "Crop / Programme", "Posting Cost Centre"],
-  ["CC-PDY-KHG-001", "Paddy Cultivation - Khairagarh", "Seasonal Crop Operations", "Crop / Programme", "Posting Cost Centre"],
-  ["CC-RHR-DUR-001", "Rahar Cultivation - Durg", "Seasonal Crop Operations", "Crop / Programme", "Posting Cost Centre"],
-  ["CC-RHR-KHG-001", "Rahar Cultivation - Khairagarh", "Seasonal Crop Operations", "Crop / Programme", "Posting Cost Centre"],
-  ["CC-PSP-001", "Paddy Straw Procurement", ROOT_NAME, "Business Vertical", "Parent / Group"],
-  ["CC-PSP-DUR-001", "Durg Paddy Straw Procurement", "Paddy Straw Procurement", "Location", "Posting Cost Centre"],
-  ["CC-PSP-KHG-001", "Khairagarh Paddy Straw Procurement", "Paddy Straw Procurement", "Location", "Posting Cost Centre"],
-  ["CC-PSP-BMT-001", "Bemetara Paddy Straw Procurement", "Paddy Straw Procurement", "Location", "Posting Cost Centre"],
-  ["CC-PSP-RPR-001", "Raipur Paddy Straw Procurement", "Paddy Straw Procurement", "Location", "Posting Cost Centre"],
-  ["CC-PSP-OTH-001", "Other Paddy Straw Procurement Locations", "Paddy Straw Procurement", "Location", "Posting Cost Centre"],
-  ["CC-BIO-AGG-001", "Biomass Collection & Aggregation", ROOT_NAME, "Business Vertical", "Parent / Group"],
-  ["CC-BIO-COL-001", "Collection Operations", "Biomass Collection & Aggregation", "Operational", "Posting Cost Centre"],
-  ["CC-BIO-BAL-001", "Baling Operations", "Biomass Collection & Aggregation", "Operational", "Posting Cost Centre"],
-  ["CC-BIO-LDU-001", "Loading & Unloading", "Biomass Collection & Aggregation", "Operational", "Posting Cost Centre"],
-  ["CC-BIO-AGG-002", "Aggregation Operations", "Biomass Collection & Aggregation", "Operational", "Posting Cost Centre"],
-  ["CC-BIO-STO-001", "Biomass Storage", ROOT_NAME, "Storage", "Parent / Group"],
-  ["CC-STO-PS-001", "Paddy Straw Storage", "Biomass Storage", "Storage", "Posting Cost Centre"],
-  ["CC-STO-NAP-001", "Napier / Silage Storage", "Biomass Storage", "Storage", "Posting Cost Centre"],
-  ["CC-STO-COM-001", "Common Storage Operations", "Biomass Storage", "Storage", "Posting Cost Centre"],
-  ["CC-LOG-001", "Logistics & Transportation", ROOT_NAME, "Logistics", "Parent / Group"],
-  ["CC-LOG-FDS-001", "Feedstock Transportation", "Logistics & Transportation", "Logistics", "Posting Cost Centre"],
-  ["CC-LOG-FRM-001", "Farm Logistics", "Logistics & Transportation", "Logistics", "Posting Cost Centre"],
-  ["CC-LOG-INT-001", "Internal Material Movement", "Logistics & Transportation", "Logistics", "Posting Cost Centre"],
-  ["CC-PRC-001", "Procurement & Supply Chain", ROOT_NAME, "Business Vertical", "Parent / Group"],
-  ["CC-PRC-BUY-001", "Central Procurement", "Procurement & Supply Chain", "Department", "Posting Cost Centre"],
-  ["CC-PRC-STR-001", "Stores & Inventory", "Procurement & Supply Chain", "Department", "Posting Cost Centre"],
-  ["CC-PRC-VEN-001", "Vendor Coordination", "Procurement & Supply Chain", "Department", "Posting Cost Centre"],
-  ["CC-ENG-001", "Engineering & Infrastructure", ROOT_NAME, "Business Vertical", "Parent / Group"],
-  ["CC-ENG-IRR-001", "Irrigation Infrastructure", "Engineering & Infrastructure", "Operational", "Posting Cost Centre"],
-  ["CC-ENG-BRW-001", "Borewell Development", "Engineering & Infrastructure", "Operational", "Posting Cost Centre"],
-  ["CC-ENG-FEN-001", "Fencing Infrastructure", "Engineering & Infrastructure", "Operational", "Posting Cost Centre"],
-  ["CC-ENG-ELE-001", "Electrical Infrastructure", "Engineering & Infrastructure", "Operational", "Posting Cost Centre"],
-  ["CC-MNT-001", "Equipment & Maintenance", ROOT_NAME, "Business Vertical", "Parent / Group"],
-  ["CC-MNT-FRM-001", "Farm Equipment Maintenance", "Equipment & Maintenance", "Operational", "Posting Cost Centre"],
-  ["CC-MNT-HRV-001", "Harvesting Equipment Maintenance", "Equipment & Maintenance", "Operational", "Posting Cost Centre"],
-  ["CC-MNT-VEH-001", "Vehicle Maintenance", "Equipment & Maintenance", "Operational", "Posting Cost Centre"],
-  ["CC-LND-001", "Land Management", ROOT_NAME, "Business Vertical", "Parent / Group"],
-  ["CC-LND-LSE-001", "Land Leasing & Commercial", "Land Management", "Function", "Posting Cost Centre"],
-  ["CC-LND-DOC-001", "Land Documentation", "Land Management", "Function", "Posting Cost Centre"],
-  ["CC-LND-REL-001", "Landowner Relations", "Land Management", "Function", "Posting Cost Centre"],
-  ["CC-COM-001", "Common & Shared Costs", ROOT_NAME, "Shared Cost", "Parent / Group"],
-  ["CC-COM-OPS-001", "Common Operations", "Common & Shared Costs", "Shared Cost", "Posting Cost Centre"],
-  ["CC-COM-ADM-001", "Common Administration", "Common & Shared Costs", "Shared Cost", "Posting Cost Centre"],
-  ["CC-COM-UTL-001", "Common Utilities", "Common & Shared Costs", "Shared Cost", "Posting Cost Centre"],
-  ["CC-COM-TRV-001", "Common Travel & Conveyance", "Common & Shared Costs", "Shared Cost", "Posting Cost Centre"],
-];
-
 const today = () => new Date().toISOString().slice(0, 10);
 const nowText = () => new Date().toLocaleString("en-IN");
 
-const seededCentres: CostCentre[] = seedRows.map(([code, name, parent, type, nature], index) => ({
-  id: `seed-${index + 1}`,
-  code,
-  name,
-  nature,
-  type,
-  parent,
-  linkedEntityType: "None",
-  linkedEntityId: "",
-  linkedEntityName: "",
-  owner: "",
-  approver: "",
-  effectiveFrom: "2026-04-01",
-  effectiveTo: "",
-  status: "Active",
-  description: `${name} cost centre`,
-  directPosting: nature === "Posting Cost Centre",
-  budgetApplicable: ["Business Vertical", "Crop / Programme", "Cluster", "Operational", "Logistics", "Storage", "Shared Cost"].includes(type),
-  budgetControl: "Tracking Only",
-  allocationEligible: nature === "Posting Cost Centre",
-  manualCodeOverride: false,
-  hasTransactions: false,
-  createdBy: "System Seed",
-  createdOn: "01/04/2026, 09:00",
-  modifiedBy: "System Seed",
-  modifiedOn: "01/04/2026, 09:00",
-}));
-
-const loadCentres = (): CostCentre[] => {
-  try {
-    const current = localStorage.getItem(STORAGE_KEY);
-    const saved = JSON.parse(current || "[]") as CostCentre[];
-    if (!current) {
-      const legacy = JSON.parse(localStorage.getItem("sbr-cost-accounting-centres-v1") || "[]") as Array<Record<string, unknown>>;
-      if (Array.isArray(legacy)) legacy.forEach((row, index) => saved.push({
-        ...blankCentre(seededCentres),
-        id: String(row.id || `legacy-${index + 1}`),
-        code: String(row.code || generateCode(String(row.type || "Other"), String(row.department || ""), seededCentres)),
-        name: String(row.name || "Legacy Cost Centre"),
-        nature: row.directPosting === false ? "Parent / Group" : "Posting Cost Centre",
-        type: String(row.type || "Other"),
-        parent: String(row.parent || ""),
-        linkedEntityType: row.department ? "Department" : "None",
-        linkedEntityName: String(row.linkedEntityName || row.department || ""),
-        owner: String(row.head || ""),
-        approver: String(row.secondary || ""),
-        effectiveFrom: String(row.effectiveFrom || today()),
-        effectiveTo: String(row.effectiveTo || ""),
-        status: row.status === "Suspended" ? "Blocked" : (String(row.status || "Active") as CentreStatus),
-        description: String(row.description || ""),
-        directPosting: row.directPosting !== false,
-        budgetApplicable: Boolean(row.budgetApplicable),
-        budgetControl: row.budgetControl === "Warning Only" ? "Warning on Exceeding Budget" : row.budgetControl === "Hard Limit" ? "Hard Stop on Exceeding Budget" : String(row.budgetControl || "Tracking Only"),
-        allocationEligible: row.directPosting !== false,
-        manualCodeOverride: Boolean(row.manualCodeOverride),
-        createdBy: "Legacy Import",
-        createdOn: nowText(),
-        modifiedBy: "Legacy Import",
-        modifiedOn: nowText(),
-      }));
-    }
-    if (!Array.isArray(saved) || !saved.length) return seededCentres;
-    const merged = new Map(seededCentres.map((centre) => [centre.id, centre]));
-    saved.forEach((centre) => merged.set(centre.id, { ...centre, status: centre.status === ("Suspended" as CentreStatus) ? "Blocked" : centre.status }));
-    return Array.from(merged.values());
-  } catch {
-    return seededCentres;
-  }
-};
+const buildCentre = (id: string, src: Record<string, unknown>): CostCentre => ({
+  id,
+  code: String(src.code ?? ""),
+  name: String(src.name ?? ""),
+  nature: (String(src.nature ?? "Posting Cost Centre")) as CentreNature,
+  type: String(src.type ?? ""),
+  parent: String(src.parent ?? ""),
+  linkedEntityType: String(src.linkedEntityType ?? "None"),
+  linkedEntityId: String(src.linkedEntityId ?? ""),
+  linkedEntityName: String(src.linkedEntityName ?? ""),
+  owner: String(src.owner ?? ""),
+  approver: String(src.approver ?? ""),
+  effectiveFrom: String(src.effectiveFrom ?? today()),
+  effectiveTo: String(src.effectiveTo ?? ""),
+  status: (String(src.status ?? "Active")) as CentreStatus,
+  description: String(src.description ?? ""),
+  directPosting: Boolean(src.directPosting),
+  budgetApplicable: Boolean(src.budgetApplicable),
+  budgetControl: String(src.budgetControl ?? "Tracking Only"),
+  allocationEligible: Boolean(src.allocationEligible),
+  manualCodeOverride: Boolean(src.manualCodeOverride),
+  hasTransactions: Boolean(src.hasTransactions),
+  createdBy: String(src.createdBy ?? ""),
+  createdOn: String(src.createdOn ?? ""),
+  modifiedBy: String(src.modifiedBy ?? ""),
+  modifiedOn: String(src.modifiedOn ?? ""),
+});
 
 const typeCode = (type: string) => ({
   "Company Root": "SBR",
@@ -405,7 +296,13 @@ function HierarchyView({ centres, onView, onEdit, onAddChild }: { centres: CostC
 }
 
 export default function CostCentreMaster({ departments, masterOptions }: { departments: MasterOption[]; masterOptions: Record<string, MasterOption[]> }) {
-  const [centres, setCentres] = useState<CostCentre[]>(loadCentres);
+  const [centres, setCentres] = useState<CostCentre[]>([]);
+  useEffect(() => {
+    const baseUrl = getBaseUrl().replace(/\/$/, "");
+    fetch(`${baseUrl}/admin_accounting_masters/list/COST_CENTRE`).then((r) => r.json()).then((res) => {
+      if (res?.success) setCentres((res.data as Array<Record<string, unknown>>).map((item) => buildCentre(String(item.item_id), item)));
+    }).catch(() => {});
+  }, []);
   const [query, setQuery] = useState("");
   const [type, setType] = useState("All");
   const [nature, setNature] = useState("All");
@@ -419,7 +316,15 @@ export default function CostCentreMaster({ departments, masterOptions }: { depar
   const [actionId, setActionId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
 
-  const persist = (next: CostCentre[]) => { setCentres(next); localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); };
+  const saveOne = async (centre: CostCentre): Promise<CostCentre> => {
+    const baseUrl = getBaseUrl().replace(/\/$/, "");
+    const isExisting = centres.some((item) => item.id === centre.id);
+    const { id, ...data } = centre;
+    const response = await fetch(`${baseUrl}/admin_accounting_masters/save`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ master_type: "COST_CENTRE", item_id: isExisting ? id : undefined, data }) });
+    const result = await response.json().catch(() => null);
+    if (!response.ok || !result?.success) throw new Error(result?.detail || result?.message || "Failed to save Cost Centre");
+    return buildCentre(String(result.data.item_id), result.data);
+  };
   const locations = Array.from(new Set(centres.filter((centre) => centre.type === "Location" || centre.type === "Cluster" || /Durg|Khairagarh|Bemetara|Raipur/i.test(`${centre.name} ${centre.linkedEntityName}`)).map((centre) => centre.linkedEntityName || ["Durg", "Khairagarh", "Bemetara", "Raipur"].find((place) => centre.name.includes(place)) || centre.name)));
   const filtered = useMemo(() => centres.filter((centre) => {
     const searchable = `${centre.code} ${centre.name} ${centre.parent} ${centre.linkedEntityName} ${centre.owner}`.toLowerCase();
@@ -436,15 +341,35 @@ export default function CostCentreMaster({ departments, masterOptions }: { depar
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const paged = filtered.slice((page - 1) * pageSize, page * pageSize);
   const clearFilters = () => { setQuery(""); setType("All"); setNature("All"); setParent("All"); setLocation("All"); setStatus("All"); setBudget("All"); setPage(1); };
-  const saveCentre = (centre: CostCentre, addAnother: boolean) => {
-    const next = centres.some((item) => item.id === centre.id) ? centres.map((item) => item.id === centre.id ? centre : item) : [centre, ...centres];
-    persist(next);
-    toast.success("Cost Centre saved");
-    setModal(addAnother ? { mode: "add", parent: centre.parent } : null);
+  const saveCentre = async (centre: CostCentre, addAnother: boolean) => {
+    try {
+      const saved = await saveOne(centre);
+      setCentres((current) => current.some((item) => item.id === centre.id) ? current.map((item) => item.id === centre.id ? saved : item) : [saved, ...current]);
+      toast.success("Cost Centre saved");
+      setModal(addAnother ? { mode: "add", parent: saved.parent } : null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save Cost Centre");
+    }
   };
-  const createParent = (centre: CostCentre) => persist([centre, ...centres]);
+  const createParent = async (centre: CostCentre) => {
+    try {
+      const saved = await saveOne(centre);
+      setCentres((current) => [saved, ...current]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save Cost Centre");
+    }
+  };
   const duplicate = (centre: CostCentre) => setModal({ mode: "add", item: { ...centre, id: `cc-${Date.now()}`, code: generateCode(centre.type, centre.linkedEntityName, centres), name: `${centre.name} Copy`, hasTransactions: false, createdBy: "", createdOn: "", modifiedBy: "", modifiedOn: "" } });
-  const updateStatus = (centre: CostCentre, nextStatus: CentreStatus) => { persist(centres.map((item) => item.id === centre.id ? { ...item, status: nextStatus, modifiedOn: nowText() } : item)); setActionId(null); toast.success(nextStatus === "Blocked" ? "Accounting posting blocked" : `Cost Centre marked ${nextStatus}`); };
+  const updateStatus = async (centre: CostCentre, nextStatus: CentreStatus) => {
+    try {
+      const saved = await saveOne({ ...centre, status: nextStatus, modifiedOn: nowText() });
+      setCentres((current) => current.map((item) => item.id === centre.id ? saved : item));
+      setActionId(null);
+      toast.success(nextStatus === "Blocked" ? "Accounting posting blocked" : `Cost Centre marked ${nextStatus}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update status");
+    }
+  };
   const exportCsv = () => {
     const headers = ["Code", "Name", "Type", "Parent", "Linked Entity", "Nature", "Owner", "Budget", "Status"];
     const rows = centres.map((centre) => [centre.code, centre.name, centre.type, centre.parent, centre.linkedEntityName, centre.nature, centre.owner, centre.budgetApplicable ? centre.budgetControl : "No", centre.status]);
