@@ -1483,7 +1483,7 @@ function EditLineItemModal({
   const totalQty    = qtyNum * acresNum;
   const totalValue  = totalQty * rateNum;
   const utilizedNum = Math.max(0, parseFloat(utilizedQty) || 0);
-  const utilizedPct = totalQty > 0 ? Math.min(100, (utilizedNum / totalQty) * 100) : 0;
+  const utilizedPct = totalValue > 0 ? Math.min(100, (utilizedNum / totalValue) * 100) : 0;
 
   const handleSave = () => {
     if (!category.trim() || !lineItem.trim() || !uom.trim() || !qtyPerAcre || !acres || !ratePerUnit) {
@@ -1536,7 +1536,7 @@ function EditLineItemModal({
             <Field label="Rate / Unit (₹) *">
               <input type="number" min="0" value={ratePerUnit} onChange={(e) => setRatePerUnit(e.target.value)} placeholder="0" className={inputCls} />
             </Field>
-            <Field label={`Utilized Qty${uom ? ` (${uom})` : ""}`}>
+            <Field label="Utilized Amount (₹)">
               <input type="number" min="0" value={utilizedQty} onChange={(e) => setUtilizedQty(e.target.value)} placeholder="0" className={inputCls} />
               <div className="mt-1.5 flex items-center gap-2">
                 <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
@@ -1558,7 +1558,7 @@ function EditLineItemModal({
             </div>
             <div>
               <p className="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">Utilized Value</p>
-              <p className={`mt-0.5 text-sm font-extrabold ${barTextColor(utilizedPct)}`}>{fmt(utilizedNum * rateNum)}</p>
+              <p className={`mt-0.5 text-sm font-extrabold ${barTextColor(utilizedPct)}`}>{fmt(utilizedNum)}</p>
             </div>
           </div>
         </div>
@@ -2021,7 +2021,7 @@ export default function Budget() {
   const totalSavings = data.reduce((s, r) => s + r.savings, 0);
 
   const filteredTotalValue   = filtered.reduce((s, r) => s + r.qtyPerAcre * r.acres * r.ratePerUnit, 0);
-  const filteredUtilizedVal  = filtered.reduce((s, r) => s + r.utilizedQty * r.ratePerUnit, 0);
+  const filteredUtilizedVal  = filtered.reduce((s, r) => s + r.utilizedQty, 0);
   const filteredTotalSavings = filtered.reduce((s, r) => s + r.savings, 0);
   const overallPct           = filteredTotalValue > 0 ? Math.min(100, (filteredUtilizedVal / filteredTotalValue) * 100) : 0;
 
@@ -2338,8 +2338,8 @@ export default function Budget() {
               {filtered.map((row, idx) => {
                 const totalQty      = row.qtyPerAcre * row.acres;
                 const totalValue    = totalQty * row.ratePerUnit;
-                const utilizedValue = row.utilizedQty * row.ratePerUnit;
-                const utilizedPct   = totalQty > 0 ? Math.min(100, (row.utilizedQty / totalQty) * 100) : 0;
+                const utilizedValue = row.utilizedQty;
+                const utilizedPct   = totalValue > 0 ? Math.min(100, (row.utilizedQty / totalValue) * 100) : 0;
                 const isAllocationExpanded = expandedAllocationId === row.id;
                 return (
                   <Fragment key={row.id}>
@@ -2427,7 +2427,7 @@ export default function Budget() {
                         </div>
                         <UtilizationBar pct={utilizedPct} />
                         <p className="text-[9px] font-semibold text-slate-400 tabular-nums mt-0.5">
-                          {fmtNum(row.utilizedQty)} / {fmtNum(totalQty)} {row.uom}
+                          {fmt(row.utilizedQty)} / {fmt(totalValue)}
                         </p>
                       </div>
                     </td>

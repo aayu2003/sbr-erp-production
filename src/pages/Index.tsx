@@ -5,7 +5,7 @@ const Index = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    navigate('/leads');
+    navigate('/ceos-desk');
   }, [navigate]);
 
   return null;
