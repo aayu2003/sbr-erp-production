@@ -284,7 +284,7 @@ const AppSidebar = () => {
 
       {/* Navigation Links — fully driven by src/config/modules.json */}
       <nav className="min-h-0 flex-1 p-3 space-y-2 overflow-y-auto scrollbar-thin scrollbar-thumb-white/10">
-        {modulesConfig.supersets.filter(s => isSuperAdmin || s.enabled).map(superset => {
+        {modulesConfig.supersets.filter(s => s.enabled).map(superset => {
           const allowedModules = user?.module_access ?? [];
 
           // Pre-compute which groups have at least one accessible item

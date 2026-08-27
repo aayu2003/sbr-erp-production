@@ -57,38 +57,41 @@
       ]
     },
     {
-      "key": "admin",
-      "label": "ADMIN",
-      "description": "Admin controls and farmer operations",
-      "icon": "ClipboardCheck",
+      "key": "operations",
+      "label": "OPERATIONS",
+      "description": "Daily execution modules",
+      "icon": "FolderKanban",
       "enabled": true,
       "groups": [
         {
-          "key": "indents-request",
-          "label": "Indents and Request",
+          "key": "logistics",
+          "label": "Logistics",
           "enabled": true,
           "items": [
-            { "key": "fuel-requests-admin",   "label": "Fuel Requests",               "path": "/admin-ops-fuel-requests",    "icon": "Fuel",          "enabled": true  },
-            { "key": "on-demand-task",        "label": "On Demand Task & Allocation", "path": "/on-demand-task",             "icon": "ClipboardCheck","enabled": true  },
-            { "key": "on-demand-task-legacy", "label": "On Demand Task (Legacy)",     "path": "/on-demand-task-legacy",      "icon": "ClipboardCheck","enabled": true  },
-            { "key": "admin-request",         "label": "Admin Ops Request",           "path": "/admin-request",              "icon": "ClipboardCheck","enabled": true },
-            { "key": "admin-inbox",           "label": "Inbox",                       "path": "/admin/inbox",                "icon": "Mail",          "enabled": true  }
+            { "key": "vehicle-management",  "label": "Vehicle List",       "path": "/vehicle-management", "icon": "Car",  "enabled": true  },
+            { "key": "fleet-chart",         "label": "Fleet Chart",        "path": "/fleet-chart",        "icon": "Map",  "enabled": true, "notificationStatus": "warning" },
+            { "key": "logistics-request",   "label": "Logistics Request",  "path": "/logistics",          "icon": "Truck","enabled": true },
+            { "key": "stock-transfer-logistics", "label": "Stock Transfer Logistics", "path": "/logistics-request", "icon": "PackageCheck", "enabled": true }
           ]
         },
         {
-          "key": "farm-management",
-          "label": "Farm Management",
+          "key": "operation",
+          "label": "Operation",
           "enabled": true,
           "items": [
-            { "key": "tasks-beta",       "label": "Tasks (Beta)",     "path": "/tasks-beta",       "icon": "CheckSquare", "enabled": true }
-          ]
-        },
-        {
-          "key": "administration",
-          "label": "Administration",
-          "enabled": true,
-          "items": [
-            { "key": "user-management", "label": "User Management", "path": "/user-management", "icon": "UserCheck", "enabled": true }
+            { "key": "cultivation-calendar","label": "Cultivation Calendar",  "path": "/cultivation-calendar","icon": "Calendar","enabled": true  },
+            { "key": "operational-calendar","label": "Operational Calendar",  "path": "/operational-calendar","icon": "CalendarClock","enabled": true  },
+            { "key": "cultivation-master",  "label": "Operations Master",     "path": "/cultivation-master",  "icon": "Sprout",  "enabled": true  },
+            { "key": "cultivation-plan",    "label": "Cultivation Planner",   "path": "/cultivation-plan",    "icon": "Layers",  "enabled": true  },
+            { "key": "field-monitoring",    "label": "Field Monitoring",      "path": "/field-monitoring",    "icon": "Activity","enabled": true  },
+            { "key": "field-visit-analytics","label": "Field Visit Analytics","path": "/field-visit-analytics","icon": "Map",    "enabled": true  },
+            { "key": "labour-management",   "label": "Labour Management",     "path": "/labour-management",   "icon": "Users",   "enabled": true  },
+            { "key": "harvest-planning",    "label": "Harvest Planning",      "path": "/harvest-planning",    "icon": "Sprout",  "enabled": true },
+            { "key": "harvest-orders",      "label": "Harvest Orders",        "path": "/harvest-orders",      "icon": "Package", "enabled": true },
+            { "key": "harvest-cards",       "label": "Harvest Cards",         "path": "/harvest-cards",       "icon": "CreditCard","enabled": true},
+            { "key": "weighment",           "label": "Weighment & QC",        "path": "/weighment",           "icon": "Scale",   "enabled": true },
+            { "key": "rental-rate-card",    "label": "Rental Rate Card",      "path": "/rental-rate-card",    "icon": "Tractor", "enabled": true },
+            { "key": "service-requests",    "label": "Service Request",       "path": "/service-requests",    "icon": "FileText","enabled": true }
           ]
         }
       ]
@@ -164,6 +167,90 @@
       ]
     },
     {
+      "key": "payroll",
+      "label": "HR MANAGEMENT",
+      "description": "People and workforce modules",
+      "icon": "Users",
+      "enabled": true,
+      "groups": [
+        {
+          "key": "human-resource",
+          "label": "Human Resource",
+          "enabled": true,
+          "items": [
+            { "key": "hr-management",    "label": "HR Management",         "path": "/hr-management",        "icon": "LayoutDashboard", "enabled": true },
+            { "key": "staff-onboarding", "label": "Employee Directory",    "path": "/staff-onboarding",     "icon": "UserPlus", "enabled": true  },
+            { "key": "man-power-req",    "label": "Man Power Requisition", "path": "/man-power-requisition","icon": "FileText", "enabled": true },
+            { "key": "hrms-inbox",       "label": "Inbox",                 "path": "/hrms/inbox",           "icon": "Mail",     "enabled": true }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "finance-accounts",
+      "label": "FINANCE & ACCOUNTS",
+      "description": "Focused accounting operations, controls, and reporting",
+      "icon": "Landmark",
+      "enabled": true,
+      "groups": [
+        {
+          "key": "finance-accounts-workspace",
+          "label": "Finance & Accounts",
+          "enabled": true,
+          "items": [
+            { "key": "finance-accounts-dashboard",          "label": "Dashboard",            "path": "/finance-accounts/dashboard",          "icon": "LayoutDashboard", "enabled": true },
+            { "key": "finance-bills-payables",              "label": "Bills & Payables",     "path": "/finance-accounts/bills-payables",     "icon": "Receipt",         "enabled": true },
+            { "key": "finance-invoice-directory",           "label": "Invoice Directory",    "path": "/finance-accounts/invoice-directory",  "icon": "FolderKanban",    "enabled": true },
+            { "key": "finance-payments-receipts",           "label": "PRR Module", "path": "/finance-accounts/payments-receipts", "icon": "CreditCard",      "enabled": true },
+            { "key": "finance-vouchers",                    "label": "Vouchers",             "path": "/finance-accounts/vouchers",           "icon": "FileText",        "enabled": true },
+            { "key": "finance-banking",                     "label": "Banking",              "path": "/finance-accounts/banking",            "icon": "Landmark",        "enabled": true },
+            { "key": "finance-ledgers-reports",             "label": "Ledgers & Reports",    "path": "/finance-accounts/ledgers-reports",    "icon": "BookOpen",        "enabled": true },
+            { "key": "budget",                              "label": "Budget",               "path": "/budget",                             "icon": "PieChart",        "enabled": true },
+            { "key": "finance-masters-controls",            "label": "Masters & Controls",   "path": "/finance-accounts/masters-controls",   "icon": "Settings",        "enabled": true },
+            { "key": "finance-accounting-master",           "label": "Accounting Master",    "path": "/finance-accounts/accounting-master",  "icon": "Settings",        "enabled": true },
+            { "key": "finance-chart-of-accounts",           "label": "Chart of Accounts",    "path": "/finance-accounts/chart-of-accounts", "icon": "BookOpen",        "enabled": true }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "admin",
+      "label": "ADMIN",
+      "description": "Admin controls and farmer operations",
+      "icon": "ClipboardCheck",
+      "enabled": true,
+      "groups": [
+        {
+          "key": "indents-request",
+          "label": "Indents and Request",
+          "enabled": true,
+          "items": [
+            { "key": "fuel-requests-admin",   "label": "Fuel Requests",               "path": "/admin-ops-fuel-requests",    "icon": "Fuel",          "enabled": true  },
+            { "key": "on-demand-task",        "label": "On Demand Task & Allocation", "path": "/on-demand-task",             "icon": "ClipboardCheck","enabled": true  },
+            { "key": "on-demand-task-legacy", "label": "On Demand Task (Legacy)",     "path": "/on-demand-task-legacy",      "icon": "ClipboardCheck","enabled": true  },
+            { "key": "admin-request",         "label": "Admin Ops Request",           "path": "/admin-request",              "icon": "ClipboardCheck","enabled": true },
+            { "key": "admin-inbox",           "label": "Inbox",                       "path": "/admin/inbox",                "icon": "Mail",          "enabled": true  }
+          ]
+        },
+        {
+          "key": "farm-management",
+          "label": "Farm Management",
+          "enabled": true,
+          "items": [
+            { "key": "tasks-beta",       "label": "Tasks (Beta)",     "path": "/tasks-beta",       "icon": "CheckSquare", "enabled": true }
+          ]
+        },
+        {
+          "key": "administration",
+          "label": "Administration",
+          "enabled": true,
+          "items": [
+            { "key": "user-management", "label": "User Management", "path": "/user-management", "icon": "UserCheck", "enabled": true }
+          ]
+        }
+      ]
+    },
+    {
       "key": "approvals-section",
       "label": "APPROVALS",
       "description": "Central approval queues and review workflows",
@@ -212,87 +299,6 @@
       ]
     },
     {
-      "key": "payroll",
-      "label": "HR MANAGEMENT",
-      "description": "People and workforce modules",
-      "icon": "Users",
-      "enabled": true,
-      "groups": [
-        {
-          "key": "human-resource",
-          "label": "Human Resource",
-          "enabled": true,
-          "items": [
-            { "key": "hr-management",    "label": "HR Management",         "path": "/hr-management",        "icon": "LayoutDashboard", "enabled": true },
-            { "key": "staff-onboarding", "label": "Employee Directory",    "path": "/staff-onboarding",     "icon": "UserPlus", "enabled": true  },
-            { "key": "man-power-req",    "label": "Man Power Requisition", "path": "/man-power-requisition","icon": "FileText", "enabled": true },
-            { "key": "hrms-inbox",       "label": "Inbox",                 "path": "/hrms/inbox",           "icon": "Mail",     "enabled": true }
-          ]
-        }
-      ]
-    },
-    {
-      "key": "operations",
-      "label": "OPERATIONS",
-      "description": "Daily execution modules",
-      "icon": "FolderKanban",
-      "enabled": true,
-      "groups": [
-        {
-          "key": "logistics",
-          "label": "Logistics",
-          "enabled": true,
-          "items": [
-            { "key": "vehicle-management",  "label": "Vehicle List",       "path": "/vehicle-management", "icon": "Car",  "enabled": true  },
-            { "key": "fleet-chart",         "label": "Fleet Chart",        "path": "/fleet-chart",        "icon": "Map",  "enabled": true, "notificationStatus": "warning" },
-            { "key": "logistics-request",   "label": "Logistics Request",  "path": "/logistics",          "icon": "Truck","enabled": true },
-            { "key": "stock-transfer-logistics", "label": "Stock Transfer Logistics", "path": "/logistics-request", "icon": "PackageCheck", "enabled": true }
-          ]
-        },
-        {
-          "key": "operation",
-          "label": "Operation",
-          "enabled": true,
-          "items": [
-            { "key": "cultivation-calendar","label": "Cultivation Calendar",  "path": "/cultivation-calendar","icon": "Calendar","enabled": true  },
-            { "key": "operational-calendar","label": "Operational Calendar",  "path": "/operational-calendar","icon": "CalendarClock","enabled": true  },
-            { "key": "cultivation-master",  "label": "Operations Master",     "path": "/cultivation-master",  "icon": "Sprout",  "enabled": true  },
-            { "key": "cultivation-plan",    "label": "Cultivation Planner",   "path": "/cultivation-plan",    "icon": "Layers",  "enabled": true  },
-            { "key": "field-monitoring",    "label": "Field Monitoring",      "path": "/field-monitoring",    "icon": "Activity","enabled": true  },
-            { "key": "field-visit-analytics","label": "Field Visit Analytics","path": "/field-visit-analytics","icon": "Map",    "enabled": true  },
-            { "key": "labour-management",   "label": "Labour Management",     "path": "/labour-management",   "icon": "Users",   "enabled": true  },
-            { "key": "harvest-planning",    "label": "Harvest Planning",      "path": "/harvest-planning",    "icon": "Sprout",  "enabled": true },
-            { "key": "harvest-orders",      "label": "Harvest Orders",        "path": "/harvest-orders",      "icon": "Package", "enabled": true },
-            { "key": "harvest-cards",       "label": "Harvest Cards",         "path": "/harvest-cards",       "icon": "CreditCard","enabled": true},
-            { "key": "weighment",           "label": "Weighment & QC",        "path": "/weighment",           "icon": "Scale",   "enabled": true },
-            { "key": "rental-rate-card",    "label": "Rental Rate Card",      "path": "/rental-rate-card",    "icon": "Tractor", "enabled": true },
-            { "key": "service-requests",    "label": "Service Request",       "path": "/service-requests",    "icon": "FileText","enabled": true }
-          ]
-        }
-      ]
-    },
-    {
-      "key": "accounts",
-      "label": "ACCOUNTS",
-      "description": "Financial records and payment modules",
-      "icon": "Receipt",
-      "enabled": true,
-      "groups": [
-        {
-          "key": "accounts",
-          "label": "Accounts",
-          "enabled": true,
-          "items": [
-            { "key": "accounts-dashboard",  "label": "Dashboard",                 "path": "/accounts/dashboard",    "icon": "LayoutDashboard","enabled": true },
-            { "key": "accounts-ledger",     "label": "Ledger",                    "path": "/accounts/ledger",       "icon": "BookOpen",       "enabled": true },
-            { "key": "accounts-purchase",   "label": "Purchase Flow Connection",  "path": "/accounts/purchase-flow","icon": "Link2",          "enabled": true },
-            { "key": "accounts-payments",   "label": "Payments",                  "path": "/accounts/payments",     "icon": "CreditCard",     "enabled": true },
-            { "key": "budget",              "label": "Budget",                    "path": "/budget",                "icon": "PieChart",       "enabled": true }
-          ]
-        }
-      ]
-    },
-    {
       "key": "project-superset",
       "label": "PROJECT",
       "description": "Project setup, department onboarding and site map markings",
@@ -312,28 +318,21 @@
       ]
     },
     {
-      "key": "finance-accounts",
-      "label": "FINANCE & ACCOUNTS",
-      "description": "Focused accounting operations, controls, and reporting",
-      "icon": "Landmark",
-      "enabled": true,
+      "key": "accounts",
+      "label": "ACCOUNTS",
+      "description": "Financial records and payment modules",
+      "icon": "Receipt",
+      "enabled": false,
       "groups": [
         {
-          "key": "finance-accounts-workspace",
-          "label": "Finance & Accounts",
+          "key": "accounts",
+          "label": "Accounts",
           "enabled": true,
           "items": [
-            { "key": "finance-accounts-dashboard",          "label": "Dashboard",            "path": "/finance-accounts/dashboard",          "icon": "LayoutDashboard", "enabled": true },
-            { "key": "finance-bills-payables",              "label": "Bills & Payables",     "path": "/finance-accounts/bills-payables",     "icon": "Receipt",         "enabled": true },
-            { "key": "finance-invoice-directory",           "label": "Invoice Directory",    "path": "/finance-accounts/invoice-directory",  "icon": "FolderKanban",    "enabled": true },
-            { "key": "finance-payments-receipts",           "label": "PRR Module", "path": "/finance-accounts/payments-receipts", "icon": "CreditCard",      "enabled": true },
-            { "key": "finance-vouchers",                    "label": "Vouchers",             "path": "/finance-accounts/vouchers",           "icon": "FileText",        "enabled": true },
-            { "key": "finance-banking",                     "label": "Banking",              "path": "/finance-accounts/banking",            "icon": "Landmark",        "enabled": true },
-            { "key": "finance-ledgers-reports",             "label": "Ledgers & Reports",    "path": "/finance-accounts/ledgers-reports",    "icon": "BookOpen",        "enabled": true },
-            { "key": "finance-budget-costing",              "label": "Budget & Costing",     "path": "/finance-accounts/budget-costing",     "icon": "PieChart",        "enabled": true },
-            { "key": "finance-masters-controls",            "label": "Masters & Controls",   "path": "/finance-accounts/masters-controls",   "icon": "Settings",        "enabled": true },
-            { "key": "finance-accounting-master",           "label": "Accounting Master",    "path": "/finance-accounts/accounting-master",  "icon": "Settings",        "enabled": true },
-            { "key": "finance-chart-of-accounts",           "label": "Chart of Accounts",    "path": "/finance-accounts/chart-of-accounts", "icon": "BookOpen",        "enabled": true }
+            { "key": "accounts-dashboard",  "label": "Dashboard",                 "path": "/accounts/dashboard",    "icon": "LayoutDashboard","enabled": true },
+            { "key": "accounts-ledger",     "label": "Ledger",                    "path": "/accounts/ledger",       "icon": "BookOpen",       "enabled": true },
+            { "key": "accounts-purchase",   "label": "Purchase Flow Connection",  "path": "/accounts/purchase-flow","icon": "Link2",          "enabled": true },
+            { "key": "accounts-payments",   "label": "Payments",                  "path": "/accounts/payments",     "icon": "CreditCard",     "enabled": true }
           ]
         }
       ]

@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import getBaseUrl from "@/lib/config";
+import { cachedJson } from "@/lib/ceoDeskData";
 import { getFarmerNames } from "@/lib/farmerNameCache";
 import { getTaskDetailsBulk } from "@/lib/taskDetailsCache";
 import { getAssignedSupervisorAndFieldManagers, type FarmTeamAssignment } from "@/lib/supervisorFieldManagerCache";
@@ -84,6 +85,9 @@ type DashboardKpi = {
   // Actual Disbursement's percentage, which needs to show alongside the split without adding a
   // new line of its own.
   badge?: string;
+  // True while whatever backend state this tile's value is computed from hasn't finished loading
+  // yet — the tile shows just a spinner in place of its normal content until this flips false.
+  loading?: boolean;
 };
 
 const toneStyles: Record<Tone, { icon: string; iconBg: string; ring: string; ringSoft: string; helper: string }> = {
@@ -143,6 +147,14 @@ const KpiCard = ({ card }: { card: DashboardKpi }) => {
       ? (value: number) => `${value.toLocaleString("en-IN", { maximumFractionDigits: 1 })} ac`
       : formatFinancialAmount;
 
+  if (card.loading) {
+    return (
+      <Card className={cn("flex h-full flex-col items-center justify-center overflow-hidden", showPieChart ? "min-h-[124px] p-4" : "min-h-[118px] p-4")}>
+        <RefreshCw className="h-6 w-6 animate-spin text-slate-300" />
+      </Card>
+    );
+  }
+
   return (
     <Card className={cn("flex h-full flex-col overflow-hidden", showPieChart ? "min-h-[124px] p-4" : "min-h-[118px] p-4")}>
       {!card.hideHeader && (
@@ -183,8 +195,19 @@ const KpiCard = ({ card }: { card: DashboardKpi }) => {
 
       {/* Breakdown pie — Capex/Opex Distribution and Crop-wise Area, each their own standalone
           tile now rather than sharing space on a row-spanning Total Budget tile. */}
+      {card.breakdown && card.hideHeader && (
+        <div className="flex items-center gap-3">
+          <div className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-full", style.iconBg)}>
+            <Icon className={cn("h-4 w-4", style.icon)} />
+          </div>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-extrabold text-slate-950">{card.label}</p>
+            {card.helper && <p className={cn("text-xs font-bold", style.helper)}>{card.helper}</p>}
+          </div>
+        </div>
+      )}
       {card.breakdown && (
-        <div className={cn("flex flex-1 items-center gap-3", !card.hideHeader && "mt-4 border-t border-slate-100 pt-4")}>
+        <div className={cn("flex flex-1 items-center gap-3", card.hideHeader ? "mt-3" : "mt-4 border-t border-slate-100 pt-4")}>
           {breakdownTotal > 0 ? (
             <>
               <div className="relative h-24 w-24 shrink-0">
@@ -452,15 +475,13 @@ type ActualDisbursementRecord = { amount: number; prr_number: string; date_of_pr
 // BASE_URL/ceo_desk/get_actual_disbursement — real PRR payments (from admin_accounts_prr's
 // paid_at/payment_details, see mark_payment_paid), the actual counterpart to the planned
 // week-wise schedule read out of each budget's "ERP Disbursement" xlsx sheet below.
-const fetchActualDisbursements = async (signal: AbortSignal): Promise<ActualDisbursementRecord[]> => {
+const fetchActualDisbursements = async (): Promise<ActualDisbursementRecord[]> => {
   const baseUrl = getBaseUrl().replace(/\/$/, "");
   try {
-    const res = await fetch(`${baseUrl}/ceo_desk/get_actual_disbursement`, { signal });
-    if (!res.ok) return [];
-    const data = await res.json().catch(() => null);
+    // Routed through the shared cache so a login-time warm of this endpoint is reused here.
+    const data = await cachedJson<{ data?: ActualDisbursementRecord[] }>(`${baseUrl}/ceo_desk/get_actual_disbursement`);
     return Array.isArray(data?.data) ? data.data : [];
-  } catch (err: unknown) {
-    if ((err as { name?: string })?.name === "AbortError") throw err;
+  } catch {
     return [];
   }
 };
@@ -634,7 +655,10 @@ const DisbursementSequenceCard = ({
       </p>
       <div className="h-64">
         {loading ? (
-          <div className="flex h-full items-center justify-center text-sm font-semibold text-slate-400">Loading…</div>
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-400">
+            <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
+            <p className="text-xs font-bold">Loading disbursement sequence…</p>
+          </div>
         ) : series.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm font-semibold text-slate-400">
             No disbursement sequence data recorded yet.
@@ -760,16 +784,15 @@ const parseBudgetWorkbookCategories = (buffer: ArrayBuffer): BudgetCategoryDetai
 };
 
 const fetchCompleteCategoryBudgets = async (base: string): Promise<BudgetCategoryBifurcation[]> => {
-  const [categoryResponse, masterResponse] = await Promise.all([
-    fetch(`${base}/ceo_desk/get_category_wise_budget_utilization`),
-    fetch(`${base}/admin_accounts/get_budgets`),
+  // Both routed through the shared cache so a login-time warm of these endpoints is reused.
+  const [categoryBody, masterBody] = await Promise.all([
+    cachedJson<{ success?: boolean; data?: BudgetCategoryBifurcation[] }>(`${base}/ceo_desk/get_category_wise_budget_utilization`).catch(() => null),
+    cachedJson<{ data?: BudgetMasterRecord[] }>(`${base}/admin_accounts/get_budgets`).catch(() => null),
   ]);
-  const categoryBody = await categoryResponse.json().catch(() => null);
-  const masterBody = await masterResponse.json().catch(() => null);
-  const categoryBudgets: BudgetCategoryBifurcation[] = categoryResponse.ok && categoryBody?.success && Array.isArray(categoryBody?.data)
+  const categoryBudgets: BudgetCategoryBifurcation[] = categoryBody?.success && Array.isArray(categoryBody?.data)
     ? categoryBody.data
     : [];
-  const masterBudgets: BudgetMasterRecord[] = masterResponse.ok && Array.isArray(masterBody?.data)
+  const masterBudgets: BudgetMasterRecord[] = Array.isArray(masterBody?.data)
     ? masterBody.data
     : [];
   const existingIds = new Set(categoryBudgets.map((budget) => budget.budget_id));
@@ -953,9 +976,9 @@ type ClusterCropSummary = {
 };
 
 const CROP_COLORS: Record<string, string> = {
-  paddy: "var(--crop-paddy-color, #22c55e)",
+  paddy: "var(--crop-paddy-color, #eab308)",
   napier: "var(--crop-napier-color, #22c55e)",
-  rahar: "var(--crop-rahar-color, #800000)",
+  rahar: "var(--crop-rahar-color, #92400e)",
   unspecified: "#94a3b8",
 };
 const FALLBACK_CROP_COLORS = ["#2563eb", "#6d28d9", "#0891b2", "#dc2626", "#0f766e"];
@@ -1327,6 +1350,10 @@ const formatWeekRangeLabel = (weekStart: Date) => {
   const endLabel = weekEnd.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
   return `${startLabel} – ${endLabel}`;
 };
+
+// The Cultivation Tracker always opens on the third week of June (the cultivation season's
+// start), regardless of today's date. "Today" in the week nav still jumps to the current week.
+const cultivationTrackerDefaultWeek = () => startOfWeekMonday(new Date(new Date().getFullYear(), 5, 15));
 
 // Activities x Days week grid: one row per activity active this week, one cell per day showing
 // total acres + distinct farm count for that activity on that day — the CEO-facing view a
@@ -3230,18 +3257,30 @@ const FinancialAnalysisView = ({
     [actualDisbursements],
   );
 
-  const totalUtilized = useMemo(() => sumBudgetTotals(budgets).utilized, [budgets]);
+  // Total Budget and Balance track the summed budget-wise bifurcation rows — the same source the
+  // Budget Bifurcation donut below uses — rather than kpis.total_budget, so the two figures on
+  // this view can never disagree. Capex / Opex still come from the analytics KPI endpoint.
+  const budgetTotals = useMemo(() => sumBudgetTotals(budgets), [budgets]);
+  const totalUtilized = budgetTotals.utilized;
+  const budgetReady = !budgetsLoading && budgets.length > 0;
   // Balance = Total Budget - Utilized Budget.
-  const balanceReady = !loading && !!kpis;
-  const totalBalance = kpis ? kpis.total_budget - totalUtilized : null;
+  const totalBalance = budgetReady ? budgetTotals.totalBudget - totalUtilized : null;
 
   return (
     <div className="space-y-4">
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         {financialStatDefs.map((stat) => {
           const isBalance = stat.key === "balance";
-          const ready = isBalance ? balanceReady : !loading && !!kpis;
-          const value = isBalance ? totalBalance : kpis ? kpis[stat.key as keyof FinancialKpis] : undefined;
+          const isTotalBudget = stat.key === "total_budget";
+          const usesBifurcation = isBalance || isTotalBudget;
+          const ready = usesBifurcation ? budgetReady : !loading && !!kpis;
+          const value = isBalance
+            ? totalBalance
+            : isTotalBudget
+              ? budgetTotals.totalBudget
+              : kpis
+                ? kpis[stat.key as keyof FinancialKpis]
+                : undefined;
           const hasValue = ready && value !== null && value !== undefined;
           // Balance only: green/up when total budget still covers what's been utilized, red/down
           // when utilization has exceeded the budget.
@@ -3577,7 +3616,7 @@ const CultivationTrackerView = ({
   // Single source of truth for "what period is the tracker looking at" — the week grid drives
   // it directly, and the crop-wise summary / task timeline below derive their month from it, so
   // sliding weeks in the calendar keeps everything else on the page in sync.
-  const [weekStart, setWeekStart] = useState(() => startOfWeekMonday(new Date()));
+  const [weekStart, setWeekStart] = useState(() => cultivationTrackerDefaultWeek());
   const activeMonth = useMemo(() => startOfMonth(weekStart), [weekStart]);
 
   const monthTasks = useMemo(() => {
@@ -3699,6 +3738,7 @@ const CeosDesk = () => {
   const [budgetBifurcation, setBudgetBifurcation] = useState<BudgetBifurcation[]>([]);
   const [budgetBifurcationLoading, setBudgetBifurcationLoading] = useState(false);
   const [actualDisbursements, setActualDisbursements] = useState<ActualDisbursementRecord[]>([]);
+  const [actualDisbursementsLoading, setActualDisbursementsLoading] = useState(false);
   const [disbursementSeries, setDisbursementSeries] = useState<DisbursementWeek[]>([]);
   const [disbursementSeriesLoading, setDisbursementSeriesLoading] = useState(false);
   const [categoryBudgets, setCategoryBudgets] = useState<BudgetCategoryBifurcation[]>([]);
@@ -3722,8 +3762,7 @@ const CeosDesk = () => {
     const loadLandAcquisition = async () => {
       setLeadsLoading(true);
       try {
-        const res = await fetch(`${base}/farmer_managment/get_leads`);
-        const data: { leads?: any[] } = await res.json();
+        const data: { leads?: any[] } = await cachedJson(`${base}/farmer_managment/get_leads`);
         if (!cancelled) setLeads(transformLeads(Array.isArray(data?.leads) ? data.leads : []));
       } catch {
         if (!cancelled) setLeads([]);
@@ -3737,9 +3776,8 @@ const CeosDesk = () => {
       setClusterLoading(true);
       setCalendarLoading(true);
 
-      const farmsPromise = fetch(`${base}/farmer_managment/get_farms`)
-        .then((res) => res.json())
-        .then((data: { farms?: Farm[] }) => {
+      const farmsPromise = cachedJson<{ farms?: Farm[] }>(`${base}/farmer_managment/get_farms`)
+        .then((data) => {
           if (!cancelled) setFarms(Array.isArray(data?.farms) ? data.farms : []);
         })
         .catch(() => {
@@ -3749,9 +3787,8 @@ const CeosDesk = () => {
           if (!cancelled) setFarmsLoading(false);
         });
 
-      const clusterPromise = fetch(`${base}/ceo_desk/get_cluster_wise_crop_distribution`)
-        .then((res) => res.json())
-        .then((data: { success?: boolean; clusters?: ClusterEntry[] }) => {
+      const clusterPromise = cachedJson<{ success?: boolean; clusters?: ClusterEntry[] }>(`${base}/ceo_desk/get_cluster_wise_crop_distribution`)
+        .then((data) => {
           if (!cancelled) setClusterList(Array.isArray(data?.clusters) ? data.clusters : []);
         })
         .catch(() => {
@@ -3761,8 +3798,8 @@ const CeosDesk = () => {
           if (!cancelled) setClusterLoading(false);
         });
 
-      const calendarPromise = fetch(`${base}/admin_cultivation/fetch_cultivation_calander`)
-        .then((res) => res.json())
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const calendarPromise = cachedJson<any>(`${base}/admin_cultivation/fetch_cultivation_calander`)
         .then(async (data) => {
           const parsed = parseCultivationCalendar(data);
           const cropTypeByCalanderId = await fetchCropTypesForCalanders(base, collectCalanderIds(parsed));
@@ -3795,9 +3832,8 @@ const CeosDesk = () => {
       setBudgetBifurcationLoading(true);
       setCategoryBudgetsLoading(true);
 
-      const kpiPromise = fetch(`${base}/ceo_desk/get_financial_analytics_KPIs`)
-        .then((res) => res.json())
-        .then((data: { success?: boolean; data?: FinancialKpis }) => {
+      const kpiPromise = cachedJson<{ success?: boolean; data?: FinancialKpis }>(`${base}/ceo_desk/get_financial_analytics_KPIs`)
+        .then((data) => {
           if (!cancelled) setFinancialKpis(data?.success && data?.data ? data.data : null);
         })
         .catch(() => {
@@ -3807,9 +3843,8 @@ const CeosDesk = () => {
           if (!cancelled) setFinancialLoading(false);
         });
 
-      const budgetBifPromise = fetch(`${base}/ceo_desk/budget_wise_utilization_bifurcation`)
-        .then((res) => res.json())
-        .then((data: { success?: boolean; data?: BudgetBifurcation[] }) => {
+      const budgetBifPromise = cachedJson<{ success?: boolean; data?: BudgetBifurcation[] }>(`${base}/ceo_desk/budget_wise_utilization_bifurcation`)
+        .then((data) => {
           const rows = data?.success && Array.isArray(data?.data) ? data.data : [];
           if (!cancelled) setBudgetBifurcation(rows);
           return rows;
@@ -3837,7 +3872,8 @@ const CeosDesk = () => {
 
       // Real payment feed for the Dashboard's Actual Disbursement vs Budget Utilized figure —
       // same endpoint FinancialAnalysisView's own DisbursementSequenceCard draws from.
-      const disbursementPromise = fetchActualDisbursements(new AbortController().signal)
+      setActualDisbursementsLoading(true);
+      const disbursementPromise = fetchActualDisbursements()
         .then((records) => {
           if (!cancelled) setActualDisbursements(records);
           return records;
@@ -3845,6 +3881,9 @@ const CeosDesk = () => {
         .catch(() => {
           if (!cancelled) setActualDisbursements([]);
           return [] as ActualDisbursementRecord[];
+        })
+        .finally(() => {
+          if (!cancelled) setActualDisbursementsLoading(false);
         });
 
       const [, budgetRows, categoryRows, disbursementRecords] = await Promise.all([
@@ -3927,9 +3966,8 @@ const CeosDesk = () => {
     let cancelled = false;
     const base = getBaseUrl().replace(/\/$/, "");
     setInventoryLoading(true);
-    fetch(`${base}/inventory/get_all_item`)
-      .then((res) => res.json())
-      .then((data: { success?: boolean; items?: InventoryItemRecord[] }) => {
+    cachedJson<{ success?: boolean; items?: InventoryItemRecord[] }>(`${base}/inventory/get_all_item`)
+      .then((data) => {
         if (!cancelled) setInventoryItems(data?.success && Array.isArray(data?.items) ? data.items : []);
       })
       .catch(() => {
@@ -3948,9 +3986,8 @@ const CeosDesk = () => {
     let cancelled = false;
     const base = getBaseUrl().replace(/\/$/, "");
     setStaffLoading(true);
-    fetch(`${base}/admin_staff/get_all_staff`)
-      .then((res) => res.json())
-      .then((data: StaffRecord[]) => {
+    cachedJson<StaffRecord[]>(`${base}/admin_staff/get_all_staff`)
+      .then((data) => {
         if (!cancelled) setStaffRecords(Array.isArray(data) ? data : []);
       })
       .catch(() => {
@@ -4021,18 +4058,31 @@ const CeosDesk = () => {
     const totalCropArea = cropAreaEntries.reduce((sum, [, area]) => sum + area, 0);
 
     const activityTypes = new Set<string>();
+    // Per-activity-type planned/completed acreage — lets the "done 100%" helper below count how
+    // many distinct activity types (1st Ploughing, 2nd Ploughing, ...) have had ALL their assigned
+    // acreage completed, not just an overall acreage fraction across every activity mixed together.
+    const activityTypeAcres = new Map<string, { planned: number; completed: number }>();
     let plannedAcres = 0;
     let completedAcres = 0;
     Object.values(calendarData).forEach((rows) => {
       rows.forEach((row) => {
         activityTypes.add(row.activity);
+        const stats = activityTypeAcres.get(row.activity) ?? { planned: 0, completed: 0 };
         row.assignments.forEach((assignment) => {
           const acres = assignment.assigned_area || 0;
           plannedAcres += acres;
-          if (isCompletedAssignmentStatus(assignment.status)) completedAcres += acres;
+          stats.planned += acres;
+          if (isCompletedAssignmentStatus(assignment.status)) {
+            completedAcres += acres;
+            stats.completed += acres;
+          }
         });
+        activityTypeAcres.set(row.activity, stats);
       });
     });
+    const fullyCompletedActivityTypes = Array.from(activityTypeAcres.values()).filter(
+      (stats) => stats.planned > 0 && stats.completed >= stats.planned,
+    ).length;
     const activityDonePct = plannedAcres > 0 ? (completedAcres / plannedAcres) * 100 : 0;
 
     const { totalBudget, utilized } = sumBudgetTotals(budgetBifurcation);
@@ -4063,8 +4113,15 @@ const CeosDesk = () => {
 
     const formatAcresValue = (value: number) => value.toLocaleString("en-IN", { maximumFractionDigits: 1 });
 
+    // Which underlying fetch each tile's value is computed from — kept close to the return object
+    // below so a card's loading flag can never drift out of sync with what it actually depends on.
+    const landLoading = farmsLoading;
+    const activityLoading = calendarLoading;
+    const budgetLoading = financialLoading || budgetBifurcationLoading;
+    const disbursementLoading = budgetBifurcationLoading || disbursementSeriesLoading;
+
     return {
-      totalLand: { label: "Total Land", value: formatAcresValue(totalLand), suffix: "Acres", helper: "", tone: "green", icon: MapPinned },
+      totalLand: { label: "Total Land", value: formatAcresValue(totalLand), suffix: "Acres", helper: "", tone: "green", icon: MapPinned, loading: landLoading },
       totalCultivableArea: {
         label: "Total Cultivable Area",
         value: formatAcresValue(totalCultivable),
@@ -4074,8 +4131,9 @@ const CeosDesk = () => {
         icon: Sprout,
         progress: Math.round(cultivablePct),
         chart: "pie",
+        loading: landLoading,
       },
-      totalLandParcels: { label: "Total Land Parcels", value: String(farms.length), suffix: "Parcels", helper: "", tone: "purple", icon: Landmark },
+      totalLandParcels: { label: "Total Land Parcels", value: String(farms.length), suffix: "Parcels", helper: "", tone: "purple", icon: Landmark, loading: landLoading },
       cropWiseArea: {
         label: "Crop-wise Area",
         value: formatAcresValue(totalCropArea),
@@ -4086,8 +4144,17 @@ const CeosDesk = () => {
         breakdown: cropAreaEntries.map(([key, area], index) => ({ label: cropLabel(key), value: area, color: cropColor(key, index) })),
         breakdownFormat: "acres",
         hideHeader: true,
+        loading: landLoading,
       },
-      totalActivities: { label: "Total Activities", value: String(activityTypes.size), suffix: "Types", helper: "", tone: "orange", icon: ClipboardList },
+      totalActivities: {
+        label: "Total Cultivation Activities",
+        value: String(activityTypes.size),
+        suffix: "Types",
+        helper: "",
+        tone: "orange",
+        icon: ClipboardList,
+        loading: activityLoading,
+      },
       totalBudget: {
         label: "Total Budget",
         value: formatFinancialAmount(totalBudget),
@@ -4095,6 +4162,7 @@ const CeosDesk = () => {
         helper: "",
         tone: "blue",
         icon: IndianRupee,
+        loading: budgetLoading,
       },
       capexOpexDistribution: {
         label: "Capex / Opex Distribution",
@@ -4108,6 +4176,7 @@ const CeosDesk = () => {
           { label: "Opex", value: opex, color: "#7c3aed" },
         ],
         hideValue: true,
+        loading: budgetLoading,
       },
       actualDisbursementPct: {
         label: "Actual Disbursement",
@@ -4120,16 +4189,18 @@ const CeosDesk = () => {
           { label: "Actual", value: utilized },
           { label: "Expected", value: expectedTillDate },
         ],
+        loading: disbursementLoading,
       },
       activityDonePct: {
-        label: "% of Activity Done",
+        label: "Percentage of activity done",
         value: activityDonePct.toFixed(1),
         suffix: "%",
-        helper: `${Math.round(completedAcres)} of ${Math.round(plannedAcres)} ac completed`,
+        helper: `${fullyCompletedActivityTypes} activities out of ${activityTypes.size} activities are done 100%`,
         tone: "green",
         icon: Wheat,
         progress: Math.round(activityDonePct),
         chart: "pie",
+        loading: activityLoading,
       },
       budgetUtilized: {
         label: "Budget Utilized",
@@ -4138,6 +4209,7 @@ const CeosDesk = () => {
         helper: totalBudget > 0 ? `${utilizedPct.toFixed(1)}% of Total Budget` : "",
         tone: "orange",
         icon: IndianRupee,
+        loading: budgetLoading,
       },
       budgetRemaining: {
         label: "Budget Remaining",
@@ -4146,6 +4218,7 @@ const CeosDesk = () => {
         helper: remainingFavorable ? "Within Total Budget" : "Exceeds Total Budget",
         tone: remainingFavorable ? "green" : "red",
         icon: Landmark,
+        loading: budgetLoading,
       },
       expectedDisbursementMonth: {
         label: "Expected Disbursement (Current Month)",
@@ -4154,9 +4227,21 @@ const CeosDesk = () => {
         helper: "",
         tone: "purple",
         icon: IndianRupee,
+        loading: disbursementLoading,
       },
     };
-  }, [farms, calendarData, budgetBifurcation, financialKpis, disbursementSeries]);
+  }, [
+    farms,
+    calendarData,
+    budgetBifurcation,
+    financialKpis,
+    disbursementSeries,
+    farmsLoading,
+    calendarLoading,
+    financialLoading,
+    budgetBifurcationLoading,
+    disbursementSeriesLoading,
+  ]);
 
   // Budget Utilization Trend chart — cumulative running total of real PRR payments
   // (BASE_URL/ceo_desk/get_actual_disbursement), one point per distinct date_of_prr:
@@ -4287,13 +4372,18 @@ const CeosDesk = () => {
 
           <Card className="p-5">
             <SectionHeader
-              title="Budget Utilization Trend (Rs in Cr)"
+              title="Budget Utilization Trend"
               right={totalBudgetCr > 0 && <Pill tone="green">{utilizedPctOfBudget.toFixed(1)}% of Total Budget</Pill>}
             />
             <p className="-mt-2 mb-3 text-xs font-semibold text-slate-500">
               Cumulative real disbursement (actual PRR payments), one point per payment date.
             </p>
-            {utilizationTrendData.length === 0 ? (
+            {actualDisbursementsLoading ? (
+              <div className="flex h-[248px] flex-col items-center justify-center gap-2 text-slate-400">
+                <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
+                <p className="text-xs font-bold">Loading disbursement history…</p>
+              </div>
+            ) : utilizationTrendData.length === 0 ? (
               <div className="flex h-[248px] items-center justify-center text-sm font-bold text-slate-400">No disbursements recorded yet</div>
             ) : (
               <div className="h-[260px]">
