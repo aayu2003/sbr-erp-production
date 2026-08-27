@@ -112,7 +112,6 @@ const BudgetDashboard = lazy(() => import("./pages/BudgetDashboard"));
 
 const Banking = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.Banking })));
 const BillsPayables = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.BillsPayables })));
-const BudgetCosting = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.BudgetCosting })));
 const FinanceAccountsDashboard = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.FinanceAccountsDashboard })));
 const LedgersReports = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.LedgersReports })));
 const MastersControls = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.MastersControls })));
@@ -377,7 +376,6 @@ const App = () => (
           <Route path="/finance-accounts/vouchers" element={<AppLayout><Vouchers /></AppLayout>} />
           <Route path="/finance-accounts/banking" element={<AppLayout><Banking /></AppLayout>} />
           <Route path="/finance-accounts/ledgers-reports" element={<AppLayout><LedgersReports /></AppLayout>} />
-          <Route path="/finance-accounts/budget-costing" element={<AppLayout><BudgetCosting /></AppLayout>} />
           <Route path="/finance-accounts/masters-controls" element={<AppLayout><MastersControls /></AppLayout>} />
           <Route path="/finance-accounts/accounting-master" element={<AppLayout><AccountingMaster /></AppLayout>} />
           <Route path="/finance-accounts/chart-of-accounts" element={<AppLayout><ChartOfAccounts /></AppLayout>} />

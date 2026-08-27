@@ -5,7 +5,6 @@ import {
   ArrowRight,
   ArrowUpRight,
   BookOpen,
-  Calculator,
   CheckCircle2,
   ChevronDown,
   CircleDollarSign,
@@ -48,7 +47,6 @@ type FinanceModuleKey =
   | "vouchers"
   | "banking"
   | "ledgers-reports"
-  | "budget-costing"
   | "masters-controls";
 
 export type FinanceRecord = {
@@ -320,22 +318,6 @@ const FINANCE_MODULES: ModuleDefinition[] = [
       { label: "Outstanding", description: "Analyse receivable and payable ageing.", features: ["Payables Ageing", "Receivables Ageing"] },
       { label: "Tax", description: "Review tax summaries and statutory reports.", features: ["Tax Reports"] },
       { label: "MIS", description: "Open management information reports and analysis.", features: ["MIS"] },
-    ],
-  },
-  {
-    key: "budget-costing",
-    title: "Budget & Costing",
-    shortTitle: "Budget & Costing",
-    description: "Plan budgets, monitor utilisation and analyse cost across the organisation.",
-    path: "/finance-accounts/budget-costing",
-    icon: Calculator,
-    accent: "bg-orange-50 text-orange-700",
-    tabs: [
-      { label: "Overview", description: "Review budgets, actuals, commitments and available balances.", features: ["Budget vs Actual", "Budget Utilisation"] },
-      { label: "Budgets", description: "Create and maintain approved budgets.", features: ["Budget", "Budget vs Actual"] },
-      { label: "Utilisation", description: "Track consumed, committed and available value.", features: ["Budget Utilisation", "Budget vs Actual"] },
-      { label: "Commitments", description: "Monitor purchase and work commitments before actual posting.", features: ["Commitments"] },
-      { label: "Cost Analysis", description: "Analyse cost by centre, project, department and site.", features: ["Cost Centres", "Project-wise Cost", "Department-wise Cost", "Land/Site-wise Cost"] },
     ],
   },
   {
@@ -3920,5 +3902,4 @@ export const BillsPayables = () => <FinanceAccountsModule moduleKey="bills-payab
 export const PaymentsReceipts = () => <FinanceAccountsModule moduleKey="payments-receipts" />;
 export const Banking = () => <FinanceAccountsModule moduleKey="banking" />;
 export const LedgersReports = () => <FinanceAccountsModule moduleKey="ledgers-reports" />;
-export const BudgetCosting = () => <FinanceAccountsModule moduleKey="budget-costing" />;
 export const MastersControls = () => <FinanceAccountsModule moduleKey="masters-controls" />;
