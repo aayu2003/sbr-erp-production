@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   BarChart3,
@@ -15,6 +15,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/context/AuthContext';
+import { warmCeoDeskData } from '@/lib/ceoDeskData';
 import { toast } from 'sonner';
 import agriLogo from '@/Assets/3f-logo.png';
 import loginBgVideo from '@/Assets/login-bg-video.mp4';
@@ -34,13 +35,27 @@ const LoginPage = () => {
   const [submitting, setSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
+  // CEO's Desk is a heavy lazy chunk (recharts + xlsx + leaflet) and is where every login
+  // lands. Start downloading it while the user is still filling in credentials so it's
+  // parsed by the time we navigate.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void import('./CeosDesk');
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, []);
+
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     setSubmitting(true);
     try {
       await login(username.trim(), password);
+      // Login succeeded and we're about to land on the CEO's Desk — kick off its data
+      // requests now so they overlap the route chunk download instead of only starting
+      // once <CeosDesk> has mounted.
+      warmCeoDeskData();
       toast.success('Logged in');
-      navigate('/leads', { replace: true });
+      navigate('/ceos-desk', { replace: true });
     } catch (err: any) {
       toast.error(err?.message || 'Login failed');
     } finally {
