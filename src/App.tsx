@@ -1,121 +1,139 @@
+import { lazy, Suspense } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import AppLayout from "./components/layout/AppLayout";
-import AuthLanding from "./pages/AuthLanding";
-import Login from "./pages/Login";
-import Index from "./pages/Index";
-import CeosDesk from "./pages/CeosDesk";
-import Leads from "./pages/Leads";
-import Farmers from "./pages/Farmers";
-import FarmerProfile from "./pages/FarmerProfile";
-import HarvestPlanning from "./pages/HarvestPlanning";
-import NotFound from "./pages/NotFound";
-import Inventory from "./pages/Inventory";
-import InventoryIndent from "./pages/InventoryIndent";
-import InventoryApprovals from "./pages/InventoryApprovals";
-import CultivationMaster from "./pages/CultivationMaster";
-import CultivationPlan from "./pages/CultivationPlan";
-import CreateCultivationPlan from "./pages/CreateCultivationPlan";
-import CultivationCalendar from "./pages/CultivationCalendar";
-import OperationalCalendar from "./pages/OperationalCalendar";
-import FieldVisitAnalytics from "./pages/FieldVisitAnalytics";
-import HarvestOrders from "./pages/HarvestOrders";
-import HarvestCards from "./pages/HarvestCards";
-import StaffOnboarding from "./pages/StaffOnboarding";
-import ManPowerRequisition from "./pages/ManPowerRequisition";
-import AdminMrfApproval from "./pages/adminmrfapproval";
-import LogisticsManagement from "./pages/LogisticsManagement";
-import LogisticsRequest from "./pages/LogisticsRequest";
-import AdminRequestPage from "./pages/AdminRequestPage";
-import TasksBeta from "./pages/TasksBeta";
-import VehicleManagement from "./pages/VehicleManagement";
-import WeighmentQC from "./pages/WeighmentQC";
-import RentalRateCard from "./pages/RentalRateCard";
-import ServiceRequest from "./pages/ServiceRequest";
-import FleetChart from "./pages/FleetChart";
-import KhasraFinder from "./pages/khasra_finder";
-import FieldMonitoring from "./pages/FieldMonitoring";
-import LandAcquisition from "./pages/LandAcquisition";
-import LeaseMaster from "./pages/LeaseMaster";
-import Legal from "./pages/Legal";
-import FinanceAdminOpsIndent from "./pages/FinanceAdminOpsIndent";
-import PurchaseVerifier from "./pages/PurchaseVerifier";
-import WorkOrderVerifier from "./pages/WorkOrderVerifier";
-import PurchaseRequisition from "./pages/PurchaseRequisition";
-import PurchaseRequisitionEntry from "./pages/PurchaseRequisitionEntry";
-import VendorDirectory from "./pages/VendorDirectory";
-import QuotationComparative from "./pages/QuotationComparative";
-import SprQuotationComparative from "./pages/SprQuotationComparative";
-import HOInbox from "@/pages/HOInbox";
-import WorkOrderCommunication from "@/pages/WorkOrderCommunication";
-import HO from "@/pages/HO";
-import POCreation from "@/pages/POCreation";
-import WOCreation from "@/pages/WOCreation";
-import PurchaseFlow from "@/pages/PurchaseFlow";
-import WorkOrderFlow from "@/pages/WorkOrderFlow";
-import ProjectConfig from "@/pages/ProjectConfig";
-import DirectorCapex from "./pages/DirectorCapex";
-import DirectorOpex from "./pages/DirectorOpex";
-import DirectorAmortization from "./pages/DirectorAmortization";
-import DirectorCashFlow from "./pages/DirectorCashFlow";
-import DirectorCostMonitoring from "./pages/DirectorCostMonitoring";
-import DirectorEmisInvestments from "./pages/DirectorEmisInvestments";
-import DirectorAssetsLiabilities from "./pages/DirectorAssetsLiabilities";
-import HRManagement from "./pages/HRManagement";
-import Settings from "./pages/Settings";
-import {
-  TaskCalendarPage,
-  TaskDetailPage,
-  TaskFormPage,
-  TaskInboxPage,
-  TaskSettingsPage,
-  TaskTemplatesPage,
-  TaskWorkspacePage,
-} from "./features/on-demand-tasks/on_demand_task_new";
-import OnDemandTask from "./pages/OnDemandTask";
-import FarmDirectory from "./pages/FarmDirectory";
-import FuelsAndConsumables from "./pages/FuelsAndConsumables";
-import AdminOpsFuelRequest from "./pages/AdminOpsFuelRequest";
-import DirectorFuelRequest from "./pages/DirectorFuelRequest";
-import WorkOrder from "./pages/WorkOrder";
-import ScopeOfWork from "./pages/ScopeOfWork";
-import WccModule from "./pages/WccModule";
-import WebApp from "./pages/webapp/WebApp";
-import Inbox from "./pages/Inbox";
-import WccApprovalInbox from "./pages/WccApprovalInbox";
-import GRNModule from "./pages/GRNModule";
-import InspectionReport from "./pages/InspectionReport";
-import InspectionReportApprovals from "./pages/InspectionReportApprovals";
-import GrnApprovalInbox from "./pages/GrnApprovalInbox";
-import GateEntryModule from "./pages/GateEntryModule";
-import LabourManagement from "./pages/LabourManagement";
-import UserManagement from "./pages/UserManagement";
-import AccountsDashboard from "./pages/AccountsDashboard";
-import AccountsLedger from "./pages/AccountsLedger";
-import AccountsPayments from "./pages/AccountsPayments";
-import PRRApprovalInbox from "./pages/PRRApprovalInbox";
-import AccountsPurchaseFlow from "./pages/AccountsPurchaseFlow";
-import Budget from "./pages/Budget";
-import BudgetDashboard from "./pages/BudgetDashboard";
-import {
-  Banking,
-  BillsPayables,
-  BudgetCosting,
-  FinanceAccountsDashboard,
-  LedgersReports,
-  MastersControls,
-  PaymentsReceipts,
-} from "./pages/FinanceAccounts";
-import Vouchers from "./pages/Vouchers";
-import AccountingMaster from "./pages/AccountingMaster";
-import ChartOfAccounts from "./pages/ChartOfAccounts";
-import Communication from "./pages/Communication";
-import InvoiceDirectory from "./pages/InvoiceDirectory";
+
+// Every page below is route-level code-split via React.lazy — previously all ~90 pages (plus
+// recharts/xlsx/leaflet etc. pulled in by some of them) were bundled into one ~8.3MB JS chunk
+// that had to be downloaded and parsed before ANY route could render, CEO's Desk included. Now
+// each route only pulls its own chunk (+ whatever shared vendor chunk Vite factors out) on demand.
+const AuthLanding = lazy(() => import("./pages/AuthLanding"));
+const Login = lazy(() => import("./pages/Login"));
+const Index = lazy(() => import("./pages/Index"));
+const CeosDesk = lazy(() => import("./pages/CeosDesk"));
+const Leads = lazy(() => import("./pages/Leads"));
+const Farmers = lazy(() => import("./pages/Farmers"));
+const FarmerProfile = lazy(() => import("./pages/FarmerProfile"));
+const HarvestPlanning = lazy(() => import("./pages/HarvestPlanning"));
+const NotFound = lazy(() => import("./pages/NotFound"));
+const Inventory = lazy(() => import("./pages/Inventory"));
+const InventoryIndent = lazy(() => import("./pages/InventoryIndent"));
+const InventoryApprovals = lazy(() => import("./pages/InventoryApprovals"));
+const CultivationMaster = lazy(() => import("./pages/CultivationMaster"));
+const CultivationPlan = lazy(() => import("./pages/CultivationPlan"));
+const CreateCultivationPlan = lazy(() => import("./pages/CreateCultivationPlan"));
+const CultivationCalendar = lazy(() => import("./pages/CultivationCalendar"));
+const OperationalCalendar = lazy(() => import("./pages/OperationalCalendar"));
+const FieldVisitAnalytics = lazy(() => import("./pages/FieldVisitAnalytics"));
+const HarvestOrders = lazy(() => import("./pages/HarvestOrders"));
+const HarvestCards = lazy(() => import("./pages/HarvestCards"));
+const StaffOnboarding = lazy(() => import("./pages/StaffOnboarding"));
+const ManPowerRequisition = lazy(() => import("./pages/ManPowerRequisition"));
+const AdminMrfApproval = lazy(() => import("./pages/adminmrfapproval"));
+const LogisticsManagement = lazy(() => import("./pages/LogisticsManagement"));
+const LogisticsRequest = lazy(() => import("./pages/LogisticsRequest"));
+const AdminRequestPage = lazy(() => import("./pages/AdminRequestPage"));
+const TasksBeta = lazy(() => import("./pages/TasksBeta"));
+const VehicleManagement = lazy(() => import("./pages/VehicleManagement"));
+const WeighmentQC = lazy(() => import("./pages/WeighmentQC"));
+const RentalRateCard = lazy(() => import("./pages/RentalRateCard"));
+const ServiceRequest = lazy(() => import("./pages/ServiceRequest"));
+const FleetChart = lazy(() => import("./pages/FleetChart"));
+const KhasraFinder = lazy(() => import("./pages/khasra_finder"));
+const FieldMonitoring = lazy(() => import("./pages/FieldMonitoring"));
+const LandAcquisition = lazy(() => import("./pages/LandAcquisition"));
+const LeaseMaster = lazy(() => import("./pages/LeaseMaster"));
+const Legal = lazy(() => import("./pages/Legal"));
+const FinanceAdminOpsIndent = lazy(() => import("./pages/FinanceAdminOpsIndent"));
+const PurchaseVerifier = lazy(() => import("./pages/PurchaseVerifier"));
+const WorkOrderVerifier = lazy(() => import("./pages/WorkOrderVerifier"));
+const PurchaseRequisition = lazy(() => import("./pages/PurchaseRequisition"));
+const PurchaseRequisitionEntry = lazy(() => import("./pages/PurchaseRequisitionEntry"));
+const VendorDirectory = lazy(() => import("./pages/VendorDirectory"));
+const QuotationComparative = lazy(() => import("./pages/QuotationComparative"));
+const SprQuotationComparative = lazy(() => import("./pages/SprQuotationComparative"));
+const HOInbox = lazy(() => import("@/pages/HOInbox"));
+const WorkOrderCommunication = lazy(() => import("@/pages/WorkOrderCommunication"));
+const HO = lazy(() => import("@/pages/HO"));
+const POCreation = lazy(() => import("@/pages/POCreation"));
+const WOCreation = lazy(() => import("@/pages/WOCreation"));
+const PurchaseFlow = lazy(() => import("@/pages/PurchaseFlow"));
+const WorkOrderFlow = lazy(() => import("@/pages/WorkOrderFlow"));
+const ProjectConfig = lazy(() => import("@/pages/ProjectConfig"));
+const ProjectOnboarding = lazy(() => import("@/pages/ProjectOnboarding"));
+const DepartmentOnboarding = lazy(() => import("@/pages/DepartmentOnboarding"));
+const ImportantMapMarkings = lazy(() => import("@/pages/ImportantMapMarkings"));
+const DirectorCapex = lazy(() => import("./pages/DirectorCapex"));
+const DirectorOpex = lazy(() => import("./pages/DirectorOpex"));
+const DirectorAmortization = lazy(() => import("./pages/DirectorAmortization"));
+const DirectorCashFlow = lazy(() => import("./pages/DirectorCashFlow"));
+const DirectorCostMonitoring = lazy(() => import("./pages/DirectorCostMonitoring"));
+const DirectorEmisInvestments = lazy(() => import("./pages/DirectorEmisInvestments"));
+const DirectorAssetsLiabilities = lazy(() => import("./pages/DirectorAssetsLiabilities"));
+const HRManagement = lazy(() => import("./pages/HRManagement"));
+const Settings = lazy(() => import("./pages/Settings"));
+
+const TaskCalendarPage = lazy(() => import("./features/on-demand-tasks/on_demand_task_new").then((m) => ({ default: m.TaskCalendarPage })));
+const TaskDetailPage = lazy(() => import("./features/on-demand-tasks/on_demand_task_new").then((m) => ({ default: m.TaskDetailPage })));
+const TaskFormPage = lazy(() => import("./features/on-demand-tasks/on_demand_task_new").then((m) => ({ default: m.TaskFormPage })));
+const TaskInboxPage = lazy(() => import("./features/on-demand-tasks/on_demand_task_new").then((m) => ({ default: m.TaskInboxPage })));
+const TaskSettingsPage = lazy(() => import("./features/on-demand-tasks/on_demand_task_new").then((m) => ({ default: m.TaskSettingsPage })));
+const TaskTemplatesPage = lazy(() => import("./features/on-demand-tasks/on_demand_task_new").then((m) => ({ default: m.TaskTemplatesPage })));
+const TaskWorkspacePage = lazy(() => import("./features/on-demand-tasks/on_demand_task_new").then((m) => ({ default: m.TaskWorkspacePage })));
+
+const OnDemandTask = lazy(() => import("./pages/OnDemandTask"));
+const FarmDirectory = lazy(() => import("./pages/FarmDirectory"));
+const FuelsAndConsumables = lazy(() => import("./pages/FuelsAndConsumables"));
+const AdminOpsFuelRequest = lazy(() => import("./pages/AdminOpsFuelRequest"));
+const DirectorFuelRequest = lazy(() => import("./pages/DirectorFuelRequest"));
+const WorkOrder = lazy(() => import("./pages/WorkOrder"));
+const ScopeOfWork = lazy(() => import("./pages/ScopeOfWork"));
+const WccModule = lazy(() => import("./pages/WccModule"));
+const WebApp = lazy(() => import("./pages/webapp/WebApp"));
+const Inbox = lazy(() => import("./pages/Inbox"));
+const WccApprovalInbox = lazy(() => import("./pages/WccApprovalInbox"));
+const GRNModule = lazy(() => import("./pages/GRNModule"));
+const InspectionReport = lazy(() => import("./pages/InspectionReport"));
+const InspectionReportApprovals = lazy(() => import("./pages/InspectionReportApprovals"));
+const GrnApprovalInbox = lazy(() => import("./pages/GrnApprovalInbox"));
+const GateEntryModule = lazy(() => import("./pages/GateEntryModule"));
+const LabourManagement = lazy(() => import("./pages/LabourManagement"));
+const UserManagement = lazy(() => import("./pages/UserManagement"));
+const AccountsDashboard = lazy(() => import("./pages/AccountsDashboard"));
+const AccountsLedger = lazy(() => import("./pages/AccountsLedger"));
+const AccountsPayments = lazy(() => import("./pages/AccountsPayments"));
+const PRRApprovalInbox = lazy(() => import("./pages/PRRApprovalInbox"));
+const AccountsPurchaseFlow = lazy(() => import("./pages/AccountsPurchaseFlow"));
+const Budget = lazy(() => import("./pages/Budget"));
+const BudgetDashboard = lazy(() => import("./pages/BudgetDashboard"));
+
+const Banking = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.Banking })));
+const BillsPayables = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.BillsPayables })));
+const BudgetCosting = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.BudgetCosting })));
+const FinanceAccountsDashboard = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.FinanceAccountsDashboard })));
+const LedgersReports = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.LedgersReports })));
+const MastersControls = lazy(() => import("./pages/FinanceAccounts").then((m) => ({ default: m.MastersControls })));
+
+const PRRModule = lazy(() => import("./pages/PRRModule"));
+const Vouchers = lazy(() => import("./pages/Vouchers"));
+const AccountingMaster = lazy(() => import("./pages/AccountingMaster"));
+const ChartOfAccounts = lazy(() => import("./pages/ChartOfAccounts"));
+const Communication = lazy(() => import("./pages/Communication"));
+const InvoiceDirectory = lazy(() => import("./pages/InvoiceDirectory"));
 
 const queryClient = new QueryClient();
+
+// Shown while a route's own chunk is downloading — full-viewport so it doesn't flash oddly inside
+// AppLayout's chrome (AppLayout itself isn't lazy, but this Suspense boundary sits above it, so a
+// suspending route replaces the whole screen until its chunk resolves, then swaps in for real).
+const RouteFallback = () => (
+  <div className="flex min-h-screen items-center justify-center bg-slate-50">
+    <div className="h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-slate-500" />
+  </div>
+);
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -123,6 +141,7 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter basename={import.meta.env.BASE_URL}>
+        <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/" element={<AuthLanding />} />
@@ -140,7 +159,7 @@ const App = () => (
           <Route path="/land-acquisition" element={<AppLayout><LandAcquisition /></AppLayout>} />
           <Route path="/lease-master" element={<AppLayout><LeaseMaster /></AppLayout>} />
           <Route path="/farm-directory" element={<AppLayout><FarmDirectory /></AppLayout>} />
-          
+
           {/* Operations */}
           <Route path="/cultivation-calendar" element={<AppLayout><CultivationCalendar /></AppLayout>} />
           <Route path="/operational-calendar" element={<AppLayout><OperationalCalendar /></AppLayout>} />
@@ -305,6 +324,11 @@ const App = () => (
             }
           />
 
+          {/* PROJECT superset */}
+          <Route path="/project-onboarding" element={<AppLayout><ProjectOnboarding /></AppLayout>} />
+          <Route path="/department-onboarding" element={<AppLayout><DepartmentOnboarding /></AppLayout>} />
+          <Route path="/project-map-markings" element={<AppLayout><ImportantMapMarkings /></AppLayout>} />
+
           {/* Director */}
           <Route path="/director/capex" element={<AppLayout><DirectorCapex /></AppLayout>} />
           <Route path="/director/opex" element={<AppLayout><DirectorOpex /></AppLayout>} />
@@ -349,7 +373,7 @@ const App = () => (
           <Route path="/finance-accounts/dashboard" element={<AppLayout><FinanceAccountsDashboard /></AppLayout>} />
           <Route path="/finance-accounts/bills-payables" element={<AppLayout><BillsPayables /></AppLayout>} />
           <Route path="/finance-accounts/invoice-directory" element={<AppLayout><InvoiceDirectory /></AppLayout>} />
-          <Route path="/finance-accounts/payments-receipts" element={<AppLayout><PaymentsReceipts /></AppLayout>} />
+          <Route path="/finance-accounts/payments-receipts" element={<AppLayout><PRRModule /></AppLayout>} />
           <Route path="/finance-accounts/vouchers" element={<AppLayout><Vouchers /></AppLayout>} />
           <Route path="/finance-accounts/banking" element={<AppLayout><Banking /></AppLayout>} />
           <Route path="/finance-accounts/ledgers-reports" element={<AppLayout><LedgersReports /></AppLayout>} />
@@ -363,6 +387,7 @@ const App = () => (
 
           <Route path="*" element={<NotFound />} />
         </Routes>
+        </Suspense>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

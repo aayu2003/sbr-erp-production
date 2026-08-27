@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { X, Download, Printer, ArrowUpRight, Loader2, AlertCircle } from 'lucide-react';
+import { X, Download, Printer, ArrowUpRight, Loader2, AlertCircle, Trash2 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable, { type RowInput } from 'jspdf-autotable';
 import { toast } from 'sonner';
@@ -262,6 +262,35 @@ const buildAnnexurePivot = (
   photos.sort((a, b) => a.dateOfCompletion.localeCompare(b.dateOfCompletion) || a.activity.localeCompare(b.activity) || a.id.localeCompare(b.id));
 
   return { lines, photos };
+};
+
+// Clubs the printed Annexure primarily by place — every row for the same place sits together as
+// one block, however many different activities were done there — and within each place, by
+// activity, with each activity's own rows ordered by date of completion. Stable at both levels:
+// a place block appears where its first row was first seen, and same for an activity sub-block
+// within it.
+const groupAnnexureLines = (lines: AnnexureLine[]): AnnexureLine[] => {
+  const placeGroups = new Map<string, AnnexureLine[]>();
+  for (const line of lines) {
+    const bucket = placeGroups.get(line.place);
+    if (bucket) bucket.push(line);
+    else placeGroups.set(line.place, [line]);
+  }
+
+  const result: AnnexureLine[] = [];
+  for (const placeLines of placeGroups.values()) {
+    const activityGroups = new Map<string, AnnexureLine[]>();
+    for (const line of placeLines) {
+      const bucket = activityGroups.get(line.activity);
+      if (bucket) bucket.push(line);
+      else activityGroups.set(line.activity, [line]);
+    }
+    for (const activityLines of activityGroups.values()) {
+      activityLines.sort((a, b) => a.dateOfCompletion.localeCompare(b.dateOfCompletion));
+      result.push(...activityLines);
+    }
+  }
+  return result;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -1076,12 +1105,33 @@ const WccCertificatePreview = ({
   const setLineRate = (lineId: string) => (value: string) =>
     setLineEdits((prev) => ({ ...prev, [lineId]: value }));
 
+  // Same pattern as lineEdits above, but for Quantity — the auto-computed figure (from
+  // completed acreage/work-done records) is only ever a starting point; the preparer can
+  // correct it before certifying.
+  const [quantityEdits, setQuantityEdits] = useState<Record<string, string>>(() => {
+    if (!existingRecord) return {};
+    const seed: Record<string, string> = {};
+    for (const line of existingRecord.annexure.lines) {
+      seed[line.id] = String(line.quantity);
+    }
+    return seed;
+  });
+  const setLineQuantity = (lineId: string) => (value: string) =>
+    setQuantityEdits((prev) => ({ ...prev, [lineId]: value }));
+
+  // Lines removed from this certificate — a local, session-only override (same idea as
+  // lineEdits/quantityEdits) rather than a delete of the underlying work-done/task record, so a
+  // mistakenly-logged or otherwise not-to-be-certified line can be dropped from the Annexure
+  // without touching the calendar data it came from.
+  const [excludedLineIds, setExcludedLineIds] = useState<Set<string>>(() => new Set());
+  const excludeLine = (lineId: string) => setExcludedLineIds((prev) => new Set(prev).add(lineId));
+
   // The lines actually shown/priced/submitted — cultivation & operational lines merge their
-  // live rate edits; enterprise-drafted lines already carry a per-line rate set earlier in
-  // the WccWorkspace wizard, so they're mapped in read-only here.
+  // live rate/quantity edits; enterprise-drafted lines already carry a per-line rate and
+  // quantity set earlier in the WccWorkspace wizard, so they're mapped in read-only here.
   const effectiveLines: AnnexureLine[] = useMemo(() => {
     if (enterprise) {
-      return enterprise.serviceLines.filter((line) => line.selected).map((line) => ({
+      const lines = enterprise.serviceLines.filter((line) => line.selected && !excludedLineIds.has(line.id)).map((line) => ({
         id: line.id,
         activity: line.description,
         place: line.locationReference || enterprise.header.projectSiteLabel || enterprise.header.site || '—',
@@ -1090,12 +1140,19 @@ const WccCertificatePreview = ({
         quantity: line.currentQty,
         rate: line.rate,
       }));
+      return groupAnnexureLines(lines);
     }
-    return pivot.lines.map((line) => {
-      const edit = lineEdits[line.id];
-      return edit !== undefined ? { ...line, rate: Number(edit) || 0 } : line;
+    const lines = pivot.lines.filter((line) => !excludedLineIds.has(line.id)).map((line) => {
+      const rateEdit = lineEdits[line.id];
+      const quantityEdit = quantityEdits[line.id];
+      return {
+        ...line,
+        rate: rateEdit !== undefined ? Number(rateEdit) || 0 : line.rate,
+        quantity: quantityEdit !== undefined ? Number(quantityEdit) || 0 : line.quantity,
+      };
     });
-  }, [enterprise, pivot.lines, lineEdits]);
+    return groupAnnexureLines(lines);
+  }, [enterprise, pivot.lines, lineEdits, quantityEdits, excludedLineIds]);
 
   const taskPhotos = pivot.photos || [];
   const taskPhotoEvidenceRows = buildAnnexurePhotoEvidenceRows(effectiveLines, taskPhotos);
@@ -1623,6 +1680,7 @@ const WccCertificatePreview = ({
                         <th className="px-3 py-3 text-right text-[10px] font-bold uppercase tracking-wide">Quantity</th>
                         <th className="whitespace-nowrap px-3 py-3 text-right text-[10px] font-bold uppercase tracking-wide">Rate / Unit (₹)</th>
                         <th className="px-3 py-3 text-right text-[10px] font-bold uppercase tracking-wide">Value (₹)</th>
+                        {linesEditable && <th className="px-3 py-3 text-center text-[10px] font-bold uppercase tracking-wide">Action</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -1633,7 +1691,19 @@ const WccCertificatePreview = ({
                           <td className="px-3 py-2.5 text-slate-600">{line.place}</td>
                           <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{formatDate(line.dateOfCompletion)}</td>
                           <td className="px-3 py-2.5 text-slate-600">{line.uom}</td>
-                          <td className="whitespace-nowrap px-3 py-2.5 text-right font-medium tabular-nums">{line.quantity.toFixed(2)}</td>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-right font-medium tabular-nums">
+                            {linesEditable ? (
+                              <input
+                                type="number"
+                                value={quantityEdits[line.id] ?? String(line.quantity)}
+                                onChange={(e) => setLineQuantity(line.id)(e.target.value)}
+                                placeholder="0"
+                                className="w-20 border-b border-dashed border-gray-300 bg-transparent text-right outline-none focus:border-[#0D3A35]"
+                              />
+                            ) : (
+                              line.quantity.toFixed(2)
+                            )}
+                          </td>
                           <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">
                             {linesEditable ? (
                               <input
@@ -1648,6 +1718,18 @@ const WccCertificatePreview = ({
                             )}
                           </td>
                           <td className="whitespace-nowrap px-3 py-2.5 text-right font-bold tabular-nums text-slate-800">{line.rate ? (line.quantity * line.rate).toFixed(2) : '—'}</td>
+                          {linesEditable && (
+                            <td className="px-3 py-2.5 text-center">
+                              <button
+                                type="button"
+                                onClick={() => excludeLine(line.id)}
+                                title="Remove this line from the certificate"
+                                className="rounded-md p-1.5 text-red-500 hover:bg-red-50"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </td>
+                          )}
                         </tr>
                       ))}
                       <tr className="bg-[#eaf4f1] font-bold text-[#0D3A35]">
@@ -1655,6 +1737,7 @@ const WccCertificatePreview = ({
                         <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums">{totalQuantity.toFixed(2)}</td>
                         <td className="px-3 py-3" />
                         <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums">{totalValue ? totalValue.toFixed(2) : '—'}</td>
+                        {linesEditable && <td className="px-3 py-3" />}
                       </tr>
                     </tbody>
                   </table>

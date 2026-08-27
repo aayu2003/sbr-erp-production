@@ -12,6 +12,9 @@ import {
   Wheat,
 } from 'lucide-react';
 import getBaseUrl from '@/lib/config';
+import { getTaskDetailsBulk } from '@/lib/taskDetailsCache';
+import { getFarmerNames } from '@/lib/farmerNameCache';
+import { getAssignedSupervisorAndFieldManagers } from '@/lib/supervisorFieldManagerCache';
 import { TaskTimelinePanel, type TimelineTask, type TimelineFarm, type TimelineAssignment } from './TaskTimelinePanel';
 import PlotMapViewModal, { type MapViewTask } from './PlotMapViewModal';
 import WccCertificatePreview from './WccCertificatePreview';
@@ -203,16 +206,19 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
     const farmIds = Array.from(new Set(
       operationalWorkDone.map((w) => w.farm_id).filter((id): id is string => !!id && !farmerNames[id]),
     ));
-    farmIds.forEach((farmId) => {
-      if (fetchedOperationalFarmIds.current.has(farmId)) return;
-      fetchedOperationalFarmIds.current.add(farmId);
-      fetch(`${BASE_URL}/farmer_managment/get_farmer_details_from_farm_id/${farmId}`)
-        .then((res) => res.json())
-        .then((data: { farmer?: { farmer_name?: string } }) => {
-          const name = data?.farmer?.farmer_name;
-          if (name) setOperationalFarmerNames((prev) => ({ ...prev, [farmId]: name }));
-        })
-        .catch(() => {});
+    const idsToFetch = farmIds.filter((farmId) => !fetchedOperationalFarmIds.current.has(farmId));
+    if (idsToFetch.length === 0) return;
+    idsToFetch.forEach((farmId) => fetchedOperationalFarmIds.current.add(farmId));
+
+    getFarmerNames(idsToFetch).then((names) => {
+      setOperationalFarmerNames((prev) => {
+        const next = { ...prev };
+        idsToFetch.forEach((farmId) => {
+          const name = names[farmId];
+          if (name) next[farmId] = name;
+        });
+        return next;
+      });
     });
   }, [operationalWorkDone, farmerNames]);
 
@@ -229,16 +235,16 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
       ...workDone.map((w) => w.task_id),
       ...operationalWorkDone.map((w) => w.task_id),
     ].filter((taskId): taskId is string => Boolean(taskId))));
-    taskIds.forEach((taskId) => {
-      if (fetchedTaskIds.current.has(taskId)) return;
-      fetchedTaskIds.current.add(taskId);
+    const idsToFetch = taskIds.filter((taskId) => !fetchedTaskIds.current.has(taskId));
+    if (idsToFetch.length === 0) return;
+    idsToFetch.forEach((taskId) => fetchedTaskIds.current.add(taskId));
 
-      fetch(`${BASE_URL}/admin_all_task/get_task_details/${taskId}`)
-        .then((res) => res.json())
-        .then((data: ApiTaskDetails) => {
-          setTaskDetailsById((prev) => ({ ...prev, [taskId]: data || {} }));
-        })
-        .catch(() => setTaskDetailsById((prev) => ({ ...prev, [taskId]: {} })));
+    getTaskDetailsBulk(idsToFetch).then((details) => {
+      setTaskDetailsById((prev) => {
+        const next = { ...prev };
+        idsToFetch.forEach((taskId) => { next[taskId] = (details[taskId] ?? {}) as ApiTaskDetails; });
+        return next;
+      });
     });
   }, [workDone, operationalWorkDone]);
 
@@ -267,20 +273,22 @@ const WccModal = ({ vendorId, vendorName, vendorWoNumber, landIds, activities, f
   const fetchedAssignmentFarmIds = useRef<Set<string>>(new Set());
   useEffect(() => {
     const farmIds = Array.from(new Set(timelineTasks.map((t) => t.farmId)));
-    farmIds.forEach((farmId) => {
-      if (fetchedAssignmentFarmIds.current.has(farmId)) return;
-      fetchedAssignmentFarmIds.current.add(farmId);
+    const idsToFetch = farmIds.filter((farmId) => !fetchedAssignmentFarmIds.current.has(farmId));
+    if (idsToFetch.length === 0) return;
+    idsToFetch.forEach((farmId) => fetchedAssignmentFarmIds.current.add(farmId));
 
-      fetch(`${BASE_URL}/farmer_managment/get_assigned_supervisor_and_field_manager/${farmId}`)
-        .then((res) => res.json())
-        .then((data: { assigned_supervisor?: { supervisor_name?: string }; assigned_field_manager?: { name?: string } | { name?: string }[] }) => {
-          const fm = Array.isArray(data?.assigned_field_manager) ? data.assigned_field_manager[0] : data?.assigned_field_manager;
-          setAssignmentByFarm((prev) => ({
-            ...prev,
-            [farmId]: { supervisorName: data?.assigned_supervisor?.supervisor_name ?? '', fieldManagerName: fm?.name ?? '' },
-          }));
-        })
-        .catch(() => setAssignmentByFarm((prev) => ({ ...prev, [farmId]: { supervisorName: '', fieldManagerName: '' } })));
+    getAssignedSupervisorAndFieldManagers(idsToFetch).then((assignments) => {
+      setAssignmentByFarm((prev) => {
+        const next = { ...prev };
+        idsToFetch.forEach((farmId) => {
+          const assignment = assignments[farmId];
+          next[farmId] = {
+            supervisorName: assignment?.supervisorName ?? '',
+            fieldManagerName: assignment?.fieldManagers?.[0]?.name ?? '',
+          };
+        });
+        return next;
+      });
     });
   }, [timelineTasks]);
 
