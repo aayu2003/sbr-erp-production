@@ -35,6 +35,8 @@ Undo2,
 import { cn } from '@/lib/utils';
 import getBaseUrl from '@/lib/config';
 import { getFarmerNames } from '@/lib/farmerNameCache';
+import { getAssignedSupervisorAndFieldManagers } from '@/lib/supervisorFieldManagerCache';
+import { getTaskDetailsBulk } from '@/lib/taskDetailsCache';
 import { toast } from 'sonner';
 import { formatDateDDMMYYYY } from '@/lib/dateFormat';
 
@@ -777,6 +779,14 @@ const [splitTaskVendorB, setSplitTaskVendorB] = useState<{ vendorId: string; ven
 const [undoingSplitTaskKey, setUndoingSplitTaskKey] = useState<string | null>(null);
 const [loading, setLoading] = useState(true);
 const [error, setError] = useState<string | null>(null);
+
+// Full-page loading sequence shown only on the very first mount — a blank screen with a
+// progress bar walking through each stage of the initial data fetch, replaced by the real
+// calendar once everything it needs is in. Never reappears after that (filters/popups opening
+// later re-trigger the same underlying fetches, but this screen only gates first paint).
+const INITIAL_LOAD_STAGES = ['Fetching all cultivation calendar', 'Fetching land details', 'Fetching task details', 'Finishing up', 'Completed'] as const;
+const [initialLoadStage, setInitialLoadStage] = useState(0);
+const [showInitialLoader, setShowInitialLoader] = useState(true);
 const taskModalRef = useRef<HTMLDivElement | null>(null);
 const [filterBlockId, setFilterBlockId] = useState<string>('all');
 const [filterCropType, setFilterCropType] = useState<string>('all');
@@ -908,25 +918,22 @@ const fetchedTimelineFarmIds = useRef<Set<string>>(new Set());
 // whichever single day is currently open in the modal).
 useEffect(() => {
 const farmIds = Array.from(new Set(timelineTasks.map((task) => task.farmId)));
-farmIds.forEach((farmId) => {
-if (fetchedTimelineFarmIds.current.has(farmId)) return;
-fetchedTimelineFarmIds.current.add(farmId);
+const idsToFetch = farmIds.filter((farmId) => !fetchedTimelineFarmIds.current.has(farmId));
+if (idsToFetch.length === 0) return;
+idsToFetch.forEach((farmId) => fetchedTimelineFarmIds.current.add(farmId));
 
-fetch(`${BASE_URL}/farmer_managment/get_assigned_supervisor_and_field_manager/${farmId}`)
-.then((res) => res.json())
-.then((data: { assigned_supervisor?: { supervisor_name?: string }; assigned_field_manager?: { name?: string } | { name?: string }[] }) => {
-const fm = Array.isArray(data?.assigned_field_manager) ? data.assigned_field_manager[0] : data?.assigned_field_manager;
-setTimelineAssignmentByFarm((prev) => ({
-...prev,
-[farmId]: {
-supervisorName: data?.assigned_supervisor?.supervisor_name ?? '',
-fieldManagerName: fm?.name ?? '',
-},
-}));
-})
-.catch(() =>
-setTimelineAssignmentByFarm((prev) => ({ ...prev, [farmId]: { supervisorName: '', fieldManagerName: '' } })),
-);
+getAssignedSupervisorAndFieldManagers(idsToFetch).then((assignments) => {
+setTimelineAssignmentByFarm((prev) => {
+const next = { ...prev };
+idsToFetch.forEach((farmId) => {
+const assignment = assignments[farmId];
+next[farmId] = {
+supervisorName: assignment?.supervisorName ?? '',
+fieldManagerName: assignment?.fieldManagers?.[0]?.name ?? '',
+};
+});
+return next;
+});
 });
 }, [timelineTasks]);
 
@@ -939,26 +946,35 @@ useEffect(() => {
 const taskIds = Array.from(new Set(
 timelineTasks.filter((task) => task.statusTone === 'green' && task.taskId).map((task) => task.taskId as string)
 ));
-taskIds.forEach((taskId) => {
-if (fetchedTimelineTaskIds.current.has(taskId)) return;
-fetchedTimelineTaskIds.current.add(taskId);
+const idsToFetch = taskIds.filter((taskId) => !fetchedTimelineTaskIds.current.has(taskId));
+if (idsToFetch.length === 0) return;
+idsToFetch.forEach((taskId) => fetchedTimelineTaskIds.current.add(taskId));
 
-fetch(`${BASE_URL}/admin_all_task/get_task_details/${taskId}`)
-.then((res) => res.json())
-.then((data: { progress_images?: string[] }) => {
-setTimelineProgressImages((prev) => ({ ...prev, [taskId]: Array.isArray(data?.progress_images) ? data.progress_images : [] }));
-})
-.catch(() => setTimelineProgressImages((prev) => ({ ...prev, [taskId]: [] })));
+getTaskDetailsBulk(idsToFetch).then((details) => {
+setTimelineProgressImages((prev) => {
+const next = { ...prev };
+idsToFetch.forEach((taskId) => {
+const images = details[taskId]?.progress_images;
+next[taskId] = Array.isArray(images) ? (images as string[]) : [];
+});
+return next;
+});
 });
 }, [timelineTasks]);
 
 useEffect(() => {
+let cancelled = false;
 setLoading(true);
-Promise.allSettled([fetchCalendarData(), fetchFarmsById()]).then((results) => {
-const [calendarResult, farmsResult] = results;
+setInitialLoadStage(0);
 
+(async () => {
+const [calendarResult, farmsResult] = await Promise.allSettled([fetchCalendarData(), fetchFarmsById()]);
+if (cancelled) return;
+
+let calendarData: CalendarData = {};
 if (calendarResult.status === 'fulfilled') {
-setActivitiesData(calendarResult.value);
+calendarData = calendarResult.value;
+setActivitiesData(calendarData);
 } else {
 console.error(calendarResult.reason);
 setError('Failed to load calendar data');
@@ -971,7 +987,32 @@ console.error(farmsResult.reason);
 }
 
 setLoading(false);
-});
+setInitialLoadStage(1);
+
+// Supervisor/field manager + farmer names for every farm on the calendar — reuses the same
+// shared bulk caches the rest of the page already draws from (getAssignedSupervisor...,
+// getFarmerNames), so this just dedupes with whatever those effects independently trigger
+// rather than firing a second round of requests.
+const farmIds = Array.from(new Set(
+Object.values(calendarData).flat().map((a) => String(a?.farm_id || '').trim()).filter(Boolean)
+));
+setInitialLoadStage(2);
+await Promise.allSettled([
+getAssignedSupervisorAndFieldManagers(farmIds),
+getFarmerNames(farmIds),
+]);
+if (cancelled) return;
+
+setInitialLoadStage(3);
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (cancelled) return;
+setInitialLoadStage(4);
+await new Promise((resolve) => setTimeout(resolve, 400));
+if (cancelled) return;
+setShowInitialLoader(false);
+})();
+
+return () => { cancelled = true; };
 }, []);
 
 // Fetch supervisor + field manager whenever the day popup opens
@@ -981,29 +1022,11 @@ const activities = activitiesData[selectedDate] ?? [];
 const farmIds = [...new Set(activities.map((a) => a.farm_id).filter(Boolean))];
 if (farmIds.length === 0) return;
 setContactsById({});
-Promise.allSettled(
-farmIds.map((farmId) =>
-fetch(`${BASE_URL}/farmer_managment/get_assigned_supervisor_and_field_manager/${farmId}`)
-.then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
-.then((data) => ({ farmId, data }))
-.catch(() => ({ farmId, data: null }))
-)
-).then((results) => {
+getAssignedSupervisorAndFieldManagers(farmIds).then((assignments) => {
 const next: Record<string, { supervisorName: string; supervisorContact: string; fieldManagers: { name: string; contact: string }[] }> = {};
-for (const r of results) {
-if (r.status === 'fulfilled' && r.value?.data?.success) {
-const { farmId, data } = r.value;
-const sup = data.assigned_supervisor;
-const fms = Array.isArray(data.assigned_field_manager)
-? data.assigned_field_manager
-: data.assigned_field_manager ? [data.assigned_field_manager] : [];
-next[farmId] = {
-supervisorName:    sup?.supervisor_name ?? '',
-supervisorContact: sup?.suervisor_contact ?? sup?.supervisor_contact ?? '',
-fieldManagers:     fms.map((fm: any) => ({ name: fm.name ?? '', contact: fm.contact ?? '' })),
-};
-}
-}
+farmIds.forEach((farmId) => {
+next[farmId] = assignments[farmId] ?? { supervisorName: '', supervisorContact: '', fieldManagers: [] };
+});
 setContactsById(next);
 });
 }, [isModalOpen, selectedDate]);
@@ -1024,20 +1047,18 @@ const next = { ...prev };
 taskIds.forEach((id) => { next[id] = { loading: true, vendorId: '', vendorName: '' }; });
 return next;
 });
+getTaskDetailsBulk(taskIds).then((details) => {
+setTaskVendorById((prev) => {
+const next = { ...prev };
 taskIds.forEach((taskId) => {
-fetch(`${BASE_URL}/admin_all_task/get_task_details/${taskId}`)
-.then((res) => (res.ok ? res.json() : null))
-.catch(() => null)
-.then((data) => {
-const vd = data?.vendor_details;
-setTaskVendorById((prev) => ({
-...prev,
-[taskId]: {
+const vd = details[taskId]?.vendor_details as { vendor_id?: unknown; vendor_name?: unknown } | undefined;
+next[taskId] = {
 loading: false,
 vendorId: String(vd?.vendor_id ?? 'self'),
 vendorName: String(vd?.vendor_name ?? ''),
-},
-}));
+};
+});
+return next;
 });
 });
 }, [isModalOpen, selectedDate]);
@@ -1158,7 +1179,7 @@ farm_id: farmId,
 assignments: [{
 farm_id: farmId,
 assigned_area: Number(t.assigned_area) || 0,
-status: 'pending',
+status: t.status === 'completed' ? 'completed' : 'pending',
 plot: (t.plot ?? []) as PlotItem[],
 task_id: t.task_id,
 parent_task_id: t.parent_task_id,
@@ -2404,6 +2425,49 @@ onRemoveRow={(store) => removeEquipmentStoreRow(id, store)}
 </div>
 );
 };
+
+if (showInitialLoader) {
+return (
+<div className="flex min-h-screen w-full items-center justify-center bg-white">
+<div className="w-full max-w-sm px-6">
+<div className="mb-8 flex items-center justify-center gap-2.5">
+<CalendarIcon className="h-6 w-6 text-[#276152]" />
+<span className="text-lg font-bold text-[#0D3A35]">Cultivation Calendar</span>
+</div>
+<div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+<div
+className="h-full rounded-full bg-[#276152] transition-all duration-500 ease-out"
+style={{ width: `${((initialLoadStage + 1) / INITIAL_LOAD_STAGES.length) * 100}%` }}
+/>
+</div>
+<div className="mt-6 space-y-3">
+{INITIAL_LOAD_STAGES.map((label, idx) => {
+const isLast = idx === INITIAL_LOAD_STAGES.length - 1;
+const isDone = idx < initialLoadStage || (idx === initialLoadStage && isLast);
+const isActive = idx === initialLoadStage && !isLast;
+return (
+<div key={label} className="flex items-center gap-2.5 text-sm">
+{isDone ? (
+<CheckCircle2 className="h-4 w-4 shrink-0 text-[#276152]" />
+) : isActive ? (
+<div className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[#276152] border-t-transparent" />
+) : (
+<div className="h-4 w-4 shrink-0 rounded-full border-2 border-slate-200" />
+)}
+<span className={cn(
+'font-medium',
+isDone ? 'text-[#0D3A35]' : isActive ? 'font-bold text-[#0D3A35]' : 'text-slate-300',
+)}>
+{label}
+</span>
+</div>
+);
+})}
+</div>
+</div>
+</div>
+);
+}
 
 return (
 <div className="p-8 space-y-8 animate-in fade-in duration-300 min-h-screen bg-gray-50/50 font-sans">

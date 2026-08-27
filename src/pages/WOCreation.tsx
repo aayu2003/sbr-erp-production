@@ -108,13 +108,24 @@ const comparativeStatementNumber = (record: any, index: number) => {
   return `SBRPL/CS/${String(index + 1).padStart(3, '0')}`;
 };
 
-const approvedVendorName = (record: ComparativeModel) => {
+// get_NFA only ever returns approved_vendor_id, no name — record.vendors resolves it when the
+// approved vendor happens to be one of the indent's own quoters (the common case), but an HO
+// override outside the quote comparison has no name anywhere in that payload. vendorNameById
+// (the vendor directory, /purchase_flow/get_vendors) is the last-resort fallback before this
+// falls back to showing the raw id.
+const approvedVendorName = (record: ComparativeModel, vendorNameById: Record<string, string> = {}) => {
   const selectedVendorId = safe(record.hoSelectedVendorId);
   if (!selectedVendorId) return 'Not recorded';
 
-  return record.vendors?.find((vendor) =>
+  const matchedName = record.vendors?.find((vendor) =>
     [vendor.id, vendor.directoryVendorId].some((id) => safe(id) === selectedVendorId),
-  )?.name || selectedVendorId;
+  )?.name;
+  // mapNfaToComparative's own fallback vendor entry (pushed below when get_NFA has no name at
+  // all) defaults its name to the raw id itself — treat that placeholder as "no name" too, so
+  // the vendor-directory lookup still gets a chance to resolve a real one.
+  if (matchedName && matchedName !== selectedVendorId) return matchedName;
+
+  return vendorNameById[selectedVendorId] || selectedVendorId;
 };
 
 const totalForApprovedVendor = (record: ComparativeModel) => {
@@ -220,6 +231,29 @@ export default function WOCreation() {
   const [replyingQuestionId, setReplyingQuestionId] = useState<string | null>(null);
   const [pdfDownloading, setPdfDownloading] = useState(false);
   const [pdfPrinting, setPdfPrinting] = useState(false);
+  const [vendorNameById, setVendorNameById] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const baseUrl = String(getBaseUrl() ?? '').replace(/\/$/, '');
+        const request = (method: 'GET' | 'POST') => fetch(`${baseUrl}/purchase_flow/get_vendors`, { method, headers: { Accept: 'application/json' } });
+        let response = await request('GET');
+        if (response.status === 405) response = await request('POST');
+        if (!response.ok) return;
+        const payload = await response.json().catch(() => null);
+        const list: Array<Record<string, unknown>> = Array.isArray(payload?.vendors) ? payload.vendors : [];
+        if (cancelled) return;
+        setVendorNameById(Object.fromEntries(
+          list.map((vendor) => [safe(vendor.vendor_id), safe(vendor.vendor_name)]).filter(([id, name]) => id && name),
+        ));
+      } catch {
+        // Approved Vendor just falls back to whatever record.vendors already carries.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const refreshPoState = async () => {
     const approvals = await fetchPoApprovalsFromBackend();
@@ -275,10 +309,10 @@ export default function WOCreation() {
       record.comparisonId,
       record.indentId,
       record.hoSelectedVendorId,
-      approvedVendorName(record),
+      approvedVendorName(record, vendorNameById),
       ...(record.items || []).map((item) => item.partName),
     ].some((value) => safe(value).toLowerCase().includes(needle)));
-  }, [approvedRecords, query]);
+  }, [approvedRecords, query, vendorNameById]);
 
   const totalPoValue = approvedRecords.reduce((sum, record) =>
     createdOrders[record.indentId] ? sum + totalForApprovedVendor(record) : sum,
@@ -312,7 +346,7 @@ export default function WOCreation() {
       comparativeNo: record.comparisonNo || record.comparisonId || 'Not recorded',
       prNumber: record.indentId,
       poNumber: approvalRecord?.poNumber || orderNo || 'Not created',
-      approvedVendor: approvedVendorName(record),
+      approvedVendor: approvedVendorName(record, vendorNameById),
       itemDetails: (record.items || []).map((item) => item.partName || 'Item not recorded'),
       uoms: (record.items || []).map((item) => item.uom || '-'),
       quantities: (record.items || []).map((item) => numberOrZero(item.qty)),
@@ -450,7 +484,7 @@ export default function WOCreation() {
                     <td className="break-words px-2 py-3 text-center font-mono text-[11px] font-bold leading-4 text-[#0D3A35]">{record.comparisonNo || record.comparisonId || 'Not recorded'}</td>
                     <td className="break-words px-2 py-3 text-center font-mono text-[11px] font-semibold leading-4">{record.indentId}</td>
                     <td className="break-words px-2 py-3 text-center font-mono text-[11px] font-bold leading-4 text-[#0D3A35]">{approvalRecord?.poNumber || orderNo || 'Not created'}</td>
-                    <td className="break-words px-2 py-3 text-center font-semibold leading-4">{approvedVendorName(record)}</td>
+                    <td className="break-words px-2 py-3 text-center font-semibold leading-4">{approvedVendorName(record, vendorNameById)}</td>
                     <td className="space-y-0.5 px-2 py-3">{(record.items || []).map((item) => <div key={item.id} className="truncate font-semibold">{item.partName}</div>)}</td>
                     <td className="space-y-0.5 px-1 py-3 text-center">{(record.items || []).map((item) => <div key={item.id}>{item.uom || '—'}</div>)}</td>
                     <td className="space-y-0.5 px-1 py-3 text-center font-semibold tabular-nums">{(record.items || []).map((item) => <div key={item.id}>{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 }).format(item.qty)}</div>)}</td>

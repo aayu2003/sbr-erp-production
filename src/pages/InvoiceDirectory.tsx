@@ -104,6 +104,39 @@ function DocumentPreview({ document }: { document: InvoiceDocument }) {
   );
 }
 
+// Non-interactive, cropped-to-fit rendering of a PDF's first page — used as the live preview
+// filling a folder card. pointer-events-none so the card's own onClick still fires.
+function PdfFirstPagePreview({ url, label }: { url: string; label: string }) {
+  return (
+    <div className="relative h-full w-full overflow-hidden bg-white">
+      <iframe
+        src={`${url}#page=1&zoom=page-width&toolbar=0&navpanes=0&scrollbar=0&pagemode=none`}
+        title={`${label} first page preview`}
+        loading="lazy"
+        tabIndex={-1}
+        className="pointer-events-none absolute left-1/2 top-0 h-[86%] w-[116%] -translate-x-1/2 border-0 bg-white"
+      />
+    </div>
+  );
+}
+
+// Fills the body of a folder card with the actual document, not just an icon — so the card
+// itself reads as the invoice rather than a link to one.
+function CardDocumentPreview({ document }: { document: InvoiceDocument }) {
+  if (document.mimeType.startsWith("image/")) {
+    return <img src={document.url} alt={document.fileName} loading="lazy" className="h-full w-full object-cover" />;
+  }
+  if (document.mimeType === "application/pdf") {
+    return <PdfFirstPagePreview url={document.url} label={document.fileName} />;
+  }
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-400">
+      <FileText className="h-8 w-8" />
+      <p className="max-w-[80%] truncate text-[11px] font-semibold">{document.fileName}</p>
+    </div>
+  );
+}
+
 // Small square preview used on the folder card grid — an actual thumbnail of the file
 // rather than just its type name, so the card reads like a Drive folder at a glance.
 function DocumentThumbnail({ document }: { document: InvoiceDocument }) {
@@ -116,6 +149,39 @@ function DocumentThumbnail({ document }: { document: InvoiceDocument }) {
       ) : (
         <div className="flex h-full w-full flex-col items-center justify-center gap-1 text-slate-400"><FileText className="h-5 w-5" /></div>
       )}
+    </div>
+  );
+}
+
+// Full-screen preview, matching the click-to-preview pattern used across PurchaseFlow — any
+// document in a folder can be inspected on its own without entering Process Invoice.
+function DocumentPreviewModal({
+  folderLabel, document, onClose,
+}: {
+  folderLabel: string; document: InvoiceDocument; onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm sm:p-6"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+    >
+      <div className="flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/20 bg-white shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between gap-4 bg-[#0d473f] px-5 py-4 text-white">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/10"><FileText className="h-5 w-5" /></span>
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/60">{folderLabel} · {document.type}</p>
+              <h2 className="truncate text-base font-bold text-white">{document.fileName}</h2>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/20 bg-white/10 text-white transition hover:bg-white/20" aria-label="Close document preview"><X className="h-5 w-5" /></button>
+        </div>
+        <div className="min-h-0 flex-1 bg-slate-100 p-3 sm:p-4">
+          <div className="flex h-full items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-white p-3 shadow-inner">
+            <DocumentPreview document={document} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -440,6 +506,13 @@ export default function InvoiceDirectory() {
   const [processingFolder, setProcessingFolder] = useState<InvoiceFolder | null>(null);
   const [filterVendorId, setFilterVendorId] = useState("");
   const [filterOrderNumber, setFilterOrderNumber] = useState("");
+  const [previewTarget, setPreviewTarget] = useState<{ folder: InvoiceFolder; document: InvoiceDocument } | null>(null);
+  const [activeTab, setActiveTab] = useState<"pending" | "processed">("pending");
+
+  const openPreview = (folder: InvoiceFolder, document?: InvoiceDocument) => {
+    if (!document) { toast.error("This folder has no documents to preview."); return; }
+    setPreviewTarget({ folder, document });
+  };
 
   const loadFolders = () => {
     setFoldersLoading(true);
@@ -491,7 +564,10 @@ export default function InvoiceDirectory() {
 
   const vendorNameFor = (folder: InvoiceFolder) => folder.vendorName || vendors.find((vendor) => vendor.id === folder.vendorId)?.name || folder.vendorId || "Vendor not recorded";
 
-  const visibleFolders = folders.filter((folder) => {
+  const tabFolders = folders.filter((folder) => (activeTab === "processed" ? folder.processed : !folder.processed));
+  const pendingCount = folders.filter((folder) => !folder.processed).length;
+  const processedCount = folders.filter((folder) => folder.processed).length;
+  const visibleFolders = tabFolders.filter((folder) => {
     if (filterVendorId && folder.vendorId !== filterVendorId) return false;
     const orderQuery = filterOrderNumber.trim().toLowerCase();
     if (orderQuery && !folder.orderNumber.toLowerCase().includes(orderQuery)) return false;
@@ -548,6 +624,29 @@ export default function InvoiceDirectory() {
 
         {foldersError && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-sm font-semibold text-amber-800">{foldersError}</div>}
 
+        <div className="inline-flex w-fit items-center gap-1 rounded-xl border border-slate-200/80 bg-white p-1 shadow-[0_10px_28px_rgba(15,23,42,0.035)]">
+          <button
+            onClick={() => setActiveTab("pending")}
+            className={cn(
+              "inline-flex h-10 items-center justify-center gap-2 rounded-lg px-4 text-sm font-bold transition",
+              activeTab === "pending" ? "bg-[#0d5c4d] text-white" : "text-slate-500 hover:bg-slate-50",
+            )}
+          >
+            Pending
+            <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-extrabold", activeTab === "pending" ? "bg-white/20 text-white" : "bg-slate-100 text-slate-500")}>{pendingCount}</span>
+          </button>
+          <button
+            onClick={() => setActiveTab("processed")}
+            className={cn(
+              "inline-flex h-10 items-center justify-center gap-2 rounded-lg px-4 text-sm font-bold transition",
+              activeTab === "processed" ? "bg-[#0d5c4d] text-white" : "text-slate-500 hover:bg-slate-50",
+            )}
+          >
+            Processed
+            <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-extrabold", activeTab === "processed" ? "bg-white/20 text-white" : "bg-slate-100 text-slate-500")}>{processedCount}</span>
+          </button>
+        </div>
+
         {folders.length > 0 && (
           <div className="flex flex-col gap-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.035)] sm:flex-row sm:items-center">
             <div className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-[0.1em] text-slate-400">
@@ -586,49 +685,107 @@ export default function InvoiceDirectory() {
           <div className="flex min-h-[360px] flex-col items-center justify-center rounded-3xl border border-slate-200/80 bg-white px-6 py-12 text-center shadow-[0_18px_45px_rgba(15,23,42,0.05)]">
             <span className="rounded-2xl bg-[#edf5f2] p-4 text-[#6c9b90]"><Inbox className="h-8 w-8" /></span>
             <h3 className="mt-4 text-lg font-bold text-slate-800">
-              {foldersLoading ? "Loading invoice folders…" : isFiltered ? "No invoice folders match this filter" : "No invoice folders yet"}
+              {foldersLoading
+                ? "Loading invoice folders…"
+                : isFiltered
+                  ? "No invoice folders match this filter"
+                  : activeTab === "processed"
+                    ? "No processed invoice folders yet"
+                    : "No pending invoice folders"}
             </h3>
             <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">
-              {isFiltered ? "Try a different order number or vendor." : "Add an invoice and its supporting documents to create the first folder."}
+              {isFiltered
+                ? "Try a different order number or vendor."
+                : activeTab === "processed"
+                  ? "Folders show up here once they've been processed into a Bill Inward entry."
+                  : "Add an invoice and its supporting documents to create the first folder."}
             </p>
             {isFiltered ? (
               <button onClick={() => { setFilterVendorId(""); setFilterOrderNumber(""); }} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]">Clear filters</button>
-            ) : (
+            ) : activeTab === "pending" ? (
               <button onClick={() => setIsAddOpen(true)} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" /> Add Invoice</button>
-            )}
+            ) : null}
           </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {visibleFolders.map((folder) => (
-              <div key={folder.id} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_10px_28px_rgba(15,23,42,0.035)] transition hover:-translate-y-0.5 hover:border-[#8bbcaf] hover:shadow-[0_14px_34px_rgba(13,71,63,0.09)]">
-                <div className="flex items-start justify-between gap-3">
-                  <span className="rounded-xl bg-amber-50 p-3 text-amber-600"><Folder className="h-5 w-5" /></span>
-                  {folder.processed ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase text-emerald-700"><CheckCircle2 className="h-3 w-3" /> Processed</span>
-                  ) : (
-                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-extrabold uppercase text-slate-500">{folder.documents.length} file{folder.documents.length === 1 ? "" : "s"}</span>
+            {visibleFolders.map((folder) => {
+              const primary = folder.documents.find((document) => document.type === PRIMARY_DOCUMENT_TYPE) ?? folder.documents[0];
+              const otherDocs = folder.documents.filter((document) => document.id !== primary?.id);
+              return (
+                <div key={folder.id} className="flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_10px_28px_rgba(15,23,42,0.035)] transition hover:-translate-y-0.5 hover:border-[#8bbcaf] hover:shadow-[0_14px_34px_rgba(13,71,63,0.09)]">
+                  {/* Header on top of the preview — the invoice's own details, not just the file's */}
+                  <div className="shrink-0 border-b border-slate-100 px-4 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-600"><Folder className="h-4 w-4" /></span>
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-bold text-slate-900" title={folder.label}>{folder.label}</p>
+                          <p className="truncate text-xs font-semibold text-slate-500" title={vendorNameFor(folder)}>{vendorNameFor(folder)}</p>
+                        </div>
+                      </div>
+                      {folder.processed ? (
+                        <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase text-emerald-700"><CheckCircle2 className="h-3 w-3" /> Processed</span>
+                      ) : (
+                        <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-extrabold uppercase text-slate-500">{folder.documents.length} file{folder.documents.length === 1 ? "" : "s"}</span>
+                      )}
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-medium text-slate-400">
+                      <span>{new Date(folder.createdAt).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                      {folder.orderNumber && <span>· {folder.orderNumber}</span>}
+                    </div>
+                  </div>
+
+                  {/* The card body IS the preview — the live document, not a link to one */}
+                  <div
+                    role={primary ? "button" : undefined}
+                    tabIndex={primary ? 0 : undefined}
+                    onClick={() => primary && openPreview(folder, primary)}
+                    onKeyDown={(event) => { if (primary && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openPreview(folder, primary); } }}
+                    className={cn("relative min-h-[220px] flex-1 overflow-hidden bg-slate-50", primary && "cursor-pointer outline-none")}
+                    title={primary ? "Preview invoice" : undefined}
+                  >
+                    {primary ? <CardDocumentPreview document={primary} /> : (
+                      <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-300">
+                        <Inbox className="h-8 w-8" />
+                        <p className="text-xs font-semibold">No documents</p>
+                      </div>
+                    )}
+                    {otherDocs.length > 0 && (
+                      <span className="absolute bottom-2 right-2 rounded-full bg-slate-900/70 px-2 py-1 text-[10px] font-bold text-white backdrop-blur">+{otherDocs.length} more</span>
+                    )}
+                  </div>
+
+                  {otherDocs.length > 0 && (
+                    <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-t border-slate-100 px-4 py-2.5">
+                      {otherDocs.map((document) => (
+                        <button
+                          key={document.id}
+                          type="button"
+                          onClick={() => openPreview(folder, document)}
+                          className="shrink-0 transition hover:-translate-y-0.5"
+                          aria-label={`Preview ${document.type}`}
+                        >
+                          <DocumentThumbnail document={document} />
+                        </button>
+                      ))}
+                    </div>
                   )}
+
+                  <div className="flex shrink-0 items-center gap-2 border-t border-slate-100 px-4 py-3">
+                    <button onClick={() => handleProcess(folder)} className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-3 text-sm font-bold text-white hover:bg-[#0a4b3f]">{folder.processed ? "Reprocess Invoice" : "Process Invoice"}</button>
+                    <button onClick={() => removeFolder(folder)} className="rounded-xl p-2.5 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Remove from view"><Trash2 className="h-4 w-4" /></button>
+                  </div>
                 </div>
-                <h3 className="mt-4 truncate text-base font-bold text-slate-900" title={folder.label}>{folder.label}</h3>
-                <p className="truncate text-xs font-semibold text-slate-500" title={vendorNameFor(folder)}>{vendorNameFor(folder)}</p>
-                <p className="mt-0.5 text-xs font-medium text-slate-400">{new Date(folder.createdAt).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
-                <div className="mt-3 flex items-center gap-2">
-                  {folder.documents.slice(0, 2).map((document) => <DocumentThumbnail key={document.id} document={document} />)}
-                  {folder.documents.length > 2 && (
-                    <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-100 text-sm font-bold text-slate-500">+{folder.documents.length - 2}</div>
-                  )}
-                </div>
-                <div className="mt-4 flex items-center gap-2">
-                  <button onClick={() => handleProcess(folder)} className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-3 text-sm font-bold text-white hover:bg-[#0a4b3f]">{folder.processed ? "Reprocess Invoice" : "Process Invoice"}</button>
-                  <button onClick={() => removeFolder(folder)} className="rounded-xl p-2.5 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Remove from view"><Trash2 className="h-4 w-4" /></button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
 
       {isAddOpen && <AddInvoiceModal vendors={vendors} vendorsLoading={vendorsLoading} vendorsError={vendorsError} onClose={() => setIsAddOpen(false)} onCreate={addFolder} />}
+      {previewTarget && (
+        <DocumentPreviewModal folderLabel={previewTarget.folder.label} document={previewTarget.document} onClose={() => setPreviewTarget(null)} />
+      )}
       {processingFolder && (
         <BillInwardModal
           module={billsPayablesModule}

@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowRight,
+  ArrowUpRight,
   BookOpen,
   Calculator,
   CheckCircle2,
@@ -98,11 +99,21 @@ export type FinanceRecord = {
   supportingDocumentNames?: string[];
   sourceBillId?: string;
   sourceBillInwardNo?: string;
+  // Set once a PRR has actually been created for this Bill Inward invoice (admin_accounts_invoice.
+  // prr_number/payment_id) — drives the Outstanding tab's "Mark as Paid" action.
+  prrNumber?: string;
+  paymentId?: string;
   prrDetails?: PRRDetails;
   // Set once a PRR is approved — what happens next depends on PRR Type (see
   // PRR_TYPE_SKIPS_PAYMENT_DETAILS). Undefined until then; "ledger_posted" is terminal.
   prrStage?: "awaiting_payment_details" | "awaiting_ledger_posting" | "ledger_posted";
   paymentDetails?: { utr?: string; paymentDate?: string; paymentMode?: string; chequeNumber?: string };
+  // Set when this Bill Inward is itself the leftover balance split off a partially-paid invoice
+  // (see mark_payment_paid's split_from/split_note) — splitFrom is the root invoice_id every
+  // split of the same original bill traces back to, splitNote is the auto-generated "X%
+  // remaining against ..." narration shown on its card.
+  splitFrom?: string;
+  splitNote?: string;
 };
 
 // One row of the PRR's budget allocation — a specific line item within a specific budget,
@@ -456,7 +467,8 @@ const nextPaymentRequestNumber = (records: FinanceRecord[]) => {
 const invoiceStatusLabel = (invoice: Record<string, unknown>): string => {
   const ledger = String(invoice.ledger_entery_status ?? "").toLowerCase();
   const director = String(invoice.director_approval_status ?? "").toLowerCase();
-  if (["posted", "paid"].includes(ledger)) return "Paid";
+  const prrStatus = String(invoice.PRR_status ?? "").toLowerCase();
+  if (prrStatus === "paid" || ["posted", "paid"].includes(ledger)) return "Paid";
   if (director === "approved") return "Verified";
   return "Pending Approval";
 };
@@ -505,6 +517,9 @@ const mapInvoiceToRecord = (invoice: Record<string, unknown>): FinanceRecord => 
     poWoReference: orderNumber || "NA",
     grnServiceReference: grnWccDoc ? String(grnWccDoc.document_number ?? "") : "",
     department: String(purchaseOrder.department ?? ""),
+    placeOfSupply: String(purchaseOrder.place_of_supply ?? ""),
+    project: String(purchaseOrder.project ?? ""),
+    site: String(purchaseOrder.site ?? ""),
     tdsApplicable: tax.tds_applicable ? "Yes" : "No",
     paymentTerms: String(tax.payment_terms ?? ""),
     attachmentName: invoiceDetails.invoice_doc_url ? String(invoiceDetails.invoice_doc_url).split("/").pop() || "Invoice document" : "",
@@ -516,6 +531,10 @@ const mapInvoiceToRecord = (invoice: Record<string, unknown>): FinanceRecord => 
     ),
     status: invoiceStatusLabel(invoice),
     ledgerEntryStatus: String(invoice.ledger_entery_status ?? ""),
+    prrNumber: invoice.prr_number ? String(invoice.prr_number) : "",
+    paymentId: invoice.payment_id ? String(invoice.payment_id) : "",
+    splitFrom: invoice.split_from ? String(invoice.split_from) : "",
+    splitNote: invoice.split_note ? String(invoice.split_note) : "",
     notes: "",
   };
 };
@@ -527,8 +546,20 @@ const mergeInvoiceRecords = (previous: FinanceRecord[], fetched: FinanceRecord[]
   const previousById = new Map(previous.map((record) => [record.id, record]));
   const merged = fetched.map((record) => {
     const existing = previousById.get(record.id);
-    // ledgerEntryStatus has no backend update endpoint yet either — same reasoning as status.
-    return existing ? { ...record, status: existing.status, ledgerEntryStatus: existing.ledgerEntryStatus } : record;
+    if (!existing) return record;
+    // "Verified" is real backend state (director_approval_status, set by the real
+    // update_invoice_approval_status call) — always trust the fresh fetch for it. Only "Paid"
+    // (markBillPaid) and a completed ledger entry are truly local-only with no backend field
+    // of their own, so those are the only local values worth surviving a refetch. Blindly
+    // preserving *any* cached status by id (the old behaviour) meant a reused invoice_id
+    // (e.g. after the backend table is cleared/reset, or a new financial year restarts
+    // numbering) would silently inherit a stale "Verified"/"Paid" tag from an unrelated old
+    // record that happened to share the same id.
+    return {
+      ...record,
+      status: existing.status === "Paid" ? "Paid" : record.status,
+      ledgerEntryStatus: existing.ledgerEntryStatus === "completed" ? "completed" : record.ledgerEntryStatus,
+    };
   });
   const fetchedIds = new Set(fetched.map((record) => record.id));
   const untouched = previous.filter((record) => !fetchedIds.has(record.id));
@@ -721,28 +752,36 @@ const loadAccountingDimensionDefaults = (): AccountingDimensions => {
 // matter what was configured in Accounting Master. Only Active, direct-posting-eligible
 // cost centres are offered — "Parent / Group" centres exist purely for hierarchy roll-up
 // and can't take a direct posting (see CostCentreMaster.tsx's "Posting Allowed" state).
-const useAccountingDimensions = (): AccountingDimensions => {
+export const useAccountingDimensions = (): AccountingDimensions => {
   const [dimensions, setDimensions] = useState<AccountingDimensions>(loadAccountingDimensionDefaults);
   useEffect(() => {
     let cancelled = false;
     const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
     (async () => {
       try {
-        const [centresRes, attributionsRes] = await Promise.all([
+        const [centresRes, attributionsRes, departmentsRes] = await Promise.all([
           fetch(`${baseUrl}/admin_accounting_masters/list/COST_CENTRE`, { headers: { Accept: "application/json" } }),
           fetch(`${baseUrl}/admin_accounting_masters/list/COST_ATTRIBUTION`, { headers: { Accept: "application/json" } }),
+          fetch(`${baseUrl}/admin_accounting_masters/list/DEPARTMENT`, { headers: { Accept: "application/json" } }),
         ]);
         const centresPayload = centresRes.ok ? await centresRes.json().catch(() => null) : null;
         const attributionsPayload = attributionsRes.ok ? await attributionsRes.json().catch(() => null) : null;
+        const departmentsPayload = departmentsRes.ok ? await departmentsRes.json().catch(() => null) : null;
         const centreItems: Array<Record<string, unknown>> = Array.isArray(centresPayload?.data) ? centresPayload.data : [];
         const attributionItems: Array<Record<string, unknown>> = Array.isArray(attributionsPayload?.data) ? attributionsPayload.data : [];
+        const departmentItems: Array<Record<string, unknown>> = Array.isArray(departmentsPayload?.data) ? departmentsPayload.data : [];
         const costCentres = centreItems
           .filter((item) => String(item.status ?? "") === "Active" && Boolean(item.directPosting))
+          .map((item) => ({ id: String(item.item_id ?? ""), code: String(item.code ?? ""), name: String(item.name ?? "") }));
+        // Department is its own master type now (Project superset → Department Onboarding),
+        // not folded into Cost Centre's "type" field anymore.
+        const departments = departmentItems
+          .filter((item) => String(item.status ?? "") === "Active")
           .map((item) => ({ id: String(item.item_id ?? ""), code: String(item.code ?? ""), name: String(item.name ?? "") }));
         const costAttributions = attributionItems
           .filter((item) => String(item.status ?? "") === "Active")
           .map((item) => ({ id: String(item.item_id ?? ""), code: String(item.code ?? ""), name: String(item.name ?? ""), level: String(item.level ?? "") }));
-        if (!cancelled) setDimensions((current) => ({ ...current, costCentres, costAttributions }));
+        if (!cancelled) setDimensions((current) => ({ ...current, costCentres, departments, costAttributions }));
       } catch {
         // Accounting Master unreachable — PRR form still works, just without live dimension options.
       }
@@ -845,6 +884,20 @@ export function BillInwardModal({ module, tab, existing, onClose, onSaved, initi
     void loadVendors();
     return () => { cancelled = true; };
   }, []);
+
+  // Selecting a vendor from the dropdown sets both vendorId and party (see its onChange
+  // below), but vendorId can also arrive pre-filled (initialVendorId, from an Invoice
+  // Directory folder that only resolved an ID and not a name) without ever going through
+  // that onChange — leaving party silently blank while the dropdown still shows the right
+  // vendor selected. Keeping party in sync with the loaded vendor directory here, regardless
+  // of how vendorId was set, is what actually saved to the backend as vendor_name.
+  useEffect(() => {
+    const vendorId = String(form.vendorId ?? "").trim();
+    if (!vendorId) return;
+    const vendor = vendors.find((item) => item.id === vendorId);
+    if (vendor?.name && vendor.name !== form.party) update("party", vendor.name);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.vendorId, vendors]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1144,6 +1197,9 @@ export function BillInwardModal({ module, tab, existing, onClose, onSaved, initi
             order_number: hasOrderReference ? form.poWoReference : "",
             cupporting_documents: cupportingDocuments,
             department: form.department || "",
+            place_of_supply: form.placeOfSupply || "",
+            project: form.project || "",
+            site: form.site || "",
           },
           tax_details: {
             cgst_percentage: base > 0 ? (Number(form.cgstAmount || 0) / base) * 100 : 0,
@@ -1444,6 +1500,139 @@ const initialPrrDetails = (record: FinanceRecord, bill?: FinanceRecord): PRRDeta
     ...record.prrDetails,
   };
 };
+
+// The admin_payment_flow row a backend-tracked PRR actually lives in — same shape the PRR
+// Module fetches from get_payment_flow, structurally compatible with whatever richer type the
+// caller (PRRModule's "Sent for Approval" preview, PRRApprovalPanel's director review) uses.
+export type PrrPaymentFlowLike = {
+  payment_id?: string;
+  prr_number?: string;
+  vendor_name?: string;
+  vendor_id?: string;
+  order_number?: string;
+  source_invoice_id?: string;
+  created_at?: string;
+  admin_ops_signature?: string;
+  director_signature?: string;
+  payment_request_dict?: {
+    payment?: { payment_amount?: number; actual_payable_amount?: number; remarks?: string };
+    tds_tax_details?: { applicable?: boolean; section?: string; rate?: number; amount?: number };
+  };
+  // Everything the Create PRR popup captured with no home in send_for_approval's own
+  // admin_accounts_prr shape — stashed here by create_and_submit_prr.
+  prr_form_extra?: {
+    prr_type?: string; requesting_department?: string; priority?: string; cost_centre?: string; cost_attribution?: string;
+    project_cluster?: string; land_site?: string; payment_mode?: string; payment_terms?: string; impact?: string;
+    payee_type?: string; pan?: string; basic_amount?: number; taxable_amount?: number; cgst?: number; sgst?: number; igst?: number;
+    other_charges?: number; gross_invoice_amount?: number; advance_adjusted?: number; note_adjustment?: number; retention_amount?: number;
+    other_deduction?: number; rcm_applicable?: boolean; accounting_narration?: string; bank_account_from?: string; payment_extent?: string;
+    requested_payment_amount?: number; accounts_remarks?: string; due_date?: string;
+    budget_lines?: Array<{ key?: string; budgetId?: string; budgetName?: string; category?: string; lineItem?: string; lineItemId?: string; amount?: number }>;
+  };
+};
+
+// The admin_accounts_prr row itself, as returned by GET /admin_accounts/get_prr/{prr_number}.
+export type PrrApiRecordLike = {
+  prr_number?: string;
+  header?: { prr_date?: string; prr_type?: string; requested_by?: string; requesting_department?: string; invoice_date?: string };
+  party_details?: { vendor_id?: string; vendor_name?: string; vendor_code?: string; gstin?: string; pan?: string };
+  reference_details?: { order_number?: string; grn?: string[]; wcc?: string[]; log_book?: string[] };
+  amount_details?: { net_payable_amount?: number; actual_payable_amount?: number; remarks?: string };
+  status?: string;
+  supporting_document_details?: Array<{ document?: string; doc_link?: string }>;
+};
+
+// Reconstructs the exact same {record, details} pair the Create PRR popup builds live, but from
+// what actually got persisted (the payment-flow row + its admin_accounts_prr record) instead of
+// from in-progress form state — so any view of an already-sent PRR (PRR Module's "Sent for
+// Approval" tab, the director's PRRApprovalPanel) renders through the identical PrrDocumentPreview
+// component and looks identical to the "Ready to Draft" live preview, not a different document.
+export function buildPrrPreviewFromPaymentFlow(flow: PrrPaymentFlowLike, prr: PrrApiRecordLike | null): { details: PRRDetails; record: FinanceRecord } {
+  const extra = flow.prr_form_extra ?? {};
+  const payment = flow.payment_request_dict?.payment;
+  const tds = flow.payment_request_dict?.tds_tax_details;
+  const grnWcc = [...(prr?.reference_details?.grn ?? []), ...(prr?.reference_details?.wcc ?? [])].join(", ");
+
+  const details: PRRDetails = {
+    prrType: extra.prr_type || prr?.header?.prr_type || "Payment",
+    requestingDepartment: extra.requesting_department || prr?.header?.requesting_department || "",
+    requestedBy: prr?.header?.requested_by || "",
+    priority: extra.priority || "Normal",
+    impact: extra.impact || "",
+    payeeType: extra.payee_type || "Vendor",
+    vendorCode: prr?.party_details?.vendor_code || flow.vendor_id || "",
+    gstin: prr?.party_details?.gstin || "",
+    pan: extra.pan || prr?.party_details?.pan || "",
+    bankAccount: "",
+    paymentAgainst: prr?.reference_details?.order_number ? "PO" : "Invoice",
+    invoiceNumber: flow.source_invoice_id || "",
+    invoiceDate: prr?.header?.invoice_date || "",
+    costCentre: extra.cost_centre || "",
+    costAttribution: extra.cost_attribution || "",
+    projectCluster: extra.project_cluster || "",
+    landSite: extra.land_site || "",
+    basicAmount: Number(extra.basic_amount) || 0,
+    taxableAmount: Number(extra.taxable_amount) || 0,
+    cgst: Number(extra.cgst) || 0,
+    sgst: Number(extra.sgst) || 0,
+    igst: Number(extra.igst) || 0,
+    otherCharges: Number(extra.other_charges) || 0,
+    grossInvoiceAmount: Number(extra.gross_invoice_amount) || Number(payment?.payment_amount) || 0,
+    advanceAdjusted: Number(extra.advance_adjusted) || 0,
+    noteAdjustment: Number(extra.note_adjustment) || 0,
+    retentionAmount: Number(extra.retention_amount) || 0,
+    tdsDeduction: Number(tds?.amount) || 0,
+    otherDeduction: Number(extra.other_deduction) || 0,
+    netPayableAmount: Number(prr?.amount_details?.net_payable_amount ?? payment?.payment_amount) || 0,
+    actualPayableAmount: Number(prr?.amount_details?.actual_payable_amount ?? payment?.actual_payable_amount) || 0,
+    tdsApplicable: tds?.applicable ? "Yes" : "No",
+    tdsSection: tds?.section || "",
+    tdsRate: Number(tds?.rate) || 0,
+    tdsBaseAmount: Number(extra.taxable_amount) || 0,
+    tdsAmount: Number(tds?.amount) || 0,
+    rcmApplicable: extra.rcm_applicable ? "Yes" : "No",
+    accountingCostCentre: extra.cost_centre || "",
+    budgetLines: (extra.budget_lines ?? []).map((line) => ({
+      key: line.key || `${line.budgetId ?? ""}::${line.lineItemId ?? ""}`,
+      budgetId: line.budgetId || "",
+      budgetName: line.budgetName || "",
+      category: line.category || "",
+      lineItem: line.lineItem || "",
+      lineItemId: line.lineItemId || "",
+      amount: Number(line.amount) || 0,
+    })),
+    accountingNarration: extra.accounting_narration || "",
+    paymentMode: extra.payment_mode || "NEFT",
+    paymentTerms: extra.payment_terms || "",
+    bankAccountFrom: extra.bank_account_from || "",
+    paymentExtent: extra.payment_extent || "Full Payment",
+    requestedPaymentAmount: Number(extra.requested_payment_amount) || Number(payment?.payment_amount) || 0,
+    supportingDocuments: (prr?.supporting_document_details ?? []).map((doc) => doc.document || "").filter(Boolean),
+    requesterRemarks: payment?.remarks || "",
+    accountsRemarks: extra.accounts_remarks || "",
+    preparedBy: flow.admin_ops_signature || "",
+    approvedBy: flow.director_signature || "",
+  };
+
+  const record: FinanceRecord = {
+    id: flow.payment_id || "",
+    module: "payments-receipts",
+    tab: "Requests",
+    entryType: "Payment Request / PRR",
+    reference: flow.prr_number || "Pending",
+    party: flow.vendor_name || prr?.party_details?.vendor_name || "",
+    date: prr?.header?.prr_date || flow.created_at || "",
+    dueDate: extra.due_date || "",
+    amount: details.requestedPaymentAmount || details.netPayableAmount,
+    status: prr?.status || "Pending Director Approval",
+    notes: details.accountingNarration || details.requesterRemarks,
+    poWoReference: flow.order_number || prr?.reference_details?.order_number || "",
+    grnServiceReference: grnWcc,
+    sourceBillInwardNo: flow.source_invoice_id || "",
+  };
+
+  return { details, record };
+}
 
 // TYPE 1 PRRs (everything except "Accounting") land here once approved — how it was actually
 // paid, captured before the ledger entry gets posted. Reachable only from the "Receipts" tab's
@@ -1969,7 +2158,7 @@ function EntryModal(props: EntryModalProps) {
   return isBillInward ? <BillInwardModal {...props} /> : <GenericEntryModal {...props} />;
 }
 
-function DocumentFitFrame({ pageWidth, children }: { pageWidth: number; children: ReactNode }) {
+export function DocumentFitFrame({ pageWidth, children }: { pageWidth: number; children: ReactNode }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [fitScale, setFitScale] = useState(1);
@@ -2140,10 +2329,306 @@ function ExactPurchaseOrderPreview({ order }: { order: Record<string, unknown> }
   return <MakePurchaseOrderPopup open comparative={comparative} vendorId={vendorId} poNumber={poNumber} onClose={() => undefined} variant="inline" inlineSimulatePrint reviewOnly documentStatus="approved" />;
 }
 
+// Non-interactive, cropped-to-fit rendering of a PDF's first page — used as the Inward card's
+// live body preview, same recipe as Invoice Directory's own card preview.
+function BillPdfFirstPagePreview({ url }: { url: string }) {
+  return (
+    <div className="relative h-full w-full overflow-hidden bg-white">
+      <iframe
+        src={`${url}#page=1&zoom=page-width&toolbar=0&navpanes=0&scrollbar=0&pagemode=none`}
+        title="Invoice first page preview"
+        loading="lazy"
+        tabIndex={-1}
+        className="pointer-events-none absolute left-1/2 top-0 h-[86%] w-[116%] -translate-x-1/2 border-0 bg-white"
+      />
+    </div>
+  );
+}
+
+function BillCardPreview({ url }: { url: string }) {
+  const isImage = /\.(png|jpe?g|webp|gif)(\?|#|$)/i.test(url);
+  if (isImage) return <img src={url} alt="Invoice preview" loading="lazy" className="h-full w-full object-cover" />;
+  return <BillPdfFirstPagePreview url={url} />;
+}
+
+// Shared full-screen shell for every card-triggered preview below (the invoice itself, or a
+// linked PO/GRN reference) — same header/close-button chrome as Invoice Directory's preview.
+function CardPreviewModal({
+  eyebrow, title, onClose, children,
+}: {
+  eyebrow: string; title: string; onClose: () => void; children: ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm sm:p-6"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+    >
+      <div className="flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/20 bg-white shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between gap-4 bg-[#0d473f] px-5 py-4 text-white">
+          <div className="min-w-0">
+            <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/60">{eyebrow}</p>
+            <h2 className="truncate text-base font-bold text-white">{title}</h2>
+          </div>
+          <button type="button" onClick={onClose} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/20 bg-white/10 text-white transition hover:bg-white/20" aria-label="Close preview"><X className="h-5 w-5" /></button>
+        </div>
+        <div className="min-h-0 flex-1 bg-slate-100 p-3 sm:p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// Full preview of the Bill Inward's own tax invoice document, opened by clicking an Inward
+// card's body.
+function InvoiceDocumentPreviewModal({ record, onClose }: { record: FinanceRecord; onClose: () => void }) {
+  return (
+    <CardPreviewModal eyebrow={`Bill Inward · ${record.billInwardNo || record.reference}`} title={record.attachmentName || "Tax Invoice"} onClose={onClose}>
+      <div className="h-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-inner">
+        {record.attachmentUrl ? (
+          <MediaPreviewFrame name={record.attachmentName || "Tax Invoice"} type={record.attachmentType || "application/pdf"} url={record.attachmentUrl} />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+            <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400"><FileText className="h-7 w-7" /></span>
+            <p className="font-bold text-slate-900">No invoice document on file</p>
+          </div>
+        )}
+      </div>
+    </CardPreviewModal>
+  );
+}
+
+// Resolves and previews whichever real record (Purchase Order / GRN / WCC certificate) a Bill
+// Inward's PO or GRN reference points at — same lookups BillVerificationPreview's own linked-
+// document effect uses, kept separate here since the card's "oblique arrow" opens straight into
+// just this one document rather than the full bill preview.
+function ReferenceDocumentPreviewModal({
+  record, kind, onClose,
+}: {
+  record: FinanceRecord; kind: "order" | "completion"; onClose: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [linkedPurchaseOrder, setLinkedPurchaseOrder] = useState<Record<string, unknown> | null>(null);
+  const [linkedGrn, setLinkedGrn] = useState<GRNRecord | null>(null);
+  const [fallback, setFallback] = useState<{ url: string; type: string } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setLinkedPurchaseOrder(null);
+    setLinkedGrn(null);
+    setFallback(null);
+    const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+    const absoluteUrl = (value: string) => (/^(https?:|blob:|data:)/i.test(value) ? value : `${baseUrl}/${value.replace(/^\//, "")}`);
+
+    const load = async () => {
+      try {
+        if (kind === "order" && record.poWoReference && record.poWoReference !== "NA" && baseUrl) {
+          const response = await fetch(`${baseUrl}/purchase_flow/get_all_purchase_orders`, { headers: { Accept: "application/json" } });
+          const payload = response.ok ? await response.json().catch(() => null) : null;
+          const orders: Record<string, unknown>[] = Array.isArray(payload?.purchase_orders) ? payload.purchase_orders : [];
+          const selectedOrder = orders.find((order) => {
+            const quote = order.purchase_quote && typeof order.purchase_quote === "object" ? order.purchase_quote as Record<string, unknown> : {};
+            return [order.order_number, quote.order_number, quote.poNo, quote.po_no].some((value) => String(value ?? "").trim() === record.poWoReference);
+          });
+          if (active && selectedOrder) setLinkedPurchaseOrder(selectedOrder);
+        } else if (kind === "completion" && record.grnServiceReference && record.grnServiceReference !== "NA") {
+          if (record.referenceType === "PO") {
+            const grn = await getGrnById(record.grnServiceReference);
+            if (active) setLinkedGrn(grn);
+          } else if (record.referenceType === "WO" && baseUrl) {
+            const response = await fetch(`${baseUrl}/admin_wcc_certificate/get_by_order/${encodeURIComponent(record.poWoReference || "")}`, { headers: { Accept: "application/json" } });
+            const payload = response.ok ? await response.json().catch(() => null) : null;
+            const certificates: Record<string, unknown>[] = Array.isArray(payload?.certificates) ? payload.certificates : [];
+            const certificate = certificates.find((item) => [item.certificate_id, item.wcc_number].some((value) => String(value ?? "").trim() === record.grnServiceReference));
+            const rawUrl = certificate ? String(certificate.document_url ?? certificate.doc_url ?? certificate.file_url ?? certificate.certificate_url ?? "").trim() : "";
+            if (active && rawUrl) setFallback({ url: absoluteUrl(rawUrl), type: "application/pdf" });
+          }
+        }
+      } catch {
+        // Surfaced below as "could not be loaded" — the reference itself remains visible.
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+    void load();
+    return () => { active = false; };
+  }, [record.poWoReference, record.grnServiceReference, record.referenceType, kind]);
+
+  const isOrder = kind === "order";
+  const referenceNumber = (isOrder ? record.poWoReference : record.grnServiceReference) || "—";
+  const referenceLabel = isOrder ? (record.referenceType || "Order") : record.referenceType === "WO" ? "WCC / Service Completion" : "Goods Receipt Note";
+
+  return (
+    <CardPreviewModal eyebrow={`${referenceLabel} Reference`} title={referenceNumber} onClose={onClose}>
+      <div className="h-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-inner">
+        {loading ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-[#0d5c4d]"><RefreshCw className="h-8 w-8 animate-spin" /><p className="text-sm font-bold">Loading linked document…</p></div>
+        ) : isOrder && linkedPurchaseOrder ? (
+          <DocumentFitFrame pageWidth={794}><ExactPurchaseOrderPreview order={linkedPurchaseOrder} /></DocumentFitFrame>
+        ) : !isOrder && linkedGrn ? (
+          <DocumentFitFrame pageWidth={1100}><GrnDocumentPreview grn={linkedGrn} /></DocumentFitFrame>
+        ) : fallback ? (
+          <MediaPreviewFrame name={referenceNumber} type={fallback.type} url={fallback.url} />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+            <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-50 text-amber-600"><FileText className="h-7 w-7" /></span>
+            <p className="font-bold text-slate-900">This document could not be loaded</p>
+            <p className="text-sm text-slate-500">The linked {referenceLabel.toLowerCase()} record wasn't found.</p>
+          </div>
+        )}
+      </div>
+    </CardPreviewModal>
+  );
+}
+
+// Read-only preview of a Payment Request / PRR — the same formatted document PrrModal renders
+// live in its own "Live PRR Preview" pane, just without the surrounding editable form (opening
+// PrrModal itself on an already-submitted PRR re-primes it as an editable Draft, which is not
+// what a preview click should do).
+function PrrDocumentPreviewModal({
+  record: prrRecord, linkedBill, onClose,
+}: {
+  record: FinanceRecord; linkedBill?: FinanceRecord; onClose: () => void;
+}) {
+  const details = initialPrrDetails(prrRecord, linkedBill);
+  const taxInvoiceName = linkedBill?.attachmentName || "Not linked";
+  const poWoName = prrRecord.poWoReference || "Not linked";
+  const completionName = prrRecord.grnServiceReference || "Not linked";
+
+  return (
+    <CardPreviewModal eyebrow="Payment Request / PRR" title={prrRecord.reference || "PRR"} onClose={onClose}>
+      <div className="h-full overflow-hidden rounded-xl border border-slate-200 bg-slate-200/70 p-2 shadow-inner">
+        <DocumentFitFrame pageWidth={794}>
+          <PrrDocumentPreview record={prrRecord} details={details} taxInvoiceName={taxInvoiceName} poWoName={poWoName} completionName={completionName} />
+        </DocumentFitFrame>
+      </div>
+    </CardPreviewModal>
+  );
+}
+
+// One Bill Inward, rendered as its own live-preview card (Invoice Directory's layout) rather
+// than a table row — used by every bills-payables register (Inward, Verification, Ledger
+// Posting, Outstanding, Bills Paid), so a bill looks the same wherever it currently sits.
+// Header carries the bill's own identity, the body IS the tax invoice document, the footer
+// surfaces amount/party plus jump-off points to whatever PO/GRN it was raised against, and
+// `actions` is whatever that particular tab lets you do with it next.
+function BillRegisterCard({
+  record, vendorName, onPreviewInvoice, onPreviewReference, prrInfo, onPreviewPrr, actions,
+}: {
+  record: FinanceRecord;
+  vendorName: string;
+  onPreviewInvoice: () => void;
+  onPreviewReference: (kind: "order" | "completion") => void;
+  prrInfo?: { prrNumber: string; prrType: string; preparedStatus: string; directorStatus: string } | null;
+  onPreviewPrr?: () => void;
+  actions: ReactNode;
+}) {
+  const hasOrderReference = Boolean(record.poWoReference) && record.poWoReference !== "NA";
+  const hasCompletionReference = Boolean(record.grnServiceReference) && record.grnServiceReference !== "NA";
+  const completionLabel = record.referenceType === "WO" ? "WCC" : "GRN";
+
+  return (
+    <div className="flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_10px_28px_rgba(15,23,42,0.035)] transition hover:-translate-y-0.5 hover:border-[#8bbcaf] hover:shadow-[0_14px_34px_rgba(13,71,63,0.09)]">
+      <div className="shrink-0 border-b border-slate-100 px-4 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#18765f]">Bill Inward No.</p>
+            <p className="truncate text-base font-bold text-slate-900" title={record.billInwardNo || record.reference}>{record.billInwardNo || record.reference || "—"}</p>
+          </div>
+          <span className={cn("shrink-0 whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-extrabold uppercase", record.status === "Pending Approval" ? "bg-amber-50 text-amber-700" : record.status === "Verified" || ["Posted", "Paid", "Reconciled", "Closed"].includes(record.status) ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600")}>{record.status || "Draft"}</span>
+        </div>
+        <p className="mt-1.5 text-[11px] font-semibold text-slate-400">Invoice Date: {formatRegisterDate(record.invoiceDate)}</p>
+        {record.splitNote && (
+          <p className="mt-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] font-bold text-amber-700" title={record.splitFrom ? `Split from ${record.splitFrom}` : undefined}>
+            ↳ {record.splitNote}
+          </p>
+        )}
+      </div>
+
+      <button type="button" onClick={onPreviewInvoice} className="relative min-h-[220px] flex-1 cursor-pointer overflow-hidden bg-slate-50 outline-none" title="Preview invoice">
+        {record.attachmentUrl ? <BillCardPreview url={record.attachmentUrl} /> : (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-300">
+            <FileText className="h-8 w-8" />
+            <p className="text-xs font-semibold">No invoice document</p>
+          </div>
+        )}
+      </button>
+
+      <div className="shrink-0 space-y-3 border-t border-slate-100 px-4 py-3">
+        <div className="flex items-end justify-between gap-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-bold text-slate-900" title={vendorName}>{vendorName}</p>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Party</p>
+          </div>
+          <div className="shrink-0 text-right">
+            <p className="text-base font-extrabold text-[#0d5c4d]">{formatCurrency(record.amount)}</p>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Amount Payable</p>
+          </div>
+        </div>
+
+        {(hasOrderReference || hasCompletionReference || prrInfo) && (
+          <div className="flex flex-wrap gap-1.5">
+            {hasOrderReference && (
+              <button
+                type="button"
+                onClick={() => onPreviewReference("order")}
+                className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] font-bold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]"
+                title={`Preview ${record.referenceType || "PO"} ${record.poWoReference}`}
+              >
+                <span className="truncate">{record.referenceType || "PO"}: {record.poWoReference}</span>
+                <ArrowUpRight className="h-3.5 w-3.5 shrink-0" />
+              </button>
+            )}
+            {hasCompletionReference && (
+              <button
+                type="button"
+                onClick={() => onPreviewReference("completion")}
+                className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] font-bold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]"
+                title={`Preview ${completionLabel} ${record.grnServiceReference}`}
+              >
+                <span className="truncate">{completionLabel}: {record.grnServiceReference}</span>
+                <ArrowUpRight className="h-3.5 w-3.5 shrink-0" />
+              </button>
+            )}
+            {prrInfo && (
+              prrInfo.prrNumber && onPreviewPrr ? (
+                <button
+                  type="button"
+                  onClick={onPreviewPrr}
+                  className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] font-bold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]"
+                  title={`Preview PRR ${prrInfo.prrNumber}`}
+                >
+                  <span className="truncate">PRR: {prrInfo.prrNumber}</span>
+                  <ArrowUpRight className="h-3.5 w-3.5 shrink-0" />
+                </button>
+              ) : (
+                <span className="inline-flex items-center rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] font-bold text-slate-400">PRR: {prrInfo.prrNumber || "Awaiting PRR"}</span>
+              )
+            )}
+          </div>
+        )}
+
+        <p className="truncate text-[11px] font-medium text-slate-400" title={vendorName}>
+          Vendor ID: {record.vendorId || "—"}{record.vendorGstin && ` · GSTIN: ${record.vendorGstin}`}
+        </p>
+
+        {prrInfo?.prrNumber && (
+          <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2.5 text-[11px] font-bold">
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">{prrInfo.prrType}</span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">Prepared: {prrInfo.preparedStatus}</span>
+            <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5", prrInfo.directorStatus === "Approved" ? "bg-emerald-50 text-emerald-700" : prrInfo.directorStatus === "Rejected" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700")}>Director: {prrInfo.directorStatus}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="flex shrink-0 items-center gap-2 border-t border-slate-100 px-4 py-3">{actions}</div>
+    </div>
+  );
+}
+
 // Shown right after a bill is verified — books the liability against the vendor's accounts
 // ledger via the same add_accounts_ledger_entry endpoint AccountsPayments.tsx already uses
 // for its own "intake" step, so both flows post to the same place.
-type JournalLine = { id: string; glAccount: string; subLedger: string; costCentre: string; costAttribution: string; debit: string; credit: string };
+type JournalLine = { id: string; glAccount: string; subLedger: string; debit: string; credit: string };
 type MasterItem = Record<string, unknown>;
 
 type PostedVoucherLine = { gl_account: string; sub_ledger?: string; cost_centre?: string; cost_attribution?: string; debit?: number; credit?: number };
@@ -2156,6 +2641,12 @@ const masterOptionLabel = (item: MasterItem): string => {
   return name || code || String(item.item_id ?? "");
 };
 
+// Just the leading code portion of a "CODE - Name" / "CODE · Name" label — AccountingMaster's
+// Control GL picker (AccountingMaster.tsx) stores a Sub Ledger's linked GL as "code · name"
+// while this modal's own GL datalist renders "code - name", so matching on the full label
+// would never line up. Codes are the one thing both sides agree on.
+const masterCode = (value: string): string => String(value ?? "").split(/\s*[-·]\s*/)[0].trim();
+
 function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord; onClose: () => void; onPosted: (voucher: PostedVoucherData) => void }) {
   const totalGst = Number(record.cgstAmount || 0) + Number(record.sgstAmount || 0) + Number(record.igstAmount || 0);
   const totalPayable = Number(record.amount || 0) || (Number(record.baseAmount || 0) + totalGst + Number(record.otherAdjustment || 0));
@@ -2165,12 +2656,41 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
   const [narration, setNarration] = useState(`${record.entryType || "Bill Inward"} ${sourceReference} - ${record.party || ""}`.trim());
   const [voucherNo, setVoucherNo] = useState("Generating…");
   const [lines, setLines] = useState<JournalLine[]>(() => [
-    { id: "l1", glAccount: "", subLedger: "", costCentre: "", costAttribution: "", debit: totalPayable ? String(totalPayable) : "", credit: "" },
-    { id: "l2", glAccount: "", subLedger: record.party || "", costCentre: "", costAttribution: "", debit: "", credit: totalPayable ? String(totalPayable) : "" },
+    { id: "l1", glAccount: "", subLedger: "", debit: totalPayable ? String(totalPayable) : "", credit: "" },
+    { id: "l2", glAccount: "", subLedger: record.party || "", debit: "", credit: totalPayable ? String(totalPayable) : "" },
   ]);
+  // One Cost Centre / Cost Attribution for the whole voucher, not per line — set once here
+  // rather than repeated on every ledger line.
+  const [costCentre, setCostCentre] = useState("");
+  const [costAttribution, setCostAttribution] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [selectedDocKey, setSelectedDocKey] = useState("");
   const [masters, setMasters] = useState<{ glAccounts: MasterItem[]; subLedgers: MasterItem[]; costCentres: MasterItem[]; costAttributions: MasterItem[]; voucherTypes: MasterItem[] }>({ glAccounts: [], subLedgers: [], costCentres: [], costAttributions: [], voucherTypes: [] });
+  // Fallback for records saved before the vendor-name-sync fix (BillInwardModal), where
+  // vendor_name was stored blank even though vendorId/gstin came through fine — resolves the
+  // real name live from the vendor directory instead of showing a permanently blank Party.
+  const [resolvedVendorName, setResolvedVendorName] = useState("");
+  useEffect(() => {
+    if (record.party || !record.vendorId) { setResolvedVendorName(""); return; }
+    let cancelled = false;
+    const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+    (async () => {
+      try {
+        const request = (method: "GET" | "POST") => fetch(`${baseUrl}/purchase_flow/get_vendors`, { method, headers: { Accept: "application/json" } });
+        let response = await request("GET");
+        if (response.status === 405) response = await request("POST");
+        if (!response.ok) return;
+        const payload = await response.json().catch(() => null);
+        const list: Array<Record<string, unknown>> = Array.isArray(payload?.vendors) ? payload.vendors : [];
+        const match = list.find((item) => String(item.vendor_id ?? "").trim() === record.vendorId);
+        const name = match ? String(match.vendor_name ?? "").trim() : "";
+        if (!cancelled && name) setResolvedVendorName(name);
+      } catch {
+        // best-effort — Party falls back to showing vendor id/GSTIN only
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [record.party, record.vendorId]);
 
   useEffect(() => {
     const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
@@ -2202,7 +2722,7 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
   const selectedDocument = documents.find((document) => document.key === selectedDocKey) ?? documents[0];
 
   const updateLine = (id: string, patch: Partial<JournalLine>) => setLines((prev) => prev.map((line) => (line.id === id ? { ...line, ...patch } : line)));
-  const addLine = () => setLines((prev) => [...prev, { id: `l${Date.now()}`, glAccount: "", subLedger: "", costCentre: "", costAttribution: "", debit: "", credit: "" }]);
+  const addLine = () => setLines((prev) => [...prev, { id: `l${Date.now()}`, glAccount: "", subLedger: "", debit: "", credit: "" }]);
   const removeLine = (id: string) => setLines((prev) => (prev.length > 2 ? prev.filter((line) => line.id !== id) : prev));
 
   const totalDebit = lines.reduce((sum, line) => sum + (Number(line.debit) || 0), 0);
@@ -2252,7 +2772,7 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
           party: record.party || "",
           vendor_id: record.vendorId || "",
           narration,
-          lines: completedLines.map((line) => ({ gl_account: line.glAccount, sub_ledger: line.subLedger, cost_centre: line.costCentre, cost_attribution: line.costAttribution, debit: Number(line.debit) || 0, credit: Number(line.credit) || 0 })),
+          lines: completedLines.map((line) => ({ gl_account: line.glAccount, sub_ledger: line.subLedger, cost_centre: costCentre, cost_attribution: costAttribution, debit: Number(line.debit) || 0, credit: Number(line.credit) || 0 })),
         }),
       });
       const data = await response.json().catch(() => null);
@@ -2267,15 +2787,23 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
     }
   };
 
-  const smallInput = "h-9 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-800 outline-none focus:border-[#278b76] focus:ring-2 focus:ring-[#278b76]/10";
+  // Bigger, more spacious field styling to match the rest of the redesigned Accounting
+  // Master dialogs — a chevron overlay (selectAffordance) is added on top of the fields that
+  // are meant to feel like "pick from a list" (they're still text+datalist underneath, same
+  // as before, just visually cued as selectable).
+  const smallInput = "h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-800 outline-none transition focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10";
+  const selectAffordance = "relative [&>input]:pr-9 [&>svg]:pointer-events-none [&>svg]:absolute [&>svg]:right-3 [&>svg]:top-1/2 [&>svg]:-translate-y-1/2 [&>svg]:h-4 [&>svg]:w-4 [&>svg]:text-slate-400";
 
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-[2px]">
       <div className="flex max-h-[96vh] w-full max-w-[1800px] flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
-        <div className="flex shrink-0 items-start justify-between bg-[#0d473f] px-6 py-5 text-white">
-          <div>
-            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">{record.entryType === "Payment Request / PRR" ? "Payments & Receipts" : "Bills & Payables"} · Ledger Posting</p>
-            <h2 className="mt-1 text-xl font-bold">Post Accounting Entry</h2>
+        <div className="flex shrink-0 items-center justify-between bg-gradient-to-br from-[#0d473f] to-[#134f43] px-6 py-5 text-white">
+          <div className="flex items-center gap-3">
+            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border-2 border-white/25 bg-white/5"><FileText className="h-5 w-5" /></span>
+            <div>
+              <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">{record.entryType === "Payment Request / PRR" ? "Payments & Receipts" : "Bills & Payables"} · Ledger Posting</p>
+              <h2 className="mt-0.5 text-xl font-bold">Post Accounting Entry</h2>
+            </div>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg p-2 text-white/70 hover:bg-white/10 hover:text-white"><X className="h-5 w-5" /></button>
         </div>
@@ -2283,7 +2811,7 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
         <div className="grid min-h-0 flex-1 overflow-y-auto bg-[#eef3f6] lg:grid-cols-[3fr_7fr] lg:overflow-hidden">
           <section className="flex min-h-[460px] flex-col border-b border-slate-200 p-4 lg:min-h-0 lg:border-b-0 lg:border-r lg:p-5">
             <div className="mb-3 flex shrink-0 items-center justify-between">
-              <p className="text-xs font-extrabold uppercase tracking-[0.13em] text-slate-400">Documents on file</p>
+              <p className="text-xs font-extrabold uppercase tracking-[0.13em] text-slate-400">Document on File</p>
               {selectedDocument && <span className="truncate text-[11px] font-semibold text-slate-500">{selectedDocument.name}</span>}
             </div>
             {documents.length > 1 && (
@@ -2308,22 +2836,22 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
           </section>
 
           <section className="overflow-y-auto bg-white p-5 sm:p-6">
-            <div className="mb-4 grid grid-cols-2 gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs sm:grid-cols-4">
-              {[["Voucher No.", voucherNo], ["Date", formatRegisterDate(postingDate)], ["Source", record.entryType || "Bill Inward"], ["Reference No.", sourceReference || "—"], ["Party", record.party || "—"], ["Amount", formatCurrency(totalPayable)], ["Status", "Draft"]].map(([label, value]) => (
-                <div key={label}><p className="font-bold uppercase tracking-[0.08em] text-slate-400">{label}</p><p className="mt-1 truncate font-bold text-slate-800">{value}</p></div>
+            <div className="mb-5 grid grid-cols-2 gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-5 py-4 text-xs sm:grid-cols-4">
+              {[["Voucher No.", voucherNo], ["Date", formatRegisterDate(postingDate)], ["Source", record.entryType || "Bill Inward"], ["Reference No.", sourceReference || "—"], ["Party", record.party || resolvedVendorName || "—"], ["Amount", formatCurrency(totalPayable)], ["Status", "Draft"]].map(([label, value]) => (
+                <div key={label}><p className="text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">{label}</p><p className="mt-1 truncate text-sm font-bold text-slate-800">{value}</p></div>
               ))}
             </div>
             <p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">A. Source Details</p>
-            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <div className="mt-3 grid gap-4 sm:grid-cols-3">
               <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Posting Date *
                 <input required type="date" value={postingDate} onChange={(event) => setPostingDate(event.target.value)} className={smallInput} />
               </label>
               <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Voucher Type *
-                <input required list="ledger-voucher-types" value={voucherType} onChange={(event) => setVoucherType(event.target.value)} className={smallInput} placeholder="Purchase" />
+                <div className={selectAffordance}><input required list="ledger-voucher-types" value={voucherType} onChange={(event) => setVoucherType(event.target.value)} className={smallInput} placeholder="Purchase" /><ChevronDown /></div>
                 <datalist id="ledger-voucher-types">{(masters.voucherTypes.length ? masters.voucherTypes.map((item) => masterOptionLabel(item)) : ["Purchase", "Journal", "Payment"]).map((label) => <option key={label} value={label} />)}</datalist>
               </label>
               <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Source Module
-                <input disabled value="Bill Inward" className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+                <div className={selectAffordance}><input disabled value="Bill Inward" className={cn(smallInput, "bg-slate-50 text-slate-500")} /><ChevronDown /></div>
               </label>
               <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Source Reference
                 <input disabled value={sourceReference || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
@@ -2332,7 +2860,13 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
                 <input disabled value={record.reference || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
               </label>
               <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Party *
-                <input disabled value={record.party || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+                {/* Always the vendor's own name and details, sourced from the record's vendorId/
+                    vendorGstin (see BillInwardModal's party-sync effect) — never free text here,
+                    so this can't drift from the actual vendor. */}
+                <div className="flex min-h-[2.75rem] w-full flex-col justify-center gap-0.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2">
+                  <span className="truncate text-sm font-bold text-slate-700">{record.party || resolvedVendorName || "—"}</span>
+                  {(record.vendorId || record.vendorGstin) && <span className="truncate text-[11px] font-medium text-slate-400">{[record.vendorId, record.vendorGstin].filter(Boolean).join(" · ")}</span>}
+                </div>
               </label>
             </div>
             <label className="mt-3 block space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Narration
@@ -2344,42 +2878,344 @@ function LedgerEntryModal({ record, onClose, onPosted }: { record: FinanceRecord
               <button type="button" onClick={addLine} className="inline-flex items-center gap-1.5 text-xs font-bold text-[#0d5c4d] hover:underline"><Plus className="h-3.5 w-3.5" />Add Ledger Line</button>
             </div>
             <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200">
-              <table className="w-full min-w-[760px] text-left text-xs">
-                <thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["#", "GL Account *", "Sub Ledger", "Cost Centre", "Cost Attribution", "Debit (₹)", "Credit (₹)", ""].map((label) => <th key={label} className="px-2.5 py-2 font-bold">{label}</th>)}</tr></thead>
+              <table className="w-full min-w-[560px] text-left text-xs">
+                <thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["#", "GL Account *", "Sub Ledger", "Debit (₹)", "Credit (₹)", ""].map((label) => <th key={label} className="px-3 py-3 font-bold">{label}</th>)}</tr></thead>
                 <tbody className="divide-y divide-slate-100">
-                  {lines.map((line, index) => (
-                    <tr key={line.id}>
-                      <td className="px-2.5 py-2 font-semibold text-slate-500">{index + 1}</td>
-                      <td className="px-2.5 py-2"><input list="ledger-gl-accounts" value={line.glAccount} onChange={(event) => updateLine(line.id, { glAccount: event.target.value })} className={smallInput} placeholder="Select GL account" /></td>
-                      <td className="px-2.5 py-2"><input list="ledger-sub-ledgers" value={line.subLedger} onChange={(event) => updateLine(line.id, { subLedger: event.target.value })} className={smallInput} placeholder="—" /></td>
-                      <td className="px-2.5 py-2"><input list="ledger-cost-centres" value={line.costCentre} onChange={(event) => updateLine(line.id, { costCentre: event.target.value })} className={smallInput} placeholder="—" /></td>
-                      <td className="px-2.5 py-2"><input list="ledger-cost-attributions" value={line.costAttribution} onChange={(event) => updateLine(line.id, { costAttribution: event.target.value })} className={smallInput} placeholder="—" /></td>
-                      <td className="px-2.5 py-2"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.debit} onChange={(event) => updateLine(line.id, { debit: event.target.value, credit: event.target.value ? "" : line.credit })} className={smallInput} /></td>
-                      <td className="px-2.5 py-2"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.credit} onChange={(event) => updateLine(line.id, { credit: event.target.value, debit: event.target.value ? "" : line.debit })} className={smallInput} /></td>
-                      <td className="px-2.5 py-2 text-center"><button type="button" onClick={() => removeLine(line.id)} disabled={lines.length <= 2} className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="h-3.5 w-3.5" /></button></td>
-                    </tr>
-                  ))}
+                  {lines.map((line, index) => {
+                    // Only Sub Ledgers whose Control GL matches this row's selected GL Account —
+                    // matched on the GL code alone since Accounting Master's Control GL picker
+                    // stores "code · name" while this modal's own GL datalist renders "code - name".
+                    const glCode = masterCode(line.glAccount);
+                    const rowSubLedgers = glCode ? masters.subLedgers.filter((item) => masterCode(String(item.control ?? "")) === glCode) : masters.subLedgers;
+                    const rowDatalistId = `ledger-sub-ledgers-${line.id}`;
+                    return (
+                      <tr key={line.id}>
+                        <td className="px-3 py-2.5 font-semibold text-slate-500">{index + 1}</td>
+                        <td className="px-3 py-2.5"><div className={selectAffordance}><input list="ledger-gl-accounts" value={line.glAccount} onChange={(event) => updateLine(line.id, { glAccount: event.target.value, subLedger: "" })} className={smallInput} placeholder="Select GL account" /><ChevronDown /></div></td>
+                        <td className="px-3 py-2.5">
+                          <div className={selectAffordance}><input list={rowDatalistId} value={line.subLedger} onChange={(event) => updateLine(line.id, { subLedger: event.target.value })} className={smallInput} placeholder={glCode ? (rowSubLedgers.length ? "Select sub ledger" : "No sub ledgers under this GL") : "Select a GL account first"} /><ChevronDown /></div>
+                          <datalist id={rowDatalistId}>{rowSubLedgers.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+                        </td>
+                        <td className="px-3 py-2.5"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.debit} onChange={(event) => updateLine(line.id, { debit: event.target.value, credit: event.target.value ? "" : line.credit })} className={smallInput} /></td>
+                        <td className="px-3 py-2.5"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.credit} onChange={(event) => updateLine(line.id, { credit: event.target.value, debit: event.target.value ? "" : line.debit })} className={smallInput} /></td>
+                        <td className="px-3 py-2.5 text-center"><button type="button" onClick={() => removeLine(line.id)} disabled={lines.length <= 2} className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="h-3.5 w-3.5" /></button></td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
               <datalist id="ledger-gl-accounts">{masters.glAccounts.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
-              <datalist id="ledger-sub-ledgers">{masters.subLedgers.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
-              <datalist id="ledger-cost-centres">{masters.costCentres.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
-              <datalist id="ledger-cost-attributions">{masters.costAttributions.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
             </div>
 
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
-              <span><span className="text-slate-500">Total Debit (₹) </span><span className="font-bold text-slate-800">{formatCurrency(totalDebit)}</span></span>
-              <span><span className="text-slate-500">Total Credit (₹) </span><span className="font-bold text-slate-800">{formatCurrency(totalCredit)}</span></span>
-              <span className={cn("inline-flex items-center gap-1.5 font-bold", isBalanced ? "text-emerald-700" : "text-amber-700")}>Difference (₹) {formatCurrency(Math.abs(difference))} {isBalanced ? <CheckCircle2 className="h-3.5 w-3.5" /> : null}</span>
+            <div className="mt-3 grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs sm:grid-cols-2 lg:grid-cols-5">
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 lg:col-span-1">Cost Centre
+                <div className={selectAffordance}><input list="ledger-cost-centres" value={costCentre} onChange={(event) => setCostCentre(event.target.value)} className={smallInput} placeholder="—" /><ChevronDown /></div>
+                <datalist id="ledger-cost-centres">{masters.costCentres.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+              </label>
+              <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 lg:col-span-1">Cost Attribution
+                <div className={selectAffordance}><input list="ledger-cost-attributions" value={costAttribution} onChange={(event) => setCostAttribution(event.target.value)} className={smallInput} placeholder="—" /><ChevronDown /></div>
+                <datalist id="ledger-cost-attributions">{masters.costAttributions.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+              </label>
+              <div className="flex items-end justify-between gap-3 border-t border-slate-200 pt-3 sm:col-span-2 sm:border-t-0 sm:pt-0 lg:col-span-3 lg:justify-end">
+                <span><span className="text-slate-500">Total Debit (₹) </span><span className="font-bold text-slate-800">{formatCurrency(totalDebit)}</span></span>
+                <span><span className="text-slate-500">Total Credit (₹) </span><span className="font-bold text-slate-800">{formatCurrency(totalCredit)}</span></span>
+                <span className={cn("inline-flex items-center gap-1.5 font-bold", isBalanced ? "text-emerald-700" : "text-amber-700")}>Difference (₹) {formatCurrency(Math.abs(difference))} {isBalanced ? <CheckCircle2 className="h-3.5 w-3.5" /> : null}</span>
+              </div>
             </div>
           </section>
         </div>
 
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-100 bg-white px-6 py-4">
-          <p className="text-xs font-medium text-slate-400">{isBalanced ? "Ready to post — debit and credit are balanced." : "Debit and credit must be equal before this can be posted."}</p>
+          <p className={cn("inline-flex items-center gap-1.5 text-xs font-semibold", isBalanced ? "text-emerald-700" : "text-slate-400")}>{isBalanced && <CheckCircle2 className="h-4 w-4" />}{isBalanced ? "Ready to post — debit and credit are balanced." : "Debit and credit must be equal before this can be posted."}</p>
           <div className="flex gap-3">
             <button type="button" onClick={onClose} disabled={submitting} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Skip for now</button>
             <button type="button" onClick={handlePost} disabled={submitting || !isBalanced} className="h-11 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white hover:bg-[#0a4b3f] disabled:opacity-60">{submitting ? "Posting…" : "Post Ledger Entry"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type PaymentDetailsForm = { paymentMode: string; utr: string; amount: string; chequeNumber: string };
+
+// Outstanding's action per row depends on the PRR type behind it: a "Payment" (or Advance/
+// Reimbursement/Statutory/Salary) PRR needs a real transaction settled — Payment Details plus
+// the ledger entry. An "Accounting" PRR never has a transaction at all (a provision, write-
+// off, reallocation, etc.) — only the ledger entry closes it out, so Payment Details is
+// skipped entirely and the Ledger Entry section is always open, not collapsible.
+function MarkPaidModal({ record, isAccounting = false, onClose, onPaid }: { record: FinanceRecord; isAccounting?: boolean; onClose: () => void; onPaid: () => void }) {
+  const { user } = useAuth();
+  const [form, setForm] = useState<PaymentDetailsForm>({ paymentMode: "NEFT", utr: "", amount: record.amount ? String(record.amount) : "", chequeNumber: "" });
+  const set = <K extends keyof PaymentDetailsForm>(key: K, value: PaymentDetailsForm[K]) => setForm((current) => ({ ...current, [key]: value }));
+  const [ledgerOpen, setLedgerOpen] = useState(isAccounting);
+  const [postingDate, setPostingDate] = useState(new Date().toISOString().slice(0, 10));
+  const [voucherType, setVoucherType] = useState(isAccounting ? "Journal" : "Payment");
+  const [narration, setNarration] = useState(`${isAccounting ? "Accounting adjustment for" : "Payment against"} ${record.billInwardNo || record.reference} - ${record.party || ""}`.trim());
+  const totalPayable = Number(record.amount || 0);
+  const [lines, setLines] = useState<JournalLine[]>(() => [
+    { id: "l1", glAccount: "", subLedger: record.party || "", debit: totalPayable ? String(totalPayable) : "", credit: "" },
+    { id: "l2", glAccount: "", subLedger: "", debit: "", credit: totalPayable ? String(totalPayable) : "" },
+  ]);
+  const [costCentre, setCostCentre] = useState("");
+  const [costAttribution, setCostAttribution] = useState("");
+  const [masters, setMasters] = useState<{ glAccounts: MasterItem[]; subLedgers: MasterItem[]; costCentres: MasterItem[]; costAttributions: MasterItem[]; voucherTypes: MasterItem[] }>({ glAccounts: [], subLedgers: [], costCentres: [], costAttributions: [], voucherTypes: [] });
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+    let cancelled = false;
+    fetch(`${baseUrl}/admin_accounting_masters/list_all`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled || !data?.success) return;
+        setMasters({
+          glAccounts: mergeSbrGlSeed(data.data?.GL_ACCOUNT ?? []) as MasterItem[],
+          subLedgers: data.data?.SUB_LEDGER ?? [],
+          costCentres: data.data?.COST_CENTRE ?? [],
+          costAttributions: data.data?.COST_ATTRIBUTION ?? [],
+          voucherTypes: data.data?.VOUCHER_TYPE ?? [],
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // True until the preparer manually types a debit/credit amount or adds/removes a line — while
+  // true, the two default lines track whatever "Amount Paid" says (see effect below), so a
+  // partial payment's ledger entry defaults to the partial amount instead of silently staying at
+  // the full row amount it was first seeded from.
+  const [linesAmountPristine, setLinesAmountPristine] = useState(true);
+  const updateLine = (id: string, patch: Partial<JournalLine>) => {
+    if (patch.debit !== undefined || patch.credit !== undefined) setLinesAmountPristine(false);
+    setLines((prev) => prev.map((line) => (line.id === id ? { ...line, ...patch } : line)));
+  };
+  const addLine = () => {
+    setLinesAmountPristine(false);
+    setLines((prev) => [...prev, { id: `l${Date.now()}`, glAccount: "", subLedger: "", debit: "", credit: "" }]);
+  };
+  const removeLine = (id: string) => {
+    setLinesAmountPristine(false);
+    setLines((prev) => (prev.length > 2 ? prev.filter((line) => line.id !== id) : prev));
+  };
+
+  useEffect(() => {
+    if (isAccounting || !linesAmountPristine) return;
+    const amount = Number(form.amount) || 0;
+    setLines((prev) => (prev.length === 2 ? [
+      { ...prev[0], debit: amount ? String(amount) : "", credit: "" },
+      { ...prev[1], debit: "", credit: amount ? String(amount) : "" },
+    ] : prev));
+  }, [form.amount, isAccounting, linesAmountPristine]);
+
+  const totalDebit = lines.reduce((sum, line) => sum + (Number(line.debit) || 0), 0);
+  const totalCredit = lines.reduce((sum, line) => sum + (Number(line.credit) || 0), 0);
+  const difference = Math.round((totalDebit - totalCredit) * 100) / 100;
+  const isBalanced = difference === 0 && totalDebit > 0;
+
+  const smallInput = "h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-800 outline-none transition focus:border-[#278b76] focus:ring-4 focus:ring-[#278b76]/10";
+  const selectAffordance = "relative [&>input]:pr-9 [&>svg]:pointer-events-none [&>svg]:absolute [&>svg]:right-3 [&>svg]:top-1/2 [&>svg]:-translate-y-1/2 [&>svg]:h-4 [&>svg]:w-4 [&>svg]:text-slate-400";
+
+  const submit = async () => {
+    if (!isAccounting) {
+      if (!form.paymentMode) { toast.error("Select a payment mode."); return; }
+      if (!(Number(form.amount) > 0)) { toast.error("Enter the amount paid."); return; }
+    }
+    const completedLines = lines.filter((line) => line.glAccount.trim() && ((Number(line.debit) || 0) > 0 || (Number(line.credit) || 0) > 0));
+    if (completedLines.length < 2 || !isBalanced) {
+      setLedgerOpen(true);
+      toast.error(`Add the ledger entry ${isAccounting ? "for this adjustment" : "for this payment"} — at least two balanced GL lines are required before ${isAccounting ? "closing this out" : "marking as paid"}.`);
+      return;
+    }
+    if (!user?.id && !user?.name) { toast.error("You must be logged in to continue."); return; }
+    setSubmitting(true);
+    try {
+      const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+
+      // Three independent side effects of closing this out — post the ledger entry, mark the
+      // payment paid, and (for a real payment, not an accounting-only entry with no actual
+      // transaction) deduct the paid amount from its PRR's budget. None of them depend on
+      // another's response, so they're fired together rather than chained.
+      const voucherPromise = fetch(`${baseUrl}/admin_accounts/post_journal_voucher`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          posting_date: postingDate,
+          voucher_type: voucherType,
+          source_module: isAccounting ? "Accounting" : "Payment",
+          source_reference: record.billInwardNo || record.reference || "",
+          invoice_no: record.reference || "",
+          invoice_id: record.id,
+          party: record.party || "",
+          vendor_id: record.vendorId || "",
+          narration,
+          lines: completedLines.map((line) => ({ gl_account: line.glAccount, sub_ledger: line.subLedger, cost_centre: costCentre, cost_attribution: costAttribution, debit: Number(line.debit) || 0, credit: Number(line.credit) || 0 })),
+        }),
+      });
+
+      const markPaidPromise = fetch(`${baseUrl}/admin_accounts/mark_payment_paid`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          invoice_id: record.id,
+          staff_id: user?.id || "",
+          name: user?.name || "",
+          payment_mode: isAccounting ? "" : form.paymentMode,
+          utr: isAccounting ? "" : form.utr,
+          amount: isAccounting ? undefined : Number(form.amount) || 0,
+          cheque_number: !isAccounting && form.paymentMode === "Cheque" ? form.chequeNumber : "",
+        }),
+      });
+
+      const budgetDeductionPromise = isAccounting ? null : fetch(`${baseUrl}/admin_accounts/deduct_from_budget_against_payment_completion`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prr_number: record.prrNumber || "", amount_paid: Number(form.amount) || 0 }),
+      });
+
+      const [voucherResponse, markPaidResponse, budgetResponse] = await Promise.all([voucherPromise, markPaidPromise, budgetDeductionPromise]);
+
+      const voucherData = await voucherResponse.json().catch(() => null);
+      if (!voucherResponse.ok || !voucherData?.success) throw new Error(voucherData?.detail || voucherData?.message || "Failed to post the ledger entry");
+
+      const markPaidData = await markPaidResponse.json().catch(() => null);
+      if (!markPaidResponse.ok || !markPaidData?.success) throw new Error(markPaidData?.message || markPaidData?.detail || "Failed to close this out");
+
+      if (budgetResponse) {
+        const budgetData = await budgetResponse.json().catch(() => null);
+        if (!budgetResponse.ok || !budgetData?.success) throw new Error(budgetData?.message || budgetData?.detail || "Failed to deduct the paid amount from the budget");
+      }
+
+      if (markPaidData?.split_invoice_id) {
+        toast.success(`${record.billInwardNo || record.reference} settled for ${formatCurrency(Number(form.amount) || 0)} — ${markPaidData.split_invoice_id} created for the remaining balance`);
+      } else {
+        toast.success(isAccounting ? `${record.billInwardNo || record.reference} closed with the ledger entry` : `${record.billInwardNo || record.reference} marked as paid`);
+      }
+      onPaid();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to close this out");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-[2px]">
+      <div className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between bg-gradient-to-br from-[#0d473f] to-[#134f43] px-6 py-5 text-white">
+          <div>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-white/60">Bills & Payables · Outstanding</p>
+            <h2 className="mt-0.5 text-xl font-bold">{isAccounting ? "Post Ledger Entry" : "Mark as Paid"}</h2>
+            <p className="mt-1 text-xs text-white/70">{record.billInwardNo || record.reference} · {record.party || "—"} · {record.prrNumber}{isAccounting ? " · Accounting PRR — no transaction, ledger entry only" : ""}</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg p-2 text-white/70 hover:bg-white/10 hover:text-white"><X className="h-5 w-5" /></button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">
+          {!isAccounting && (
+            <>
+              <p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">Payment Details</p>
+              <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                <label className="space-y-1.5 text-xs font-bold text-slate-600">Mode of Payment
+                  <select value={form.paymentMode} onChange={(event) => set("paymentMode", event.target.value)} className={smallInput}>
+                    {["NEFT", "RTGS", "IMPS", "UPI", "Cheque", "Cash"].map((item) => <option key={item}>{item}</option>)}
+                  </select>
+                </label>
+                <label className="space-y-1.5 text-xs font-bold text-slate-600">UTR / Reference No.
+                  <input value={form.utr} onChange={(event) => set("utr", event.target.value)} className={smallInput} placeholder="Transaction reference" />
+                </label>
+                <label className="space-y-1.5 text-xs font-bold text-slate-600">Amount
+                  <div className="relative"><IndianRupee className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input type="number" min="0" step="0.01" value={form.amount} onChange={(event) => set("amount", event.target.value)} className={cn(smallInput, "pl-9")} /></div>
+                </label>
+                {form.paymentMode === "Cheque" && (
+                  <label className="space-y-1.5 text-xs font-bold text-slate-600">Cheque Number <span className="font-medium normal-case text-slate-400">(optional)</span>
+                    <input value={form.chequeNumber} onChange={(event) => set("chequeNumber", event.target.value)} className={smallInput} placeholder="Cheque no." />
+                  </label>
+                )}
+              </div>
+            </>
+          )}
+
+          {isAccounting ? (
+            <p className={cn("flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]")}>Ledger Entry</p>
+          ) : (
+            <button type="button" onClick={() => setLedgerOpen((open) => !open)} className="mt-6 flex w-full items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-left">
+              <span className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#18765f]">Ledger Entry</span>
+              <ChevronDown className={cn("h-4 w-4 text-slate-500 transition-transform", ledgerOpen && "rotate-180")} />
+            </button>
+          )}
+
+          {ledgerOpen && (
+            <div className="mt-3 space-y-3">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Posting Date
+                  <input type="date" value={postingDate} onChange={(event) => setPostingDate(event.target.value)} className={smallInput} />
+                </label>
+                <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Voucher Type
+                  <div className={selectAffordance}><input list="mark-paid-voucher-types" value={voucherType} onChange={(event) => setVoucherType(event.target.value)} className={smallInput} /><ChevronDown /></div>
+                  <datalist id="mark-paid-voucher-types">{(masters.voucherTypes.length ? masters.voucherTypes.map((item) => masterOptionLabel(item)) : ["Payment", "Bank Payment Voucher", "Cash Payment Voucher"]).map((label) => <option key={label} value={label} />)}</datalist>
+                </label>
+                <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Source Reference
+                  <input disabled value={record.billInwardNo || record.reference || "—"} className={cn(smallInput, "bg-slate-50 text-slate-500")} />
+                </label>
+              </div>
+              <label className="block space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Narration
+                <textarea rows={2} value={narration} onChange={(event) => setNarration(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 outline-none focus:border-[#278b76] focus:ring-2 focus:ring-[#278b76]/10" />
+              </label>
+
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Ledger Lines</p>
+                <button type="button" onClick={addLine} className="inline-flex items-center gap-1.5 text-xs font-bold text-[#0d5c4d] hover:underline"><Plus className="h-3.5 w-3.5" />Add Ledger Line</button>
+              </div>
+              <div className="overflow-x-auto rounded-xl border border-slate-200">
+                <table className="w-full min-w-[520px] text-left text-xs">
+                  <thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{["#", "GL Account", "Sub Ledger", "Debit (₹)", "Credit (₹)", ""].map((label) => <th key={label} className="px-3 py-3 font-bold">{label}</th>)}</tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {lines.map((line, index) => {
+                      const glCode = masterCode(line.glAccount);
+                      const rowSubLedgers = glCode ? masters.subLedgers.filter((item) => masterCode(String(item.control ?? "")) === glCode) : masters.subLedgers;
+                      const rowDatalistId = `mark-paid-sub-ledgers-${line.id}`;
+                      return (
+                        <tr key={line.id}>
+                          <td className="px-3 py-2.5 font-semibold text-slate-500">{index + 1}</td>
+                          <td className="px-3 py-2.5"><div className={selectAffordance}><input list="mark-paid-gl-accounts" value={line.glAccount} onChange={(event) => updateLine(line.id, { glAccount: event.target.value, subLedger: "" })} className={smallInput} placeholder="Select GL account" /><ChevronDown /></div></td>
+                          <td className="px-3 py-2.5">
+                            <div className={selectAffordance}><input list={rowDatalistId} value={line.subLedger} onChange={(event) => updateLine(line.id, { subLedger: event.target.value })} className={smallInput} placeholder="Select sub ledger" /><ChevronDown /></div>
+                            <datalist id={rowDatalistId}>{rowSubLedgers.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+                          </td>
+                          <td className="px-3 py-2.5"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.debit} onChange={(event) => updateLine(line.id, { debit: event.target.value, credit: event.target.value ? "" : line.credit })} className={smallInput} /></td>
+                          <td className="px-3 py-2.5"><input type="number" min="0" step="0.01" onWheel={(e) => e.currentTarget.blur()} value={line.credit} onChange={(event) => updateLine(line.id, { credit: event.target.value, debit: event.target.value ? "" : line.debit })} className={smallInput} /></td>
+                          <td className="px-3 py-2.5 text-center"><button type="button" onClick={() => removeLine(line.id)} disabled={lines.length <= 2} className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="h-3.5 w-3.5" /></button></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <datalist id="mark-paid-gl-accounts">{masters.glAccounts.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+              </div>
+
+              <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Cost Centre
+                  <div className={selectAffordance}><input list="mark-paid-cost-centres" value={costCentre} onChange={(event) => setCostCentre(event.target.value)} className={smallInput} placeholder="—" /><ChevronDown /></div>
+                  <datalist id="mark-paid-cost-centres">{masters.costCentres.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+                </label>
+                <label className="space-y-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">Cost Attribution
+                  <div className={selectAffordance}><input list="mark-paid-cost-attributions" value={costAttribution} onChange={(event) => setCostAttribution(event.target.value)} className={smallInput} placeholder="—" /><ChevronDown /></div>
+                  <datalist id="mark-paid-cost-attributions">{masters.costAttributions.map((item) => <option key={String(item.item_id)} value={masterOptionLabel(item)} />)}</datalist>
+                </label>
+                <div className="flex items-end justify-between gap-3 border-t border-slate-200 pt-3 sm:col-span-2 sm:border-t-0 sm:pt-0 lg:col-span-2 lg:justify-end">
+                  <span><span className="text-slate-500">Debit </span><span className="font-bold text-slate-800">{formatCurrency(totalDebit)}</span></span>
+                  <span><span className="text-slate-500">Credit </span><span className="font-bold text-slate-800">{formatCurrency(totalCredit)}</span></span>
+                  <span className={cn("inline-flex items-center gap-1.5 font-bold", isBalanced ? "text-emerald-700" : "text-amber-700")}>{isBalanced ? <CheckCircle2 className="h-3.5 w-3.5" /> : null}{isBalanced ? "Balanced" : `Diff ${formatCurrency(Math.abs(difference))}`}</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 bg-white px-6 py-4">
+          <p className="text-xs font-medium text-slate-400">{ledgerOpen ? (isBalanced ? "Ledger entry ready to post." : `Debit and credit must balance before ${isAccounting ? "this can be closed out" : "this can be marked as paid"}.`) : "Expand Ledger Entry to record how this payment was booked."}</p>
+          <div className="flex gap-3">
+            <button type="button" onClick={onClose} disabled={submitting} className="h-11 rounded-xl border border-slate-200 px-5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cancel</button>
+            <button type="button" onClick={submit} disabled={submitting} className="h-11 rounded-xl bg-[#0d5c4d] px-6 text-sm font-bold text-white hover:bg-[#0a4b3f] disabled:opacity-60">{submitting ? (isAccounting ? "Posting…" : "Marking…") : isAccounting ? "Post & Close" : "Mark as Paid"}</button>
           </div>
         </div>
       </div>
@@ -2574,6 +3410,7 @@ function BillVerificationPreview({ record, onClose, onVerify, onRequestPayment, 
 
 export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleKey }) {
   const module = moduleByKey[moduleKey];
+  const { user } = useAuth();
   const [params, setParams] = useSearchParams();
   const requestedTab = params.get("tab");
   const activeTab = module.tabs.find((tab) => tab.label.toLowerCase() === requestedTab?.toLowerCase()) ?? module.tabs[0];
@@ -2589,6 +3426,20 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
   const [paymentDetailsRecord, setPaymentDetailsRecord] = useState<FinanceRecord | null>(null);
   const [invoicesLoading, setInvoicesLoading] = useState(false);
   const [invoicesError, setInvoicesError] = useState("");
+  const [markPaidRecord, setMarkPaidRecord] = useState<FinanceRecord | null>(null);
+  // Inward register's card view — clicking a card's body previews its own tax invoice,
+  // clicking a PO/GRN reference chip previews that linked document instead.
+  const [invoicePreviewRecord, setInvoicePreviewRecord] = useState<FinanceRecord | null>(null);
+  const [referencePreview, setReferencePreview] = useState<{ record: FinanceRecord; kind: "order" | "completion" } | null>(null);
+  // Outstanding's PRR reference chip — a read-only preview, never the editable PrrModal.
+  const [prrPreview, setPrrPreview] = useState<{ prr: FinanceRecord; bill: FinanceRecord } | null>(null);
+  // Same fallback recipe as LedgerEntryModal's resolvedVendorName — some invoices were saved
+  // before the Bill Inward vendor-name-sync fix and have a permanently blank party.
+  const [vendorNameById, setVendorNameById] = useState<Record<string, string>>({});
+  // Outstanding's "PRR Status" / "PRR Type" columns read straight off the linked
+  // admin_payment_flow row (keyed by payment_id) rather than the invoice itself, since that's
+  // where admin_ops_approval_status/director_approval_status/prr_form_extra actually live.
+  const [paymentFlowByPaymentId, setPaymentFlowByPaymentId] = useState<Record<string, { admin_ops_approval_status?: string; director_approval_status?: string; prr_type?: string }>>({});
 
   useEffect(() => setRecords(loadRecords()), []);
 
@@ -2616,10 +3467,54 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [moduleKey]);
 
+  useEffect(() => {
+    if (moduleKey !== "bills-payables") return;
+    let cancelled = false;
+    const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+    (async () => {
+      try {
+        const request = (method: "GET" | "POST") => fetch(`${baseUrl}/purchase_flow/get_vendors`, { method, headers: { Accept: "application/json" } });
+        let response = await request("GET");
+        if (response.status === 405) response = await request("POST");
+        if (!response.ok) return;
+        const payload = await response.json().catch(() => null);
+        const list: Array<Record<string, unknown>> = Array.isArray(payload?.vendors) ? payload.vendors : [];
+        if (cancelled) return;
+        setVendorNameById(Object.fromEntries(list.map((item) => [String(item.vendor_id ?? "").trim(), String(item.vendor_name ?? "").trim()]).filter(([id, name]) => id && name)));
+      } catch {
+        // best-effort — Party just falls back to whatever the invoice itself carries
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [moduleKey]);
+
+  useEffect(() => {
+    if (moduleKey !== "bills-payables") return;
+    let cancelled = false;
+    const baseUrl = String(getBaseUrl() ?? "").replace(/\/$/, "");
+    fetch(`${baseUrl}/admin_accounts/get_payment_flow`, { headers: { Accept: "application/json" } })
+      .then((res) => res.json())
+      .then((data: { success?: boolean; data?: Array<Record<string, unknown>> }) => {
+        if (cancelled) return;
+        const list = Array.isArray(data?.data) ? data.data : [];
+        setPaymentFlowByPaymentId(Object.fromEntries(list.map((item) => [String(item.payment_id ?? ""), {
+          admin_ops_approval_status: String(item.admin_ops_approval_status ?? ""),
+          director_approval_status: String(item.director_approval_status ?? ""),
+          prr_type: String((item.prr_form_extra as Record<string, unknown> | undefined)?.prr_type ?? ""),
+        }]).filter(([id]) => id)));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [moduleKey]);
+
   const moduleRecords = records.filter((record) => record.module === moduleKey);
   const isVerificationRegister = moduleKey === "bills-payables" && activeTab.label === "Verification";
   const isBillsPaidRegister = moduleKey === "bills-payables" && activeTab.label === "Bills Paid";
   const isLedgerPostingRegister = moduleKey === "bills-payables" && activeTab.label === "Ledger Posting";
+  // Every ledger-posted Bill Inward invoice that isn't fully paid yet — the PRR Number column
+  // only has a value once the PRR Module's Create PRR popup has actually run for it, which is
+  // what gates whether "Mark as Paid" appears on that row (opens MarkPaidModal below).
+  const isOutstandingRegister = moduleKey === "bills-payables" && activeTab.label === "Outstanding";
   const isRequestRegister = moduleKey === "payments-receipts" && activeTab.label === "Requests";
   // PRRs stay tagged tab: "Requests" for life (never reassigned) — Ledger Posting/Receipts/
   // History in this module are all different views over that same bucket, exactly like Bills &
@@ -2629,9 +3524,20 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
   const isPrrHistoryRegister = moduleKey === "payments-receipts" && activeTab.label === "History";
   const isPrrDownstreamRegister = isPrrLedgerPostingRegister || isPrrReceiptsRegister || isPrrHistoryRegister;
   const prrBucket = (record: FinanceRecord) => record.tab === "Requests" && record.entryType === "Payment Request / PRR";
-  const tabRecords = isVerificationRegister || isBillsPaidRegister || isLedgerPostingRegister
-    ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward" && (!isLedgerPostingRegister || (record.status === "Verified" && record.ledgerEntryStatus !== "completed")))
-    : isRequestRegister
+  // Each Bill Inward sits in exactly one of these four tabs at a time, driven purely by how
+  // far it's progressed — never in more than one, so nothing sits cluttering a tab it's already
+  // moved past: still needs director verification -> Verification; verified but not yet booked
+  // -> Ledger Posting; booked but not yet paid (with or without a PRR raised) -> Outstanding;
+  // marked paid -> Bills Paid.
+  const tabRecords = isVerificationRegister
+    ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward" && record.status !== "Verified" && record.status !== "Paid")
+    : isLedgerPostingRegister
+      ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward" && record.status === "Verified" && record.ledgerEntryStatus !== "completed")
+      : isOutstandingRegister
+        ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward" && record.ledgerEntryStatus === "completed" && record.status !== "Paid")
+        : isBillsPaidRegister
+          ? moduleRecords.filter((record) => record.tab === "Inward" && record.entryType === "Bill Inward" && record.status === "Paid")
+          : isRequestRegister
       // "Pending Approval" is the status both PRR-creation paths actually set (see buildAutoPrr/
       // requestPayment) — Draft/Submitted/Under Review are kept only in case something upstream
       // still relies on them, but Pending Approval is what real records carry pre-decision.
@@ -2644,7 +3550,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
             ? moduleRecords.filter((record) => prrBucket(record) && effectivePrrStage(record) === "ledger_posted")
             : moduleRecords.filter((record) => record.tab === activeTab.label);
   const isInwardRegister = moduleKey === "bills-payables" && activeTab.label === "Inward";
-  const showsBillInwardRecords = isInwardRegister || isVerificationRegister || isBillsPaidRegister || isLedgerPostingRegister;
+  const showsBillInwardRecords = isInwardRegister || isVerificationRegister || isBillsPaidRegister || isLedgerPostingRegister || isOutstandingRegister;
   const visibleRecords = tabRecords.filter((record) => {
     const query = search.toLowerCase().trim();
     const matchesSearch = !query || [record.billInwardNo, record.reference, record.entryType, record.party, record.notes].some((value) => String(value ?? "").toLowerCase().includes(query));
@@ -2658,6 +3564,17 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
   const saveRecords = (next: FinanceRecord[]) => {
     setRecords(next);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  };
+
+  // Outstanding's "PRR Status" column — Prepared (admin ops / Send for Approval) is always
+  // "Approved" the moment a PRR exists (that's what admin_ops_signature stamps), Director is
+  // whatever director_approval_status on the linked payment flow currently says.
+  const prrStageInfo = (record: FinanceRecord) => {
+    const flow = paymentFlowByPaymentId[record.paymentId ?? ""];
+    if (!record.prrNumber) return null;
+    const preparedStatus = flow?.admin_ops_approval_status && flow.admin_ops_approval_status !== "not_initiated" ? "Approved" : "Pending";
+    const directorStatus = flow?.director_approval_status === "approved" ? "Approved" : flow?.director_approval_status === "rejected" ? "Rejected" : "Pending";
+    return { preparedStatus, directorStatus, prrType: flow?.prr_type || "—" };
   };
 
   const saveEntry = (entry: FinanceRecord) => {
@@ -2697,7 +3614,14 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
   // Budget lines are deliberately left blank — no budget selection in this flow.
   const buildAutoPrr = (bill: FinanceRecord, voucher: PostedVoucherData, currentRecords: FinanceRecord[]): FinanceRecord | null => {
     const existingRequest = currentRecords.find((record) => record.module === "payments-receipts" && record.tab === "Requests" && record.sourceBillId === bill.id);
-    if (existingRequest) return null;
+    if (existingRequest) {
+      // This used to fail silently — no toast either way — which made a real duplicate
+      // indistinguishable from some other bug suppressing creation entirely. Bill IDs can be
+      // reused (this table gets reset/cleared during testing), so surfacing exactly which
+      // existing PRR blocked creation is what actually lets this be diagnosed instead of guessed at.
+      toast.info(`${existingRequest.reference} already exists for ${bill.billInwardNo || bill.reference} — not creating a duplicate.`);
+      return null;
+    }
     const debitLine = voucher.lines.find((line) => (line.debit || 0) > 0);
     const details: PRRDetails = {
       ...initialPrrDetails(bill, bill),
@@ -2835,7 +3759,7 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
           eyebrow="Finance & Accounts"
           title={module.title}
           description={module.description}
-          action={!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister && !isPrrDownstreamRegister ? <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : "New Entry"}</button> : undefined}
+          action={!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister && !isOutstandingRegister && !isPrrDownstreamRegister ? <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-5 text-sm font-bold text-white shadow-[0_10px_24px_rgba(13,92,77,0.18)] hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : "New Entry"}</button> : undefined}
         />
 
         <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm">
@@ -2874,25 +3798,88 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
           </div>
 
           {visibleRecords.length ? (
+            showsBillInwardRecords ? (
+              <div className="grid gap-4 p-5 sm:grid-cols-2 xl:grid-cols-3">
+                {visibleRecords.map((record) => {
+                  const prrStage = isOutstandingRegister ? prrStageInfo(record) : null;
+                  return (
+                    <BillRegisterCard
+                      key={record.id}
+                      record={record}
+                      vendorName={record.party || vendorNameById[record.vendorId ?? ""] || "—"}
+                      onPreviewInvoice={() => setInvoicePreviewRecord(record)}
+                      onPreviewReference={(kind) => setReferencePreview({ record, kind })}
+                      prrInfo={isOutstandingRegister ? { prrNumber: record.prrNumber || "", prrType: prrStage?.prrType || "—", preparedStatus: prrStage?.preparedStatus || "Pending", directorStatus: prrStage?.directorStatus || "Pending" } : null}
+                      onPreviewPrr={isOutstandingRegister ? () => {
+                        const linkedPrr = records.find((item) => item.module === "payments-receipts" && item.tab === "Requests" && item.sourceBillId === record.id);
+                        if (linkedPrr) setPrrPreview({ prr: linkedPrr, bill: record });
+                        else toast.error("The linked PRR record could not be found.");
+                      } : undefined}
+                      actions={
+                        isVerificationRegister || isBillsPaidRegister ? (
+                          <button onClick={() => { setBillPreviewMode(isBillsPaidRegister ? "pay" : "verify"); setVerificationPreview(record); }} className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 text-sm font-bold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="Preview bill">
+                            <Eye className="h-4 w-4" />Preview
+                          </button>
+                        ) : isLedgerPostingRegister ? (
+                          <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] text-sm font-bold text-white hover:bg-[#0a4b3f]" title="Post ledger entry">
+                            <IndianRupee className="h-4 w-4" />Post Ledger Entry
+                          </button>
+                        ) : isOutstandingRegister ? (
+                          record.prrNumber ? (
+                            <button onClick={() => setMarkPaidRecord(record)} className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] text-sm font-bold text-white hover:bg-[#0a4b3f]" title={prrStage?.prrType === "Accounting" ? "Post ledger entry" : "Mark as paid"}>
+                              <IndianRupee className="h-4 w-4" />{prrStage?.prrType === "Accounting" ? "Ledger Entry" : "Mark as Paid"}
+                            </button>
+                          ) : (
+                            <span className="flex h-10 flex-1 items-center justify-center rounded-xl bg-slate-50 text-xs font-bold text-slate-400">Awaiting PRR</span>
+                          )
+                        ) : (
+                          <>
+                            <button onClick={() => { setEditing(record); setModalOpen(true); }} className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-[#0d5c4d] px-3 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Pencil className="h-4 w-4" />Edit</button>
+                            <button onClick={() => window.confirm(`Delete ${record.reference}?`) && saveRecords(records.filter((item) => item.id !== record.id))} className="rounded-xl p-2.5 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Delete"><Trash2 className="h-4 w-4" /></button>
+                          </>
+                        )
+                      }
+                    />
+                  );
+                })}
+              </div>
+            ) : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[1100px] text-left text-sm">
-                <thead className="bg-[#0d473f] text-[11px] uppercase tracking-[0.11em] text-white"><tr><th className="px-5 py-4 text-center">{showsBillInwardRecords ? "BI No." : "Reference"}</th><th className="px-5 py-4 text-center">Date</th><th className="px-5 py-4 text-center">Due Date</th><th className="px-5 py-4 text-center">Entry Type</th><th className="px-5 py-4 text-center">Party / Account</th><th className="px-5 py-4 text-center">Amount</th><th className="px-5 py-4 text-center">Status</th><th className="px-5 py-4 text-center">Actions</th></tr></thead>
+                <thead className="bg-[#0d473f] text-[11px] uppercase tracking-[0.11em] text-white"><tr><th className="px-5 py-4 text-center">{showsBillInwardRecords ? "BI No." : "Reference"}</th><th className="px-5 py-4 text-center">Date</th><th className="px-5 py-4 text-center">Due Date</th><th className="px-5 py-4 text-center">Entry Type</th><th className="px-5 py-4 text-center">Party / Account</th><th className="px-5 py-4 text-center">Amount</th>{isOutstandingRegister && <><th className="px-5 py-4 text-center">PRR No.</th><th className="px-5 py-4 text-center">PRR Type</th><th className="px-5 py-4 text-center">PRR Approval</th></>}<th className="px-5 py-4 text-center">Status</th><th className="px-5 py-4 text-center">Actions</th></tr></thead>
                 <tbody className="divide-y divide-slate-100">
-                  {visibleRecords.map((record) => (
+                  {visibleRecords.map((record) => {
+                    const prrStage = isOutstandingRegister ? prrStageInfo(record) : null;
+                    return (
                     <tr key={record.id} className="leading-5 hover:bg-slate-50/80">
-                      <td className="whitespace-nowrap px-5 py-4 font-semibold text-[#0d5c4d]">{showsBillInwardRecords ? record.billInwardNo || record.reference : record.reference}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.date)}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.dueDate)}</td><td className="px-5 py-4 font-semibold text-slate-800">{record.entryType}</td><td className="px-5 py-4 font-medium text-slate-500">{record.party || "—"}</td><td className="whitespace-nowrap px-5 py-4 text-right font-semibold text-slate-900">{formatCurrency(record.amount)}</td><td className="px-5 py-4 text-center"><span className={cn("inline-flex whitespace-nowrap rounded-full px-3 py-1 text-sm font-semibold", record.status === "Pending Approval" ? "bg-amber-50 text-amber-700" : record.status === "Verified" || ["Posted", "Paid", "Reconciled", "Closed"].includes(record.status) ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600")}>{record.status || "Draft"}</span></td>
-                      <td className="px-5 py-4"><div className="flex justify-end gap-1">{isVerificationRegister || isBillsPaidRegister ? <button onClick={() => { setBillPreviewMode(isBillsPaidRegister ? "pay" : "verify"); setVerificationPreview(record); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="Preview bill"><Eye className="h-4 w-4" />Preview</button> : isLedgerPostingRegister ? <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Post ledger entry"><IndianRupee className="h-4 w-4" />Post Ledger Entry</button> : isRequestRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />Create PRR</button> : isPrrLedgerPostingRegister ? <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Post ledger entry"><IndianRupee className="h-4 w-4" />Post Ledger Entry</button> : isPrrReceiptsRegister ? <button onClick={() => setPaymentDetailsRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Add payment details"><CreditCard className="h-4 w-4" />Add Payment Details</button> : isPrrHistoryRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="View PRR"><Eye className="h-4 w-4" />View PRR</button> : <><button onClick={() => { setEditing(record); setModalOpen(true); }} className={cn("inline-flex items-center gap-1.5 rounded-lg text-slate-500 hover:bg-[#eaf4f1] hover:text-[#0d5c4d]", record.entryType === "Bill Inward" ? "px-3 py-2 text-sm font-semibold" : "p-2")} title="Edit"><Pencil className="h-4 w-4" />{record.entryType === "Bill Inward" && "Edit"}</button><button onClick={() => window.confirm(`Delete ${record.reference}?`) && saveRecords(records.filter((item) => item.id !== record.id))} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Delete"><Trash2 className="h-4 w-4" /></button></>}</div></td>
+                      <td className="whitespace-nowrap px-5 py-4 font-semibold text-[#0d5c4d]">{showsBillInwardRecords ? record.billInwardNo || record.reference : record.reference}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.date)}</td><td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{formatRegisterDate(record.dueDate)}</td><td className="px-5 py-4 font-semibold text-slate-800">{record.entryType}</td><td className="px-5 py-4 font-medium text-slate-500">{record.party || vendorNameById[record.vendorId ?? ""] || "—"}</td><td className="whitespace-nowrap px-5 py-4 text-right font-semibold text-slate-900">{formatCurrency(record.amount)}</td>
+                      {isOutstandingRegister && <>
+                        <td className="whitespace-nowrap px-5 py-4 text-center font-mono font-semibold text-[#0d5c4d]">{record.prrNumber || "—"}</td>
+                        <td className="whitespace-nowrap px-5 py-4 text-center font-medium text-slate-600">{prrStage?.prrType || "—"}</td>
+                        <td className="px-5 py-4 text-center">
+                          {prrStage ? (
+                            <div className="flex flex-col items-center gap-1 text-[11px] font-bold">
+                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">Prepared: {prrStage.preparedStatus}</span>
+                              <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5", prrStage.directorStatus === "Approved" ? "bg-emerald-50 text-emerald-700" : prrStage.directorStatus === "Rejected" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700")}>Director: {prrStage.directorStatus}</span>
+                            </div>
+                          ) : <span className="text-xs font-semibold text-slate-400">—</span>}
+                        </td>
+                      </>}
+                      <td className="px-5 py-4 text-center"><span className={cn("inline-flex whitespace-nowrap rounded-full px-3 py-1 text-sm font-semibold", record.status === "Pending Approval" ? "bg-amber-50 text-amber-700" : record.status === "Verified" || ["Posted", "Paid", "Reconciled", "Closed"].includes(record.status) ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600")}>{record.status || "Draft"}</span></td>
+                      <td className="px-5 py-4"><div className="flex justify-end gap-1">{isVerificationRegister || isBillsPaidRegister ? <button onClick={() => { setBillPreviewMode(isBillsPaidRegister ? "pay" : "verify"); setVerificationPreview(record); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="Preview bill"><Eye className="h-4 w-4" />Preview</button> : isLedgerPostingRegister ? <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Post ledger entry"><IndianRupee className="h-4 w-4" />Post Ledger Entry</button> : isOutstandingRegister ? (record.prrNumber ? <button onClick={() => setMarkPaidRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title={prrStage?.prrType === "Accounting" ? "Post ledger entry" : "Mark as paid"}><IndianRupee className="h-4 w-4" />{prrStage?.prrType === "Accounting" ? "Ledger Entry" : "Mark as Paid"}</button> : <span className="text-xs font-semibold text-slate-400">Awaiting PRR</span>) : isRequestRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-xl bg-[#0d5c4d] px-4 text-sm font-bold text-white hover:bg-[#0a4b3f]"><Plus className="h-4 w-4" />Create PRR</button> : isPrrLedgerPostingRegister ? <button onClick={() => setLedgerEntryRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Post ledger entry"><IndianRupee className="h-4 w-4" />Post Ledger Entry</button> : isPrrReceiptsRegister ? <button onClick={() => setPaymentDetailsRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg bg-[#0d5c4d] px-3 py-2 text-sm font-semibold text-white hover:bg-[#0a4b3f]" title="Add payment details"><CreditCard className="h-4 w-4" />Add Payment Details</button> : isPrrHistoryRegister ? <button onClick={() => setPrrModalRecord(record)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:border-[#b8d6ce] hover:bg-[#eaf4f1] hover:text-[#0d5c4d]" title="View PRR"><Eye className="h-4 w-4" />View PRR</button> : <><button onClick={() => { setEditing(record); setModalOpen(true); }} className={cn("inline-flex items-center gap-1.5 rounded-lg text-slate-500 hover:bg-[#eaf4f1] hover:text-[#0d5c4d]", record.entryType === "Bill Inward" ? "px-3 py-2 text-sm font-semibold" : "p-2")} title="Edit"><Pencil className="h-4 w-4" />{record.entryType === "Bill Inward" && "Edit"}</button><button onClick={() => window.confirm(`Delete ${record.reference}?`) && saveRecords(records.filter((item) => item.id !== record.id))} className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Delete"><Trash2 className="h-4 w-4" /></button></>}</div></td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
+            )
           ) : (
             <div className="flex min-h-[300px] flex-col items-center justify-center px-6 py-12 text-center">
               <span className="rounded-2xl bg-[#edf5f2] p-4 text-[#6c9b90]"><FileBarChart className="h-8 w-8" /></span>
               <h3 className="mt-4 text-lg font-bold text-slate-800">No {activeTab.label.toLowerCase()} entries found</h3>
-              <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">{isVerificationRegister ? "Saved Bill Inward entries will appear here automatically for review and verification." : isLedgerPostingRegister ? "Director-approved (Verified) bills with a pending ledger entry will appear here for posting." : isBillsPaidRegister ? "Every Bill Inward entry will appear here. Verified bills can be marked as paid from their preview." : "Create the first entry for this workflow, or change the search and status filters."}</p>
-              {!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister && !isPrrDownstreamRegister && <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : `Create ${activeTab.features[0] ?? "Entry"}`}</button>}
+              <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">{isVerificationRegister ? "Saved Bill Inward entries will appear here automatically for review and verification, until they're verified." : isLedgerPostingRegister ? "Director-approved (Verified) bills with a pending ledger entry will appear here for posting, until it's booked." : isBillsPaidRegister ? "Bills move here only once they've been marked as paid — everything else is still in Verification, Ledger Posting or Outstanding." : isOutstandingRegister ? "Ledger-posted bills stay here — with their PRR Number once one exists — until they're marked as paid." : "Create the first entry for this workflow, or change the search and status filters."}</p>
+              {!isVerificationRegister && !isBillsPaidRegister && !isLedgerPostingRegister && !isOutstandingRegister && !isPrrDownstreamRegister && <button onClick={() => isRequestRegister ? openNewPrr() : (setEditing(null), setModalOpen(true))} className="mt-5 inline-flex h-10 items-center gap-2 rounded-xl border border-[#b8d6ce] px-4 text-sm font-bold text-[#0d5c4d] hover:bg-[#edf5f2]"><Plus className="h-4 w-4" />{isRequestRegister ? "Create PRR" : `Create ${activeTab.features[0] ?? "Entry"}`}</button>}
             </div>
           )}
         </section>
@@ -2914,6 +3901,17 @@ export function FinanceAccountsModule({ moduleKey }: { moduleKey: FinanceModuleK
           onSave={(details) => savePrrPaymentDetails(paymentDetailsRecord, details)}
         />
       )}
+      {markPaidRecord && (
+        <MarkPaidModal
+          record={markPaidRecord}
+          isAccounting={prrStageInfo(markPaidRecord)?.prrType === "Accounting"}
+          onClose={() => setMarkPaidRecord(null)}
+          onPaid={() => { setMarkPaidRecord(null); loadInvoices(); }}
+        />
+      )}
+      {invoicePreviewRecord && <InvoiceDocumentPreviewModal record={invoicePreviewRecord} onClose={() => setInvoicePreviewRecord(null)} />}
+      {referencePreview && <ReferenceDocumentPreviewModal record={referencePreview.record} kind={referencePreview.kind} onClose={() => setReferencePreview(null)} />}
+      {prrPreview && <PrrDocumentPreviewModal record={prrPreview.prr} linkedBill={prrPreview.bill} onClose={() => setPrrPreview(null)} />}
     </div>
   );
 }

@@ -6,7 +6,7 @@ import {
   ClipboardCheck, Activity, FolderKanban, Landmark,
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
   Car, Mail, Package, Scale, Truck, CheckSquare, PieChart,
-  Settings,
+  Settings, Briefcase,
   ShieldCheck,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
@@ -20,7 +20,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
   Layers, Box, FileText, Map, AlertCircle, User,
   ClipboardCheck, Activity, FolderKanban, Landmark,
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
-  Car, Mail, Package, Scale, Truck, CheckSquare, PieChart, ShieldCheck, Settings,
+  Car, Mail, Package, Scale, Truck, CheckSquare, PieChart, ShieldCheck, Settings, Briefcase,
 };
 
 /* ---------------- NAV ITEM COMPONENT ---------------- */

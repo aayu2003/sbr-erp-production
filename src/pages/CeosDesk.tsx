@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
+  CartesianGrid,
   Cell,
   Legend,
   Line,
@@ -15,11 +18,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { MapContainer, TileLayer, Polygon, useMap } from "react-leaflet";
+import { MapContainer, TileLayer, Polygon, Circle, Marker, Popup, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {
-  AlarmClock,
   ChevronLeft,
   ChevronRight,
   ClipboardList,
@@ -34,6 +36,8 @@ import {
   Shovel,
   Sprout,
   Tractor,
+  TrendingDown,
+  TrendingUp,
   Users,
   Wheat,
   Workflow,
@@ -41,75 +45,46 @@ import {
 import { cn } from "@/lib/utils";
 import getBaseUrl from "@/lib/config";
 import { getFarmerNames } from "@/lib/farmerNameCache";
+import { getTaskDetailsBulk } from "@/lib/taskDetailsCache";
+import { getAssignedSupervisorAndFieldManagers, type FarmTeamAssignment } from "@/lib/supervisorFieldManagerCache";
 import type { Lead } from "@/types/farm";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 type Tone = "green" | "blue" | "orange" | "purple" | "red";
 
-const kpiCards = [
-  {
-    label: "Total Land Area",
-    value: "757",
-    suffix: "Acres",
-    helper: "",
-    tone: "green" as Tone,
-    icon: MapPinned,
-    progress: 100,
-    clusters: [
-      { name: "North", acres: 214, percent: 28 },
-      { name: "Central", acres: 196, percent: 26 },
-      { name: "East", acres: 182, percent: 24 },
-      { name: "South", acres: 165, percent: 22 },
-    ],
-  },
-  {
-    label: "Land Under Cultivation",
-    value: "482",
-    suffix: "Acres",
-    helper: "63.64% of Total Land",
-    tone: "blue" as Tone,
-    icon: Sprout,
-    progress: 64,
-    chart: "pie",
-  },
-  {
-    label: "Budget Utilized",
-    value: "Rs 7.82",
-    suffix: "Cr",
-    helper: "60.86% Utilized",
-    tone: "green" as Tone,
-    icon: IndianRupee,
-    progress: 61,
-    chart: "pie",
-  },
-  {
-    label: "Pending Approvals",
-    value: "12",
-    suffix: "Requests",
-    helper: "Awaiting review",
-    tone: "orange" as Tone,
-    icon: ClipboardList,
-    progress: 42,
-  },
-  {
-    label: "New Land Leads",
-    value: "214",
-    suffix: "Acres",
-    helper: "Fresh parcels this month",
-    tone: "purple" as Tone,
-    icon: MapPinned,
-    progress: 86,
-  },
-  {
-    label: "Delayed Activities",
-    value: "07",
-    suffix: "Activities",
-    helper: "Require Attention",
-    tone: "red" as Tone,
-    icon: AlarmClock,
-    progress: 18,
-  },
-];
+// The 8 Dashboard-tab KPI tiles are computed live (see buildDashboardKpis) from the same
+// farms/calendarData/budgetBifurcation state the other tabs already fetch — this type is just
+// the shape KpiCard renders, not a source of data itself.
+type DashboardKpi = {
+  label: string;
+  value: string;
+  suffix: string;
+  helper: string;
+  tone: Tone;
+  icon: typeof MapPinned;
+  progress?: number;
+  chart?: "pie";
+  // Optional 2+ slice breakdown pie (distinct from the single-value progress ring above) — used
+  // by the Capex/Opex Distribution and Crop-wise Area tiles.
+  breakdown?: { label: string; value: number; color: string }[];
+  // How to format each breakdown slice's value — "currency" (default, Rs Cr/Lakh) for money like
+  // Capex/Opex, "acres" for a land-area breakdown like Crop-wise Area.
+  breakdownFormat?: "currency" | "acres";
+  // Skips the icon/label/value/suffix/helper header entirely — used by Crop-wise Area, which is
+  // meant to be just the breakdown pie and its legend, nothing else.
+  hideHeader?: boolean;
+  // Keeps the icon/label but drops just the headline value+suffix line — used by Capex/Opex
+  // Distribution, which doesn't need to repeat the total when the pie+legend already show it.
+  hideValue?: boolean;
+  // Replaces the headline value+suffix with a compact 2-up split (used by Actual Disbursement:
+  // the actual figure vs what was expected) — same vertical space as the value row it replaces,
+  // not extra, so the tile's height doesn't grow.
+  splitAmounts?: { label: string; value: number }[];
+  // A small pill in the header's top-right corner (same slot the progress ring uses) — for
+  // Actual Disbursement's percentage, which needs to show alongside the split without adding a
+  // new line of its own.
+  badge?: string;
+};
 
 const toneStyles: Record<Tone, { icon: string; iconBg: string; ring: string; ringSoft: string; helper: string }> = {
   green: { icon: "text-green-700", iconBg: "bg-green-100", ring: "#16a34a", ringSoft: "#dcfce7", helper: "text-green-700" },
@@ -126,87 +101,11 @@ const tabs = [
   { id: "financial-analysis", label: "Financial Analysis", icon: IndianRupee },
 ];
 
-const landProgress = [
-  { name: "Under Agreement", value: 152, color: "#2389e8" },
-  { name: "Land Prepared", value: 123, color: "#56c02f" },
-  { name: "Under Cultivation", value: 482, color: "#46b725" },
-  { name: "On Hold / Disputed", value: 18, color: "#f97316" },
-  { name: "Dropped", value: 0.01, labelValue: 0, color: "#a8b0bf" },
-];
-
-const budgetTrend = [
-  { month: "Apr 24", approved: 1.8, utilized: 0.9 },
-  { month: "May 24", approved: 3.8, utilized: 1.9 },
-  { month: "Jun 24", approved: 4.8, utilized: 2.8 },
-  { month: "Jul 24", approved: 6.0, utilized: 3.7 },
-  { month: "Aug 24", approved: 7.4, utilized: 4.9 },
-  { month: "Sep 24", approved: 9.4, utilized: 5.7 },
-  { month: "Oct 24", approved: 10.3, utilized: 7.2 },
-  { month: "Nov 24", approved: 10.8, utilized: 7.5 },
-  { month: "Dec 24", approved: 11.0, utilized: 7.7 },
-  { month: "Jan 25", approved: 11.4, utilized: 8.5 },
-  { month: "Feb 25", approved: 12.1, utilized: 8.8 },
-  { month: "Mar 25", approved: 13.1, utilized: 10.1 },
-];
-
-const activityStatus = [
-  { name: "Completed", value: 78, color: "#22c55e" },
-  { name: "In Progress", value: 15, color: "#f59e0b" },
-  { name: "Pending", value: 5, color: "#fbbf24" },
-  { name: "Delayed", value: 2, color: "#ef4444" },
-];
-
-const cropArea = [
-  { crop: "Paddy", acres: 260, fill: "var(--crop-paddy-color, #22c55e)" },
-  { crop: "Rahar", acres: 110, fill: "var(--crop-rahar-color, #800000)" },
-  { crop: "Napier", acres: 80, fill: "#fbbf24" },
-  { crop: "Other Crops", acres: 32, fill: "#6d28d9" },
-];
-
-const manpower = [
-  { name: "Field Managers", value: 18, color: "#0b5fe8" },
-  { name: "Supervisors", value: 28, color: "#2563eb" },
-  { name: "Skilled Labour", value: 92, color: "#22a765" },
-  { name: "Unskilled Labour", value: 108, color: "#6d28d9" },
-];
-
-const focusAreas = [
-  { label: "Procurement Discipline", helper: "PO compliance", value: "84%", tone: "green", width: "84%" },
-  { label: "Field Execution", helper: "Planned tasks closed", value: "91%", tone: "green", width: "91%" },
-  { label: "Budget Variance", helper: "Against approved plan", value: "6.8%", tone: "red", width: "22%" },
-  { label: "Stock Health", helper: "Critical items available", value: "78%", tone: "orange", width: "78%" },
-];
-
-const approvals = [
-  ["Payment Request", "PR-2024-05-125", "Field Manager - A", "Rs 2,45,600", "20 May 2024", "Pending"],
-  ["Purchase Order", "PO-2024-05-078", "Cluster Manager - B", "Rs 1,75,000", "20 May 2024", "Pending"],
-  ["Work Order", "WO-2024-05-059", "Field Manager - C", "Rs 95,420", "19 May 2024", "Pending"],
-  ["Diesel Indent", "DI-2024-05-088", "Supervisor - D", "Rs 38,760", "19 May 2024", "Pending"],
-];
-
-const risks = [
-  ["Activity delayed > 3 days", "Cluster B, C", "High", "4"],
-  ["Budget utilization crossed 80%", "Cluster A", "High", "2"],
-  ["Low stock for 18 items", "Multiple", "Medium", "1"],
-  ["Diesel consumption high", "Cluster D", "High", "3"],
-  ["Land dispute reported", "Village Khairpura", "Medium", "5"],
-];
-
-const forecast = [
-  ["Next 7 Days", "1.25", "0.85", "-0.40"],
-  ["Next 15 Days", "2.85", "1.60", "-1.25"],
-  ["Next 30 Days", "5.60", "2.90", "-2.70"],
-  ["Next 60 Days", "9.10", "3.75", "-5.35"],
-];
-
 const Card = ({ className, children }: { className?: string; children: React.ReactNode }) => (
   <section className={cn("rounded-xl border border-slate-200 bg-white shadow-[0_6px_18px_rgba(15,23,42,0.06)]", className)}>
     {children}
   </section>
 );
-
-const pieKpiCards = kpiCards.filter((card) => card.chart === "pie");
-const metricKpiCards = kpiCards.filter((card) => card.chart !== "pie");
 
 const KpiPieChart = ({ value, color, trackColor }: { value: number; color: string; trackColor: string }) => {
   const radius = 25;
@@ -234,47 +133,87 @@ const KpiPieChart = ({ value, color, trackColor }: { value: number; color: strin
   );
 };
 
-const KpiCard = ({ card }: { card: (typeof kpiCards)[number] }) => {
+const KpiCard = ({ card }: { card: DashboardKpi }) => {
   const Icon = card.icon;
   const style = toneStyles[card.tone];
   const showPieChart = card.chart === "pie";
-  const hasClusters = "clusters" in card && Array.isArray(card.clusters);
+  const breakdownTotal = card.breakdown?.reduce((sum, slice) => sum + Math.max(slice.value, 0), 0) ?? 0;
+  const formatBreakdownValue =
+    card.breakdownFormat === "acres"
+      ? (value: number) => `${value.toLocaleString("en-IN", { maximumFractionDigits: 1 })} ac`
+      : formatFinancialAmount;
 
   return (
-    <Card className={cn("overflow-hidden", showPieChart ? "min-h-[124px] p-4" : hasClusters ? "min-h-[164px] p-4" : "min-h-[118px] p-4")}>
-      <div className="flex h-full items-start justify-between gap-4">
-        <div className={cn("min-w-0 flex-1", !showPieChart && "max-w-full")}>
-          <div className="flex items-center gap-3">
-            <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-full", style.iconBg)}>
-              <Icon className={cn("h-5 w-5", style.icon)} />
-            </div>
-            <p className="text-sm font-extrabold text-slate-950">{card.label}</p>
-          </div>
-          <div className="mt-3 flex items-end gap-2">
-            <p className="text-3xl font-black tracking-normal text-slate-950">{card.value}</p>
-            <p className="pb-1 text-sm font-bold text-slate-700">{card.suffix}</p>
-          </div>
-          {card.helper && <p className={cn("mt-2 text-sm font-bold", style.helper)}>{card.helper}</p>}
-        </div>
-        {showPieChart && <KpiPieChart value={card.progress} color={style.ring} trackColor={style.ringSoft} />}
-      </div>
-
-      {hasClusters && (
-        <div className="mt-4 border-t border-slate-100 pt-3">
-          <p className="mb-2 text-xs font-black uppercase tracking-[0.08em] text-slate-500">Cluster-wise bifurcation</p>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
-            {card.clusters.map((cluster) => (
-              <div key={cluster.name} className="rounded-lg bg-slate-50 px-3 py-2">
-                <div className="flex items-center justify-between gap-2 text-xs">
-                  <span className="font-extrabold text-slate-700">{cluster.name}</span>
-                  <span className="font-black text-slate-950">{cluster.acres} ac</span>
-                </div>
-                <div className="mt-2 h-1.5 rounded-full bg-slate-200">
-                  <div className="h-1.5 rounded-full bg-green-500" style={{ width: `${cluster.percent}%` }} />
-                </div>
+    <Card className={cn("flex h-full flex-col overflow-hidden", showPieChart ? "min-h-[124px] p-4" : "min-h-[118px] p-4")}>
+      {!card.hideHeader && (
+        <div className="flex items-start justify-between gap-4">
+          <div className={cn("min-w-0 flex-1", !showPieChart && "max-w-full")}>
+            <div className="flex items-center gap-3">
+              <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-full", style.iconBg)}>
+                <Icon className={cn("h-5 w-5", style.icon)} />
               </div>
-            ))}
+              <p className="text-sm font-extrabold text-slate-950">{card.label}</p>
+            </div>
+            {!card.hideValue && (
+              <div className="mt-3 flex items-end gap-2">
+                <p className="text-3xl font-black tracking-normal text-slate-950">{card.value}</p>
+                <p className="pb-1 text-sm font-bold text-slate-700">{card.suffix}</p>
+              </div>
+            )}
+            {card.splitAmounts && (
+              <div className={cn("grid grid-cols-2 divide-x divide-slate-100", card.hideValue ? "mt-3" : "mt-2")}>
+                {card.splitAmounts.map((item, index) => (
+                  <div key={item.label} className={index === 0 ? "pr-3" : "pl-3"}>
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{item.label}</p>
+                    <p className="mt-0.5 truncate text-sm font-black text-slate-900">{formatFinancialAmount(item.value)}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+            {card.helper && <p className={cn("mt-2 text-sm font-bold", style.helper)}>{card.helper}</p>}
           </div>
+          {showPieChart && <KpiPieChart value={card.progress ?? 0} color={style.ring} trackColor={style.ringSoft} />}
+          {card.badge && (
+            <span className={cn("shrink-0 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-black", style.iconBg, style.icon)}>
+              {card.badge}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Breakdown pie — Capex/Opex Distribution and Crop-wise Area, each their own standalone
+          tile now rather than sharing space on a row-spanning Total Budget tile. */}
+      {card.breakdown && (
+        <div className={cn("flex flex-1 items-center gap-3", !card.hideHeader && "mt-4 border-t border-slate-100 pt-4")}>
+          {breakdownTotal > 0 ? (
+            <>
+              <div className="relative h-24 w-24 shrink-0">
+                <ResponsiveContainer>
+                  <PieChart>
+                    <Pie data={card.breakdown} dataKey="value" nameKey="label" innerRadius={30} outerRadius={46} paddingAngle={3} strokeWidth={0}>
+                      {card.breakdown.map((slice) => (
+                        <Cell key={slice.label} fill={slice.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip formatter={(value: number, _name, item) => [formatBreakdownValue(value), item?.payload?.label]} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="min-w-0 flex-1 space-y-2">
+                {card.breakdown.map((slice) => (
+                  <div key={slice.label} className="flex items-center justify-between gap-2 text-xs font-bold text-slate-600">
+                    <span className="flex min-w-0 items-center gap-1.5 truncate">
+                      <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: slice.color }} />
+                      {slice.label}
+                    </span>
+                    <span className="shrink-0 font-black text-slate-900">{formatBreakdownValue(slice.value)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="text-xs font-bold text-slate-300">--</p>
+          )}
         </div>
       )}
     </Card>
@@ -310,98 +249,6 @@ const landAcquisitionStats = [
   { label: "Ready for Cultivation", value: "152", suffix: "Acres", tone: "text-emerald-700" },
 ];
 
-const leaseRenewals = [
-  {
-    parcelId: "LP-KHG-118",
-    village: "Khairagarh",
-    landowner: "Ramesh Sahu",
-    area: "42 ac",
-    expiry: "18 Aug 2024",
-    rent: "Rs 18,500/ac",
-    status: "Negotiation",
-  },
-  {
-    parcelId: "LP-RJN-072",
-    village: "Rajnandgaon",
-    landowner: "Meena Verma",
-    area: "36 ac",
-    expiry: "04 Sep 2024",
-    rent: "Rs 17,800/ac",
-    status: "Docs Pending",
-  },
-  {
-    parcelId: "LP-DGR-044",
-    village: "Dongargarh",
-    landowner: "Suresh Patel",
-    area: "28 ac",
-    expiry: "22 Oct 2024",
-    rent: "Rs 19,200/ac",
-    status: "Approved",
-  },
-  {
-    parcelId: "LP-CHK-091",
-    village: "Chhuikhadan",
-    landowner: "Anita Nishad",
-    area: "31 ac",
-    expiry: "14 Nov 2024",
-    rent: "Rs 18,100/ac",
-    status: "Field Review",
-  },
-];
-
-const leadStatusRows = [
-  {
-    leadId: "LL-2024-118",
-    village: "Khairagarh",
-    cluster: "North",
-    landowner: "Ramesh Sahu",
-    area: "72 ac",
-    stage: "Lead Identified",
-    status: "Due in 2 days",
-    owner: "Field Manager - A",
-    tone: "orange" as const,
-  },
-  {
-    leadId: "LL-2024-096",
-    village: "Rajnandgaon",
-    cluster: "Central",
-    landowner: "Meena Verma",
-    area: "54 ac",
-    stage: "Field Verification",
-    status: "On track",
-    owner: "Supervisor - C",
-    tone: "green" as const,
-  },
-  {
-    leadId: "LL-2024-083",
-    village: "Dongargarh",
-    cluster: "East",
-    landowner: "Suresh Patel",
-    area: "38 ac",
-    stage: "Agreement Drafting",
-    status: "Needs review",
-    owner: "Legal Desk",
-    tone: "yellow" as const,
-  },
-  {
-    leadId: "LL-2024-071",
-    village: "Chhuikhadan",
-    cluster: "South",
-    landowner: "Anita Nishad",
-    area: "50 ac",
-    stage: "Agreement Signed",
-    status: "Ready",
-    owner: "Cluster Manager - B",
-    tone: "green" as const,
-  },
-];
-
-const cultivationStats = [
-  { label: "Planned Area", value: "642", suffix: "Acres", tone: "text-blue-700" },
-  { label: "Completed Area", value: "482", suffix: "Acres", tone: "text-emerald-700" },
-  { label: "Pending Area", value: "160", suffix: "Acres", tone: "text-amber-700" },
-  { label: "Delayed Parcels", value: "07", suffix: "Parcels", tone: "text-red-700" },
-];
 
 type FinancialKpis = {
   total_budget: number;
@@ -414,18 +261,20 @@ type FinancialKpis = {
 const FINANCIAL_DECIMAL_PLACES = 2;
 const formatFinancialAmount = (valueInRupees: number) => {
   const value = Number(valueInRupees || 0);
-  if (Math.abs(value) >= 1e7) {
-    return `Rs ${(value / 1e7).toFixed(FINANCIAL_DECIMAL_PLACES)} Cr`;
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  if (abs >= 1e7) {
+    return `${sign}Rs ${(abs / 1e7).toFixed(FINANCIAL_DECIMAL_PLACES)} Cr`;
   }
-  return `Rs ${(value / 1e5).toFixed(FINANCIAL_DECIMAL_PLACES)} Lakh`;
+  return `${sign}Rs ${(abs / 1e5).toFixed(FINANCIAL_DECIMAL_PLACES)} Lakh`;
 };
 const formatCroreChartValue = (valueInCrores: number) => formatFinancialAmount(Number(valueInCrores || 0) * 1e7);
 
 const financialStatDefs = [
-  { label: "Total Budget", key: "total_budget" as const, tone: "text-blue-700" },
-  { label: "Total Capex", key: "total_capex" as const, tone: "text-emerald-700" },
-  { label: "Total Opex", key: "total_opex" as const, tone: "text-violet-700" },
-  { label: "Total Variance", key: "total_remaining" as const, tone: "text-red-700" },
+  { label: "Total Budget", key: "total_budget" as const, tone: "text-blue-700", iconBg: "bg-blue-100", icon: Landmark },
+  { label: "Total Capex", key: "total_capex" as const, tone: "text-emerald-700", iconBg: "bg-emerald-100", icon: Tractor },
+  { label: "Total Opex", key: "total_opex" as const, tone: "text-violet-700", iconBg: "bg-violet-100", icon: Workflow },
+  { label: "Total Balance", key: "balance" as const, tone: "text-emerald-700", iconBg: "bg-emerald-100", icon: TrendingUp },
 ];
 
 type BudgetBifurcation = {
@@ -444,6 +293,10 @@ const BUDGET_SEGMENT_COLORS = {
   unallocated: "#94a3b8",
 };
 
+// Muted, report-grade green for the Category-wise Utilized figure — deliberately not the
+// brighter BUDGET_SEGMENT_COLORS.utilized used in consumer-style charts elsewhere on this page.
+const CATEGORY_UTILIZATION_COLORS = { utilized: "#166534" };
+
 const buildBudgetSegments = (entry: {
   total_budget: number;
   amount_in_pipeline: number;
@@ -451,11 +304,12 @@ const buildBudgetSegments = (entry: {
   remaining: number;
 }) => {
   const segments = [
-    { key: "pipeline", label: "Allocated", color: BUDGET_SEGMENT_COLORS.pipeline, value: Math.max(entry.amount_in_pipeline, 0) },
-    { key: "utilized", label: "Actual Utilized", color: BUDGET_SEGMENT_COLORS.utilized, value: Math.max(entry.amount_utilized, 0) },
+    { key: "utilized", label: "Utilized Budget", color: BUDGET_SEGMENT_COLORS.utilized, value: Math.max(entry.amount_utilized, 0) },
     { key: "remaining", label: "Balance", color: BUDGET_SEGMENT_COLORS.remaining, value: Math.max(entry.remaining, 0) },
   ];
-  const unallocated = entry.total_budget - (entry.amount_in_pipeline + entry.amount_utilized + entry.remaining);
+  // amount_in_pipeline folds into this bucket rather than getting its own wedge — the real
+  // Amount in Pipeline figure is its own KPI card at the top of the page.
+  const unallocated = entry.total_budget - (entry.amount_utilized + entry.remaining);
   if (unallocated > 0) {
     segments.push({ key: "unallocated", label: "Unallocated", color: BUDGET_SEGMENT_COLORS.unallocated, value: unallocated });
   }
@@ -463,37 +317,29 @@ const buildBudgetSegments = (entry: {
 };
 
 const BudgetBifurcationRow = ({ budget }: { budget: BudgetBifurcation }) => {
-  const segments = buildBudgetSegments(budget);
+  const segments = buildBudgetSegments(budget).filter((entry) => entry.key !== "unallocated");
 
   return (
     <div className="rounded-lg bg-slate-50 p-3">
-      <div className="flex items-center gap-3">
-        <div className="relative h-16 w-16 shrink-0">
-          <ResponsiveContainer>
-            <PieChart>
-              <Pie data={segments} dataKey="value" nameKey="label" innerRadius={18} outerRadius={30} paddingAngle={2}>
-                {segments.map((entry) => (
-                  <Cell key={entry.key} fill={entry.color} />
-                ))}
-              </Pie>
-              <Tooltip formatter={(value: number, _name, item) => [formatFinancialAmount(value), item?.payload?.label]} />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-xs font-black text-slate-950">{budget.budget_name}</p>
-          <p className="text-[11px] font-bold text-slate-500">{formatFinancialAmount(budget.total_budget)} Total Budget</p>
-          <div className="mt-1.5 flex flex-wrap gap-1.5">
-            {segments
-              .filter((entry) => entry.key !== "unallocated")
-              .map((entry) => (
-                <span key={entry.key} className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-600">
-                  <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: entry.color }} />
-                  {entry.label} {formatFinancialAmount(entry.value)}
-                </span>
-              ))}
+      <div className="flex items-start justify-between gap-3">
+        <p className="min-w-0 flex-1 truncate text-xs font-black text-slate-950" title={budget.budget_name}>
+          {budget.budget_name}
+        </p>
+        <p className="shrink-0 text-[11px] font-bold text-slate-500">{formatFinancialAmount(budget.total_budget)}</p>
+      </div>
+      {/* Number chips, not another segmented bar — the aggregate donut above this list already
+          shows proportion for the whole card, and Category-wise Budget Bifurcation below already
+          owns the bar treatment; repeating it per row here just reads as the same widget twice. */}
+      <div className="mt-2 grid grid-cols-2 gap-1.5">
+        {segments.map((entry) => (
+          <div key={entry.key} className="rounded-md bg-white px-2 py-1.5">
+            <p className="flex items-center gap-1 text-[9px] font-black uppercase tracking-[0.02em] text-slate-500">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: entry.color }} />
+              {entry.label}
+            </p>
+            <p className="mt-0.5 text-[11px] font-black text-slate-800">{formatFinancialAmount(entry.value)}</p>
           </div>
-        </div>
+        ))}
       </div>
     </div>
   );
@@ -514,22 +360,25 @@ const sumBudgetTotals = (budgets: BudgetBifurcation[]) =>
 const BudgetBifurcationCard = ({ budgets, loading }: { budgets: BudgetBifurcation[]; loading: boolean }) => {
   const totals = useMemo(() => sumBudgetTotals(budgets), [budgets]);
 
+  // Balance = Total Budget - Actual Utilized. Total Allocated / Amount in Pipeline is its own
+  // KPI card up top now, not part of this card's breakdown.
+  const balance = totals.totalBudget - totals.utilized;
+
   const aggregateSegments = useMemo(
     () =>
       buildBudgetSegments({
         total_budget: totals.totalBudget,
         amount_in_pipeline: totals.pipeline,
         amount_utilized: totals.utilized,
-        remaining: totals.remaining,
+        remaining: balance,
       }),
-    [totals],
+    [totals, balance],
   );
 
   const totalsList = [
     { label: "Total Budget", value: totals.totalBudget, color: "#0f172a" },
-    { label: "Allocated", value: totals.pipeline, color: BUDGET_SEGMENT_COLORS.pipeline },
-    { label: "Actual Utilized", value: totals.utilized, color: BUDGET_SEGMENT_COLORS.utilized },
-    { label: "Balance", value: totals.remaining, color: BUDGET_SEGMENT_COLORS.remaining },
+    { label: "Utilized Budget", value: totals.utilized, color: BUDGET_SEGMENT_COLORS.utilized },
+    { label: "Balance", value: balance, color: BUDGET_SEGMENT_COLORS.remaining },
   ];
 
   return (
@@ -596,7 +445,25 @@ const BudgetBifurcationCard = ({ budgets, loading }: { budgets: BudgetBifurcatio
   );
 };
 
-type DisbursementWeek = { week: string; planned: number; disbursed: number; cumulative: number };
+type DisbursementWeek = { week: string; planned: number; expected: number; disbursed: number; cumulative: number };
+
+type ActualDisbursementRecord = { amount: number; prr_number: string; date_of_prr: string };
+
+// BASE_URL/ceo_desk/get_actual_disbursement — real PRR payments (from admin_accounts_prr's
+// paid_at/payment_details, see mark_payment_paid), the actual counterpart to the planned
+// week-wise schedule read out of each budget's "ERP Disbursement" xlsx sheet below.
+const fetchActualDisbursements = async (signal: AbortSignal): Promise<ActualDisbursementRecord[]> => {
+  const baseUrl = getBaseUrl().replace(/\/$/, "");
+  try {
+    const res = await fetch(`${baseUrl}/ceo_desk/get_actual_disbursement`, { signal });
+    if (!res.ok) return [];
+    const data = await res.json().catch(() => null);
+    return Array.isArray(data?.data) ? data.data : [];
+  } catch (err: unknown) {
+    if ((err as { name?: string })?.name === "AbortError") throw err;
+    return [];
+  }
+};
 
 const DISBURSEMENT_SHEET_NAME = "ERP Disbursement";
 const MONTH_ORDER: Record<string, number> = {
@@ -626,11 +493,26 @@ const getCurrentWeekSortValue = () => {
   return now.getFullYear() * 48 + monthIdx * 4 + week;
 };
 
+const MONTH_SHORT_BY_INDEX = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Places a real payment's date_of_prr onto the same "Jun2026-W1"-style weekly key the planned
+// schedule uses (same W1-W4 day-of-month bucketing as getCurrentWeekSortValue), so actual and
+// planned amounts land in the same week bucket.
+const dateToWeekKey = (dateStr: string): string | null => {
+  const date = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return null;
+  const day = date.getDate();
+  const week = day <= 7 ? 1 : day <= 14 ? 2 : day <= 21 ? 3 : 4;
+  return `${MONTH_SHORT_BY_INDEX[date.getMonth()]}${date.getFullYear()}-W${week}`;
+};
+
 // Aggregates the "ERP Disbursement" sheet across every budget's own xlsx into one portfolio-wide,
-// chronologically-ordered week series. "Disbursed" is a best-effort proxy: weeks at-or-before
-// today are treated as already paid out on schedule, since there's no separate actuals feed.
+// chronologically-ordered week series, and merges in the real payments from
+// BASE_URL/ceo_desk/get_actual_disbursement — "expected" is the old schedule-based proxy
+// (planned, for weeks at-or-before today), "disbursed" is now what was actually paid out.
 const fetchAggregateDisbursementSeries = async (
   budgetIds: string[],
+  actualDisbursements: ActualDisbursementRecord[],
   signal: AbortSignal
 ): Promise<DisbursementWeek[]> => {
   const baseUrl = getBaseUrl().replace(/\/$/, "");
@@ -663,22 +545,32 @@ const fetchAggregateDisbursementSeries = async (
     })
   );
 
+  const actualTotals = new Map<string, number>();
+  actualDisbursements.forEach((record) => {
+    const key = dateToWeekKey(record.date_of_prr);
+    if (!key) return;
+    actualTotals.set(key, (actualTotals.get(key) || 0) + (Number(record.amount) || 0));
+  });
+
   const currentWeekSortValue = getCurrentWeekSortValue();
-  const parsedWeeks = Array.from(weekTotals.entries())
-    .map(([key, total]) => ({ total, parsed: parseWeekKey(key) }))
-    .filter((w): w is { total: number; parsed: NonNullable<ReturnType<typeof parseWeekKey>> } => w.parsed !== null)
+  const weekKeys = new Set<string>([...weekTotals.keys(), ...actualTotals.keys()]);
+  const parsedWeeks = Array.from(weekKeys)
+    .map((key) => ({ planned: weekTotals.get(key) || 0, actual: actualTotals.get(key) || 0, parsed: parseWeekKey(key) }))
+    .filter((w): w is { planned: number; actual: number; parsed: NonNullable<ReturnType<typeof parseWeekKey>> } => w.parsed !== null)
     .sort((a, b) => a.parsed.sortValue - b.parsed.sortValue);
 
   let cumulative = 0;
-  return parsedWeeks.map(({ total, parsed }) => {
-    const plannedCr = total / 1e7;
-    const disbursedCr = parsed.sortValue <= currentWeekSortValue ? plannedCr : 0;
+  return parsedWeeks.map(({ planned, actual, parsed }) => {
+    const plannedCr = planned / 1e7;
+    const expectedCr = parsed.sortValue <= currentWeekSortValue ? plannedCr : 0;
+    const disbursedCr = actual / 1e7;
     // Cumulative runs from the very first week through this one, regardless of whether the
     // week is in the past or future — it's "how much is due by this point in the sequence".
     cumulative += plannedCr;
     return {
       week: `${parsed.monthShort} W${parsed.week}`,
       planned: Number(plannedCr.toFixed(3)),
+      expected: Number(expectedCr.toFixed(3)),
       disbursed: Number(disbursedCr.toFixed(3)),
       cumulative: Number(cumulative.toFixed(3)),
     };
@@ -689,16 +581,17 @@ const DisbursementSequenceCard = ({
   series,
   loading,
   budgets,
+  totalActualDisbursedCr,
 }: {
   series: DisbursementWeek[];
   loading: boolean;
   budgets: BudgetBifurcation[];
+  totalActualDisbursedCr: number;
 }) => {
   const [chartView, setChartView] = useState<"line" | "bar">("line");
-  const expectedTillNow = series.reduce((sum, item) => sum + item.disbursed, 0);
-  const { totalBudget, utilized } = sumBudgetTotals(budgets);
+  const expectedTillNow = series.reduce((sum, item) => sum + item.expected, 0);
+  const { totalBudget } = sumBudgetTotals(budgets);
   const totalBudgetCr = totalBudget / 1e7;
-  const utilizedCr = utilized / 1e7;
 
   return (
     <Card className="p-5">
@@ -806,7 +699,7 @@ const DisbursementSequenceCard = ({
           <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Expected Disbursement Till Now</p>
         </div>
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
-          <p className="text-lg font-black text-slate-950">{formatCroreChartValue(utilizedCr)}</p>
+          <p className="text-2xl font-black text-slate-950">{formatCroreChartValue(totalActualDisbursedCr)}</p>
           <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Total Disbursed Till Now</p>
         </div>
       </div>
@@ -911,51 +804,43 @@ const CategoryBudgetCard = ({ budget }: { budget: BudgetCategoryBifurcation }) =
 
   return (
     <Card className="p-5">
-      <div className="mb-4 flex items-start justify-between gap-3">
+      <div className="mb-4 flex items-start justify-between gap-3 border-b border-slate-100 pb-4">
         <div>
-          <h3 className="text-sm font-black text-slate-950">{budget.budget_name}</h3>
-          <p className="mt-0.5 text-xs font-semibold text-slate-500">{formatFinancialAmount(totalBudget)} Total Budget</p>
+          <h3 className="text-sm font-bold text-slate-900">{budget.budget_name}</h3>
+          <p className="mt-0.5 text-xs font-medium tabular-nums text-slate-500">{formatFinancialAmount(totalBudget)} Total Budget</p>
         </div>
         <Pill tone="blue">{budget.categories.length} Categories</Pill>
       </div>
       <div className="max-h-[420px] overflow-y-auto pr-1">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {budget.categories.map((category) => {
-            const allocatedPct = category.total_budget > 0 ? Math.min((category.amount_in_pipeline / category.total_budget) * 100, 100) : 0;
-            const utilizedPct = category.total_budget > 0
-              ? Math.min((category.amount_utilized / category.total_budget) * 100, 100 - allocatedPct)
-              : 0;
-            const balancePct = category.total_budget > 0
-              ? Math.min((category.remaining / category.total_budget) * 100, 100 - allocatedPct - utilizedPct)
-              : 0;
-
-            return (
-              <div key={category.category} className="rounded-lg border border-slate-100 bg-slate-50 p-3">
-                <span className="block truncate text-xs font-black text-slate-800">{category.category.trim()}</span>
-                <div className="mt-2 flex h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
-                  <div className="h-full" style={{ width: `${allocatedPct}%`, backgroundColor: BUDGET_SEGMENT_COLORS.pipeline }} />
-                  <div className="h-full" style={{ width: `${utilizedPct}%`, backgroundColor: BUDGET_SEGMENT_COLORS.utilized }} />
-                  <div className="h-full" style={{ width: `${balancePct}%`, backgroundColor: BUDGET_SEGMENT_COLORS.remaining }} />
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {budget.categories.map((category) => (
+            // A visible header strip plus a hairline border/shadow on every tile — so that in a
+            // 4-up grid, where one category ends and the next begins is never ambiguous.
+            <div key={category.category} className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
+              <p
+                className="truncate border-b border-slate-200 bg-slate-50 px-3 py-2 text-[13px] font-semibold text-slate-900"
+                title={category.category.trim()}
+              >
+                {category.category.trim()}
+              </p>
+              <div className="grid grid-cols-3 divide-x divide-slate-200">
+                <div className="px-2.5 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Budget</p>
+                  <p className="mt-1 text-sm font-bold tabular-nums text-slate-900">{formatFinancialAmount(category.total_budget)}</p>
                 </div>
-                <div className="mt-2 grid grid-cols-4 gap-2 border-t border-slate-200/80 pt-2">
-                  {[
-                    { label: "Total Budget", value: category.total_budget, color: "#0f172a" },
-                    { label: "Allocated", value: category.amount_in_pipeline, color: BUDGET_SEGMENT_COLORS.pipeline },
-                    { label: "Actual Utilized", value: category.amount_utilized, color: BUDGET_SEGMENT_COLORS.utilized },
-                    { label: "Balance", value: category.remaining, color: BUDGET_SEGMENT_COLORS.remaining },
-                  ].map((item) => (
-                    <div key={item.label} className="min-w-0">
-                      <p className="flex items-center gap-1 whitespace-nowrap text-[8px] font-black uppercase tracking-[0.02em] text-slate-500">
-                        <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
-                        {item.label}
-                      </p>
-                      <p className="mt-0.5 whitespace-nowrap text-[10px] font-black text-slate-700">{formatFinancialAmount(item.value)}</p>
-                    </div>
-                  ))}
+                <div className="px-2.5 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Utilized</p>
+                  <p className="mt-1 text-sm font-bold tabular-nums" style={{ color: CATEGORY_UTILIZATION_COLORS.utilized }}>
+                    {formatFinancialAmount(Math.max(category.amount_utilized, 0))}
+                  </p>
+                </div>
+                <div className="px-2.5 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Balance</p>
+                  <p className="mt-1 text-sm font-bold tabular-nums text-slate-700">{formatFinancialAmount(Math.max(category.remaining, 0))}</p>
                 </div>
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       </div>
     </Card>
@@ -1080,6 +965,21 @@ const normalizeCropKey = (crop?: string) => (crop && crop.trim() ? crop.trim().t
 const cropLabel = (key: string) => (key === "unspecified" ? "Unspecified" : key.charAt(0).toUpperCase() + key.slice(1));
 
 const cropColor = (key: string, index: number) => CROP_COLORS[key] ?? FALLBACK_CROP_COLORS[index % FALLBACK_CROP_COLORS.length];
+
+// Soft-pastel palette for the Activities x Days week grid — one color per activity, assigned by
+// first-seen order so it stays stable across re-renders as long as the set of activities doesn't
+// change (cell fill and legend dot both key off the same activityColorFor call).
+const ACTIVITY_COLOR_PALETTE = [
+  { bg: "#dcfce7", text: "#15803d", dot: "#22c55e" },
+  { bg: "#ffedd5", text: "#c2410c", dot: "#f97316" },
+  { bg: "#fef9c3", text: "#a16207", dot: "#eab308" },
+  { bg: "#ede9fe", text: "#6d28d9", dot: "#8b5cf6" },
+  { bg: "#fee2e2", text: "#b91c1c", dot: "#ef4444" },
+  { bg: "#dbeafe", text: "#1d4ed8", dot: "#3b82f6" },
+  { bg: "#cffafe", text: "#0e7490", dot: "#06b6d4" },
+  { bg: "#fce7f3", text: "#be185d", dot: "#ec4899" },
+];
+const activityColorFor = (index: number) => ACTIVITY_COLOR_PALETTE[index % ACTIVITY_COLOR_PALETTE.length];
 
 const buildCropUnits = (farms: Farm[]): CropPlotUnit[] =>
   farms.flatMap((farm) => {
@@ -1364,15 +1264,14 @@ type ActivityAcreageSummary = {
   taskCount: number;
 };
 
-const buildActivitySummaries = (calendarData: CalendarDayMap, monthDate: Date, cropFilter: string | null) => {
-  const prefix = `${monthDate.getFullYear()}-${pad2(monthDate.getMonth() + 1)}-`;
+const buildActivitySummaries = (calendarData: CalendarDayMap, dateKeys: Set<string>, cropFilter: string | null) => {
   const byActivity = new Map<string, ActivityAcreageSummary>();
   const cropKeysSeen = new Set<string>();
   let totalTasks = 0;
   let totalAcres = 0;
 
   Object.entries(calendarData).forEach(([dateStr, rows]) => {
-    if (!dateStr.startsWith(prefix)) return;
+    if (!dateKeys.has(dateStr)) return;
 
     rows.forEach((row) => {
       const cropKey = normalizeCropKey(row.crop_type);
@@ -1410,86 +1309,107 @@ const buildActivitySummaries = (calendarData: CalendarDayMap, monthDate: Date, c
 
 const startOfMonth = (date: Date) => new Date(date.getFullYear(), date.getMonth(), 1);
 
+const addDays = (date: Date, delta: number) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + delta);
+  return next;
+};
+const startOfWeekMonday = (date: Date) => {
+  const day = date.getDay(); // 0 = Sunday
+  return addDays(new Date(date.getFullYear(), date.getMonth(), date.getDate()), day === 0 ? -6 : 1 - day);
+};
+const toDateKey = (date: Date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+const WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const weekDateKeys = (weekStart: Date) => new Set(Array.from({ length: 7 }, (_, i) => toDateKey(addDays(weekStart, i))));
+const formatWeekRangeLabel = (weekStart: Date) => {
+  const weekEnd = addDays(weekStart, 6);
+  const startLabel = weekStart.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+  const endLabel = weekEnd.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+  return `${startLabel} – ${endLabel}`;
+};
+
+// Activities x Days week grid: one row per activity active this week, one cell per day showing
+// total acres + distinct farm count for that activity on that day — the CEO-facing view a
+// week-at-a-glance planner needs, versus the old day-grid-of-events month calendar.
 const CultivationCalendarCard = ({
   calendarData,
   loading,
-  selectedMonth,
-  onMonthChange,
+  weekStart,
+  onWeekChange,
   onOpenPlanner,
 }: {
   calendarData: CalendarDayMap;
   loading: boolean;
-  selectedMonth: Date;
-  onMonthChange: (monthDate: Date) => void;
+  weekStart: Date;
+  onWeekChange: (weekStart: Date) => void;
   onOpenPlanner: (monthDate: Date) => void;
 }) => {
-  const year = selectedMonth.getFullYear();
-  const month = selectedMonth.getMonth();
-  const monthLabel = selectedMonth.toLocaleString("default", { month: "long", year: "numeric" });
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const firstDayOffset = new Date(year, month, 1).getDay();
+  const weekDates = useMemo(() => Array.from({ length: 7 }, (_, index) => addDays(weekStart, index)), [weekStart]);
+  const monthLabel = weekStart.toLocaleString("default", { month: "long", year: "numeric" });
 
-  const goToMonth = (delta: number) => {
-    onMonthChange(new Date(year, month + delta, 1));
-  };
+  const goWeek = (delta: number) => onWeekChange(addDays(weekStart, delta * 7));
+  const goToday = () => onWeekChange(startOfWeekMonday(new Date()));
 
-  const daySummaries = useMemo(() => {
-    const summaries: Record<number, { activity: string; cropKey: string; acres: number }[]> = {};
+  const { activityRows, cellsByActivity } = useMemo(() => {
+    const order: string[] = [];
+    const seen = new Set<string>();
+    const cells = new Map<string, Map<string, { acres: number; farmIds: Set<string> }>>();
 
-    for (let day = 1; day <= daysInMonth; day += 1) {
-      const dateStr = `${year}-${pad2(month + 1)}-${pad2(day)}`;
-      const rows = calendarData[dateStr];
-      if (!rows || rows.length === 0) continue;
-
-      const byKey = new Map<string, { activity: string; cropKey: string; acres: number }>();
-      rows.forEach((row) => {
-        const cropKey = normalizeCropKey(row.crop_type);
-        const key = `${row.activity}__${cropKey}`;
-        const acres = row.assignments.reduce((sum, a) => sum + (a.assigned_area || 0), 0);
-        const existing = byKey.get(key);
-        if (existing) existing.acres += acres;
-        else byKey.set(key, { activity: row.activity, cropKey, acres });
+    weekDates.forEach((date) => {
+      const dateKey = toDateKey(date);
+      (calendarData[dateKey] ?? []).forEach((row) => {
+        if (!seen.has(row.activity)) {
+          seen.add(row.activity);
+          order.push(row.activity);
+        }
+        const byDate = cells.get(row.activity) ?? new Map();
+        const cell = byDate.get(dateKey) ?? { acres: 0, farmIds: new Set<string>() };
+        row.assignments.forEach((a) => {
+          cell.acres += a.assigned_area || 0;
+          if (a.farm_id) cell.farmIds.add(a.farm_id);
+        });
+        byDate.set(dateKey, cell);
+        cells.set(row.activity, byDate);
       });
+    });
 
-      summaries[day] = Array.from(byKey.values()).sort((a, b) => b.acres - a.acres);
-    }
-
-    return summaries;
-  }, [calendarData, daysInMonth, month, year]);
-
-  const cells: (number | null)[] = [
-    ...Array.from({ length: firstDayOffset }, () => null),
-    ...Array.from({ length: daysInMonth }, (_, index) => index + 1),
-  ];
+    return { activityRows: order, cellsByActivity: cells };
+  }, [calendarData, weekDates]);
 
   return (
     <Card className="p-5">
-      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="text-base font-black text-slate-950">{monthLabel} Cultivation Calendar</h2>
-          <p className="mt-1 text-sm font-semibold text-slate-500">Real-time view of scheduled crop activities this month.</p>
-        </div>
-        <div className="flex items-center gap-1.5">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => goToMonth(-1)}
-            aria-label="Previous month"
-            className="rounded-lg border border-slate-200 p-2 text-slate-500 transition-colors hover:bg-slate-50"
+            onClick={() => goWeek(-1)}
+            aria-label="Previous week"
+            className="rounded-lg border border-slate-200 p-1.5 text-slate-500 transition-colors hover:bg-slate-50"
           >
             <ChevronLeft className="h-4 w-4" />
           </button>
+          <h2 className="text-base font-black text-slate-950">{monthLabel}</h2>
           <button
             type="button"
-            onClick={() => goToMonth(1)}
-            aria-label="Next month"
-            className="rounded-lg border border-slate-200 p-2 text-slate-500 transition-colors hover:bg-slate-50"
+            onClick={() => goWeek(1)}
+            aria-label="Next week"
+            className="rounded-lg border border-slate-200 p-1.5 text-slate-500 transition-colors hover:bg-slate-50"
           >
             <ChevronRight className="h-4 w-4" />
           </button>
+        </div>
+        <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => onOpenPlanner(selectedMonth)}
-            className="ml-1 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-black text-blue-700 transition-colors hover:bg-blue-100"
+            onClick={goToday}
+            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-black text-slate-700 transition-colors hover:bg-slate-50"
+          >
+            Today
+          </button>
+          <button
+            type="button"
+            onClick={() => onOpenPlanner(weekStart)}
+            className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-black text-blue-700 transition-colors hover:bg-blue-100"
           >
             Open Planner
           </button>
@@ -1501,51 +1421,86 @@ const CultivationCalendarCard = ({
           <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
           <p className="text-xs font-bold">Loading calendar…</p>
         </div>
-      ) : (
-        <div className="grid grid-cols-7 gap-1.5">
-          {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
-            <div key={day} className="py-2 text-center text-[11px] font-black uppercase tracking-[0.08em] text-slate-400">
-              {day}
-            </div>
-          ))}
-          {cells.map((day, index) => {
-            const events = day ? daySummaries[day] ?? [] : [];
-
-            return (
-              <div
-                key={`${day ?? "blank"}-${index}`}
-                className={cn(
-                  "min-h-[74px] rounded-lg border p-2",
-                  day ? "border-slate-200 bg-white" : "border-transparent bg-transparent",
-                )}
-              >
-                {day && (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-black text-slate-950">{day}</span>
-                      {events.length > 0 && <span className="h-2 w-2 rounded-full bg-emerald-500" />}
-                    </div>
-                    <div className="mt-2 space-y-1">
-                      {events.slice(0, 2).map((event) => (
-                        <div
-                          key={`${event.activity}-${event.cropKey}`}
-                          className="truncate rounded-md px-2 py-1 text-[10px] font-extrabold"
-                          style={{ backgroundColor: `${cropColor(event.cropKey, 0)}22`, color: cropColor(event.cropKey, 0) }}
-                        >
-                          <div className="truncate">{event.activity}</div>
-                          <div className="truncate opacity-80">
-                            {cropLabel(event.cropKey)} · {Math.round(event.acres)} ac
-                          </div>
-                        </div>
-                      ))}
-                      {events.length > 2 && <p className="text-[10px] font-bold text-slate-400">+{events.length - 2} more</p>}
-                    </div>
-                  </>
-                )}
-              </div>
-            );
-          })}
+      ) : activityRows.length === 0 ? (
+        <div className="flex h-64 items-center justify-center text-sm font-bold text-slate-400">
+          No cultivation activity scheduled this week
         </div>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            {/* A flat grid (not nested per-row grids) so every cell's border lines up into one
+                continuous mesh — the "grid checkers" look, like a real spreadsheet/calendar. */}
+            <div className="grid min-w-[720px] grid-cols-[minmax(140px,1fr)_repeat(7,minmax(80px,1fr))] overflow-hidden rounded-lg border border-slate-200">
+              <div className="border-b border-r border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-black uppercase tracking-[0.08em] text-slate-400">
+                Activities
+              </div>
+              {weekDates.map((date, index) => (
+                <div
+                  key={toDateKey(date)}
+                  className={cn(
+                    "border-b border-slate-200 bg-slate-50 px-2 py-2 text-center text-[11px] font-black text-slate-600",
+                    index < 6 && "border-r",
+                  )}
+                >
+                  {date.getDate()} <span className="font-bold text-slate-400">{WEEKDAY_SHORT[index]}</span>
+                </div>
+              ))}
+
+              {activityRows.map((activity, rowIndex) => {
+                const palette = activityColorFor(rowIndex);
+                const byDate = cellsByActivity.get(activity);
+                const isLastRow = rowIndex === activityRows.length - 1;
+                return (
+                  <Fragment key={activity}>
+                    <div
+                      className={cn("flex items-center border-r border-slate-200 px-3 py-2", !isLastRow && "border-b")}
+                    >
+                      <span className="truncate text-xs font-bold text-slate-700" title={activity}>
+                        {activity}
+                      </span>
+                    </div>
+                    {weekDates.map((date, index) => {
+                      const dateKey = toDateKey(date);
+                      const cell = byDate?.get(dateKey);
+                      const farmCount = cell?.farmIds.size ?? 0;
+                      return (
+                        <div
+                          key={dateKey}
+                          className={cn(
+                            "flex h-14 items-center justify-center p-1.5",
+                            !isLastRow && "border-b border-slate-100",
+                            index < 6 && "border-r border-slate-100",
+                          )}
+                        >
+                          {cell && cell.acres > 0 && (
+                            <div
+                              className="flex h-full w-full flex-col items-center justify-center rounded-md text-[11px] font-black leading-tight"
+                              style={{ backgroundColor: palette.bg, color: palette.text }}
+                            >
+                              <span>{Math.round(cell.acres)} ac</span>
+                              <span className="font-bold opacity-80">
+                                {farmCount} farm{farmCount === 1 ? "" : "s"}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </Fragment>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 border-t border-slate-100 pt-4">
+            {activityRows.map((activity, index) => (
+              <span key={activity} className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: activityColorFor(index).dot }} />
+                {activity}
+              </span>
+            ))}
+          </div>
+        </>
       )}
     </Card>
   );
@@ -1570,27 +1525,30 @@ const activityCompletionTone = (completion: number) => {
 const CropActivitySummaryCard = ({
   calendarData,
   loading,
-  selectedMonth,
+  weekStart,
   farms,
   farmerNames,
 }: {
   calendarData: CalendarDayMap;
   loading: boolean;
-  selectedMonth: Date;
+  weekStart: Date;
   farms: Farm[];
   farmerNames: Record<string, string>;
 }) => {
   const [cropFilter, setCropFilter] = useState<string | null>(null);
   const [selectedActivity, setSelectedActivity] = useState<string | null>(null);
 
+  // Same 7 dates the Activities x Days calendar to the left is showing — so this card only ever
+  // lists activities actually visible in that week, never the whole month's worth.
+  const dateKeys = useMemo(() => weekDateKeys(weekStart), [weekStart]);
+
   const { summaries, totalTasks, totalAcres, cropOptions } = useMemo(
-    () => buildActivitySummaries(calendarData, selectedMonth, cropFilter),
-    [calendarData, selectedMonth, cropFilter],
+    () => buildActivitySummaries(calendarData, dateKeys, cropFilter),
+    [calendarData, dateKeys, cropFilter],
   );
 
   const activityLandDetails = useMemo(() => {
     if (!selectedActivity) return [];
-    const prefix = `${selectedMonth.getFullYear()}-${pad2(selectedMonth.getMonth() + 1)}-`;
     const farmsById = new Map(farms.map((farm) => [farm.farm_id, farm]));
     const byFarm = new Map<string, {
       farmId: string;
@@ -1603,7 +1561,7 @@ const CropActivitySummaryCard = ({
     }>();
 
     Object.entries(calendarData).forEach(([dateStr, rows]) => {
-      if (!dateStr.startsWith(prefix)) return;
+      if (!dateKeys.has(dateStr)) return;
       rows.forEach((row) => {
         const cropKey = normalizeCropKey(row.crop_type);
         if (row.activity !== selectedActivity || (cropFilter && cropKey !== cropFilter)) return;
@@ -1631,7 +1589,7 @@ const CropActivitySummaryCard = ({
     return Array.from(byFarm.values())
       .map((land) => ({ ...land, balance: Math.max(0, land.planned - land.workDone) }))
       .sort((first, second) => second.balance - first.balance || second.planned - first.planned || first.ownerName.localeCompare(second.ownerName));
-  }, [calendarData, cropFilter, farmerNames, farms, selectedActivity, selectedMonth]);
+  }, [calendarData, cropFilter, dateKeys, farmerNames, farms, selectedActivity]);
 
   const selectedSummary = summaries.find((summary) => summary.activity === selectedActivity);
   const formatAcres = (value: number) => `${value.toLocaleString("en-IN", { maximumFractionDigits: 2 })} ac`;
@@ -1640,7 +1598,9 @@ const CropActivitySummaryCard = ({
     <Card className="p-5">
       <div className="mb-4">
         <h2 className="text-base font-black text-slate-950">Crop-Wise Activity Summary</h2>
-        <p className="mt-1 text-sm font-semibold text-slate-500">Allocated versus completed acres by activity, this month.</p>
+        <p className="mt-1 text-sm font-semibold text-slate-500">
+          Allocated versus completed acres by activity, {formatWeekRangeLabel(weekStart)}.
+        </p>
       </div>
 
       {loading ? (
@@ -1755,7 +1715,7 @@ const CropActivitySummaryCard = ({
           <DialogHeader className="shrink-0 bg-[#0D3A35] px-6 py-5 text-left text-white">
             <DialogTitle className="text-xl font-black text-white">{selectedActivity || "Activity"} — Land Details</DialogTitle>
             <p className="mt-1 text-sm font-medium text-white/70">
-              {selectedMonth.toLocaleDateString("en-IN", { month: "long", year: "numeric" })}
+              {formatWeekRangeLabel(weekStart)}
               {cropFilter ? ` · ${cropLabel(cropFilter)}` : " · All Crops"}
             </p>
           </DialogHeader>
@@ -2141,6 +2101,336 @@ const PlotMapViewerCard = ({
   );
 };
 
+const CLUSTER_MAP_COLORS = ["#2563eb", "#16a34a", "#f97316", "#7c3aed", "#dc2626", "#0891b2", "#ca8a04", "#db2777"];
+
+type LandCluster = { key: string; clusterName: string; farmIds: Set<string> };
+
+// Flattens the cluster -> zone -> block -> farm hierarchy down to one row per cluster — every
+// farm under any of its zones/blocks counts, since the selector picks a whole cluster at a time.
+const buildLandClusters = (clusters: ClusterEntry[]): LandCluster[] =>
+  clusters
+    .map((cluster) => {
+      const key = cluster.cluster_id || cluster.cluster_name || "";
+      if (!key) return null;
+      const farmIds = new Set<string>();
+      (cluster.zone ?? []).forEach((zone) => {
+        (zone.blocks ?? []).forEach((block) => {
+          (block.farms ?? []).forEach((farm) => {
+            if (farm.farm_id) farmIds.add(farm.farm_id);
+          });
+        });
+      });
+      return { key, clusterName: cluster.cluster_name || key, farmIds } satisfies LandCluster;
+    })
+    .filter((entry): entry is LandCluster => entry !== null)
+    .sort((a, b) => a.clusterName.localeCompare(b.clusterName));
+
+// Cluster-by-cluster land map — pick a cluster, see every land parcel that sits inside it on one
+// shared map, instead of the old static "Land Progress Overview" donut.
+// A small pill icon showing "X ac" straight on the map — no image assets needed (unlike Leaflet's
+// default marker), and always legible against the imagery basemap without a click.
+const acreageDivIcon = (acres: number, color: string) =>
+  L.divIcon({
+    className: "",
+    html: `<div style="display:inline-flex;align-items:center;background:${color};color:#fff;font:800 11px/1 sans-serif;padding:3px 7px;border-radius:9999px;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.45);white-space:nowrap;transform:translate(-50%,-50%);">${acres.toFixed(1)} ac</div>`,
+    iconSize: [0, 0],
+    iconAnchor: [0, 0],
+  });
+
+const ClusterLandMapCard = ({ farms, clusterList, loading }: { farms: Farm[]; clusterList: ClusterEntry[]; loading: boolean }) => {
+  const clusters = useMemo(() => buildLandClusters(clusterList), [clusterList]);
+  const [selectedClusterKey, setSelectedClusterKey] = useState<string | null>(null);
+  const activeCluster = clusters.find((cluster) => cluster.key === selectedClusterKey) ?? clusters[0] ?? null;
+
+  const clusterFarms = useMemo(() => {
+    if (!activeCluster) return [];
+    return farms.filter((farm) => activeCluster.farmIds.has(farm.farm_id));
+  }, [farms, activeCluster]);
+
+  const allCoords = useMemo(() => clusterFarms.flatMap((farm) => farm.land_data?.land_coordinates ?? []), [clusterFarms]);
+  const center: [number, number] = useMemo(
+    () =>
+      allCoords.length > 0
+        ? [allCoords.reduce((sum, c) => sum + c[0], 0) / allCoords.length, allCoords.reduce((sum, c) => sum + c[1], 0) / allCoords.length]
+        : [20.5937, 78.9629],
+    [allCoords],
+  );
+  const totalClusterArea = clusterFarms.reduce((sum, farm) => sum + (Number(farm.area) || 0), 0);
+
+  // Radius big enough to enclose every land's farthest coordinate from the cluster's centroid,
+  // plus 15% breathing room — draws one boundary circle around the whole cluster, not per-land.
+  const clusterRadiusMeters = useMemo(() => {
+    if (allCoords.length === 0) return 0;
+    const centerLatLng = L.latLng(center[0], center[1]);
+    const maxDistance = allCoords.reduce((max, coord) => Math.max(max, centerLatLng.distanceTo(L.latLng(coord[0], coord[1]))), 0);
+    return maxDistance * 1.15 + 40;
+  }, [allCoords, center]);
+
+  return (
+    <Card className="p-5">
+      <SectionHeader title="Cluster-wise Land Map" right={<Pill tone="blue">{clusters.length} Clusters</Pill>} />
+      {loading ? (
+        <div className="flex h-64 flex-col items-center justify-center gap-2 text-slate-400">
+          <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
+          <p className="text-xs font-bold">Loading clusters…</p>
+        </div>
+      ) : clusters.length === 0 ? (
+        <div className="flex h-64 items-center justify-center text-sm font-bold text-slate-400">No cluster data available</div>
+      ) : (
+        <>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {clusters.map((cluster) => (
+              <button
+                key={cluster.key}
+                type="button"
+                onClick={() => setSelectedClusterKey(cluster.key)}
+                className={cn(
+                  "rounded-lg border px-3 py-1.5 text-xs font-black transition-colors",
+                  activeCluster?.key === cluster.key ? "border-blue-700 bg-blue-700 text-white" : "border-slate-200 text-slate-600 hover:bg-slate-50",
+                )}
+              >
+                {cluster.clusterName}
+              </button>
+            ))}
+          </div>
+
+          {clusterFarms.length === 0 ? (
+            <div className="flex h-56 flex-col items-center justify-center gap-2 text-slate-400">
+              <MapPinned className="h-8 w-8 opacity-40" />
+              <p className="text-xs font-bold">No lands mapped for this cluster yet</p>
+            </div>
+          ) : (
+            <div className="h-72 overflow-hidden rounded-lg">
+              <MapContainer
+                key={activeCluster?.key}
+                center={center}
+                zoom={13}
+                style={{ height: "100%", width: "100%" }}
+                zoomControl={false}
+                attributionControl={false}
+              >
+                <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={19} />
+                {/* Transparent overlay of real town/village/road names + boundaries on top of the
+                    satellite imagery above — the imagery layer alone carries no labels at all. */}
+                <TileLayer
+                  url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+                  maxZoom={19}
+                />
+
+                {clusterRadiusMeters > 0 && (
+                  <Circle
+                    center={center}
+                    radius={clusterRadiusMeters}
+                    pathOptions={{ color: "#facc15", fillColor: "#facc15", fillOpacity: 0.05, weight: 2.5, dashArray: "8 5" }}
+                  />
+                )}
+
+                {clusterFarms.map((farm, index) => {
+                  const coords = farm.land_data?.land_coordinates ?? [];
+                  if (coords.length < 3) return null;
+                  const color = CLUSTER_MAP_COLORS[index % CLUSTER_MAP_COLORS.length];
+                  const farmCenter: [number, number] = [
+                    coords.reduce((sum, c) => sum + c[0], 0) / coords.length,
+                    coords.reduce((sum, c) => sum + c[1], 0) / coords.length,
+                  ];
+                  const location =
+                    [farm.land_data?.village, farm.land_data?.district, farm.land_data?.state].filter(Boolean).join(", ") ||
+                    "Location not recorded";
+
+                  return (
+                    <Fragment key={farm.farm_id}>
+                      <Polygon positions={coords} pathOptions={{ color, fillColor: color, fillOpacity: 0.35, weight: 2 }} />
+                      <Marker position={farmCenter} icon={acreageDivIcon(Number(farm.area) || 0, color)}>
+                        <Popup>
+                          <div className="space-y-0.5 text-xs">
+                            <p className="font-black text-slate-900">{farm.farm_id}</p>
+                            <p className="font-semibold text-slate-600">{location}</p>
+                            <p className="font-bold text-slate-800">{(Number(farm.area) || 0).toFixed(1)} ac</p>
+                          </div>
+                        </Popup>
+                      </Marker>
+                    </Fragment>
+                  );
+                })}
+
+                <FitBounds coords={allCoords} />
+              </MapContainer>
+            </div>
+          )}
+
+          <p className="mt-2 text-xs font-semibold text-slate-500">
+            {activeCluster?.clusterName}: {clusterFarms.length} land(s) · {totalClusterArea.toFixed(1)} ac
+          </p>
+        </>
+      )}
+    </Card>
+  );
+};
+
+// ── Inventory & Store Value (Dashboard) ────────────────────────────────────
+// Same real Inventory table + valuation convention Inventory.tsx already uses: an item's own
+// fifo_list is what's held at its home `location`, dissociation[store] (excluding the home
+// location, which would double-count fifo_list) is what's been split out to other stores — value
+// of either is always sum(batch.stock * batch.per_unit_cost).
+
+type InventoryCostBatch = { stock: number; per_unit_cost: number };
+type InventoryDissociationEntry = { quantity?: number; LIFO?: InventoryCostBatch[] };
+type InventoryItemRecord = {
+  Invent_id: string;
+  item_name?: string;
+  location?: string;
+  fifo_list?: InventoryCostBatch[];
+  dissociation?: Record<string, InventoryDissociationEntry>;
+};
+
+const batchValue = (batches?: InventoryCostBatch[]) =>
+  (batches ?? []).reduce((sum, batch) => sum + (Number(batch?.stock) || 0) * (Number(batch?.per_unit_cost) || 0), 0);
+
+const STORE_VALUE_COLORS = ["#2563eb", "#16a34a", "#f97316", "#7c3aed", "#dc2626", "#0891b2", "#ca8a04", "#db2777"];
+
+const InventoryStoreValueCard = ({ items, loading }: { items: InventoryItemRecord[]; loading: boolean }) => {
+  const { totalValue, storeBreakdown } = useMemo(() => {
+    const storeValues = new Map<string, number>();
+    items.forEach((item) => {
+      const homeValue = batchValue(item.fifo_list);
+      if (item.location) storeValues.set(item.location, (storeValues.get(item.location) ?? 0) + homeValue);
+
+      Object.entries(item.dissociation ?? {}).forEach(([storeName, entry]) => {
+        if (!storeName || storeName === item.location) return;
+        storeValues.set(storeName, (storeValues.get(storeName) ?? 0) + batchValue(entry.LIFO));
+      });
+    });
+
+    const breakdown = Array.from(storeValues.entries())
+      .filter(([, value]) => value > 0)
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, value], index) => ({ label, value, color: STORE_VALUE_COLORS[index % STORE_VALUE_COLORS.length] }));
+
+    return { totalValue: breakdown.reduce((sum, entry) => sum + entry.value, 0), storeBreakdown: breakdown };
+  }, [items]);
+
+  return (
+    <Card className="p-5">
+      <SectionHeader title="Inventory & Store Value" />
+      {loading ? (
+        <div className="flex h-44 flex-col items-center justify-center gap-2 text-slate-400">
+          <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
+          <p className="text-xs font-bold">Loading inventory…</p>
+        </div>
+      ) : storeBreakdown.length === 0 ? (
+        <div className="flex h-44 items-center justify-center text-sm font-bold text-slate-400">No inventory value recorded</div>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 items-center gap-3 sm:grid-cols-[190px_1fr]">
+            <div className="relative h-44">
+              <ResponsiveContainer>
+                <PieChart>
+                  <Pie data={storeBreakdown} dataKey="value" nameKey="label" innerRadius={58} outerRadius={82} paddingAngle={2}>
+                    {storeBreakdown.map((entry) => (
+                      <Cell key={entry.label} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value: number, _name, item) => [formatFinancialAmount(value), item?.payload?.label]} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="absolute inset-0 flex flex-col items-center justify-center px-2 text-center">
+                <p className="text-lg font-black leading-tight">{formatFinancialAmount(totalValue)}</p>
+                <p className="text-xs font-bold text-slate-600">Total Value</p>
+              </div>
+            </div>
+            <div className="max-h-44 space-y-3 overflow-y-auto pr-1 text-sm">
+              {storeBreakdown.map((entry) => (
+                <div key={entry.label} className="flex items-center justify-between gap-3">
+                  <span className="flex min-w-0 items-center gap-2 truncate font-bold text-slate-700">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: entry.color }} />
+                    <span className="truncate">{entry.label}</span>
+                  </span>
+                  <span className="shrink-0 font-black">{formatFinancialAmount(entry.value)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <p className="mt-3 text-sm font-bold text-slate-600">{storeBreakdown.length} Stores</p>
+        </>
+      )}
+    </Card>
+  );
+};
+
+// ── Manpower Overview (Dashboard) ───────────────────────────────────────────
+// Real headcount from admin_all_staff, grouped by whatever staff_designation values actually
+// exist — not a fixed Field Manager/Supervisor/Skilled/Unskilled split, since only designations
+// staff are actually onboarded under (see admin_staff.py's add_staff) are ever real here.
+
+type StaffRecord = { staff_id?: string; staff_information?: { staff_designation?: string } };
+
+const MANPOWER_COLORS = ["#0b5fe8", "#2563eb", "#22a765", "#6d28d9", "#f97316", "#dc2626", "#0891b2", "#ca8a04"];
+
+const ManpowerOverviewCard = ({ staff, loading }: { staff: StaffRecord[]; loading: boolean }) => {
+  const breakdown = useMemo(() => {
+    const counts = new Map<string, number>();
+    staff.forEach((record) => {
+      const designation = record.staff_information?.staff_designation?.trim();
+      const label = designation ? designation.replace(/\b\w/g, (c) => c.toUpperCase()) : "Unspecified";
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    });
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, value], index) => ({ label, value, color: MANPOWER_COLORS[index % MANPOWER_COLORS.length] }));
+  }, [staff]);
+
+  const total = breakdown.reduce((sum, entry) => sum + entry.value, 0);
+
+  return (
+    <Card className="p-5">
+      <SectionHeader title="Manpower Overview" />
+      {loading ? (
+        <div className="flex h-44 flex-col items-center justify-center gap-2 text-slate-400">
+          <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
+          <p className="text-xs font-bold">Loading staff…</p>
+        </div>
+      ) : breakdown.length === 0 ? (
+        <div className="flex h-44 items-center justify-center text-sm font-bold text-slate-400">No staff records available</div>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 items-center gap-3 sm:grid-cols-[190px_1fr]">
+            <div className="relative h-44">
+              <ResponsiveContainer>
+                <PieChart>
+                  <Pie data={breakdown} dataKey="value" nameKey="label" innerRadius={58} outerRadius={82} paddingAngle={2}>
+                    {breakdown.map((entry) => (
+                      <Cell key={entry.label} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value: number, _name, item) => [value, item?.payload?.label]} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <p className="text-3xl font-black">{total}</p>
+                <p className="text-sm font-bold text-slate-600">Total</p>
+              </div>
+            </div>
+            <div className="max-h-44 space-y-3 overflow-y-auto pr-1 text-sm">
+              {breakdown.map((entry) => (
+                <div key={entry.label} className="flex items-center justify-between gap-3">
+                  <span className="flex min-w-0 items-center gap-2 truncate font-bold text-slate-700">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: entry.color }} />
+                    <span className="truncate">{entry.label}</span>
+                  </span>
+                  <span className="shrink-0 font-black">{entry.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <p className="mt-3 text-sm font-bold text-slate-600">
+            {breakdown.length} Designation{breakdown.length === 1 ? "" : "s"}
+          </p>
+        </>
+      )}
+    </Card>
+  );
+};
+
 // TODO: keep in sync with src/pages/Leads.tsx's own transform of GET /farmer_managment/get_leads.
 const transformLeads = (rawLeads: any[]): Lead[] =>
   rawLeads.map((item) => {
@@ -2228,26 +2518,82 @@ const LeadMapThumbnail = ({ coordinates }: { coordinates?: { lat: number; lng: n
   );
 };
 
+const formatLeadDate = (value?: string | Date) => {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+};
+
+// Never render a full Aadhaar number — this card sits on a dashboard, not a KYC verification
+// screen, so only the last 4 digits are shown, same masking convention as bank/ID fields elsewhere.
+const maskAadhaar = (value?: string) => (value && value.length >= 4 ? `XXXX XXXX ${value.slice(-4)}` : value || "");
+
+const DetailRow = ({ label, value }: { label: string; value: React.ReactNode }) => (
+  <div className="flex items-center justify-between gap-2">
+    <span className="text-[10px] font-black uppercase tracking-[0.06em] text-slate-500">{label}</span>
+    <span className="min-w-0 truncate text-xs font-bold text-slate-800">{value}</span>
+  </div>
+);
+
 const LeadAcquisitionCard = ({ lead }: { lead: Lead }) => {
-  const location = [lead.village, lead.district].filter(Boolean).join(", ");
+  const location = [lead.village, lead.tehsil, lead.district, lead.state].filter(Boolean).join(", ");
   const isLease = (lead.farmingOption ?? "").toLowerCase().includes("lease");
+  const addedOn = formatLeadDate(lead.createdAt);
+  const kyc = lead.kycData;
+  const agreement = isLease ? lead.agreementData : undefined;
 
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
       <LeadMapThumbnail coordinates={lead.landCoordinates} />
-      <div className="space-y-2 p-3">
+      <div className="space-y-3 p-3.5">
         <div>
-          <p className="truncate text-xs font-black text-slate-950">{lead.fullName}</p>
-          {location && <p className="truncate text-[11px] font-bold text-slate-500">{location}</p>}
+          <div className="flex items-start justify-between gap-2">
+            <p className="min-w-0 truncate text-sm font-black text-slate-950">{lead.fullName}</p>
+            <Pill tone={isLease ? "blue" : "green"}>{lead.farmingOption || "—"}</Pill>
+          </div>
+          {location && <p className="mt-0.5 truncate text-[11px] font-bold text-slate-500">{location}</p>}
         </div>
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[10px] font-black uppercase tracking-[0.06em] text-slate-500">Lead Source</span>
-          <span className="truncate text-xs font-bold text-slate-800">{lead.leadSource || "—"}</span>
+
+        <div className="space-y-1.5 rounded-lg bg-slate-50 p-2.5">
+          <DetailRow label="Phone" value={lead.alternatePhone ? `${lead.phoneNumber} / ${lead.alternatePhone}` : lead.phoneNumber} />
+          <DetailRow label="Lead Source" value={lead.leadSource || "—"} />
+          <DetailRow label="Estimated Area" value={lead.estimatedLandArea ? `${lead.estimatedLandArea} ac` : "—"} />
+          <DetailRow
+            label="Water Availability"
+            value={lead.waterAvailable === undefined ? "—" : lead.waterAvailable ? "Available" : "Not Available"}
+          />
+          {addedOn && <DetailRow label="Added On" value={addedOn} />}
         </div>
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[10px] font-black uppercase tracking-[0.06em] text-slate-500">Farming Option</span>
-          <Pill tone={isLease ? "blue" : "green"}>{lead.farmingOption || "—"}</Pill>
-        </div>
+
+        {lead.notes && (
+          <div className="rounded-lg border border-slate-100 p-2.5">
+            <p className="text-[10px] font-black uppercase tracking-[0.06em] text-slate-500">Notes</p>
+            <p className="mt-1 line-clamp-3 text-xs font-semibold text-slate-700">{lead.notes}</p>
+          </div>
+        )}
+
+        {kyc && (
+          <div className="rounded-lg border border-slate-100 p-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px] font-black uppercase tracking-[0.06em] text-slate-500">KYC</p>
+              <Pill tone={kyc.verified ? "green" : "yellow"}>{kyc.verified ? "Verified" : "Pending"}</Pill>
+            </div>
+            <div className="mt-1.5 space-y-1">
+              {kyc.aadhaarNumber && <DetailRow label="Aadhaar" value={maskAadhaar(kyc.aadhaarNumber)} />}
+              {kyc.bankName && <DetailRow label="Bank" value={kyc.bankName} />}
+            </div>
+          </div>
+        )}
+
+        {agreement && (
+          <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-2.5">
+            <p className="text-[10px] font-black uppercase tracking-[0.06em] text-blue-700">Lease Agreement</p>
+            <div className="mt-1.5 space-y-1">
+              <DetailRow label="Period" value={`${formatLeadDate(agreement.leaseStartDate)} – ${formatLeadDate(agreement.leaseEndDate)}`} />
+              <DetailRow label="Rent" value={`Rs ${Number(agreement.leaseRent || 0).toLocaleString("en-IN")}`} />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2269,7 +2615,7 @@ const LeadPipelineColumn = ({
       <p className="text-xs font-black text-slate-800">{label}</p>
       <Pill tone={tone}>{leads.length}</Pill>
     </div>
-    <div className="max-h-[480px] space-y-2 overflow-y-auto p-2.5">
+    <div className="max-h-[720px] space-y-3 overflow-y-auto p-2.5">
       {loading ? (
         <div className="flex h-32 flex-col items-center justify-center gap-2 text-slate-400">
           <RefreshCw className="h-5 w-5 animate-spin opacity-50" />
@@ -2284,7 +2630,328 @@ const LeadPipelineColumn = ({
   </div>
 );
 
-const LandAcquisitionView = ({ leads, leadsLoading }: { leads: Lead[]; leadsLoading: boolean }) => {
+// ── Lease Register (Land Acquisition) — same live data LeaseMaster.tsx shows, rendered inline
+// instead of iframing that whole standalone page/layout into a dashboard card. ─────────────────
+
+type LeaseRegisterStatus = "Active" | "Expiring Soon" | "Expired" | "Future" | "Incomplete";
+
+type LeaseRegisterRow = {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  landId: string;
+  village: string;
+  district: string;
+  state: string;
+  area: number;
+  leaseStart: string;
+  leaseEnd: string;
+  lockInStart: string;
+  lockInEnd: string;
+  rate: number;
+  annualRent: number;
+  status: LeaseRegisterStatus;
+};
+
+type LeaseFarmerSummary = {
+  farmer_id?: string;
+  farmer_data?: { full_name?: string; village?: string; district?: string; state?: string };
+};
+
+type LeaseAgreementRecord = { lease_rate?: number; lease_rent?: number };
+
+type LeaseFarmRecord = {
+  farm_id?: string;
+  id?: string;
+  lease_start_date?: string;
+  lease_start?: string;
+  lease_end_date?: string;
+  lease_end?: string;
+  lease_rate?: number;
+  lease_rent?: number;
+  total_area?: number;
+  area?: number;
+  village?: string;
+  district?: string;
+  state?: string;
+  lock_in_start_date?: string;
+  lock_in_start?: string;
+  lock_in_end_date?: string;
+  lock_in_end?: string;
+};
+
+type LeaseFarmerDetail = {
+  farmer?: { farmer_name?: string; agreement_data?: LeaseAgreementRecord[] | LeaseAgreementRecord };
+  farm?: LeaseFarmRecord[];
+};
+
+const leaseText = (...values: (string | undefined | null)[]) => values.find((value) => value && value.trim()) ?? "";
+const leaseNumber = (value: unknown) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+const leaseDateOnly = (value: string | undefined) => (value ?? "").slice(0, 10);
+const formatLeaseMoney = (value: number) => `Rs ${leaseNumber(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const formatLeaseArea = (value: number) => `${leaseNumber(value).toLocaleString("en-IN", { maximumFractionDigits: 2 })} ac`;
+const formatLeaseDateOnly = (value: string) => {
+  if (!value) return "Not Recorded";
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : value;
+};
+
+const leaseCalendarDuration = (fromValue: string | Date, toValue: string | Date): string => {
+  const from = new Date(fromValue);
+  const to = new Date(toValue);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return "";
+  from.setHours(0, 0, 0, 0);
+  to.setHours(0, 0, 0, 0);
+  if (to < from) return leaseCalendarDuration(to, from);
+  let years = to.getFullYear() - from.getFullYear();
+  let months = to.getMonth() - from.getMonth();
+  let days = to.getDate() - from.getDate();
+  if (days < 0) {
+    months -= 1;
+    days += new Date(to.getFullYear(), to.getMonth(), 0).getDate();
+  }
+  if (months < 0) {
+    years -= 1;
+    months += 12;
+  }
+  return (
+    [
+      [years, years === 1 ? "year" : "years"],
+      [months, months === 1 ? "month" : "months"],
+      [days, days === 1 ? "day" : "days"],
+    ]
+      .filter(([value]) => Number(value) > 0)
+      .map(([value, label]) => `${value} ${label}`)
+      .join(" ") || "0 days"
+  );
+};
+
+const formatLeaseExpiry = (leaseEnd: string): string => {
+  if (!leaseEnd) return "Not Recorded";
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(leaseEnd);
+  end.setHours(0, 0, 0, 0);
+  if (Number.isNaN(end.getTime())) return "Not Recorded";
+  if (end.getTime() === today.getTime()) return "Expires today";
+  return end > today ? `${leaseCalendarDuration(today, end)} left` : `Expired by ${leaseCalendarDuration(end, today)}`;
+};
+
+const getLeaseRowStatus = (start: string, end: string): LeaseRegisterStatus => {
+  if (!start || !end) return "Incomplete";
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return "Incomplete";
+  const days = Math.ceil((endMs - today.getTime()) / 86400000);
+  if (today.getTime() < startMs) return "Future";
+  if (days < 0) return "Expired";
+  if (days <= 90) return "Expiring Soon";
+  return "Active";
+};
+
+const LEASE_STATUS_TONE: Record<LeaseRegisterStatus, "green" | "orange" | "blue" | "red" | "yellow"> = {
+  Active: "green",
+  "Expiring Soon": "orange",
+  Expired: "red",
+  Future: "blue",
+  Incomplete: "yellow",
+};
+
+const normalizeLeaseFarmer = (summary: LeaseFarmerSummary, detail: LeaseFarmerDetail | null): LeaseRegisterRow[] => {
+  const fd = summary.farmer_data ?? {};
+  const ownerId = summary.farmer_id ?? "";
+  const ownerName = leaseText(detail?.farmer?.farmer_name, fd.full_name) || "Unknown";
+  const agreements = detail?.farmer?.agreement_data;
+  const agreement: LeaseAgreementRecord = (Array.isArray(agreements) ? agreements[0] : agreements) ?? {};
+  const farms = detail?.farm ?? [];
+
+  const build = (farm: LeaseFarmRecord, index: number): LeaseRegisterRow => {
+    const start = leaseDateOnly(leaseText(farm.lease_start_date, farm.lease_start));
+    const end = leaseDateOnly(leaseText(farm.lease_end_date, farm.lease_end));
+    const rate = leaseNumber(farm.lease_rate ?? farm.lease_rent ?? agreement.lease_rate ?? agreement.lease_rent);
+    const area = leaseNumber(farm.total_area ?? farm.area);
+    const village = leaseText(farm.village, fd.village);
+    const district = leaseText(farm.district, fd.district);
+    const state = leaseText(farm.state, fd.state);
+    return {
+      id: `${ownerId}:${leaseText(farm.farm_id, farm.id, String(index + 1))}`,
+      ownerId,
+      ownerName,
+      landId: leaseText(farm.farm_id, farm.id, `${ownerId}-LAND-${index + 1}`),
+      village,
+      district,
+      state,
+      area,
+      leaseStart: start,
+      leaseEnd: end,
+      lockInStart: leaseDateOnly(leaseText(farm.lock_in_start_date, farm.lock_in_start)),
+      lockInEnd: leaseDateOnly(leaseText(farm.lock_in_end_date, farm.lock_in_end)),
+      rate,
+      annualRent: rate * area,
+      status: getLeaseRowStatus(start, end),
+    };
+  };
+
+  return farms.length > 0 ? farms.map(build) : [];
+};
+
+const LeaseRegisterCard = ({ onOpenModule }: { onOpenModule: (route: string) => void }) => {
+  const [rows, setRows] = useState<LeaseRegisterRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  // Only fires once this card actually mounts — i.e. once the Land Acquisition tab is opened —
+  // not on every CEO's Desk load, since this is an N+1 fetch (one details call per land owner)
+  // same as LeaseMaster.tsx's own loader.
+  useEffect(() => {
+    let cancelled = false;
+    const base = getBaseUrl().replace(/\/$/, "");
+
+    (async () => {
+      setLoading(true);
+      setError("");
+      try {
+        const res = await fetch(`${base}/farmer_managment/get_farmers`);
+        if (!res.ok) throw new Error(`Unable to load land owners (${res.status})`);
+        const body: { farmers?: LeaseFarmerSummary[] } = await res.json();
+        const summaries = Array.isArray(body?.farmers) ? body.farmers : [];
+
+        const collected: LeaseRegisterRow[] = [];
+        const batchSize = 8;
+        for (let start = 0; start < summaries.length; start += batchSize) {
+          if (cancelled) return;
+          const batch = summaries.slice(start, start + batchSize);
+          const details = await Promise.allSettled(
+            batch.map(async (summary) => {
+              const farmerId = summary.farmer_id;
+              if (!farmerId) return null;
+              const detailRes = await fetch(`${base}/farmer_managment/farmer_details/${farmerId}`);
+              if (!detailRes.ok) return null;
+              return (await detailRes.json()) as LeaseFarmerDetail;
+            }),
+          );
+          details.forEach((result, index) => {
+            collected.push(...normalizeLeaseFarmer(batch[index], result.status === "fulfilled" ? result.value : null));
+          });
+        }
+        if (!cancelled) setRows(collected);
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "Unable to load lease records");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <Card className="overflow-hidden">
+      <div className="flex flex-col gap-2 border-b border-slate-100 p-5 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="text-base font-black text-slate-950">Lease Register</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Tenure, rate, lock-in and expiry for every leased land parcel.</p>
+        </div>
+        <Pill tone="blue">{rows.length} Lease Lands</Pill>
+      </div>
+
+      {loading ? (
+        <div className="flex h-56 flex-col items-center justify-center gap-2 text-slate-400">
+          <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
+          <p className="text-xs font-bold">Loading lease records…</p>
+        </div>
+      ) : error ? (
+        <div className="flex h-56 flex-col items-center justify-center gap-1 px-6 text-center text-slate-400">
+          <p className="text-sm font-bold text-red-600">{error}</p>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="flex h-56 items-center justify-center text-sm font-bold text-slate-400">No lease records found</div>
+      ) : (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="sticky top-0 bg-[#0d4039] text-white">
+              <tr>
+                {["Land Owner ID", "Land Owner Name", "Location", "Area", "Lease Tenure", "Lease Lock In", "Rate / Acre / Year", "Annual Rent", "Expiry", "Action"].map(
+                  (heading) => (
+                    <th key={heading} className="whitespace-nowrap px-3 py-3 text-[10px] font-black uppercase tracking-[0.06em]">
+                      {heading}
+                    </th>
+                  ),
+                )}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((row) => (
+                <tr key={row.id} className="hover:bg-slate-50">
+                  <td className="whitespace-nowrap px-3 py-3 font-black text-[#0d4039]">{row.ownerId}</td>
+                  <td className="px-3 py-3">
+                    <p className="font-black text-slate-900">{row.ownerName}</p>
+                    <p className="mt-0.5 text-[11px] font-bold text-slate-400">Land: {row.landId}</p>
+                  </td>
+                  <td className="px-3 py-3">
+                    <p className="font-bold text-slate-900">{row.village || "Not Recorded"}</p>
+                    <p className="mt-0.5 text-[11px] font-bold text-slate-400">{[row.district, row.state].filter(Boolean).join(", ") || "Not Recorded"}</p>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-3 font-black text-slate-900">{formatLeaseArea(row.area)}</td>
+                  <td className="whitespace-nowrap px-3 py-3">
+                    <p className="font-bold text-slate-900">{formatLeaseDateOnly(row.leaseStart)}</p>
+                    <p className="mt-0.5 text-[11px] font-bold text-slate-400">to {formatLeaseDateOnly(row.leaseEnd)}</p>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-3 text-slate-700">
+                    {row.lockInStart ? (
+                      <>
+                        <p className="font-bold text-slate-900">{formatLeaseDateOnly(row.lockInStart)}</p>
+                        <p className="mt-0.5 text-[11px] font-bold text-slate-400">to {formatLeaseDateOnly(row.lockInEnd)}</p>
+                      </>
+                    ) : (
+                      <span className="text-slate-400">Not Recorded</span>
+                    )}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-3 font-bold text-slate-800">{formatLeaseMoney(row.rate)}</td>
+                  <td className="whitespace-nowrap px-3 py-3 font-black text-slate-900">{formatLeaseMoney(row.annualRent)}</td>
+                  <td className="whitespace-nowrap px-3 py-3">
+                    <p className={cn("font-bold", row.status === "Expired" ? "text-red-700" : row.status === "Expiring Soon" ? "text-orange-700" : "text-slate-700")}>
+                      {formatLeaseExpiry(row.leaseEnd)}
+                    </p>
+                    <div className="mt-1">
+                      <Pill tone={LEASE_STATUS_TONE[row.status]}>{row.status}</Pill>
+                    </div>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-3">
+                    <button
+                      type="button"
+                      onClick={() => onOpenModule("/lease-master")}
+                      className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+                    >
+                      View Details
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+};
+
+const LandAcquisitionView = ({
+  leads,
+  leadsLoading,
+  onOpenModule,
+}: {
+  leads: Lead[];
+  leadsLoading: boolean;
+  onOpenModule: (route: string) => void;
+}) => {
   const contactedLeads = useMemo(() => leads.filter((lead) => lead.status === "contacted"), [leads]);
   const verifiedLeads = useMemo(() => leads.filter((lead) => lead.status === "verified"), [leads]);
   const registeredLeads = useMemo(() => leads.filter((lead) => lead.status === "registered"), [leads]);
@@ -2303,8 +2970,8 @@ const LandAcquisitionView = ({ leads, leadsLoading }: { leads: Lead[]; leadsLoad
       ))}
     </section>
 
-    <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.9fr_1.1fr]">
-      <Card className="p-5 xl:col-span-2">
+    <section className="grid grid-cols-1 gap-4">
+      <Card className="p-5">
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h2 className="text-base font-black text-slate-950">Acquisition Pipeline</h2>
@@ -2320,86 +2987,8 @@ const LandAcquisitionView = ({ leads, leadsLoading }: { leads: Lead[]; leadsLoad
         </div>
       </Card>
 
-      <Card className="overflow-hidden">
-        <div className="flex flex-col gap-2 border-b border-slate-100 p-5 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h2 className="text-base font-black text-slate-950">Lease Renewal in Upcoming 6 Months</h2>
-            <p className="mt-1 text-sm font-semibold text-slate-500">Land parcels requiring renewal action and document follow-up.</p>
-          </div>
-          <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-right">
-            <p className="text-xs font-black uppercase tracking-[0.08em] text-amber-700">Renewal Area</p>
-            <p className="text-lg font-black text-amber-900">137 ac</p>
-          </div>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-left text-sm">
-            <thead className="bg-slate-50 text-xs uppercase tracking-[0.08em] text-slate-500">
-              <tr>
-                {["Parcel ID", "Village", "Landowner", "Area", "Lease Expiry", "Current Rent", "Status"].map((heading) => (
-                  <th key={heading} className="px-4 py-3 font-black">
-                    {heading}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {leaseRenewals.map((parcel) => (
-                <tr key={parcel.parcelId}>
-                  <td className="whitespace-nowrap px-4 py-3 font-black text-slate-950">{parcel.parcelId}</td>
-                  <td className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">{parcel.village}</td>
-                  <td className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">{parcel.landowner}</td>
-                  <td className="whitespace-nowrap px-4 py-3 font-black text-slate-950">{parcel.area}</td>
-                  <td className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">{parcel.expiry}</td>
-                  <td className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">{parcel.rent}</td>
-                  <td className="whitespace-nowrap px-4 py-3">
-                    <Pill tone={parcel.status === "Approved" ? "green" : parcel.status === "Docs Pending" ? "yellow" : "orange"}>{parcel.status}</Pill>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+      <LeaseRegisterCard onOpenModule={onOpenModule} />
     </section>
-
-    <Card className="overflow-hidden">
-      <div className="flex flex-col gap-2 border-b border-slate-100 p-5 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 className="text-base font-black text-slate-950">Current Status of Leads</h2>
-          <p className="mt-1 text-sm font-semibold text-slate-500">Live acquisition leads with owner, area, stage and next status.</p>
-        </div>
-        <Pill tone="blue">{leadStatusRows.length} Active Leads</Pill>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-left text-sm">
-          <thead className="bg-slate-50 text-xs uppercase tracking-[0.08em] text-slate-500">
-            <tr>
-              {["Lead ID", "Cluster", "Village", "Landowner", "Area", "Stage", "Owner", "Next Step"].map((heading) => (
-                <th key={heading} className="px-4 py-3 font-black">
-                  {heading}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {leadStatusRows.map((lead) => (
-              <tr key={lead.leadId}>
-                <td className="whitespace-nowrap px-4 py-3 font-black text-slate-950">{lead.leadId}</td>
-                <td className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">{lead.cluster}</td>
-                <td className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">{lead.village}</td>
-                <td className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">{lead.landowner}</td>
-                <td className="whitespace-nowrap px-4 py-3 font-black text-slate-950">{lead.area}</td>
-                <td className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">{lead.stage}</td>
-                <td className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">{lead.owner}</td>
-                <td className="whitespace-nowrap px-4 py-3">
-                  <Pill tone={lead.tone}>{lead.status}</Pill>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </Card>
   </div>
   );
 };
@@ -2616,6 +3205,9 @@ const FinancialAnalysisView = ({
   farms,
   farmerNames,
   farmsLoading,
+  actualDisbursements,
+  disbursementSeries,
+  disbursementLoading,
 }: {
   kpis: FinancialKpis | null;
   loading: boolean;
@@ -2626,46 +3218,65 @@ const FinancialAnalysisView = ({
   farms: Farm[];
   farmerNames: Record<string, string>;
   farmsLoading: boolean;
+  // Real payment feed + aggregated weekly series — both computed once by the parent's tiered
+  // loader and passed down here, rather than this view re-fetching and re-parsing every budget's
+  // xlsx a second time (this used to duplicate the exact same work the parent already does).
+  actualDisbursements: ActualDisbursementRecord[];
+  disbursementSeries: DisbursementWeek[];
+  disbursementLoading: boolean;
 }) => {
-  const [disbursementSeries, setDisbursementSeries] = useState<DisbursementWeek[]>([]);
-  const [disbursementLoading, setDisbursementLoading] = useState(false);
+  const totalActualDisbursedCr = useMemo(
+    () => actualDisbursements.reduce((sum, record) => sum + (Number(record.amount) || 0), 0) / 1e7,
+    [actualDisbursements],
+  );
 
-  useEffect(() => {
-    if (budgets.length === 0) {
-      setDisbursementSeries([]);
-      return;
-    }
-    const ac = new AbortController();
-    setDisbursementLoading(true);
-    fetchAggregateDisbursementSeries(budgets.map((b) => b.budget_id), ac.signal)
-      .then((series) => setDisbursementSeries(series))
-      .catch((err: unknown) => {
-        if ((err as { name?: string })?.name !== "AbortError") setDisbursementSeries([]);
-      })
-      .finally(() => setDisbursementLoading(false));
-    return () => ac.abort();
-  }, [budgets]);
+  const totalUtilized = useMemo(() => sumBudgetTotals(budgets).utilized, [budgets]);
+  // Balance = Total Budget - Utilized Budget.
+  const balanceReady = !loading && !!kpis;
+  const totalBalance = kpis ? kpis.total_budget - totalUtilized : null;
 
   return (
     <div className="space-y-4">
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {financialStatDefs.map((stat) => (
-          <Card key={stat.label} className="p-4">
-            <p className="text-xs font-black uppercase tracking-[0.08em] text-slate-500">{stat.label}</p>
-            <div className="mt-3 flex items-end gap-2">
-              {loading || !kpis ? (
-                <p className="text-3xl font-black tracking-normal text-slate-300">--</p>
-              ) : (
-                <p className={cn("text-3xl font-black tracking-normal", stat.tone)}>{formatFinancialAmount(kpis[stat.key])}</p>
+        {financialStatDefs.map((stat) => {
+          const isBalance = stat.key === "balance";
+          const ready = isBalance ? balanceReady : !loading && !!kpis;
+          const value = isBalance ? totalBalance : kpis ? kpis[stat.key as keyof FinancialKpis] : undefined;
+          const hasValue = ready && value !== null && value !== undefined;
+          // Balance only: green/up when total budget still covers what's been utilized, red/down
+          // when utilization has exceeded the budget.
+          const favorable = !isBalance || !hasValue || (value as number) >= 0;
+          const tone = isBalance ? (favorable ? "text-emerald-700" : "text-red-700") : stat.tone;
+          const iconBg = isBalance ? (favorable ? "bg-emerald-100" : "bg-red-100") : stat.iconBg;
+          const Icon = isBalance ? (favorable ? TrendingUp : TrendingDown) : stat.icon;
+          return (
+            <Card key={stat.label} className="p-4">
+              <div className="flex items-center gap-3">
+                <span className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-full", iconBg)}>
+                  <Icon className={cn("h-5 w-5", tone)} />
+                </span>
+                <p className="text-xs font-black uppercase tracking-[0.08em] text-slate-500">{stat.label}</p>
+              </div>
+              <div className="mt-3 flex items-end gap-2">
+                {!hasValue ? (
+                  <p className="text-3xl font-black tracking-normal text-slate-300">--</p>
+                ) : (
+                  <p className={cn("text-3xl font-black tracking-normal", tone)}>{formatFinancialAmount(value)}</p>
+                )}
+              </div>
+              {isBalance && hasValue && (
+                <p className={cn("mt-1 text-[11px] font-bold", tone)}>
+                  {favorable ? "Within budget" : "Exceeds total budget"}
+                </p>
               )}
-            </div>
-          </Card>
-        ))}
+            </Card>
+          );
+        })}
       </section>
 
-      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.3fr_0.7fr]">
+      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.44fr_0.56fr]">
         <BudgetBifurcationCard budgets={budgets} loading={budgetsLoading} />
-        <DisbursementSequenceCard series={disbursementSeries} loading={disbursementLoading} budgets={budgets} />
+        <DisbursementSequenceCard series={disbursementSeries} loading={disbursementLoading} budgets={budgets} totalActualDisbursedCr={totalActualDisbursedCr} />
       </section>
 
       <CategoryWiseBudgetSection budgets={categoryBudgets} loading={categoryBudgetsLoading} />
@@ -2677,7 +3288,6 @@ const FinancialAnalysisView = ({
 
 // ── Task Timeline (Cultivation Tracker) ────────────────────────────────────
 
-type TaskAssignmentInfo = { supervisorName: string; fieldManagerName: string };
 
 const fmtTaskDate = (dateStr: string) => {
   const date = new Date(dateStr);
@@ -2777,15 +3387,19 @@ const TaskTimelineCard = ({
   farm,
   assignment,
   assignmentLoading,
+  progressImages,
 }: {
   task: CalendarTask;
   farm?: Farm;
-  assignment?: TaskAssignmentInfo;
+  assignment?: FarmTeamAssignment;
   assignmentLoading: boolean;
+  // undefined = not fetched yet (still loading or task isn't eligible), [] = fetched, none found
+  progressImages?: string[];
 }) => {
   const Icon = activityIconFor(task.activity);
   const cropKey = normalizeCropKey(task.cropType);
   const accentColor = cropColor(cropKey, 0);
+  const isCompleted = taskStatusTone(task.status) === "green";
 
   return (
     <div className="w-96 shrink-0 overflow-hidden rounded-2xl border-2 border-slate-200 bg-white shadow-md">
@@ -2805,18 +3419,36 @@ const TaskTimelineCard = ({
 
         <div>
           <p className="mb-1.5 text-[10px] font-black uppercase tracking-[0.06em] text-slate-500">Photos</p>
-          <div className="grid grid-cols-3 gap-2">
-            {[0, 1, 2].map((idx) => (
-              <div
-                key={idx}
-                className="flex h-24 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-slate-200 bg-slate-50 text-slate-300"
-                title="Sample photo placeholder — no task-photo API yet"
-              >
-                <ImageIcon className="h-7 w-7" />
-                <span className="text-[9px] font-bold">Sample</span>
-              </div>
-            ))}
-          </div>
+          {!isCompleted ? (
+            <div className="flex h-16 items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 text-[10px] font-bold text-slate-400">
+              Photos available once completed
+            </div>
+          ) : progressImages === undefined ? (
+            <div className="grid grid-cols-3 gap-2">
+              {[0, 1, 2].map((idx) => (
+                <div key={idx} className="h-24 animate-pulse rounded-lg bg-slate-100" />
+              ))}
+            </div>
+          ) : progressImages.length === 0 ? (
+            <div className="flex h-16 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-slate-200 bg-slate-50 text-slate-300">
+              <ImageIcon className="h-5 w-5" />
+              <span className="text-[9px] font-bold">No photos uploaded</span>
+            </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-2">
+              {progressImages.slice(0, 3).map((url, idx) => (
+                <a
+                  key={url || idx}
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block h-24 overflow-hidden rounded-lg border border-slate-200 bg-slate-100"
+                >
+                  <img src={url} alt={`${task.activity} progress ${idx + 1}`} loading="lazy" className="h-full w-full object-cover" />
+                </a>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
@@ -2828,7 +3460,7 @@ const TaskTimelineCard = ({
           ) : (
             <>
               <p className="mt-1 truncate text-xs font-bold text-slate-700">Sup: {assignment?.supervisorName || "—"}</p>
-              <p className="truncate text-xs font-bold text-slate-700">FM: {assignment?.fieldManagerName || "—"}</p>
+              <p className="truncate text-xs font-bold text-slate-700">FM: {assignment?.fieldManagers[0]?.name || "—"}</p>
             </>
           )}
         </div>
@@ -2852,43 +3484,72 @@ const TaskTimelineSection = ({
 }: {
   tasks: CalendarTask[];
   farmsById: Map<string, Farm>;
-  assignmentByFarm: Record<string, TaskAssignmentInfo>;
+  assignmentByFarm: Record<string, FarmTeamAssignment>;
   loading: boolean;
-}) => (
-  <Card className="p-5">
-    <SectionHeader title="Task Timeline" right={<Pill tone="blue">{tasks.length} Tasks</Pill>} />
-    {loading ? (
-      <div className="flex h-56 flex-col items-center justify-center gap-2 text-slate-400">
-        <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
-        <p className="text-xs font-bold">Loading tasks…</p>
-      </div>
-    ) : tasks.length === 0 ? (
-      <div className="flex h-56 items-center justify-center text-sm font-bold text-slate-400">No tasks scheduled this month</div>
-    ) : (
-      <div className="overflow-x-auto pb-2">
-        <div className="relative flex items-start gap-6 px-2" style={{ minWidth: "max-content" }}>
-          <div className="pointer-events-none absolute left-2 right-2 top-[13px] h-0.5 bg-slate-200" />
-          {tasks.map((task, index) => {
-            const key = `${task.calanderId}-${task.date}-${task.farmId}-${task.status}-${index}`;
-            return (
-              <div key={key} className="relative z-10 flex w-96 shrink-0 flex-col items-center">
-                <span className="mb-1 text-[10px] font-black text-slate-500">{fmtTaskDate(task.date)}</span>
-                <span className="h-3.5 w-3.5 rounded-full border-2 border-white bg-emerald-500 shadow" />
-                <div className="h-4 w-px bg-slate-200" />
-                <TaskTimelineCard
-                  task={task}
-                  farm={farmsById.get(task.farmId)}
-                  assignment={assignmentByFarm[task.farmId]}
-                  assignmentLoading={!(task.farmId in assignmentByFarm)}
-                />
-              </div>
-            );
-          })}
+}) => {
+  const [progressImagesByTask, setProgressImagesByTask] = useState<Record<string, string[]>>({});
+  const fetchedTaskIds = useRef<Set<string>>(new Set());
+
+  // One bulk POST for whatever completed tasks' progress photos aren't already cached/fetched —
+  // same shared cache getTaskDetailsBulk (and every other bulk lookup on this page) draws from,
+  // instead of one get_task_details call per card.
+  useEffect(() => {
+    const taskIds = Array.from(
+      new Set(tasks.filter((task) => taskStatusTone(task.status) === "green" && task.taskId).map((task) => task.taskId as string)),
+    );
+    const idsToFetch = taskIds.filter((taskId) => !fetchedTaskIds.current.has(taskId));
+    if (idsToFetch.length === 0) return;
+    idsToFetch.forEach((taskId) => fetchedTaskIds.current.add(taskId));
+
+    getTaskDetailsBulk(idsToFetch).then((details) => {
+      setProgressImagesByTask((prev) => {
+        const next = { ...prev };
+        idsToFetch.forEach((taskId) => {
+          const images = details[taskId]?.progress_images;
+          next[taskId] = Array.isArray(images) ? (images as string[]) : [];
+        });
+        return next;
+      });
+    });
+  }, [tasks]);
+
+  return (
+    <Card className="p-5">
+      <SectionHeader title="Task Timeline" right={<Pill tone="blue">{tasks.length} Tasks</Pill>} />
+      {loading ? (
+        <div className="flex h-56 flex-col items-center justify-center gap-2 text-slate-400">
+          <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
+          <p className="text-xs font-bold">Loading tasks…</p>
         </div>
-      </div>
-    )}
-  </Card>
-);
+      ) : tasks.length === 0 ? (
+        <div className="flex h-56 items-center justify-center text-sm font-bold text-slate-400">No tasks scheduled this month</div>
+      ) : (
+        <div className="overflow-x-auto pb-2">
+          <div className="relative flex items-start gap-6 px-2" style={{ minWidth: "max-content" }}>
+            <div className="pointer-events-none absolute left-2 right-2 top-[13px] h-0.5 bg-slate-200" />
+            {tasks.map((task, index) => {
+              const key = `${task.calanderId}-${task.date}-${task.farmId}-${task.status}-${index}`;
+              return (
+                <div key={key} className="relative z-10 flex w-96 shrink-0 flex-col items-center">
+                  <span className="mb-1 text-[10px] font-black text-slate-500">{fmtTaskDate(task.date)}</span>
+                  <span className="h-3.5 w-3.5 rounded-full border-2 border-white bg-emerald-500 shadow" />
+                  <div className="h-4 w-px bg-slate-200" />
+                  <TaskTimelineCard
+                    task={task}
+                    farm={farmsById.get(task.farmId)}
+                    assignment={assignmentByFarm[task.farmId]}
+                    assignmentLoading={!(task.farmId in assignmentByFarm)}
+                    progressImages={task.taskId ? progressImagesByTask[task.taskId] : []}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+};
 
 const CultivationTrackerView = ({
   onOpenModule,
@@ -2913,7 +3574,11 @@ const CultivationTrackerView = ({
 }) => {
   const [selectedCrop, setSelectedCrop] = useState<string | null>(null);
   const cropUnits = useMemo(() => buildCropUnits(farms), [farms]);
-  const [activeMonth, setActiveMonth] = useState(() => startOfMonth(new Date()));
+  // Single source of truth for "what period is the tracker looking at" — the week grid drives
+  // it directly, and the crop-wise summary / task timeline below derive their month from it, so
+  // sliding weeks in the calendar keeps everything else on the page in sync.
+  const [weekStart, setWeekStart] = useState(() => startOfWeekMonday(new Date()));
+  const activeMonth = useMemo(() => startOfMonth(weekStart), [weekStart]);
 
   const monthTasks = useMemo(() => {
     const prefix = `${activeMonth.getFullYear()}-${pad2(activeMonth.getMonth() + 1)}-`;
@@ -2925,39 +3590,53 @@ const CultivationTrackerView = ({
 
   const farmsById = useMemo(() => new Map(farms.map((farm) => [farm.farm_id, farm])), [farms]);
 
-  const [assignmentByFarm, setAssignmentByFarm] = useState<Record<string, TaskAssignmentInfo>>({});
+  const [assignmentByFarm, setAssignmentByFarm] = useState<Record<string, FarmTeamAssignment>>({});
   const fetchedAssignmentFarmIds = useRef<Set<string>>(new Set());
 
+  // One bulk POST for whatever farms' supervisor/FM aren't already cached, reusing the same
+  // shared cache the Cultivation Calendar page draws from — instead of one request per farm_id.
   useEffect(() => {
-    const base = getBaseUrl().replace(/\/$/, "");
     const farmIds = Array.from(new Set(monthTasks.map((task) => task.farmId)));
+    const idsToFetch = farmIds.filter((farmId) => !fetchedAssignmentFarmIds.current.has(farmId));
+    if (idsToFetch.length === 0) return;
+    idsToFetch.forEach((farmId) => fetchedAssignmentFarmIds.current.add(farmId));
 
-    farmIds.forEach((farmId) => {
-      if (fetchedAssignmentFarmIds.current.has(farmId)) return;
-      fetchedAssignmentFarmIds.current.add(farmId);
-
-      fetch(`${base}/farmer_managment/get_assigned_supervisor_and_field_manager/${farmId}`)
-        .then((res) => res.json())
-        .then((data: { assigned_supervisor?: { supervisor_name?: string }; assigned_field_manager?: { name?: string } | { name?: string }[] }) => {
-          const fm = Array.isArray(data?.assigned_field_manager) ? data.assigned_field_manager[0] : data?.assigned_field_manager;
-          setAssignmentByFarm((prev) => ({
-            ...prev,
-            [farmId]: {
-              supervisorName: data?.assigned_supervisor?.supervisor_name ?? "",
-              fieldManagerName: fm?.name ?? "",
-            },
-          }));
-        })
-        .catch(() =>
-          setAssignmentByFarm((prev) => ({ ...prev, [farmId]: { supervisorName: "", fieldManagerName: "" } })),
-        );
+    getAssignedSupervisorAndFieldManagers(idsToFetch).then((results) => {
+      setAssignmentByFarm((prev) => ({ ...prev, ...results }));
     });
   }, [monthTasks]);
+
+  // Real figures off the live farms/calendar data — Total Area is every registered land's own
+  // area, Current Cultivable Area is only the area that's actually been broken into land_plots
+  // (what's plotted out for cultivation, not just registered). Planned Activities is deliberately
+  // NOT scoped to whatever week/month the calendar below happens to be showing — it's every
+  // distinct activity type (1st Ploughing, 2nd Ploughing, ...) across the entire cultivation plan.
+  const cultivationKpis = useMemo(() => {
+    const totalArea = farms.reduce((sum, farm) => sum + (Number(farm.area) || 0), 0);
+    const cultivableArea = farms.reduce(
+      (sum, farm) => sum + (farm.land_plots ?? []).reduce((plotSum, plot) => plotSum + (Number(plot.plot_area) || 0), 0),
+      0,
+    );
+
+    const activityTypes = new Set<string>();
+    Object.values(calendarData).forEach((rows) => {
+      rows.forEach((row) => activityTypes.add(row.activity));
+    });
+
+    const formatAcresValue = (value: number) => value.toLocaleString("en-IN", { maximumFractionDigits: 1 });
+
+    return [
+      { label: "Total Area", value: formatAcresValue(totalArea), suffix: "Acres", tone: "text-blue-700" },
+      { label: "Current Cultivable Area", value: formatAcresValue(cultivableArea), suffix: "Acres", tone: "text-emerald-700" },
+      { label: "Total Lands", value: String(farms.length), suffix: "Parcels", tone: "text-violet-700" },
+      { label: "Planned Activities", value: String(activityTypes.size), suffix: "Types", tone: "text-amber-700" },
+    ];
+  }, [farms, calendarData]);
 
   return (
   <div className="space-y-4">
     <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-      {cultivationStats.map((stat) => (
+      {cultivationKpis.map((stat) => (
         <Card key={stat.label} className="p-4">
           <p className="text-xs font-black uppercase tracking-[0.08em] text-slate-500">{stat.label}</p>
           <div className="mt-3 flex items-end gap-2">
@@ -2984,8 +3663,8 @@ const CultivationTrackerView = ({
       <CultivationCalendarCard
         calendarData={calendarData}
         loading={calendarLoading}
-        selectedMonth={activeMonth}
-        onMonthChange={setActiveMonth}
+        weekStart={weekStart}
+        onWeekChange={setWeekStart}
         onOpenPlanner={(monthDate) =>
           onOpenModule(`/cultivation-calendar?month=${monthDate.getFullYear()}-${pad2(monthDate.getMonth() + 1)}`)
         }
@@ -2994,7 +3673,7 @@ const CultivationTrackerView = ({
       <CropActivitySummaryCard
         calendarData={calendarData}
         loading={calendarLoading}
-        selectedMonth={activeMonth}
+        weekStart={weekStart}
         farms={farms}
         farmerNames={farmerNames}
       />
@@ -3019,11 +3698,18 @@ const CeosDesk = () => {
   const [financialLoading, setFinancialLoading] = useState(false);
   const [budgetBifurcation, setBudgetBifurcation] = useState<BudgetBifurcation[]>([]);
   const [budgetBifurcationLoading, setBudgetBifurcationLoading] = useState(false);
+  const [actualDisbursements, setActualDisbursements] = useState<ActualDisbursementRecord[]>([]);
+  const [disbursementSeries, setDisbursementSeries] = useState<DisbursementWeek[]>([]);
+  const [disbursementSeriesLoading, setDisbursementSeriesLoading] = useState(false);
   const [categoryBudgets, setCategoryBudgets] = useState<BudgetCategoryBifurcation[]>([]);
   const [categoryBudgetsLoading, setCategoryBudgetsLoading] = useState(false);
   const [farmerNames, setFarmerNames] = useState<Record<string, string>>({});
   const [leads, setLeads] = useState<Lead[]>([]);
   const [leadsLoading, setLeadsLoading] = useState(false);
+  const [inventoryItems, setInventoryItems] = useState<InventoryItemRecord[]>([]);
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  const [staffRecords, setStaffRecords] = useState<StaffRecord[]>([]);
+  const [staffLoading, setStaffLoading] = useState(false);
 
   // Load every tab's data as soon as the desk opens — not gated on which tab is active —
   // so the data is already there the moment the user clicks a tab. Tiers run in priority
@@ -3149,7 +3835,24 @@ const CeosDesk = () => {
           if (!cancelled) setCategoryBudgetsLoading(false);
         });
 
-      const [, budgetRows, categoryRows] = await Promise.all([kpiPromise, budgetBifPromise, categoryPromise]);
+      // Real payment feed for the Dashboard's Actual Disbursement vs Budget Utilized figure —
+      // same endpoint FinancialAnalysisView's own DisbursementSequenceCard draws from.
+      const disbursementPromise = fetchActualDisbursements(new AbortController().signal)
+        .then((records) => {
+          if (!cancelled) setActualDisbursements(records);
+          return records;
+        })
+        .catch(() => {
+          if (!cancelled) setActualDisbursements([]);
+          return [] as ActualDisbursementRecord[];
+        });
+
+      const [, budgetRows, categoryRows, disbursementRecords] = await Promise.all([
+        kpiPromise,
+        budgetBifPromise,
+        categoryPromise,
+        disbursementPromise,
+      ]);
       if (!cancelled) {
         const existingBudgetIds = new Set(budgetRows.map((budget) => budget.budget_id));
         const missingBudgetRows = categoryRows
@@ -3173,18 +3876,89 @@ const CeosDesk = () => {
               remaining: totals.remaining,
             } satisfies BudgetBifurcation;
           });
-        setBudgetBifurcation([...budgetRows, ...missingBudgetRows]);
+        const allBudgetRows = [...budgetRows, ...missingBudgetRows];
+        setBudgetBifurcation(allBudgetRows);
+
+        // Schedule-based "expected disbursement till date" for the Actual Disbursement KPI
+        // (utilized / expected-till-date * 100) — same aggregation FinancialAnalysisView's
+        // own DisbursementSequenceCard uses, run here too since that view owns its own
+        // independent copy of this state.
+        if (allBudgetRows.length > 0) {
+          setDisbursementSeriesLoading(true);
+          fetchAggregateDisbursementSeries(
+            allBudgetRows.map((budget) => budget.budget_id),
+            disbursementRecords,
+            new AbortController().signal
+          )
+            .then((series) => {
+              if (!cancelled) setDisbursementSeries(series);
+            })
+            .catch((err: unknown) => {
+              if (!cancelled && (err as { name?: string })?.name !== "AbortError") setDisbursementSeries([]);
+            })
+            .finally(() => {
+              if (!cancelled) setDisbursementSeriesLoading(false);
+            });
+        } else {
+          setDisbursementSeries([]);
+        }
       }
     };
 
-    (async () => {
-      await loadLandAcquisition();
-      if (cancelled) return;
-      await loadCultivationTracker();
-      if (cancelled) return;
-      await loadFinancialAnalysis();
-    })();
+    // Land Acquisition leads feed only the Land Acquisition tab — no Dashboard KPI or other tab
+    // reads them — so they load independently instead of gating Cultivation Tracker/Financial
+    // Analysis, which the Dashboard (the first tab shown) actually depends on.
+    loadLandAcquisition();
 
+    // Cultivation Tracker and Financial Analysis touch entirely disjoint state (farms/calendar vs
+    // budgets/disbursements) — nothing in loadFinancialAnalysis reads anything loadCultivationTracker
+    // sets, so there's no reason to await one before starting the other. Both fire immediately;
+    // each still batches its own several calls with Promise.all internally.
+    void Promise.all([loadCultivationTracker(), loadFinancialAnalysis()]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Real inventory valuation for the Dashboard's Inventory & Store Value card — independent of
+  // the tiered loader above since it isn't needed by any other tab.
+  useEffect(() => {
+    let cancelled = false;
+    const base = getBaseUrl().replace(/\/$/, "");
+    setInventoryLoading(true);
+    fetch(`${base}/inventory/get_all_item`)
+      .then((res) => res.json())
+      .then((data: { success?: boolean; items?: InventoryItemRecord[] }) => {
+        if (!cancelled) setInventoryItems(data?.success && Array.isArray(data?.items) ? data.items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setInventoryItems([]);
+      })
+      .finally(() => {
+        if (!cancelled) setInventoryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Real headcount for the Dashboard's Manpower Overview card.
+  useEffect(() => {
+    let cancelled = false;
+    const base = getBaseUrl().replace(/\/$/, "");
+    setStaffLoading(true);
+    fetch(`${base}/admin_staff/get_all_staff`)
+      .then((res) => res.json())
+      .then((data: StaffRecord[]) => {
+        if (!cancelled) setStaffRecords(Array.isArray(data) ? data : []);
+      })
+      .catch(() => {
+        if (!cancelled) setStaffRecords([]);
+      })
+      .finally(() => {
+        if (!cancelled) setStaffLoading(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -3202,6 +3976,218 @@ const CeosDesk = () => {
   }, [farms]);
 
   const clusterSummaries = useMemo(() => buildClusterCropSummaries(clusterList), [clusterList]);
+
+  // The 9 Dashboard KPI tiles — all real, computed off the same farms/calendarData/budgetBifurcation
+  // state the other tabs already fetch in the background, not placeholder numbers. Keyed by name
+  // (not an array) so the explicit grid layout below can place each one by hand.
+  const dashboardKpis = useMemo((): Record<
+    | "totalLand"
+    | "totalCultivableArea"
+    | "totalLandParcels"
+    | "cropWiseArea"
+    | "totalBudget"
+    | "budgetUtilized"
+    | "budgetRemaining"
+    | "expectedDisbursementMonth"
+    | "capexOpexDistribution"
+    | "actualDisbursementPct"
+    | "activityDonePct"
+    | "totalActivities",
+    DashboardKpi
+  > => {
+    const totalLand = farms.reduce((sum, farm) => sum + (Number(farm.area) || 0), 0);
+    const totalCultivable = farms.reduce(
+      (sum, farm) => sum + (farm.land_plots ?? []).reduce((plotSum, plot) => plotSum + (Number(plot.plot_area) || 0), 0),
+      0,
+    );
+    const cultivablePct = totalLand > 0 ? (totalCultivable / totalLand) * 100 : 0;
+
+    // Area by crop, same fallback rule as everywhere else in this file: a plotted farm counts
+    // each plot's own crop_type, an unplotted one counts its whole area under farm.crop_type.
+    const cropAreaByKey = new Map<string, number>();
+    farms.forEach((farm) => {
+      const plots = farm.land_plots ?? [];
+      if (plots.length > 0) {
+        plots.forEach((plot) => {
+          const key = normalizeCropKey(plot.crop_type || farm.crop_type);
+          cropAreaByKey.set(key, (cropAreaByKey.get(key) ?? 0) + (Number(plot.plot_area) || 0));
+        });
+      } else {
+        const key = normalizeCropKey(farm.crop_type);
+        cropAreaByKey.set(key, (cropAreaByKey.get(key) ?? 0) + (Number(farm.area) || 0));
+      }
+    });
+    const cropAreaEntries = Array.from(cropAreaByKey.entries()).sort((a, b) => b[1] - a[1]);
+    const totalCropArea = cropAreaEntries.reduce((sum, [, area]) => sum + area, 0);
+
+    const activityTypes = new Set<string>();
+    let plannedAcres = 0;
+    let completedAcres = 0;
+    Object.values(calendarData).forEach((rows) => {
+      rows.forEach((row) => {
+        activityTypes.add(row.activity);
+        row.assignments.forEach((assignment) => {
+          const acres = assignment.assigned_area || 0;
+          plannedAcres += acres;
+          if (isCompletedAssignmentStatus(assignment.status)) completedAcres += acres;
+        });
+      });
+    });
+    const activityDonePct = plannedAcres > 0 ? (completedAcres / plannedAcres) * 100 : 0;
+
+    const { totalBudget, utilized } = sumBudgetTotals(budgetBifurcation);
+    const budgetRemaining = totalBudget - utilized;
+    const utilizedPct = totalBudget > 0 ? (utilized / totalBudget) * 100 : 0;
+    const remainingFavorable = budgetRemaining >= 0;
+
+    // Actual Disbursement = (Budget Utilized / Expected Disbursement Till Date) * 100 —
+    // "expected till date" is the schedule-based cumulative figure (sum of each budget's
+    // "ERP Disbursement" week columns up to the current week, see disbursementSeries/
+    // fetchAggregateDisbursementSeries), in Cr — scaled to rupees here to match `utilized`.
+    // <100% means utilization is behind what the disbursement schedule expected by now;
+    // >=100% means it's caught up to (or ahead of) schedule.
+    const expectedTillDate = disbursementSeries.reduce((sum, item) => sum + item.expected, 0) * 1e7;
+    const actualDisbursementPct = expectedTillDate > 0 ? (utilized / expectedTillDate) * 100 : null;
+    const disbursementOnSchedule = actualDisbursementPct === null || actualDisbursementPct >= 100;
+
+    const capex = Math.max(financialKpis?.total_capex ?? 0, 0);
+    const opex = Math.max(financialKpis?.total_opex ?? 0, 0);
+
+    // Whatever's scheduled (per the ERP Disbursement sheet) across every week that falls in the
+    // current calendar month — the whole month's planned figure, not just weeks already reached.
+    const currentMonthShort = new Date().toLocaleString("default", { month: "short" });
+    const expectedDisbursementThisMonth =
+      disbursementSeries
+        .filter((item) => item.week.startsWith(`${currentMonthShort} `))
+        .reduce((sum, item) => sum + item.planned, 0) * 1e7;
+
+    const formatAcresValue = (value: number) => value.toLocaleString("en-IN", { maximumFractionDigits: 1 });
+
+    return {
+      totalLand: { label: "Total Land", value: formatAcresValue(totalLand), suffix: "Acres", helper: "", tone: "green", icon: MapPinned },
+      totalCultivableArea: {
+        label: "Total Cultivable Area",
+        value: formatAcresValue(totalCultivable),
+        suffix: "Acres",
+        helper: `${cultivablePct.toFixed(1)}% of Total Land`,
+        tone: "blue",
+        icon: Sprout,
+        progress: Math.round(cultivablePct),
+        chart: "pie",
+      },
+      totalLandParcels: { label: "Total Land Parcels", value: String(farms.length), suffix: "Parcels", helper: "", tone: "purple", icon: Landmark },
+      cropWiseArea: {
+        label: "Crop-wise Area",
+        value: formatAcresValue(totalCropArea),
+        suffix: "Acres",
+        helper: `${cropAreaEntries.length} crop${cropAreaEntries.length === 1 ? "" : "s"}`,
+        tone: "green",
+        icon: Wheat,
+        breakdown: cropAreaEntries.map(([key, area], index) => ({ label: cropLabel(key), value: area, color: cropColor(key, index) })),
+        breakdownFormat: "acres",
+        hideHeader: true,
+      },
+      totalActivities: { label: "Total Activities", value: String(activityTypes.size), suffix: "Types", helper: "", tone: "orange", icon: ClipboardList },
+      totalBudget: {
+        label: "Total Budget",
+        value: formatFinancialAmount(totalBudget),
+        suffix: "",
+        helper: "",
+        tone: "blue",
+        icon: IndianRupee,
+      },
+      capexOpexDistribution: {
+        label: "Capex / Opex Distribution",
+        value: formatFinancialAmount(capex + opex),
+        suffix: "",
+        helper: "",
+        tone: "blue",
+        icon: IndianRupee,
+        breakdown: [
+          { label: "Capex", value: capex, color: "#16a34a" },
+          { label: "Opex", value: opex, color: "#7c3aed" },
+        ],
+        hideValue: true,
+      },
+      actualDisbursementPct: {
+        label: "Actual Disbursement",
+        value: actualDisbursementPct === null ? "--" : actualDisbursementPct.toFixed(0),
+        suffix: actualDisbursementPct === null ? "" : "%",
+        helper: "",
+        tone: disbursementOnSchedule ? "green" : "red",
+        icon: disbursementOnSchedule ? TrendingUp : TrendingDown,
+        splitAmounts: [
+          { label: "Actual", value: utilized },
+          { label: "Expected", value: expectedTillDate },
+        ],
+      },
+      activityDonePct: {
+        label: "% of Activity Done",
+        value: activityDonePct.toFixed(1),
+        suffix: "%",
+        helper: `${Math.round(completedAcres)} of ${Math.round(plannedAcres)} ac completed`,
+        tone: "green",
+        icon: Wheat,
+        progress: Math.round(activityDonePct),
+        chart: "pie",
+      },
+      budgetUtilized: {
+        label: "Budget Utilized",
+        value: formatFinancialAmount(utilized),
+        suffix: "",
+        helper: totalBudget > 0 ? `${utilizedPct.toFixed(1)}% of Total Budget` : "",
+        tone: "orange",
+        icon: IndianRupee,
+      },
+      budgetRemaining: {
+        label: "Budget Remaining",
+        value: formatFinancialAmount(budgetRemaining),
+        suffix: "",
+        helper: remainingFavorable ? "Within Total Budget" : "Exceeds Total Budget",
+        tone: remainingFavorable ? "green" : "red",
+        icon: Landmark,
+      },
+      expectedDisbursementMonth: {
+        label: "Expected Disbursement (Current Month)",
+        value: formatFinancialAmount(expectedDisbursementThisMonth),
+        suffix: "",
+        helper: "",
+        tone: "purple",
+        icon: IndianRupee,
+      },
+    };
+  }, [farms, calendarData, budgetBifurcation, financialKpis, disbursementSeries]);
+
+  // Budget Utilization Trend chart — cumulative running total of real PRR payments
+  // (BASE_URL/ceo_desk/get_actual_disbursement), one point per distinct date_of_prr:
+  // same-day PRRs are summed together first, then the running total carries forward
+  // date over date (Date 1: Amount 1, Date 2: Amount 1 + Amount 2, ...).
+  const utilizationTrendData = useMemo(() => {
+    const totalsByDate = new Map<string, number>();
+    actualDisbursements.forEach((record) => {
+      const date = record.date_of_prr;
+      if (!date) return;
+      totalsByDate.set(date, (totalsByDate.get(date) || 0) + (Number(record.amount) || 0));
+    });
+
+    let cumulative = 0;
+    return Array.from(totalsByDate.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, amount]) => {
+        cumulative += amount;
+        const parsed = new Date(date);
+        const label = Number.isNaN(parsed.getTime())
+          ? date
+          : parsed.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+        return { date, label, utilized: Number((cumulative / 1e7).toFixed(3)) };
+      });
+  }, [actualDisbursements]);
+
+  // Total Budget reference line + "% of budget disbursed so far" badge — gives the trend line an
+  // actual ceiling to read against instead of floating with no context for what's a lot vs a little.
+  const totalBudgetCr = useMemo(() => sumBudgetTotals(budgetBifurcation).totalBudget / 1e7, [budgetBifurcation]);
+  const latestUtilizedCr = utilizationTrendData.length > 0 ? utilizationTrendData[utilizationTrendData.length - 1].utilized : 0;
+  const utilizedPctOfBudget = totalBudgetCr > 0 ? (latestUtilizedCr / totalBudgetCr) * 100 : 0;
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-950">
@@ -3242,7 +4228,7 @@ const CeosDesk = () => {
 
       <div className="space-y-3 px-6 py-4">
         {activeTabId === "land-acquisition" ? (
-          <LandAcquisitionView leads={leads} leadsLoading={leadsLoading} />
+          <LandAcquisitionView leads={leads} leadsLoading={leadsLoading} onOpenModule={(route) => navigate(route)} />
         ) : activeTabId === "financial-analysis" ? (
           <FinancialAnalysisView
             kpis={financialKpis}
@@ -3254,6 +4240,9 @@ const CeosDesk = () => {
             farms={farms}
             farmerNames={farmerNames}
             farmsLoading={farmsLoading}
+            actualDisbursements={actualDisbursements}
+            disbursementSeries={disbursementSeries}
+            disbursementLoading={disbursementSeriesLoading}
           />
         ) : activeTabId === "cultivation-tracker" ? (
           <CultivationTrackerView
@@ -3269,299 +4258,101 @@ const CeosDesk = () => {
           />
         ) : (
           <>
-        <section className="grid grid-cols-1 gap-4 xl:grid-cols-3">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-1">
-            {pieKpiCards.map((card) => (
-              <KpiCard key={card.label} card={card} />
-            ))}
-          </div>
+        {/* Three plain equal-width rows now that nothing spans multiple rows anymore — Total
+            Budget, Capex/Opex Distribution, and Actual Disbursement are each their own standalone
+            tile instead of sharing one tall card. */}
+        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <KpiCard card={dashboardKpis.totalLand} />
+          <KpiCard card={dashboardKpis.totalCultivableArea} />
+          <KpiCard card={dashboardKpis.totalLandParcels} />
+          <KpiCard card={dashboardKpis.cropWiseArea} />
+        </section>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:col-span-2">
-            {metricKpiCards.map((card) => (
-              <KpiCard key={card.label} card={card} />
-            ))}
-          </div>
+        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <KpiCard card={dashboardKpis.totalBudget} />
+          <KpiCard card={dashboardKpis.budgetUtilized} />
+          <KpiCard card={dashboardKpis.budgetRemaining} />
+          <KpiCard card={dashboardKpis.expectedDisbursementMonth} />
+        </section>
+
+        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <KpiCard card={dashboardKpis.capexOpexDistribution} />
+          <KpiCard card={dashboardKpis.actualDisbursementPct} />
+          <KpiCard card={dashboardKpis.activityDonePct} />
+          <KpiCard card={dashboardKpis.totalActivities} />
         </section>
 
         <section className="grid grid-cols-1 gap-3 xl:grid-cols-[0.86fr_1.14fr]">
-          <Card className="p-5">
-            <SectionHeader title="Land Progress Overview (Acres)" />
-            <div className="grid grid-cols-1 items-center gap-4 md:grid-cols-[220px_1fr]">
-              <div className="relative h-56">
-                <ResponsiveContainer>
-                  <PieChart>
-                    <Pie data={landProgress} dataKey="value" innerRadius={72} outerRadius={104} startAngle={100} endAngle={460} paddingAngle={1}>
-                      {landProgress.map((entry) => (
-                        <Cell key={entry.name} fill={entry.color} />
-                      ))}
-                    </Pie>
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <p className="text-4xl font-black">757</p>
-                  <p className="text-sm font-bold text-slate-600">Total Acres</p>
-                </div>
-              </div>
-              <div className="space-y-3 text-sm">
-                {landProgress.map((item) => (
-                  <div key={item.name} className="flex items-center justify-between gap-3">
-                    <span className="flex items-center gap-2 font-bold text-slate-700">
-                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                      {item.name}
-                    </span>
-                    <span className="font-black text-slate-900">{item.labelValue ?? item.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <p className="mt-1 text-right text-xs font-semibold text-slate-500">Last Updated: 21 May 2024</p>
-          </Card>
+          <ClusterLandMapCard farms={farms} clusterList={clusterList} loading={clusterLoading} />
 
           <Card className="p-5">
             <SectionHeader
               title="Budget Utilization Trend (Rs in Cr)"
-              right={<button className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-700">Monthly</button>}
+              right={totalBudgetCr > 0 && <Pill tone="green">{utilizedPctOfBudget.toFixed(1)}% of Total Budget</Pill>}
             />
-            <div className="h-[248px]">
-              <ResponsiveContainer>
-                <LineChart data={budgetTrend} margin={{ left: -18, right: 8, top: 6, bottom: 0 }}>
-                  <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
-                  <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="approved" stroke="#2563eb" strokeWidth={2.3} strokeDasharray="6 4" dot={false} name="Approved Budget" />
-                  <Line type="monotone" dataKey="utilized" stroke="#16a34a" strokeWidth={3} dot={{ r: 3 }} name="Utilized Budget" />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </Card>
-        </section>
-
-        <section className="grid grid-cols-1 gap-3 xl:grid-cols-[0.9fr_0.68fr_0.68fr_0.82fr]">
-          <Card className="p-5">
-            <SectionHeader title="Activity Completion Status (Area in Acres)" />
-            <div className="grid grid-cols-1 items-center gap-3 sm:grid-cols-[190px_1fr]">
-              <div className="relative h-44">
+            <p className="-mt-2 mb-3 text-xs font-semibold text-slate-500">
+              Cumulative real disbursement (actual PRR payments), one point per payment date.
+            </p>
+            {utilizationTrendData.length === 0 ? (
+              <div className="flex h-[248px] items-center justify-center text-sm font-bold text-slate-400">No disbursements recorded yet</div>
+            ) : (
+              <div className="h-[260px]">
                 <ResponsiveContainer>
-                  <PieChart>
-                    <Pie data={activityStatus} dataKey="value" innerRadius={58} outerRadius={82} paddingAngle={2}>
-                      {activityStatus.map((entry) => (
-                        <Cell key={entry.name} fill={entry.color} />
-                      ))}
-                    </Pie>
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <p className="text-3xl font-black">78%</p>
-                  <p className="text-sm font-bold text-slate-600">Completed</p>
-                </div>
-              </div>
-              <div className="space-y-3 text-sm">
-                {activityStatus.map((item) => (
-                  <div key={item.name} className="flex items-center justify-between gap-3">
-                    <span className="flex items-center gap-2 font-bold text-slate-700">
-                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                      {item.name}
-                    </span>
-                    <span className="font-black">{item.value}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <p className="mt-3 text-sm font-bold text-slate-600">Total Area : 482 Acres</p>
-          </Card>
-
-          <Card className="p-5">
-            <SectionHeader title="Crop-Wise Area (Acres)" />
-            <div className="h-56">
-              <ResponsiveContainer>
-                <BarChart data={cropArea} margin={{ left: -18, right: 4, top: 8, bottom: 0 }}>
-                  <XAxis dataKey="crop" axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 800 }} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fontWeight: 700 }} />
-                  <Tooltip />
-                  <Bar dataKey="acres" radius={[8, 8, 0, 0]}>
-                    {cropArea.map((entry) => (
-                      <Cell key={entry.crop} fill={entry.fill} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </Card>
-
-          <Card className="p-5">
-            <SectionHeader title="Manpower Overview" />
-            <div className="relative h-44">
-              <ResponsiveContainer>
-                <PieChart>
-                  <Pie data={manpower} dataKey="value" innerRadius={58} outerRadius={82} paddingAngle={2}>
-                    {manpower.map((entry) => (
-                      <Cell key={entry.name} fill={entry.color} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <p className="text-3xl font-black">246</p>
-                <p className="text-sm font-bold text-slate-600">Total</p>
-              </div>
-            </div>
-            <div className="space-y-2 text-sm">
-              {manpower.map((item) => (
-                <div key={item.name} className="flex items-center justify-between gap-3">
-                  <span className="flex items-center gap-2 font-bold text-slate-700">
-                    <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                    {item.name}
-                  </span>
-                  <span className="font-black">{item.value}</span>
-                </div>
-              ))}
-            </div>
-          </Card>
-
-          <Card className="p-5">
-            <SectionHeader title="Focus Areas" />
-            <div className="space-y-3">
-              {focusAreas.map((area) => (
-                <div key={area.label} className="rounded-lg border border-slate-100 bg-white p-3 shadow-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-black text-slate-950">{area.label}</p>
-                      <p className="text-xs font-semibold text-slate-500">{area.helper}</p>
-                    </div>
-                    <p className="text-xl font-black text-slate-950">{area.value}</p>
-                  </div>
-                  <div className="mt-3 h-2 rounded-full bg-slate-100">
-                    <div
-                      className={cn("h-2 rounded-full", area.tone === "green" && "bg-green-500", area.tone === "red" && "bg-red-500", area.tone === "orange" && "bg-orange-500")}
-                      style={{ width: area.width }}
+                  <AreaChart data={utilizationTrendData} margin={{ left: -12, right: 12, top: 6, bottom: 8 }}>
+                    <defs>
+                      <linearGradient id="utilizationFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#16a34a" stopOpacity={0.32} />
+                        <stop offset="95%" stopColor="#16a34a" stopOpacity={0.02} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                    <XAxis
+                      dataKey="label"
+                      tickLine={false}
+                      axisLine={false}
+                      tick={{ fontSize: 10, fontWeight: 700 }}
+                      interval="preserveStartEnd"
+                      minTickGap={24}
                     />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </Card>
-        </section>
-
-        <section className="grid grid-cols-1 gap-3 xl:grid-cols-[1.18fr_0.86fr_0.82fr_0.76fr]">
-          <Card className="overflow-hidden">
-            <SectionHeader title="Pending Approvals" />
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-600">
-                  <tr>
-                    {["Request Type", "Request No.", "Requested By", "Amount", "Date", "Status"].map((heading) => (
-                      <th key={heading} className="px-4 py-3 font-black">
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {approvals.map((row) => (
-                    <tr key={row[1]}>
-                      {row.slice(0, 5).map((cell) => (
-                        <td key={cell} className="whitespace-nowrap px-4 py-3 font-bold text-slate-700">
-                          {cell}
-                        </td>
-                      ))}
-                      <td className="px-4 py-3">
-                        <Pill tone="orange">{row[5]}</Pill>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <button className="mx-auto my-4 flex items-center gap-2 text-sm font-black text-blue-700">View All Approvals &rarr;</button>
-          </Card>
-
-          <Card className="overflow-hidden">
-            <SectionHeader title="Risk Alerts & Exceptions" />
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-600">
-                  <tr>
-                    {["Risk / Issue", "Location", "Severity", "Days Open"].map((heading) => (
-                      <th key={heading} className="px-4 py-3 font-black">
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {risks.map((row) => (
-                    <tr key={row[0]}>
-                      <td className="px-4 py-3 font-bold">{row[0]}</td>
-                      <td className="px-4 py-3 font-bold">{row[1]}</td>
-                      <td className="px-4 py-3">
-                        <Pill tone={row[2] === "High" ? "red" : "yellow"}>{row[2]}</Pill>
-                      </td>
-                      <td className="px-4 py-3 font-black">{row[3]}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <button className="mx-auto my-4 flex items-center gap-2 text-sm font-black text-blue-700">View All Risks &rarr;</button>
-          </Card>
-
-          <Card className="overflow-hidden">
-            <SectionHeader title="Cash Requirement Forecast (Rs in Cr)" />
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-600">
-                  <tr>
-                    {["Period", "Estimated Need", "Available Funds", "Gap / Surplus"].map((heading) => (
-                      <th key={heading} className="px-4 py-3 font-black">
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {forecast.map((row) => (
-                    <tr key={row[0]}>
-                      {row.map((cell, index) => (
-                        <td key={cell} className={cn("px-4 py-4 font-bold", index === 3 && "font-black text-red-600")}>
-                          {cell}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <button className="mx-auto my-4 flex items-center gap-2 text-sm font-black text-blue-700">View Detailed Forecast &rarr;</button>
-          </Card>
-
-          <Card className="p-5">
-            <SectionHeader title="CEO Summary" />
-            <div className="space-y-3 text-sm font-semibold leading-6 text-slate-700">
-              <p>Total 757 acres are under management, out of which 482 acres are under cultivation.</p>
-              <p>Budget utilization is 60.86% against the approved budget.</p>
-              <p>Manpower strength today is 246 people.</p>
-              <p>7 activities are delayed and 12 approvals are pending.</p>
-              <p>Diesel consumption is 12% above standard and needs immediate review.</p>
-              <p>Focus on timely execution, cost discipline and risk mitigation to achieve operational goals.</p>
-            </div>
-            <div className="mt-5 flex justify-end">
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-100 text-blue-700">
-                <ClipboardList className="h-8 w-8" />
+                    <YAxis
+                      tickLine={false}
+                      axisLine={false}
+                      width={60}
+                      tick={{ fontSize: 11, fontWeight: 700 }}
+                      tickFormatter={(value: number) => formatCroreChartValue(value)}
+                    />
+                    <Tooltip
+                      formatter={(value: number) => [formatCroreChartValue(value), "Cumulative Disbursed"]}
+                      labelFormatter={(label: string) => label}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="utilized"
+                      stroke="#16a34a"
+                      strokeWidth={3}
+                      fill="url(#utilizationFill)"
+                      dot={{ r: 3, strokeWidth: 0, fill: "#16a34a" }}
+                      activeDot={{ r: 5 }}
+                      name="Cumulative Disbursed"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
               </div>
-            </div>
+            )}
           </Card>
         </section>
+
+        <section className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+          <InventoryStoreValueCard items={inventoryItems} loading={inventoryLoading} />
+          <ManpowerOverviewCard staff={staffRecords} loading={staffLoading} />
+        </section>
+
           </>
         )}
       </div>
 
       <footer className="flex flex-col gap-2 border-t border-slate-200 bg-white px-6 py-4 text-xs font-semibold text-slate-600 md:flex-row md:items-center md:justify-between">
         <span>© 2024 SaiBioresources Private Limited. All rights reserved.</span>
-        <span className="flex items-center gap-3">
-          Last Updated: 21 May 2024
-          <span>09:30 AM</span>
-          <span className="h-3 w-3 rounded-full bg-green-500" />
-        </span>
       </footer>
     </main>
   );
