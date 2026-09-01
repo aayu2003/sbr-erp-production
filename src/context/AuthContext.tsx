@@ -7,6 +7,7 @@ import React, {
 } from 'react';
 import { toast } from 'sonner';
 import { getBaseUrl } from '@/lib/config';
+import { validateGuestToken } from '@/lib/guestApi';
 
 type AuthUser = {
   name?: string;
@@ -18,6 +19,10 @@ type AuthUser = {
   module_access?: string[];
 };
 
+/** A read-only shared-link session. Only takes effect when there is no real
+ *  logged-in user — a logged-in user always sees the full app. */
+type GuestSession = { token: string; scope: string };
+
 type AuthContextValue = {
   user: AuthUser | null;
   token: string | null;
@@ -27,9 +32,17 @@ type AuthContextValue = {
   logout: () => void;
   isTokenValid: () => boolean;
   validateToken: () => Promise<boolean>;
+  /** Active guest session, or null. Ignored while a real user is logged in. */
+  guest: GuestSession | null;
+  /** True while a share token is being validated against the backend. */
+  guestChecking: boolean;
+  /** Validate a share token against the backend and, if good, start guest mode. */
+  activateGuest: (token: string, scope: string) => Promise<boolean>;
+  clearGuest: () => void;
 };
 
 const KEY = 'fc_auth_v1';
+const GUEST_KEY = 'fc_guest_v1';
 
 // Hardcoded admin bypass — no API call, full module access
 const SBR_ADMIN_TOKEN = '__sbr_admin_bypass__';
@@ -66,6 +79,56 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [token, setToken] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  // Start "checking" if a share token is already in the URL, so guarded pages can
+  // show a spinner instead of flashing their locked state before validation runs.
+  const [guestChecking, setGuestChecking] = useState(() => {
+    try {
+      return !!new URLSearchParams(window.location.search).get('guest');
+    } catch {
+      return false;
+    }
+  });
+  const [guest, setGuest] = useState<GuestSession | null>(() => {
+    try {
+      const raw = localStorage.getItem(GUEST_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed.token === 'string' && typeof parsed.scope === 'string'
+        ? { token: parsed.token, scope: parsed.scope }
+        : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const clearGuest = useCallback(() => {
+    setGuest(null);
+    try {
+      localStorage.removeItem(GUEST_KEY);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const activateGuest = useCallback(async (guestToken: string, scope: string) => {
+    setGuestChecking(true);
+    try {
+      const ok = await validateGuestToken(guestToken, scope);
+      if (!ok) {
+        clearGuest();
+        return false;
+      }
+      const next = { token: guestToken, scope };
+      setGuest(next);
+      try {
+        localStorage.setItem(GUEST_KEY, JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return true;
+    } finally {
+      setGuestChecking(false);
+    }
+  }, [clearGuest]);
 
   useEffect(() => {
     try {
@@ -259,8 +322,28 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     persist(null, null, null);
   };
 
+  // A real login always wins over any lingering guest session.
+  useEffect(() => {
+    if (token && guest) clearGuest();
+  }, [token, guest, clearGuest]);
+
   return (
-    <AuthContext.Provider value={{ user, token, expiresAt, loading, login, logout, isTokenValid, validateToken }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        token,
+        expiresAt,
+        loading,
+        login,
+        logout,
+        isTokenValid,
+        validateToken,
+        guest: token ? null : guest,
+        guestChecking,
+        activateGuest,
+        clearGuest,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
