@@ -131,6 +131,7 @@
           "label": "Common",
           "enabled": true,
           "items": [
+            { "key": "procurement-dashboard", "label": "Procurement Dashboard", "path": "/procurement-dashboard", "icon": "LayoutDashboard", "enabled": true },
             { "key": "vendor-directory", "label": "Vendor Directory",      "path": "/vendor-directory",     "icon": "FileText", "enabled": true }
           ]
         },

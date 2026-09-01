@@ -7,12 +7,15 @@ import {
   Link2, LayoutDashboard, BookOpen, CreditCard, Receipt,
   Car, Mail, Package, Scale, Truck, CheckSquare, PieChart,
   Settings, Briefcase,
-  ShieldCheck,
+  ShieldCheck, Lock,
 } from "lucide-react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/context/AuthContext";
 import modulesConfig from "@/config/modules.json";
+import { isGuestPathAllowed } from "@/lib/guestApi";
+import GuestLocked from "@/components/guest/GuestLocked";
+import GuestMobileBar from "@/components/guest/GuestMobileBar";
 
 // Map JSON icon name strings → Lucide components
 const ICON_MAP: Record<string, React.ElementType> = {
@@ -33,6 +36,8 @@ interface NavItemProps {
   isSidebarCollapsed: boolean;
   budgetCard?: boolean;
   notificationCount?: number;
+  /** Guest-link view: item is visible but its page is gated. */
+  locked?: boolean;
 }
 
 const NavItem = ({
@@ -43,6 +48,7 @@ const NavItem = ({
   isSidebarCollapsed,
   budgetCard = false,
   notificationCount = 0,
+  locked = false,
 }: NavItemProps) => {
   return (
     <NavLink
@@ -77,8 +83,14 @@ const NavItem = ({
           {!isSidebarCollapsed && <span className="truncate">{label}</span>}
           {!isSidebarCollapsed && <span className="ml-auto" />}
 
-          {/* Updated notification logic to render AlertCircle icon for warnings */}
-          {notificationCount > 0 ? (
+          {locked ? (
+            <Lock
+              className={cn(
+                "shrink-0 text-white/30",
+                isSidebarCollapsed ? "absolute right-1 top-1 h-3 w-3" : "h-3.5 w-3.5"
+              )}
+            />
+          ) : notificationCount > 0 ? (
             <span
               className={cn(
                 "flex min-w-5 items-center justify-center rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-extrabold leading-none text-slate-900",
@@ -184,8 +196,11 @@ const NavGroup = ({
 const AppSidebar = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [mailUnread, setMailUnread] = useState(0);
-  const { user } = useAuth();
+  const { user, guest } = useAuth();
   const isSuperAdmin = user?.id === 'sbr-admin';
+  // Guest-link visitors see the whole nav so the app looks intact — every item
+  // except their unlocked one carries a lock and lands on the locked screen.
+  const showAllNav = isSuperAdmin || !!guest;
 
   useEffect(() => {
     document.title = "SBR | Farm-connect";
@@ -289,14 +304,15 @@ const AppSidebar = () => {
 
           // Pre-compute which groups have at least one accessible item
           const visibleGroups = superset.groups
-            .filter(g => isSuperAdmin || g.enabled)
+            .filter(g => showAllNav || g.enabled)
             .map(g => ({
               ...g,
               visibleItems: g.items.filter(item =>
                 item.enabled && (
-                  isSuperAdmin ||
+                  showAllNav ||
                   allowedModules.includes(item.key) ||
                   item.key === 'communication' ||
+                  (item.key === 'procurement-dashboard' && allowedModules.includes('vendor-directory')) ||
                   (item.key === 'purchase-comparative' && allowedModules.includes('purchase-req')) ||
                   (item.key === 'work-comparative' && (allowedModules.includes('work-order') || allowedModules.includes('purchase-req'))) ||
                   (item.key === 'work-requisition-approver' && (allowedModules.includes('work-order') || allowedModules.includes('finance-admin-ops'))) ||
@@ -331,6 +347,7 @@ const AppSidebar = () => {
                   isSidebarCollapsed={isCollapsed}
                   notificationStatus={notif as 'warning' | 'success' | 'none'}
                   notificationCount={item.key === 'communication' ? mailUnread : 0}
+                  locked={!!guest && !isGuestPathAllowed(guest.scope, item.path)}
                 />
               );
             });
@@ -476,11 +493,33 @@ const AppSidebar = () => {
 /* ---------------- LAYOUT WRAPPER ---------------- */
 
 const AppLayout = ({ children }: { children: React.ReactNode }) => {
+  const { guest } = useAuth();
+  const { pathname } = useLocation();
+  const guestLocked = !!guest && !isGuestPathAllowed(guest.scope, pathname);
+  const content = guestLocked ? <GuestLocked /> : children;
+
+  // Guest-link view: hide the sidebar on phones (it would eat the screen) and
+  // show a slim bar instead. Desktop guests and every logged-in user are
+  // untouched — the layout below is byte-for-byte the original.
+  if (guest) {
+    return (
+      <div className="flex h-screen overflow-hidden bg-[#f8f9fb]">
+        <div className="hidden lg:contents">
+          <AppSidebar />
+        </div>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <GuestMobileBar />
+          <main className="min-h-0 flex-1 overflow-y-auto">{content}</main>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen overflow-hidden bg-[#f8f9fb]">
       <AppSidebar />
       <main className="flex-1 min-w-0 overflow-y-auto">
-        {children}
+        {content}
       </main>
     </div>
   );
