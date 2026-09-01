@@ -5,6 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import AppLayout from "./components/layout/AppLayout";
+import GuestGate from "./components/guest/GuestGate";
 
 // Every page below is route-level code-split via React.lazy — previously all ~90 pages (plus
 // recharts/xlsx/leaflet etc. pulled in by some of them) were bundled into one ~8.3MB JS chunk
@@ -53,6 +54,7 @@ const WorkOrderVerifier = lazy(() => import("./pages/WorkOrderVerifier"));
 const PurchaseRequisition = lazy(() => import("./pages/PurchaseRequisition"));
 const PurchaseRequisitionEntry = lazy(() => import("./pages/PurchaseRequisitionEntry"));
 const VendorDirectory = lazy(() => import("./pages/VendorDirectory"));
+const ProcurementDashboard = lazy(() => import("./pages/ProcurementDashboard"));
 const QuotationComparative = lazy(() => import("./pages/QuotationComparative"));
 const SprQuotationComparative = lazy(() => import("./pages/SprQuotationComparative"));
 const HOInbox = lazy(() => import("@/pages/HOInbox"));
@@ -140,6 +142,7 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter basename={import.meta.env.BASE_URL}>
+        <GuestGate />
         <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route path="/login" element={<Login />} />
@@ -229,6 +232,14 @@ const App = () => (
             element={
               <AppLayout>
                 <PurchaseRequisitionEntry />
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/procurement-dashboard"
+            element={
+              <AppLayout>
+                <ProcurementDashboard />
               </AppLayout>
             }
           />

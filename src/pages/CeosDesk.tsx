@@ -18,7 +18,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { MapContainer, TileLayer, Polygon, Circle, Marker, Popup, useMap } from "react-leaflet";
+import { MapContainer, TileLayer, Polygon, Polyline, Circle, CircleMarker, Marker, Popup, Tooltip as LeafletTooltip, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {
@@ -33,6 +33,7 @@ import {
   Leaf,
   MapPinned,
   RefreshCw,
+  Route,
   Shovel,
   Sprout,
   Tractor,
@@ -103,6 +104,7 @@ const tabs = [
   { id: "land-acquisition", label: "Land Acquisition", icon: MapPinned },
   { id: "cultivation-tracker", label: "Cultivation Tracker", icon: Sprout },
   { id: "financial-analysis", label: "Financial Analysis", icon: IndianRupee },
+  { id: "project-map", label: "Project Map", icon: Route },
 ];
 
 const Card = ({ className, children }: { className?: string; children: React.ReactNode }) => (
@@ -2294,6 +2296,381 @@ const ClusterLandMapCard = ({ farms, clusterList, loading }: { farms: Farm[]; cl
   );
 };
 
+// ── Project Map (Project Map tab) ─────────────────────────────────────────
+// India gas-pipeline infrastructure routes, filtered from the GEM Global Gas Infrastructure
+// Tracker into public/india_pipelines.geojson (see scripts/filter-india-pipelines.mjs).
+
+type PipelineGeometry =
+  | { type: "LineString"; coordinates: [number, number][] }
+  | { type: "MultiLineString"; coordinates: [number, number][][] };
+
+type PipelineFeature = { type: "Feature"; properties: Record<string, string>; geometry: PipelineGeometry };
+
+type PipelineCollection = { type: "FeatureCollection"; features: PipelineFeature[] };
+
+const PIPELINE_STATUS_STYLE: Record<string, { label: string; color: string }> = {
+  operating: { label: "Operating", color: "#16a34a" },
+  construction: { label: "Under Construction", color: "#2563eb" },
+  proposed: { label: "Proposed", color: "#9333ea" },
+  shelved: { label: "Shelved", color: "#f59e0b" },
+  cancelled: { label: "Cancelled", color: "#ef4444" },
+  retired: { label: "Retired", color: "#64748b" },
+};
+
+const pipelineStatusStyle = (status?: string) =>
+  PIPELINE_STATUS_STYLE[(status ?? "").toLowerCase()] ?? { label: status || "Unknown", color: "#64748b" };
+
+// Surveyed junction points on the pipeline network — decimal degrees converted from the
+// field DMS coordinates (full precision; ~1 mm).
+const JUNCTION_POINTS: { label: string; position: [number, number]; dms: string }[] = [
+  { label: "SV30", position: [21.11312778, 80.50902222], dms: `21°06'47.26"N 80°30'32.48"E` },
+  { label: "SV31", position: [21.24722778, 80.99331111], dms: `21°14'50.02"N 80°59'35.92"E` },
+  { label: "SV32", position: [21.31785833, 81.27488889], dms: `21°19'04.29"N 81°16'29.60"E` },
+  { label: "SV33", position: [21.35019167, 81.50846944], dms: `21°21'00.69"N 81°30'30.49"E` },
+];
+
+// geojson coordinates are [lng, lat]; Leaflet wants [lat, lng]. A LineString becomes one line,
+// a MultiLineString stays as its list of lines — Polyline accepts positions[][] directly.
+const toLatLngLines = (geometry: PipelineGeometry): [number, number][][] => {
+  const lines = geometry.type === "LineString" ? [geometry.coordinates] : geometry.coordinates;
+  return lines.map((line) => line.map(([lng, lat]) => [lat, lng] as [number, number]));
+};
+
+const ProjectMapView = ({ farms, clusterList }: { farms: Farm[]; clusterList: ClusterEntry[] }) => {
+  const [collection, setCollection] = useState<PipelineCollection | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [showZones, setShowZones] = useState(true);
+  const [showJunctions, setShowJunctions] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    fetch(`${import.meta.env.BASE_URL}india_pipelines.geojson`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
+      .then((data: PipelineCollection) => {
+        if (!active) return;
+        setCollection(data);
+        setError("");
+      })
+      .catch(() => active && setError("Could not load pipeline map data."))
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const features = useMemo(() => collection?.features ?? [], [collection]);
+
+  const statusCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    features.forEach((feature) => {
+      const key = (feature.properties.Status ?? "").toLowerCase();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [features]);
+
+  const visibleFeatures = useMemo(
+    () =>
+      statusFilter
+        ? features.filter((feature) => (feature.properties.Status ?? "").toLowerCase() === statusFilter)
+        : features,
+    [features, statusFilter],
+  );
+
+  const pipelineCoords = useMemo(
+    () => visibleFeatures.flatMap((feature) => toLatLngLines(feature.geometry).flat()),
+    [visibleFeatures],
+  );
+
+  const totalLengthKm = useMemo(
+    () => visibleFeatures.reduce((sum, feature) => sum + (Number(feature.properties.LengthMergedKm) || 0), 0),
+    [visibleFeatures],
+  );
+
+  // Our own farm clusters ("zones") overlaid on the same map — the dashed boundary circle and
+  // land polygons from the Cluster-wise Land Map — so pipeline routes can be read against where
+  // our land actually sits.
+  const zoneOverlays = useMemo(
+    () =>
+      buildLandClusters(clusterList)
+        .map((cluster, index) => {
+          const clusterFarms = farms.filter((farm) => cluster.farmIds.has(farm.farm_id));
+          const coords = clusterFarms.flatMap((farm) => farm.land_data?.land_coordinates ?? []);
+          if (coords.length === 0) return null;
+          const center: [number, number] = [
+            coords.reduce((sum, c) => sum + c[0], 0) / coords.length,
+            coords.reduce((sum, c) => sum + c[1], 0) / coords.length,
+          ];
+          const centerLatLng = L.latLng(center[0], center[1]);
+          const radius =
+            coords.reduce((max, c) => Math.max(max, centerLatLng.distanceTo(L.latLng(c[0], c[1]))), 0) * 1.15 + 40;
+          return {
+            key: cluster.key,
+            name: cluster.clusterName,
+            color: CLUSTER_MAP_COLORS[index % CLUSTER_MAP_COLORS.length],
+            center,
+            radius,
+            farms: clusterFarms,
+          };
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null),
+    [clusterList, farms],
+  );
+
+  // Frame the map on the junction points and our land zones (the actual area of interest) when we
+  // have any; otherwise fall back to the full pipeline network.
+  const fitCoords = useMemo(() => {
+    const focus: [number, number][] = [
+      ...(showJunctions ? JUNCTION_POINTS.map((point) => point.position) : []),
+      ...(showZones
+        ? zoneOverlays.flatMap((zone) => zone.farms.flatMap((farm) => farm.land_data?.land_coordinates ?? []))
+        : []),
+    ];
+    return focus.length > 0 ? focus : pipelineCoords;
+  }, [zoneOverlays, pipelineCoords, showJunctions, showZones]);
+
+  return (
+    <Card className="p-5">
+      <SectionHeader
+        title="Project Map"
+        right={
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Pill tone="red">{JUNCTION_POINTS.length} Junctions</Pill>
+            {zoneOverlays.length > 0 && <Pill tone="green">{zoneOverlays.length} Zones</Pill>}
+            <Pill tone="blue">
+              {visibleFeatures.length} Pipelines · {Math.round(totalLengthKm).toLocaleString("en-IN")} km
+            </Pill>
+          </div>
+        }
+      />
+      <p className="-mt-2 mb-3 text-xs font-semibold text-slate-500">
+        Gas pipeline infrastructure across India on a standard street map — routes, status and capacity from the Global Energy Monitor tracker.
+      </p>
+
+      {loading ? (
+        <div className="flex h-[520px] flex-col items-center justify-center gap-2 text-slate-400">
+          <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
+          <p className="text-xs font-bold">Loading pipeline map…</p>
+        </div>
+      ) : error ? (
+        <div className="flex h-[520px] items-center justify-center text-sm font-bold text-slate-400">{error}</div>
+      ) : features.length === 0 ? (
+        <div className="flex h-[520px] items-center justify-center text-sm font-bold text-slate-400">No pipeline data available</div>
+      ) : (
+        <>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={() => setStatusFilter(null)}
+              className={cn(
+                "rounded-lg border px-3 py-1.5 text-xs font-black transition-colors",
+                statusFilter === null ? "border-blue-700 bg-blue-700 text-white" : "border-slate-200 text-slate-600 hover:bg-slate-50",
+              )}
+            >
+              All ({features.length})
+            </button>
+            {statusCounts.map(([key, count]) => {
+              const style = pipelineStatusStyle(key);
+              const active = statusFilter === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setStatusFilter(active ? null : key)}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-black transition-colors",
+                    active ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 text-slate-600 hover:bg-slate-50",
+                  )}
+                >
+                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: style.color }} />
+                  {style.label} ({count})
+                </button>
+              );
+            })}
+
+            {/* Layer toggles — hide/show our own overlays independently of the pipeline filter. */}
+            <span className="mx-1 self-stretch border-l border-slate-200" />
+            <button
+              type="button"
+              onClick={() => setShowJunctions((value) => !value)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-black transition-colors",
+                showJunctions ? "border-rose-600 bg-rose-600 text-white" : "border-slate-200 text-slate-400 hover:bg-slate-50",
+              )}
+            >
+              <span className={cn("h-2 w-2 shrink-0 rounded-full", showJunctions ? "bg-white" : "bg-rose-600")} />
+              Junctions
+            </button>
+            {zoneOverlays.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowZones((value) => !value)}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-black transition-colors",
+                  showZones ? "border-emerald-600 bg-emerald-600 text-white" : "border-slate-200 text-slate-400 hover:bg-slate-50",
+                )}
+              >
+                <span className={cn("h-2 w-2 shrink-0 rounded-full", showZones ? "bg-white" : "bg-emerald-600")} />
+                Zones
+              </button>
+            )}
+          </div>
+
+          <div className="h-[520px] overflow-hidden rounded-lg">
+            <MapContainer
+              center={[22.5, 80]}
+              zoom={5}
+              style={{ height: "100%", width: "100%" }}
+              zoomControl
+            >
+              {/* Minimal light-grey basemap (Esri, no API key) — near-white land, very faint
+                  roads, far less visual noise than a full street map so pipeline routes read
+                  clearly. Labels come from the separate reference overlay below. */}
+              <TileLayer
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+                attribution="Tiles &copy; Esri"
+                maxNativeZoom={16}
+                maxZoom={19}
+              />
+              <TileLayer
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
+                maxNativeZoom={16}
+                maxZoom={19}
+              />
+
+              {visibleFeatures.map((feature) => {
+                const style = pipelineStatusStyle(feature.properties.Status);
+                const positions = toLatLngLines(feature.geometry);
+                const props = feature.properties;
+                const route = [props.StartLocation || props["StartState/Province"], props.EndLocation || props["EndState/Province"]]
+                  .filter(Boolean)
+                  .join(" → ");
+                return (
+                  <Polyline
+                    key={props.ProjectID || props.PipelineName}
+                    positions={positions}
+                    pathOptions={{ color: style.color, weight: 3, opacity: 0.9 }}
+                  >
+                    <Popup>
+                      <div className="space-y-0.5 text-xs">
+                        <p className="font-black text-slate-900">{props.PipelineName}</p>
+                        {props.SegmentName && <p className="font-semibold text-slate-600">{props.SegmentName}</p>}
+                        <p className="font-bold" style={{ color: style.color }}>{style.label}</p>
+                        {route && <p className="font-semibold text-slate-600">{route}</p>}
+                        {props.Owner && <p className="text-slate-600">Owner: {props.Owner}</p>}
+                        {Number(props.LengthMergedKm) > 0 && (
+                          <p className="text-slate-600">Length: {Number(props.LengthMergedKm).toFixed(1)} km</p>
+                        )}
+                        {props.Capacity && props.Capacity !== "--" && (
+                          <p className="text-slate-600">Capacity: {props.Capacity} {props.CapacityUnits}</p>
+                        )}
+                        {props.StartYear1 && <p className="text-slate-600">Start year: {props.StartYear1}</p>}
+                        {props.Wiki && (
+                          <a href={props.Wiki} target="_blank" rel="noreferrer" className="font-bold text-blue-700 underline">
+                            GEM wiki
+                          </a>
+                        )}
+                      </div>
+                    </Popup>
+                  </Polyline>
+                );
+              })}
+
+              {showJunctions && JUNCTION_POINTS.map((point) => (
+                <Fragment key={point.label}>
+                  {/* Ground-truth precision ring (fixed 15 m radius) — visible only when zoomed
+                      right in, shows exactly which spot on the ground the point sits on. */}
+                  <Circle
+                    center={point.position}
+                    radius={15}
+                    pathOptions={{ color: "#e11d48", weight: 1, fillColor: "#e11d48", fillOpacity: 0.15 }}
+                  />
+                  {/* SVG dot centred exactly on the coordinate at every zoom (no icon-anchor
+                      offset). Small crosshair-style: thin outer ring + solid 2 px core. */}
+                  <CircleMarker
+                    center={point.position}
+                    radius={7}
+                    pathOptions={{ color: "#ffffff", weight: 2, fillColor: "#e11d48", fillOpacity: 1 }}
+                  />
+                  <CircleMarker
+                    center={point.position}
+                    radius={1.5}
+                    pathOptions={{ color: "#7f1d1d", weight: 0, fillColor: "#7f1d1d", fillOpacity: 1 }}
+                  >
+                    <LeafletTooltip permanent direction="top" offset={[0, -8]} className="junction-label">
+                      {point.label}
+                    </LeafletTooltip>
+                    <Popup>
+                      <div className="space-y-0.5 text-xs">
+                        <p className="font-black text-slate-900">{point.label}</p>
+                        <p className="font-bold text-rose-600">Junction point</p>
+                        <p className="text-slate-600">{point.dms}</p>
+                        <p className="text-slate-500">{point.position[0].toFixed(8)}, {point.position[1].toFixed(8)}</p>
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                </Fragment>
+              ))}
+
+              {showZones && zoneOverlays.map((zone) => (
+                <Fragment key={zone.key}>
+                  {zone.radius > 0 && (
+                    <Circle
+                      center={zone.center}
+                      radius={zone.radius}
+                      pathOptions={{ color: zone.color, fillColor: zone.color, fillOpacity: 0.05, weight: 2.5, dashArray: "8 5" }}
+                    />
+                  )}
+                  {zone.farms.map((farm) => {
+                    const coords = farm.land_data?.land_coordinates ?? [];
+                    if (coords.length < 3) return null;
+                    const farmCenter: [number, number] = [
+                      coords.reduce((sum, c) => sum + c[0], 0) / coords.length,
+                      coords.reduce((sum, c) => sum + c[1], 0) / coords.length,
+                    ];
+                    const location =
+                      [farm.land_data?.village, farm.land_data?.district, farm.land_data?.state].filter(Boolean).join(", ") ||
+                      "Location not recorded";
+                    return (
+                      <Fragment key={farm.farm_id}>
+                        <Polygon positions={coords} pathOptions={{ color: zone.color, fillColor: zone.color, fillOpacity: 0.35, weight: 2 }} />
+                        <Marker position={farmCenter} icon={acreageDivIcon(Number(farm.area) || 0, zone.color)}>
+                          <Popup>
+                            <div className="space-y-0.5 text-xs">
+                              <p className="font-black text-slate-900">{farm.farm_id}</p>
+                              <p className="font-semibold text-slate-600">{zone.name}</p>
+                              <p className="font-semibold text-slate-600">{location}</p>
+                              <p className="font-bold text-slate-800">{(Number(farm.area) || 0).toFixed(1)} ac</p>
+                            </div>
+                          </Popup>
+                        </Marker>
+                      </Fragment>
+                    );
+                  })}
+                </Fragment>
+              ))}
+
+              <FitBounds coords={fitCoords} />
+            </MapContainer>
+          </div>
+          <p className="mt-2 text-xs font-semibold text-slate-500">
+            {showJunctions && (
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2 w-2 shrink-0 rounded-full bg-rose-600" /> Junction points ·{" "}
+              </span>
+            )}
+            {showZones && zoneOverlays.length > 0 && `dashed circles and shaded parcels are our ${zoneOverlays.length} land zone(s) · `}
+            colored lines are gas pipeline routes.
+          </p>
+        </>
+      )}
+    </Card>
+  );
+};
+
 // ── Inventory & Store Value (Dashboard) ────────────────────────────────────
 // Same real Inventory table + valuation convention Inventory.tsx already uses: an item's own
 // fifo_list is what's held at its home `location`, dissociation[store] (excluding the home
@@ -4314,6 +4691,8 @@ const CeosDesk = () => {
       <div className="space-y-3 px-6 py-4">
         {activeTabId === "land-acquisition" ? (
           <LandAcquisitionView leads={leads} leadsLoading={leadsLoading} onOpenModule={(route) => navigate(route)} />
+        ) : activeTabId === "project-map" ? (
+          <ProjectMapView farms={farms} clusterList={clusterList} />
         ) : activeTabId === "financial-analysis" ? (
           <FinancialAnalysisView
             kpis={financialKpis}
